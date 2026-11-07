@@ -13,7 +13,7 @@ use thiserror::Error as ThisError;
 use super::{AudioFile, Project, Stroke, Zone, LOWEST_NOTE};
 use crate::error::{Error, ParseError};
 use crate::formats::nsmp::{self, codec, encode};
-use crate::wav::{read_pcm16, Pcm16};
+use npno_prep::wav::{read_pcm16, Pcm16};
 
 /// Where an [`AudioFile::path`] points.
 ///
@@ -123,7 +123,7 @@ pub enum AudioError {
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
 /// No generation has a stroke that holds more than two channels.
 pub fn source_pcm(wav: &[u8]) -> Result<Pcm16, AudioError> {
-    let pcm = read_pcm16(wav)?;
+    let pcm = read_pcm16(wav).map_err(Error::from)?;
     if pcm.channels != 1 && pcm.channels != 2 {
         return Err(AudioError::Channels {
             channels: pcm.channels,
@@ -892,7 +892,7 @@ mod tests {
         let samples: Vec<i16> = (0..FRAMES * usize::from(channels))
             .map(|k| (k % 512) as i16 * 16 - 4096)
             .collect();
-        crate::wav::pcm16(&samples, rate, channels).unwrap()
+        npno_prep::wav::pcm16(&samples, rate, channels).unwrap()
     }
 
     fn two_zones() -> Project {

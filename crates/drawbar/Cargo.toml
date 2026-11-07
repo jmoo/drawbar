@@ -36,6 +36,7 @@ epaint_default_fonts = "0.32"
 nord-format = { path = "../nord-format", version = "0.9.0", features = [
   "bundle",
 ] }
+npno-prep = { path = "../npno-prep", version = "0.1.0" }
 # `file-handle-inner`: a picked file is copied into the library from its path, or from
 # the browser's `File`, never read whole first.
 rfd = { version = "0.15", features = ["file-handle-inner"] }

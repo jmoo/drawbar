@@ -81,6 +81,10 @@ pub enum Error {
     #[error(transparent)]
     Parse(#[from] ParseError),
 
+    /// A WAV that does not read, or audio that cannot be written as one.
+    #[error(transparent)]
+    Wav(#[from] npno_prep::Error),
+
     #[cfg(feature = "bundle")]
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),

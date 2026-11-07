@@ -975,6 +975,7 @@ dependencies = [
  "muda",
  "nord-format",
  "nord-usb",
+ "npno-prep",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "proc-macro2",
@@ -2264,6 +2265,7 @@ dependencies = [
  "dialoguer",
  "nord-format",
  "nord-usb",
+ "npno-prep",
 ]
 
 [[package]]
@@ -2273,6 +2275,7 @@ dependencies = [
  "crcxx",
  "libtest-mimic",
  "nord-bits-derive",
+ "npno-prep",
  "serde_json",
  "thiserror 2.0.20",
  "zip",
@@ -2291,6 +2294,13 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "npno-prep"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
 ]
 
 [[package]]

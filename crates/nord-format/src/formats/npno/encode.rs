@@ -94,7 +94,7 @@ use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
-use crate::wav::SampleLoop;
+use npno_prep::wav::{self, Play};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -356,11 +356,11 @@ const SHORTEST_LOOP: usize = 2 * SEEDS;
 /// A loop is exact only in a source already at [`codec::RATE`]. Elsewhere its ends land
 /// on the nearest lattice frame at or before them, and its length may lose a fraction of
 /// a frame.
-pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
+pub fn sustain(found: wav::Loop, rate: u32) -> Result<Loop, Error> {
     if rate == 0 {
         return Err(refuse("a loop at 0 Hz has no place on the lattice"));
     }
-    if !found.forward {
+    if found.play != Play::Forward {
         return Err(refuse(format!(
             "the loop from frame {} to {} does not play forward, and a stroke loops only \
              forward",
@@ -2371,10 +2371,10 @@ mod tests {
     /// fall.
     #[test]
     fn a_wav_loop_moves_onto_the_lattice_with_its_frames() {
-        let at = |start, end| SampleLoop {
+        let at = |start, end| wav::Loop {
             start,
             end,
-            forward: true,
+            play: Play::Forward,
         };
         assert_eq!(
             sustain(at(100, 199), codec::RATE).unwrap(),
@@ -2390,8 +2390,8 @@ mod tests {
         assert!(error.contains("0 Hz"), "{error}");
         let refused = [
             (
-                SampleLoop {
-                    forward: false,
+                wav::Loop {
+                    play: Play::Alternating,
                     ..at(0, 99)
                 },
                 "does not play forward",

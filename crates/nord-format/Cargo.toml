@@ -36,6 +36,7 @@ synthetic = []
 [dependencies]
 nord-bits-derive = { path = "../nord-bits-derive", version = "=0.6.0" }
 crcxx = "0.3.1"
+npno-prep = { path = "../npno-prep", version = "0.1.0" }
 thiserror = "2"
 zip = { version = "9", optional = true, default-features = false, features = [
   "deflate",

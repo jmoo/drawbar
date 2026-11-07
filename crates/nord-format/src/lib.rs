@@ -39,7 +39,6 @@
 //!   [`panel`] groups them the way the instrument's panel does.
 //! - [`components`] and [`types`] are the typed values those fields hold.
 //! - [`accept`] says which format tags each instrument family takes.
-//! - [`wav`] moves decoded audio in and out of WAV files.
 //!
 //! # Features and dependencies
 //!
@@ -69,7 +68,6 @@ pub mod note;
 pub mod panel;
 pub mod types;
 pub mod util;
-pub mod wav;
 
 use crate::cbin::{Cbin, RawBody};
 use crate::formats::{

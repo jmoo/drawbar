@@ -301,12 +301,12 @@ pub(crate) fn wav_bytes() -> Vec<u8> {
     let samples: Vec<i16> = (0..codec::SOURCE_RATE as usize)
         .map(|i| ((i as f64 / 40.0).sin() * 12_000.0) as i16)
         .collect();
-    nord_format::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
+    npno_prep::wav::mono_pcm16(&samples, codec::SOURCE_RATE).unwrap()
 }
 
 /// [`wav_bytes`] encoded as a sample named Marimba.
 pub(crate) fn sample_bytes() -> Vec<u8> {
-    let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
+    let source = npno_prep::wav::read_pcm16(&wav_bytes()).unwrap();
     let options = nord_format::formats::nsmp::encode::Options::new("Marimba");
     nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
         .unwrap()

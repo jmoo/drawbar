@@ -1,0 +1,36 @@
+//! Cut a recorded take into the strokes of a Nord piano library.
+//!
+//! A take is one WAV holding every note played. [`wav`] reads it in any PCM or float
+//! encoding and saves its regions and loops without touching the audio or any chunk it
+//! does not own; [`resample`] brings it to the rate the instrument plays.
+
+pub mod resample;
+pub mod wav;
+
+use thiserror::Error as ThisError;
+
+#[derive(ThisError, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Error {
+    /// Bytes that do not form what they claim to.
+    #[error("{0}")]
+    Malformed(String),
+
+    /// A well-formed file in an encoding this crate does not read.
+    #[error("{0}")]
+    Unsupported(String),
+
+    #[error("value {value} is outside {bound}")]
+    OutOfBounds { value: String, bound: String },
+}
+
+fn malformed<T>(why: impl Into<String>) -> Result<T, Error> {
+    Err(Error::Malformed(why.into()))
+}
+
+fn out_of_bounds<T>(value: impl Into<String>, bound: impl Into<String>) -> Result<T, Error> {
+    Err(Error::OutOfBounds {
+        value: value.into(),
+        bound: bound.into(),
+    })
+}

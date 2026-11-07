@@ -48,8 +48,16 @@ the loudest layer. Banks are 0 for attack, 1 for pedal resonance and 2 for
 release. The WAVs must be 16-bit PCM, mono or stereo, in the plain or the
 extensible WAV format. Any sample rate is accepted.
 
+`build` also takes one WAV holding every stroke, such as a recorded take, whose
+regions are the strokes. Each region is labelled as a stroke's WAV is named
+(`060-b0-l00`), and a loop inside a region is that stroke's loop. The take may be
+PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
+WAV of it would be. A region labelled any other way, or a loop that crosses a
+region's end, is refused.
+
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
+nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno
 nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
 nord piano rebuild grand.npno -o again.npno        # re-encode a library's own strokes
 ```

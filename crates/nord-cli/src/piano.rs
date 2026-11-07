@@ -14,6 +14,7 @@ use nord_format::formats::npno::{
 };
 use nord_format::note;
 use nord_format::Entity;
+use npno_prep::wav;
 
 use crate::edit::{write_edit, write_file};
 use crate::ui::Ui;
@@ -161,10 +162,15 @@ pub struct BuildArgs {
     /// layer of one root and bank must use the same form. Files that are not WAVs are
     /// skipped, and a WAV named any other way is refused.
     ///
+    /// Or one WAV, a take, whose regions are the strokes: each region labeled as a
+    /// stroke's WAV is named (`060-b0-l00`), with the `smpl` loop it holds, if any, as
+    /// its loop. The take may be PCM of 8 to 32 bits or float; each region is rounded to
+    /// 16 bits, as a 16-bit WAV of it would be.
+    ///
     /// The `frames` column in the output counts the WAV's frames. A stroke pads them
     /// out to whole blocks, or ends with the block holding its loop's end.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    #[arg(value_name = "DIR|TAKE")]
+    pub input: PathBuf,
 
     /// A library to take everything the audio does not decide from: the decay
     /// coefficients, per-note tables, playback parameters, format and the word at the
@@ -593,7 +599,7 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
 
     let (index, stroke) = chosen;
     let audio = codec::decode(stroke, library.channels()).map_err(|e| e.to_string())?;
-    let wav = nord_format::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
+    let wav = npno_prep::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
         .map_err(|e| e.to_string())?;
     write_file(ui, &args.out, &wav)?;
 
@@ -974,16 +980,68 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// One WAV a build reads, and what its name says the stroke is.
-struct StrokeFile {
-    path: PathBuf,
+/// Where a stroke's audio is.
+enum Source<'a> {
+    /// A WAV of its own.
+    File(PathBuf),
+    /// A region of a take, with the loop it holds counted from the region's start.
+    Region {
+        path: &'a Path,
+        take: &'a wav::Audio,
+        region: &'a wav::Region,
+        sample_loop: Option<wav::Loop>,
+    },
+}
+
+/// One stroke a build reads, and what its name says the stroke is.
+struct StrokeFile<'a> {
+    source: Source<'a>,
     root: u8,
     bank: Bank,
     layer: LayerTag,
 }
 
+impl StrokeFile<'_> {
+    fn name(&self) -> String {
+        match &self.source {
+            Source::File(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into(),
+            Source::Region { region, .. } => region.label.clone(),
+        }
+    }
+
+    /// The stroke as an error names it.
+    fn whose(&self) -> String {
+        match &self.source {
+            Source::File(path) => path.display().to_string(),
+            Source::Region { path, region, .. } => {
+                format!("{}: region {:?}", path.display(), region.label)
+            }
+        }
+    }
+
+    fn pcm(&self) -> Result<wav::Pcm16, String> {
+        match &self.source {
+            Source::File(path) => crate::wav::pcm16(path),
+            Source::Region {
+                take,
+                region,
+                sample_loop,
+                ..
+            } => Ok(crate::wav::cut(take, region, *sample_loop)),
+        }
+    }
+}
+
+fn in_stroke_order(strokes: &mut [StrokeFile]) {
+    strokes.sort_by_key(|s| (s.root, s.bank.code(), s.layer, s.name()));
+}
+
 /// The WAVs in a directory, with what their names say each one is, in stroke order.
-fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
+fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile<'static>>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
@@ -1004,7 +1062,7 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
             )
         })?;
         out.push(StrokeFile {
-            path,
+            source: Source::File(path),
             root,
             bank,
             layer,
@@ -1013,9 +1071,44 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     if out.is_empty() {
         return Err(format!("{}: no WAV to build a library from", dir.display()));
     }
-    out.sort_by(|a, b| {
-        (a.root, a.bank.code(), a.layer, &a.path).cmp(&(b.root, b.bank.code(), b.layer, &b.path))
-    });
+    in_stroke_order(&mut out);
+    Ok(out)
+}
+
+/// The regions of the take at `path`, with what their labels say each stroke is, in
+/// stroke order.
+fn region_strokes<'a>(
+    path: &'a Path,
+    take: &'a wav::Audio,
+    marks: &'a wav::Marks,
+) -> Result<Vec<StrokeFile<'a>>, String> {
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut out = Vec::new();
+    for (region, sample_loop) in marks.regions_with_loops().map_err(|e| named(&e))? {
+        let (root, bank, layer) = parse_stroke_name(&region.label, Stem::None)
+            .filter(|_| region.frames > 0)
+            .ok_or_else(|| {
+                named(&format!(
+                    "region {:?} at frame {} is no stroke: a region here must span frames                      and be labelled as a stroke's WAV is named, as in 060-b0-l00",
+                    region.label, region.start
+                ))
+            })?;
+        out.push(StrokeFile {
+            source: Source::Region {
+                path,
+                take,
+                region,
+                sample_loop,
+            },
+            root,
+            bank,
+            layer,
+        });
+    }
+    if out.is_empty() {
+        return Err(named(&"no region to build a library from"));
+    }
+    in_stroke_order(&mut out);
     Ok(out)
 }
 
@@ -1045,7 +1138,7 @@ fn layer_values(files: &[StrokeFile], version: Version) -> Result<Vec<u8>, Strin
             return Err(format!(
                 "{}: no velocity selects layer value {value}; {highest} is the largest a \
                  key of a format {} library ever sounds",
-                file.path.display(),
+                file.whose(),
                 version.number()
             ));
         }
@@ -1112,29 +1205,35 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
         "wav", "root", "bank", "value", "frames", "seconds"
     )));
-    let files = stroke_files(&args.dir)?;
+    let take = match args.input.is_dir() {
+        true => None,
+        false => Some(crate::wav::take(&args.input)?),
+    };
+    let files = match &take {
+        None => stroke_files(&args.input)?,
+        Some((audio, marks)) => region_strokes(&args.input, audio, marks)?,
+    };
     let values = layer_values(&files, version)?;
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
     let mut looped = 0usize;
     for (file, layer) in files.iter().zip(values) {
-        let path = &file.path;
-        let pcm = crate::wav::pcm16(path)?;
+        let pcm = file.pcm()?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
         let sustain = pcm
             .sample_loop
             .map(|found| encode::sustain(found, pcm.rate))
             .transpose()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
         looped += usize::from(sustain.is_some());
         clipped += audio.clipped;
         resampled += usize::from(pcm.rate != codec::RATE);
         let frames = audio.channels.first().map_or(0, Vec::len);
         ui.out(format!(
             "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
+            file.name(),
             note::name(file.root),
             file.bank.name(),
             layer,
@@ -1327,9 +1426,9 @@ mod tests {
         }
     }
 
-    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile {
+    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile<'static> {
         StrokeFile {
-            path: PathBuf::new(),
+            source: Source::File(PathBuf::new()),
             root,
             bank,
             layer,
@@ -1429,5 +1528,118 @@ mod tests {
         assert!(note::parse("128").is_err(), "--at and --map's root");
         assert_eq!(parse_range("0..127").unwrap(), (0, 127));
         assert!(parse_range("0..128").is_err());
+    }
+
+    /// A decaying stereo tone of `frames` at `hz`, at a rate the instrument plays.
+    fn tone(hz: f64, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let t = i as f64 / f64::from(codec::RATE);
+                let x = (std::f64::consts::TAU * hz * t).sin() * (-3.0 * t).exp() * 0.4;
+                [x as f32, (x * 0.7) as f32]
+            })
+            .collect()
+    }
+
+    fn build_from(input: &Path, out: &Path) -> Result<Vec<u8>, String> {
+        let (input, out) = (input.to_str().unwrap(), out.to_str().unwrap());
+        let Ok(crate::PianoAction::Build(args)) = piano(&[
+            "build",
+            input,
+            "--name",
+            "Take",
+            "--kind",
+            "wurlitzer",
+            "-o",
+            out,
+        ]) else {
+            panic!("build did not parse");
+        };
+        build(&Ui::piped(), args)?;
+        Ok(std::fs::read(out).unwrap())
+    }
+
+    /// The RFC's equivalence: a take's regions build the strokes their audio, cut into
+    /// WAVs of their own, builds.
+    #[test]
+    fn a_takes_regions_build_what_the_same_cuts_as_wavs_build() {
+        let dir = crate::edit::tests::scratch("piano-take");
+        let mut samples = tone(261.6, 9_000);
+        samples.extend(tone(329.6, 8_000));
+        let take = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples,
+        };
+        let region = |start, frames, label: &str| wav::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let looped = wav::Loop {
+            start: 5_000,
+            end: 6_999,
+            play: wav::Play::Forward,
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(100, 7_900, "060-b0-l00"),
+                region(8_000, 1_000, "060-b2-l00"),
+                region(9_000, 8_000, "064-b0-l00"),
+            ],
+            loops: vec![looped],
+        };
+        let path = dir.join("take.wav");
+        let deep = wav::write(&take, wav::Encoding::Int { bits: 24 }).unwrap();
+        std::fs::write(&path, wav::with_marks(&deep, &marks).unwrap()).unwrap();
+        let take = wav::read(&deep).unwrap();
+
+        let cuts = dir.join("cuts");
+        std::fs::create_dir(&cuts).unwrap();
+        for (found, sample_loop) in marks.regions_with_loops().unwrap() {
+            let pcm = crate::wav::cut(&take, found, sample_loop);
+            let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
+            let loops = wav::Marks {
+                regions: vec![],
+                loops: sample_loop.into_iter().collect(),
+            };
+            let file = wav::with_marks(&file, &loops).unwrap();
+            std::fs::write(cuts.join(format!("{}.wav", found.label)), file).unwrap();
+        }
+
+        let from_take = build_from(&path, &dir.join("take.npno")).unwrap();
+        let from_cuts = build_from(&cuts, &dir.join("cuts.npno")).unwrap();
+        assert!(
+            from_take == from_cuts,
+            "the take built another library than its cuts"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_region_that_names_no_stroke_is_refused_by_label() {
+        let dir = crate::edit::tests::scratch("piano-take-label");
+        let take = wav::Audio {
+            rate: codec::RATE,
+            channels: 1,
+            samples: vec![0.1; 2_000],
+        };
+        let path = dir.join("take.wav");
+        let plain = wav::write(&take, wav::Encoding::Int { bits: 24 }).unwrap();
+        for (frames, label) in [(500, "intro"), (0, "060-b0-l00")] {
+            let marks = wav::Marks {
+                regions: vec![wav::Region {
+                    start: 10,
+                    frames,
+                    label: label.into(),
+                }],
+                loops: vec![],
+            };
+            std::fs::write(&path, wav::with_marks(&plain, &marks).unwrap()).unwrap();
+            let err = build_from(&path, &dir.join("out.npno")).unwrap_err();
+            assert!(err.contains("take.wav"), "{err}");
+            assert!(err.contains(&format!("region {label:?}")), "{err}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
