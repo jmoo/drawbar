@@ -60,7 +60,11 @@ its root's loudest layer, whatever the stroke's own level. So before rounding,
 `build` raises each softer region of a take to that layer's peak, and each
 release to its root's loudest attack. The soft layers keep their detail above
 the 16-bit steps and play as loud as they would unraised. The library grows,
-because louder audio takes more bits to code. A format 5 library, or one built
+because louder audio takes more bits to code. A release from a take plays at its
+recorded level under its own attack, the region of its root at its layer, lifted by
+at most 12 dB towards 14 dB under it, so a quiet key-off stays quiet without being
+lost. A release with no such attack, or one from a directory of WAVs, plays 18 dB
+under its root's loudest attack. A format 5 library, or one built
 against a template, plays each stroke's audio at its own level, so nothing is
 raised.
 

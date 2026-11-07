@@ -344,6 +344,13 @@ pub struct Recording {
     /// the loop. The loop's last four frames become the four before its start. A release
     /// stroke plays once and cannot loop.
     pub sustain: Option<Loop>,
+    /// How far under its own attack a release stroke was recorded, in decibels: under
+    /// the attack stroke of its root at its layer, both measured as [`build`] measures
+    /// a stroke's level, before either was raised. A [`Version::V6`] library from rules
+    /// plays such a release at that balance with its attack, as [`release_under`] lifts
+    /// it. Without it a release plays [`RELEASE_UNDER_ATTACK`] under its root's loudest
+    /// attack, and the value is ignored on other strokes and in other libraries.
+    pub under_attack: Option<f64>,
 }
 
 /// The fewest frames a loop may hold. Its last [`SEEDS`] frames restate the ones before
@@ -968,6 +975,22 @@ fn layer_trim(version: Version, bank: Bank, layer: u8) -> i16 {
 /// not confirmed on hardware.
 const RELEASE_UNDER_ATTACK: f64 = 18.0;
 
+/// The most a release stroke's [`release_under`] lifts it over its recorded level, in
+/// decibels. Levelled all to one peak, quiet key-offs were lifted 25 to 40 dB and their
+/// noise came up with them (heard on a Stage 4).
+const RELEASE_LIFT: f64 = 12.0;
+
+/// How near its attack [`release_under`] lifts a release stroke, in decibels under it.
+const RELEASE_NEAREST: f64 = 14.0;
+
+/// How far under its own attack a release recorded `recorded` decibels under it plays:
+/// lifted towards [`RELEASE_NEAREST`] by at most [`RELEASE_LIFT`]. One recorded nearer
+/// than that keeps its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
+/// down and could not be heard; up to about 49 dB under played fine (heard on a Stage 4).
+fn release_under(recorded: f64) -> f64 {
+    recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
+}
+
 /// Frames [`level`] averages power over: 10 ms.
 const LEVEL_WINDOW: usize = codec::RATE as usize / 100;
 
@@ -1040,11 +1063,14 @@ fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
                     describe(recording)
                 ))
             })?;
-        let under = match recording.bank {
-            Bank::Attack | Bank::Resonance => {
-                LAYER_TRIM - lift * (f64::from(recording.layer) - f64::from(loudest_layer))
+        let layer_under =
+            |layer: u8| LAYER_TRIM - lift * (f64::from(layer) - f64::from(loudest_layer));
+        let under = match (recording.bank, recording.under_attack) {
+            (Bank::Attack | Bank::Resonance, _) => layer_under(recording.layer),
+            (Bank::Release, Some(recorded)) => {
+                layer_under(recording.layer) + release_under(recorded)
             }
-            Bank::Release => LAYER_TRIM + RELEASE_UNDER_ATTACK,
+            (Bank::Release, None) => LAYER_TRIM + RELEASE_UNDER_ATTACK,
         };
         tenths.push(((under + level - reference) / step).round());
     }
@@ -1788,6 +1814,7 @@ mod tests {
             layer,
             channels,
             sustain: None,
+            under_attack: None,
         }
     }
 
@@ -2614,6 +2641,25 @@ mod tests {
             [30, 27, 24],
             "a grand lifts 1.2 dB per 100"
         );
+    }
+
+    /// A release that states how far under its attack it was recorded plays at that
+    /// balance with its attack, lifted towards 14 dB under it by at most 12 dB: recorded
+    /// 10 dB under, it stays there; 20 dB under, it plays 14 under; 32 under, 20 under.
+    /// Its trim is its attack's, plus that, less what its audio stands under its
+    /// attack's: here 12 dB.
+    #[test]
+    fn a_6_x_rule_build_keeps_a_releases_recorded_balance_with_its_attack() {
+        for (recorded, plays) in [(10.0, 100), (20.0, 140), (32.0, 200)] {
+            let mut recordings = twelve_decibels_apart();
+            recordings[2].under_attack = Some(recorded);
+            let trims = trims_at(Version::V6, Kind::Harpsichord, 0, &recordings);
+            assert_eq!(
+                trims[2] - trims[0],
+                plays - 120,
+                "recorded {recorded} dB under"
+            );
+        }
     }
 
     /// A 6.x library from rules levels every stroke against its root's, so a silent

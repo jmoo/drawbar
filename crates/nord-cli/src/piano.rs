@@ -1038,6 +1038,32 @@ impl StrokeFile<'_> {
         }
     }
 
+    /// How loud a region is, in decibels over a steady sample of one unit, measured as
+    /// the encoder measures a stroke: the most power any 10 ms of its first half second
+    /// averages, on its louder channel. None for a WAV, and for a silent region.
+    fn level(&self) -> Option<f64> {
+        let Source::Region { take, region, .. } = &self.source else {
+            return None;
+        };
+        let channels = usize::from(take.channels).max(1);
+        let frames = crate::wav::frames(take, region);
+        let span = (frames.len() / channels).min(take.rate as usize / 2);
+        let width = span.min(take.rate as usize / 100).max(1);
+        let loudest = (0..channels)
+            .map(|channel| {
+                let power = |frame: usize| f64::from(frames[frame * channels + channel]).powi(2);
+                let mut sum: f64 = (0..width.min(span)).map(power).sum();
+                let mut most = sum;
+                for frame in width..span {
+                    sum += power(frame) - power(frame - width);
+                    most = most.max(sum);
+                }
+                most / width as f64
+            })
+            .fold(0.0, f64::max);
+        (loudest > 0.0).then(|| 10.0 * loudest.log10())
+    }
+
     /// The loudest sample of a region, and none for a WAV, which is already 16 bits.
     fn peak(&self) -> Option<f32> {
         match &self.source {
@@ -1083,6 +1109,31 @@ fn take_gains(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<f32> {
                 _ => 1.0,
             },
         )
+        .collect()
+}
+
+/// How far under its own attack each release region was recorded, in the order `files`
+/// came in, with `values` their layer values: under the attack region of its root at its
+/// layer value. None for every other stroke, for a release with no such attack, and
+/// unless `leveled`, as [`take_gains`] says.
+///
+/// One recording holds both strokes, so their balance is the instrument's: a format 6
+/// library from rules plays the release at it, lifted as quiet key-offs need. A
+/// directory's WAVs may each have been levelled on their own, so theirs is not used.
+fn release_balance(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<Option<f64>> {
+    let attacks: BTreeMap<(u8, u8), f64> = files
+        .iter()
+        .zip(values)
+        .filter(|(file, _)| file.bank == Bank::Attack)
+        .filter_map(|(file, &value)| Some(((file.root, value), file.level()?)))
+        .collect();
+    files
+        .iter()
+        .zip(values)
+        .map(|(file, &value)| match (leveled, file.bank) {
+            (true, Bank::Release) => Some(attacks.get(&(file.root, value))? - file.level()?),
+            _ => None,
+        })
         .collect()
 }
 
@@ -1270,13 +1321,19 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         &values,
         matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
     );
+    let balances = release_balance(
+        &files,
+        &values,
+        matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
+    );
+    let balanced = balances.iter().flatten().count();
     let raised = gains.iter().filter(|&&gain| gain > 1.0).count();
     let most = gains.iter().fold(1.0f32, |most, &gain| most.max(gain));
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
     let mut looped = 0usize;
-    for ((file, layer), gain) in files.iter().zip(values).zip(gains) {
+    for (((file, layer), gain), under_attack) in files.iter().zip(values).zip(gains).zip(balances) {
         let pcm = file.pcm(gain)?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
             .map_err(|e| format!("{}: {e}", file.whose()))?;
@@ -1317,6 +1374,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             layer,
             channels: audio.channels,
             sustain,
+            under_attack,
         });
     }
 
@@ -1337,6 +1395,11 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ui.note(format!(
             "{resampled} WAV(s) were resampled to the {} Hz rate the instrument plays at",
             codec::RATE
+        ));
+    }
+    if balanced > 0 {
+        ui.note(format!(
+            "{balanced} release(s) play at their recorded level under their own attack,              lifted by at most 12 dB towards 14 dB under it"
         ));
     }
     if raised > 0 {
@@ -1722,7 +1785,9 @@ mod tests {
     }
 
     /// A soft layer and a release, 32 dB under their root's loudest layer, are raised
-    /// to its peak before rounding, and still play as loud against it as unraised.
+    /// to its peak before rounding. The soft layer still plays as loud against it as
+    /// unraised, and the release, which the WAVs' build plays 18 dB under the loudest
+    /// attack, plays at its recorded balance lifted by 12 dB: 20 dB under its attack.
     #[test]
     fn a_takes_soft_regions_are_raised_without_changing_how_loud_they_play() {
         let dir = crate::edit::tests::scratch("piano-take-raise");
@@ -1762,14 +1827,20 @@ mod tests {
                 under < 0.5,
                 "stroke {stroke} peaks {under:.1} dB under its root's"
             );
-            let against = |levels: &[(i16, f64)]| levels[stroke].1 - levels[0].1;
-            assert!(
-                (against(&raised) - against(&unraised)).abs() < 0.15,
-                "stroke {stroke} plays {:.2} dB against its root raised, {:.2} unraised",
-                against(&raised),
-                against(&unraised)
-            );
         }
+        let against = |levels: &[(i16, f64)], stroke: usize| levels[stroke].1 - levels[0].1;
+        assert!(
+            (against(&raised, 1) - against(&unraised, 1)).abs() < 0.15,
+            "the soft layer plays {:.2} dB against its root raised, {:.2} unraised",
+            against(&raised, 1),
+            against(&unraised, 1)
+        );
+        let recorded = 20.0 * 40f64.log10();
+        assert!(
+            (against(&raised, 2) + recorded - 12.0).abs() < 0.15,
+            "the release plays {:.2} dB against its attack",
+            against(&raised, 2)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -659,6 +659,7 @@ impl Coding {
                 layer: take.layer,
                 channels: audio.channels,
                 sustain,
+                under_attack: None,
             });
         }
 
