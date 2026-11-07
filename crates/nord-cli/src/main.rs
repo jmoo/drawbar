@@ -20,6 +20,7 @@ mod editors;
 mod file;
 mod file_edit;
 mod piano;
+mod prep;
 mod sample;
 mod slot;
 mod summary;
@@ -352,6 +353,16 @@ enum PianoAction {
     /// `--template`, or without one from `--kind`, `--gain`, `--damper-top` and
     /// `--loop-fade`.
     Build(piano::BuildArgs),
+
+    /// Find the hits of a recorded take and write them into it as the regions `build`
+    /// reads.
+    ///
+    /// Each hit is assigned to the next note of `--notes` its pitch is nearest, and a
+    /// note's hits become its layers. Each kept hit is cut into an attack, from its
+    /// strike to its key-up, and a release from the key-up, each a region labelled as
+    /// a stroke's WAV is named. Hits standing too little over the take's hum-free floor
+    /// are left out. The listing shows every hit and what became of it.
+    Prep(prep::PrepArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each
     /// stroke's blocks compare.
@@ -751,6 +762,7 @@ fn main() -> ExitCode {
             PianoAction::Trim(args) => piano::trim(&ui, args),
             PianoAction::Split(args) => piano::split(&ui, args),
             PianoAction::Build(args) => piano::build(&ui, args),
+            PianoAction::Prep(args) => prep::prep(&ui, args),
             PianoAction::Rebuild(args) => piano::rebuild(&ui, args),
             PianoAction::Verify(args) => piano::verify(&ui, args),
         },

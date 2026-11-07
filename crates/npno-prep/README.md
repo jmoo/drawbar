@@ -12,8 +12,17 @@ itself, so any WAV editor can show them.
   and every other chunk are copied as they were.
 - `resample` converts the rate with the filter `scipy.signal.resample_poly` uses by
   default, so its output matches the Python prototype's to float precision.
+- `plan` finds the take's hits, assigns them to the notes played, chooses each
+  note's velocity layers by level or playing order, and cuts each hit into an
+  attack, from its strike to its key-up, and a release. Levels are measured
+  against the take's floor with its mains hum taken out (`hum`). Run at the rate
+  of the take it was tuned on, it places the same strokes as the Python
+  prototype.
+- `filter` holds the Butterworth high-pass and notch sections these run on,
+  forward only.
 
-`nord piano build TAKE.wav` builds a library from a take's labelled regions.
+`nord piano prep TAKE.wav --notes ...` writes a take's hits into it as regions, and
+`nord piano build TAKE.wav` builds a library from them.
 
 ## Disclaimer
 

@@ -64,6 +64,34 @@ because louder audio takes more bits to code. A format 5 library, or one built
 against a template, plays each stroke's audio at its own level, so nothing is
 raised.
 
+`prep` writes those regions. Give it the notes in the order you played them, and
+the number of velocity layers each note gets:
+
+```sh
+nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
+```
+
+Each note may be hit several times in a row, loud to soft or in any order. `prep`
+finds every hit, gives it to the next note in the list whose pitch is nearest, and
+keeps up to `--layers` of each note's hits: by measured level, dropping hits within
+`--min-layer-gap` dB of a louder one and spreading the rest evenly in dB, or with
+`--order played` the first ones played, the first the loudest. Each kept hit
+becomes an attack, from its strike to its key-up and at most `--max-seconds`
+long, and a release from the key-up, at most `--release-seconds` long. A hit
+standing less than 54 dB over the take's floor, measured with its mains hum taken
+out, is left out: levelled with the others, its hiss would come up with it. A
+key-off that stands clear of neither the quiet before its hit nor the floor gets
+no release. `--skip` leaves out hits by the number the listing gives them.
+
+A take at any other rate is resampled to the instrument's 35,002 Hz first, at its
+own bit depth, and the regions are placed on that, so they lie where the build
+reads them, and the original is never changed. A take already at 35,002 Hz may be
+its own `-o`: only its regions and loops are replaced. The listing shows every hit: its note
+and detected pitch, its level, and what became of it.
+
+A take works best opening with 3 to 5 seconds of silence, free of ground loops,
+peaking around -6 dBFS, and with each note held until it has died.
+
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
 nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno
