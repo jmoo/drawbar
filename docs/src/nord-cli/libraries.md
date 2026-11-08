@@ -74,11 +74,14 @@ that does not end with its attack, or that names a release or a looped attack, i
 refused.
 
 A format 6 library built without a template plays each stroke at the level of
-its root's loudest layer, whatever the stroke's own level. So before rounding,
-`build` raises each softer region of a take to that layer's peak, and each
-release to its root's loudest attack. The soft layers keep their detail above
-the 16-bit steps and play as loud as they would unraised. The library grows,
-because louder audio takes more bits to code. A release from a take plays at its
+its root's loudest layer, whatever the stroke's own level, and each root at the
+level of its loudest layer's audio. So before rounding, `build` brings every
+region of a take to a peak of -13 dBFS. The soft layers keep their detail above
+the 16-bit steps, and a note recorded quieter plays as loud as the others. The
+library grows, because louder audio takes more bits to code. Such a library also
+reaches the whole 88 keys where it can: the lowest root's strokes are pitched
+down, and the highest's up, by at most 12 semitones, to roots that reach A0 and
+C8. A release from a take plays at its
 recorded level under its own attack, both measured once cleaned, the region of its root at its layer, lifted by
 at most 12 dB towards 14 dB under it, so a quiet key-off stays quiet without being
 lost. A release with no such attack, or one from a directory of WAVs, plays 18 dB

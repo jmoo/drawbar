@@ -999,6 +999,8 @@ enum Source<'a> {
         audio: Vec<f32>,
         sample_loop: Option<wav::Loop>,
         fade: Option<u32>,
+        /// Semitones the region is pitched by, to play a root the take does not hold.
+        shift: i32,
     },
 }
 
@@ -1018,7 +1020,10 @@ impl StrokeFile<'_> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into(),
-            Source::Region { region, .. } => region.label.clone(),
+            Source::Region { region, shift, .. } => match shift {
+                0 => region.label.clone(),
+                _ => format!("{} {shift:+}", region.label),
+            },
         }
     }
 
@@ -1090,39 +1095,114 @@ impl StrokeFile<'_> {
     }
 }
 
-/// The gain each stroke's audio is raised by before it is rounded to 16 bits, in the
-/// order `files` came in, with `values` their layer values.
+/// The peak every region of a take is brought to before it is rounded to 16 bits, in
+/// dB under full scale: the prototype's, which left room for its loop crossfades.
+const TAKE_PEAK_DB: f64 = -13.0;
+
+/// The gain each stroke's audio is raised or lowered by before it is rounded to 16
+/// bits, in the order `files` came in.
 ///
 /// A format 6 library built from rules plays each stroke at the level of its root's
-/// loudest layer, whatever the stroke's own level, so a region of a take is raised to
-/// that layer's peak: a soft layer keeps its detail above the 16-bit steps and plays as
-/// it would unraised. Release strokes are leveled against the loudest attack. In any
-/// other library a stroke plays at its own level, so nothing is raised.
-fn take_gains(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<f32> {
-    let against = |file: &StrokeFile| match file.bank {
-        Bank::Attack | Bank::Resonance => (file.root, file.bank.code()),
-        Bank::Release => (file.root, Bank::Attack.code()),
-    };
-    let mut loudest: BTreeMap<(u8, u8), (u8, f32)> = BTreeMap::new();
-    for (file, &value) in files.iter().zip(values) {
-        if let (Some(peak), Bank::Attack | Bank::Resonance) = (file.peak(), file.bank) {
-            let entry = loudest.entry(against(file)).or_insert((value, peak));
-            if value < entry.0 {
-                *entry = (value, peak);
-            }
-        }
-    }
+/// loudest layer, whatever the stroke's own level, and each root at its loudest layer's
+/// audio level. So every region of a take is brought to one peak: a soft layer keeps
+/// its detail above the 16-bit steps, and a root recorded quieter plays as loud as the
+/// others. Kept at their recorded levels, the treble roots of the interface take played
+/// 2 to 12 dB under the prototype's, which brought every hit to one peak, and the top
+/// sounded dead (heard on a Stage 4). In any other library a stroke plays at its own
+/// level, so nothing changes.
+fn take_gains(files: &[StrokeFile], leveled: bool) -> Vec<f32> {
+    let target = 10f32.powf(TAKE_PEAK_DB as f32 / 20.0);
     files
         .iter()
-        .map(
-            |file| match (leveled, file.peak(), loudest.get(&against(file))) {
-                (true, Some(peak), Some(&(_, reference))) if peak > 0.0 && reference > peak => {
-                    reference / peak
-                }
-                _ => 1.0,
-            },
-        )
+        .map(|file| match (leveled, file.peak()) {
+            (true, Some(peak)) if peak > 0.0 => target / peak,
+            _ => 1.0,
+        })
         .collect()
+}
+
+/// The lowest and highest keys a take's roots are pitched out towards: the instrument's
+/// 88.
+const KEYS: (u8, u8) = (21, 108);
+
+/// The furthest a root is pitched to play keys its take does not reach, in semitones.
+const MOST_PITCHED: i32 = 12;
+
+/// Extra roots that reach the keys a take's lowest and highest roots do not, each the
+/// strokes of that root pitched, as the prototype made them, for a format 6 library
+/// built from rules.
+///
+/// A root plays from 12 semitones under it to one over, and a key past them is silent.
+/// The lowest root's strokes are pitched down to the root that reaches [`KEYS`]' lowest,
+/// and the highest's up to the one that reaches its highest, by at most
+/// [`MOST_PITCHED`] semitones.
+fn pitched_roots<'a>(files: &[StrokeFile<'a>]) -> Result<Vec<StrokeFile<'a>>, String> {
+    let roots: BTreeSet<u8> = files.iter().map(|file| file.root).collect();
+    let (Some(&lowest), Some(&highest)) = (roots.first(), roots.last()) else {
+        return Ok(Vec::new());
+    };
+    let mut wanted = Vec::new();
+    if lowest > KEYS.0 + 12 {
+        let to = (KEYS.0 + 12).max(lowest.saturating_sub(MOST_PITCHED as u8));
+        wanted.push((lowest, to));
+    }
+    if highest < KEYS.1 - 1 {
+        let to = (KEYS.1 - 1).min(highest + MOST_PITCHED as u8);
+        wanted.push((highest, to));
+    }
+    let mut out = Vec::new();
+    for (from, to) in wanted {
+        let shift = i32::from(to) - i32::from(from);
+        for file in files.iter().filter(|file| file.root == from) {
+            let Source::Region {
+                path,
+                take,
+                region,
+                audio,
+                sample_loop,
+                fade,
+                ..
+            } = &file.source
+            else {
+                continue;
+            };
+            let named = |e: &dyn std::fmt::Display| format!("{}: {e}", file.whose());
+            let pitched = npno_prep::resample::pitched(
+                &wav::Audio {
+                    rate: take.rate,
+                    channels: take.channels,
+                    samples: audio.clone(),
+                },
+                shift,
+            )
+            .map_err(|e| named(&e))?;
+            let frames = pitched.frames() as u32;
+            let scale = |at: u32| {
+                ((f64::from(at) * frames as f64 / (audio.len() / usize::from(take.channels)) as f64)
+                    .round() as u32)
+                    .min(frames)
+            };
+            out.push(StrokeFile {
+                source: Source::Region {
+                    path,
+                    take,
+                    region,
+                    audio: pitched.samples,
+                    sample_loop: sample_loop.map(|found| wav::Loop {
+                        start: scale(found.start),
+                        end: scale(found.end),
+                        ..found
+                    }),
+                    fade: fade.map(scale),
+                    shift,
+                },
+                root: to,
+                bank: file.bank,
+                layer: file.layer,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// How far under its own attack each release region was recorded, in the order `files`
@@ -1232,6 +1312,7 @@ fn region_strokes<'a>(
                 audio,
                 sample_loop,
                 fade: None,
+                shift: 0,
             },
             root,
             bank,
@@ -1392,6 +1473,21 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
                 let noise = Noise::of(&npno_prep::plan::mono(audio), audio.rate);
                 files.extend(region_strokes(path, audio, marks, &noise)?);
             }
+            let pitched = match (&donor, version) {
+                (encode::Donor::Rules(_), Version::V6) => pitched_roots(&files)?,
+                _ => Vec::new(),
+            };
+            for file in &pitched {
+                let Source::Region { shift, .. } = file.source else {
+                    unreachable!("pitched roots are regions");
+                };
+                ui.note(format!(
+                    "{}: pitched {shift:+} semitones to a root of {}, to reach keys the take does not",
+                    file.whose(),
+                    note::name(file.root)
+                ));
+            }
+            files.extend(pitched);
             in_stroke_order(&mut files);
             files
         }
@@ -1399,7 +1495,6 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let values = layer_values(&files, version)?;
     let gains = take_gains(
         &files,
-        &values,
         matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
     );
     let balances = release_balance(
@@ -1408,8 +1503,10 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
     );
     let balanced = balances.iter().flatten().count();
-    let raised = gains.iter().filter(|&&gain| gain > 1.0).count();
-    let most = gains.iter().fold(1.0f32, |most, &gain| most.max(gain));
+    let leveled = gains.iter().filter(|&&gain| gain != 1.0).count();
+    let (least, most) = gains
+        .iter()
+        .fold((1.0f32, 1.0f32), |(l, m), &gain| (l.min(gain), m.max(gain)));
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
@@ -1484,11 +1581,11 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
              lifted by at most 12 dB towards 14 dB under it"
         ));
     }
-    if raised > 0 {
+    if leveled > 0 {
         ui.note(format!(
-            "{raised} region(s) were raised, by up to {:.1} dB, to their root's loudest \
-             layer's peak before rounding to 16 bits; each plays at its root's level as \
-             it would unraised",
+            "{leveled} region(s) were brought to a {TAKE_PEAK_DB} dBFS peak, by {:+.1} to \
+             {:+.1} dB, before rounding to 16 bits, so every root plays as loud as the others",
+            20.0 * least.log10(),
             20.0 * most.log10()
         ));
     }

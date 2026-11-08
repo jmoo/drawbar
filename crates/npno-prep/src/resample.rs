@@ -140,9 +140,89 @@ pub fn resample(audio: &Audio, rate: u32) -> Result<Audio, Error> {
     })
 }
 
+/// The ratio nearest `x` whose denominator is at most `most`, as numerator and
+/// denominator: the continued fraction's last convergent within it, or the
+/// semiconvergent after it where that is nearer.
+fn nearest_ratio(x: f64, most: u64) -> (u64, u64) {
+    let (mut p0, mut q0, mut p1, mut q1) = (0u64, 1u64, 1u64, 0u64);
+    let mut rest = x;
+    loop {
+        let a = rest.floor();
+        let q2 = q0 + a as u64 * q1;
+        if q2 > most {
+            break;
+        }
+        (p0, q0, p1, q1) = (p1, q1, p0 + a as u64 * p1, q2);
+        let fraction = rest - a;
+        if fraction < 1e-12 {
+            return (p1, q1);
+        }
+        rest = 1.0 / fraction;
+    }
+    let k = (most - q0) / q1;
+    let (pb, qb) = (p0 + k * p1, q0 + k * q1);
+    let off = |p: u64, q: u64| (p as f64 / q as f64 - x).abs();
+    match off(p1, q1) <= off(pb, qb) {
+        true => (p1, q1),
+        false => (pb, qb),
+    }
+}
+
+/// `audio` pitched by `semitones`, at its own rate: resampled by the ratio of
+/// denominator at most 2000 nearest 2^(-semitones/12), so it plays that much higher in
+/// as many fewer frames. The prototype pitched its extra roots so.
+pub fn pitched(audio: &Audio, semitones: i32) -> Result<Audio, Error> {
+    let (up, down) = nearest_ratio(2f64.powf(-f64::from(semitones) / 12.0), 2000);
+    let shifted = resample(
+        &Audio {
+            rate: down as u32,
+            ..audio.clone()
+        },
+        up as u32,
+    )?;
+    Ok(Audio {
+        rate: audio.rate,
+        ..shifted
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ratio_is_the_nearest_with_its_denominator() {
+        assert_eq!(nearest_ratio(0.75, 2000), (3, 4));
+        let (p, q) = nearest_ratio(2f64.powf(-11.0 / 12.0), 2000);
+        assert!(q <= 2000);
+        assert!(
+            (p as f64 / q as f64 - 2f64.powf(-11.0 / 12.0)).abs() < 2e-6,
+            "{p}/{q}"
+        );
+    }
+
+    #[test]
+    fn a_tone_pitched_up_an_octave_less_one_plays_that_much_higher() {
+        let audio = tone(35_002, 440.0, 35_002, 1);
+        let up = pitched(&audio, 11).unwrap();
+        assert_eq!(up.rate, 35_002);
+        let ratio = 2f64.powf(11.0 / 12.0);
+        assert!(
+            (up.frames() as f64 - 35_002.0 / ratio).abs() < 2.0,
+            "{}",
+            up.frames()
+        );
+        let crossings = up.samples[1_000..up.samples.len() - 1_000]
+            .windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count() as f64;
+        let seconds = (up.samples.len() - 2_000) as f64 / 35_002.0;
+        assert!(
+            (crossings / seconds - 440.0 * ratio).abs() < 3.0,
+            "{}",
+            crossings / seconds
+        );
+    }
 
     fn tone(rate: u32, hz: f64, frames: usize, channels: u16) -> Audio {
         let samples = (0..frames)

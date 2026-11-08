@@ -559,7 +559,8 @@ mod tests {
         let npno_s = npno.to_str().unwrap();
         crate::piano::build(&Ui::piped(), build_args(&[loud_r, soft_r, "-o", npno_s])).unwrap();
         let (_, piano) = crate::piano::read(&npno).unwrap();
-        assert_eq!(piano.library().unwrap().strokes().len(), 8);
+        // and C4's pitched down to C3 and E4's up to E5, to reach more keys
+        assert_eq!(piano.library().unwrap().strokes().len(), 16);
         let twice = crate::piano::build(&Ui::piped(), build_args(&[loud_r, loud_r, "-o", npno_s]));
         assert!(twice.is_err(), "the same strokes twice");
         std::fs::remove_dir_all(&dir).unwrap();
