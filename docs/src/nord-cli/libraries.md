@@ -55,6 +55,15 @@ PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
 WAV of it would be. A region labelled any other way, or a loop that crosses a
 region's end, is refused.
 
+A take's strokes are shaped to sustain as they are built. A looped region's loop
+has the decay across it evened out, so its end meets its start, and its last 30 ms
+are crossfaded into the audio before its start. A region labelled with `-fade`
+after a stroke's name (`084-b0-l00-fade`) lies at the end of that attack, and the
+attack fades from there to silence at its end, following the note's own decay as
+it slows, down to 70 dB under its peak, then loops on 100 ms of silence. A fade
+that does not end with its attack, or that names a release or a looped attack, is
+refused.
+
 A format 6 library built without a template plays each stroke at the level of
 its root's loudest layer, whatever the stroke's own level. So before rounding,
 `build` raises each softer region of a take to that layer's peak, and each
@@ -87,6 +96,15 @@ out, is left out: levelled with the others, its hiss would come up with it. A
 key-off that stands clear of neither the quiet before its hit nor the floor gets
 no release. `--skip` leaves out hits by the number the listing gives them.
 
+Each attack also gets its sustain. A note still sounding at its key-up is looped:
+about half a second, a whole number of its periods, ending 150 ms before the key-up
+or where it sinks to 30 dB over the floor, tuned within a period for the best
+match between its end and its start. The listing gives each loop's match, and warns
+under 0.5. A note that dies into the floor before its key-up, and would finish
+fading before it, gets a fade region instead, from where it came within 20 dB of the
+floor, and its attack ends where the fade reaches silence. Loops in the noise of a
+dying note clicked, so it is never looped.
+
 Or record one take per velocity layer, each playing every note once, and give them
 loudest first:
 
@@ -104,7 +122,7 @@ A take at any other rate is resampled to the instrument's 35,002 Hz first, at it
 own bit depth, and the regions are placed on that, so they lie where the build
 reads them, and the original is never changed. A take already at 35,002 Hz may be
 its own `-o`: only its regions and loops are replaced. The listing shows every hit: its note
-and detected pitch, its level, and what became of it.
+and detected pitch, its level, what became of it, and how it sustains.
 
 A take works best opening with 3 to 5 seconds of silence, free of ground loops,
 peaking around -6 dBFS, and with each note held until it has died.

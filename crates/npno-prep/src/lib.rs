@@ -7,8 +7,8 @@
 //! [`plan`] runs the detectors in turn: [`detect`] finds each hit, its pitch and its
 //! key-up, [`hum`] the take's mains hum so levels are measured against the floor
 //! without it, [`layers`] assigns hits to notes and chooses each note's layers, and
-//! [`cut`] places each hit's attack and release. [`plan::Plan::regions`] names them as
-//! the build reads them.
+//! [`cut`] places each hit's attack and release, and [`sustain`] its loop or fade.
+//! [`plan::Plan::regions`] and [`plan::Plan::loops`] mark them as the build reads them.
 
 pub mod cut;
 pub mod detect;
@@ -18,6 +18,7 @@ pub mod hum;
 pub mod layers;
 pub mod plan;
 pub mod resample;
+pub mod sustain;
 pub mod wav;
 
 use thiserror::Error as ThisError;

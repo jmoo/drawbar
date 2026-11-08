@@ -7,6 +7,7 @@ use nord_format::formats::npno::codec;
 use nord_format::note;
 use npno_prep::layers::{Choice, Order};
 use npno_prep::plan::{self, Fate, PlanOptions, SetLayer};
+use npno_prep::sustain::Sustain;
 use npno_prep::wav;
 
 use crate::edit::write_file;
@@ -197,7 +198,7 @@ fn prep_take(
     }
     let marks = wav::Marks {
         regions,
-        loops: Vec::new(),
+        loops: plan.loops(),
     };
     let audio = match resampled {
         true => wav::write(&take, layout.format.encoding).map_err(|e| named(&e))?,
@@ -212,7 +213,11 @@ fn prep_take(
             codec::RATE
         ));
     }
-    ui.note(format!("{} region(s)", marks.regions.len()));
+    ui.note(format!(
+        "{} region(s), {} loop(s)",
+        marks.regions.len(),
+        marks.loops.len()
+    ));
     Ok(())
 }
 
@@ -222,6 +227,9 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
         _ => a == b,
     }
 }
+
+/// A loop whose end matches its start less than this is warned about.
+const LOOP_MATCH_WARNING: f64 = 0.5;
 
 /// Every hit, what became of it and where its strokes lie.
 fn list(ui: &Ui, plan: &plan::Plan) {
@@ -244,16 +252,43 @@ fn list(ui: &Ui, plan: &plan::Plan) {
         Err(why) => ui.note(format!("{why}; the floor is {:.1} dBFS", plan.floor_db)),
     }
     ui.out(ui.dim(format!(
-        "  {:>4} {:>8}  {:>4} {:>6} {:>6}  {:<24} {:>7} {:>7}",
-        "hit", "at", "note", "pitch", "level", "", "attack", "release"
+        "  {:>4} {:>8}  {:>4} {:>6} {:>6}  {:<24} {:>7} {:>7}  {}",
+        "hit", "at", "note", "pitch", "level", "", "attack", "release", "sustain"
     )));
     let rate = f64::from(plan.rate);
     for planned in &plan.hits {
         let hit = &planned.hit;
+        let sustain = match &planned.fate {
+            Fate::Kept {
+                sustain: Sustain::Loop { start, len, score },
+                ..
+            } => format!(
+                "loops {:.2} s from {:.2} s, match {score:.2}",
+                *len as f64 / rate,
+                *start as f64 / rate
+            ),
+            Fate::Kept {
+                sustain: Sustain::Dies { fade, .. },
+                ..
+            } => format!("fades from {:.2} s", *fade as f64 / rate),
+            _ => String::new(),
+        };
         let (what, attack, release) = match &planned.fate {
-            Fate::Kept { layer, value, cuts } => (
+            Fate::Kept {
+                layer,
+                value,
+                cuts,
+                sustain,
+            } => (
                 format!("layer {layer}, value {value}"),
-                format!("{:.2} s", cuts.attack.len() as f64 / rate),
+                format!(
+                    "{:.2} s",
+                    match sustain {
+                        Sustain::Dies { end, .. } => *end.min(&cuts.attack.len()),
+                        Sustain::Loop { .. } => cuts.attack.len(),
+                    } as f64
+                        / rate
+                ),
                 match (&cuts.release, &cuts.no_release) {
                     (Some(span), _) => format!("{:.2} s", span.len() as f64 / rate),
                     (None, Some(_)) => "none".to_string(),
@@ -279,7 +314,7 @@ fn list(ui: &Ui, plan: &plan::Plan) {
             Fate::Chosen(_) => ("more hits than layers".into(), String::new(), String::new()),
         };
         ui.out(format!(
-            "  {:>4} {:>7.2}s  {:>4} {:>6} {:>6.1}  {:<24} {:>7} {:>7}",
+            "  {:>4} {:>7.2}s  {:>4} {:>6} {:>6.1}  {:<24} {:>7} {:>7}  {}",
             hit.number,
             hit.onset as f64 * npno_prep::detect::FRAME,
             planned.note.map_or("-".into(), note::name),
@@ -291,9 +326,23 @@ fn list(ui: &Ui, plan: &plan::Plan) {
             what,
             attack,
             release,
+            sustain,
         ));
         if let Some(warning) = &planned.warning {
             ui.warn(format!("hit {}: {warning}", hit.number));
+        }
+        if let Fate::Kept {
+            sustain: Sustain::Loop { score, .. },
+            ..
+        } = &planned.fate
+        {
+            if *score < LOOP_MATCH_WARNING {
+                ui.warn(format!(
+                    "hit {}: its loop's end matches its start only {score:.2}; listen to \
+                     it, and move the loop in an editor if it is heard",
+                    hit.number
+                ));
+            }
         }
         if let Fate::Kept { cuts, .. } = &planned.fate {
             match (&cuts.release, &cuts.no_release) {
@@ -513,6 +562,103 @@ mod tests {
         assert_eq!(piano.library().unwrap().strokes().len(), 8);
         let twice = crate::piano::build(&Ui::piped(), build_args(&[loud_r, loud_r, "-o", npno_s]));
         assert!(twice.is_err(), "the same strokes twice");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A held middle C loops, and an E6 that dies within 20 dB of the floor long before its key-up fades
+    /// instead: its attack ends where the fade reaches silence, the fade is a region of
+    /// its own, and the built stroke ends in the silence it loops on.
+    #[test]
+    fn a_held_note_loops_and_a_dying_one_fades() {
+        let dir = crate::edit::tests::scratch("piano-prep-sustain");
+        let rate = codec::RATE;
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut samples: Vec<f32> = (0..rate as usize * 12)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                1e-4 * ((seed >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0)
+            })
+            .collect();
+        for (start, note, db_per_s, up) in [(1.0, 60.0, 3.0, 4.5), (6.0, 88.0, 40.0, 10.0)] {
+            let f = 440.0 * 2f64.powf((note - 69.0) / 12.0);
+            let from = (start * f64::from(rate)) as usize;
+            for (i, v) in samples.iter_mut().enumerate().skip(from) {
+                let t = (i - from) as f64 / f64::from(rate);
+                let damp = match t < up - start {
+                    true => 1.0,
+                    false => (-(t - (up - start)) * 90.0).exp(),
+                };
+                let level = 10f64.powf((-12.0 - db_per_s * t) / 20.0) * damp;
+                *v += (level * (2.0 * std::f64::consts::PI * f * t).sin()) as f32;
+            }
+        }
+        let audio = wav::Audio {
+            rate,
+            channels: 1,
+            samples,
+        };
+        let path = dir.join("take.wav");
+        std::fs::write(
+            &path,
+            wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap(),
+        )
+        .unwrap();
+        let take = path.to_str().unwrap();
+        prep(
+            &Ui::piped(),
+            prep_args(&[take, "--notes", "C4,E6", "--layers", "1", "-o", take]),
+        )
+        .unwrap();
+
+        let marks = wav::read_marks(&std::fs::read(&path).unwrap()).unwrap();
+        let labels: Vec<&str> = marks.regions.iter().map(|r| r.label.as_str()).collect();
+        assert!(labels.contains(&"088-b0-v00-fade"), "{labels:?}");
+        assert_eq!(marks.loops.len(), 1, "only the held note loops");
+        let held = &marks.regions[0];
+        assert_eq!(held.label, "060-b0-v00");
+        assert!(marks.loops[0].end < held.start + held.frames);
+        let (attack, fade) = (
+            marks
+                .regions
+                .iter()
+                .find(|r| r.label == "088-b0-v00")
+                .unwrap(),
+            marks
+                .regions
+                .iter()
+                .find(|r| r.label == "088-b0-v00-fade")
+                .unwrap(),
+        );
+        assert_eq!(attack.start + attack.frames, fade.start + fade.frames);
+        let fades_at = f64::from(fade.start - attack.start) / f64::from(rate);
+        assert!((fades_at - 1.3).abs() < 0.15, "fades from {fades_at:.2} s");
+
+        let npno = dir.join("take.npno");
+        let npno_s = npno.to_str().unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "nord", "piano", "build", take, "--name", "S", "-o", npno_s,
+        ]);
+        let Ok(crate::Command::Piano {
+            action: crate::PianoAction::Build(build),
+        }) = cli.map(|cli| cli.command)
+        else {
+            panic!("build did not parse");
+        };
+        crate::piano::build(&Ui::piped(), build).unwrap();
+        let (_, piano) = crate::piano::read(&npno).unwrap();
+        let library = piano.library().unwrap();
+        let stroke = library
+            .strokes()
+            .iter()
+            .find(|s| s.root == 88 && s.bank_code() == 0)
+            .unwrap();
+        let lane = &codec::decode(stroke, library.channels()).unwrap().lanes[0];
+        assert!(
+            lane[lane.len() - 2_000..].iter().all(|&v| v == 0),
+            "ends silent"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

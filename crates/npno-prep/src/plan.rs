@@ -4,7 +4,8 @@ use crate::cut::{self, CutOptions, Cuts, Take};
 use crate::detect::{self, Envelope, Hit};
 use crate::hum::{self, Hum, NoHum};
 use crate::layers::{self, Choice, Order};
-use crate::wav::{Audio, Region};
+use crate::sustain::{self, Sustain, SustainOptions};
+use crate::wav::{Audio, Loop, Region};
 
 /// What [`plan`] is told about a take.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +23,7 @@ pub struct PlanOptions {
     /// dB: levelled with the others, its hiss comes up with it.
     pub min_snr_db: f64,
     pub cut: CutOptions,
+    pub sustain: SustainOptions,
     /// Set for a take of one layer: one of a set of takes, each holding every note at
     /// one velocity. Each note's last hit is then that layer, and [`PlanOptions::layers`]
     /// and [`PlanOptions::order`] are not read.
@@ -47,6 +49,7 @@ impl PlanOptions {
             min_layer_gap_db: 2.0,
             min_snr_db: 54.0,
             cut: CutOptions::default(),
+            sustain: SustainOptions::default(),
             set: None,
         }
     }
@@ -55,11 +58,13 @@ impl PlanOptions {
 /// What became of a hit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fate {
-    /// A layer of its note, with the layer value it is named by.
+    /// A layer of its note, with the layer value it is named by, and how its attack
+    /// sustains, in frames from the attack's start.
     Kept {
         layer: usize,
         value: u8,
         cuts: Cuts,
+        sustain: Sustain,
     },
     Skipped,
     /// Its level stood this far over the floor, too little.
@@ -104,17 +109,19 @@ pub fn mono(audio: &Audio) -> Vec<f64> {
 /// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, chooses
 /// each note's layers and cuts their strokes.
 ///
-/// Hits, pitch and key-ups are found on the take as recorded; levels against the floor
-/// on the take with its hum taken out, whose floor is lower.
+/// Hits, pitch and key-ups are found on the take as recorded; levels against the floor,
+/// and each attack's loop or fade, on the take with its hum taken out, whose floor is
+/// lower.
 pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     let x = detect::highpassed(mono, rate);
     let env = Envelope::of(&x, rate);
     let hits = detect::hits(&x, rate, &env);
     let hum = hum::find(&x, rate, &env);
-    let quiet = match &hum {
-        Ok(found) => Envelope::of(&found.removed(&x, rate), rate),
-        Err(_) => env.clone(),
+    let cleaned = match &hum {
+        Ok(found) => found.removed(&x, rate),
+        Err(_) => x.clone(),
     };
+    let quiet = Envelope::of(&cleaned, rate);
     let floor = quiet.floor();
 
     let assigned = layers::assign(&hits, &options.notes, |hit| {
@@ -195,11 +202,22 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
         };
         for (&i, choice) in members.iter().zip(choices) {
             planned[i].fate = match choice {
-                Choice::Layer(layer) => Fate::Kept {
-                    layer,
-                    value: values[layer],
-                    cuts: cut::cut(&take, &planned[i].hit, &options.cut),
-                },
+                Choice::Layer(layer) => {
+                    let cuts = cut::cut(&take, &planned[i].hit, &options.cut);
+                    let sustain = sustain::find(
+                        &cleaned[cuts.attack.clone()],
+                        rate,
+                        note,
+                        floor,
+                        &options.sustain,
+                    );
+                    Fate::Kept {
+                        layer,
+                        value: values[layer],
+                        cuts,
+                        sustain,
+                    }
+                }
                 other => Fate::Chosen(other),
             };
         }
@@ -215,26 +233,58 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
 
 impl Plan {
     /// The regions of every kept hit's strokes, in the take's order: an attack labelled
-    /// `060-b0-v00`, and a release `060-b2-v00` where it has one.
+    /// `060-b0-v00`, and a release `060-b2-v00` where it has one. A dying attack ends
+    /// where its fade reaches silence, and its fade is a region of its own within it,
+    /// labelled `060-b0-v00-fade`, ending with it.
     pub fn regions(&self) -> Vec<Region> {
         let mut regions = Vec::new();
         for planned in &self.hits {
-            let (Some(note), Fate::Kept { value, cuts, .. }) = (planned.note, &planned.fate) else {
+            let (
+                Some(note),
+                Fate::Kept {
+                    value,
+                    cuts,
+                    sustain,
+                    ..
+                },
+            ) = (planned.note, &planned.fate)
+            else {
                 continue;
             };
-            let strokes = [(0, Some(&cuts.attack)), (2, cuts.release.as_ref())];
-            for (bank, span) in strokes {
+            let mut attack = cuts.attack.clone();
+            let mut fade = None;
+            if let Sustain::Dies { fade: from, end } = *sustain {
+                attack.end = attack.start + end.min(attack.len());
+                fade = Some(attack.start + from..attack.end);
+            }
+            let strokes = [
+                (0, Some(attack), ""),
+                (0, fade, "-fade"),
+                (2, cuts.release.clone(), ""),
+            ];
+            for (bank, span, suffix) in strokes {
                 let Some(span) = span.filter(|span| !span.is_empty()) else {
                     continue;
                 };
                 regions.push(Region {
                     start: span.start as u32,
                     frames: span.len() as u32,
-                    label: format!("{note:03}-b{bank}-v{value:02}"),
+                    label: format!("{note:03}-b{bank}-v{value:02}{suffix}"),
                 });
             }
         }
         regions
+    }
+
+    /// The loop of every kept attack that loops, in the take's order.
+    pub fn loops(&self) -> Vec<Loop> {
+        self.hits
+            .iter()
+            .filter_map(|planned| match &planned.fate {
+                Fate::Kept { cuts, sustain, .. } => sustain.sample_loop(cuts.attack.start),
+                _ => None,
+            })
+            .collect()
     }
 }
 

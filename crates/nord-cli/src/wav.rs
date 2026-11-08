@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use npno_prep::sustain::{self, SustainOptions};
 use npno_prep::wav::{self, Audio, Loop, Marks, Pcm16, Region};
 
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
@@ -47,14 +48,39 @@ pub fn frames<'a>(take: &'a Audio, region: &Region) -> &'a [f32] {
     &take.samples[start..start + region.frames as usize * channels]
 }
 
-/// The frames of `region` raised by `gain` and rounded to 16-bit PCM, with
-/// `sample_loop` counted from its start.
-pub fn cut(take: &Audio, region: &Region, sample_loop: Option<Loop>, gain: f32) -> Pcm16 {
-    let raised: Vec<f32> = frames(take, region).iter().map(|x| x * gain).collect();
+/// The frames of `region` shaped to sustain, raised by `gain` and rounded to 16-bit
+/// PCM, with `sample_loop` counted from its start.
+///
+/// A looped region's loop is evened out and crossfaded so its end meets its start. A
+/// region that fades from frame `fade` fades to silence at its end and loops on
+/// silence after it.
+pub fn cut(
+    take: &Audio,
+    region: &Region,
+    sample_loop: Option<Loop>,
+    fade: Option<u32>,
+    gain: f32,
+) -> Pcm16 {
+    let channels = usize::from(take.channels.max(1));
+    let options = SustainOptions::default();
+    let mut shaped = frames(take, region).to_vec();
+    let mut sample_loop = sample_loop;
+    match (&sample_loop, fade) {
+        (Some(held), _) => sustain::even_loop(&mut shaped, channels, take.rate, held, &options),
+        (None, Some(fade)) => {
+            let (faded, silent) =
+                sustain::fade_out(&shaped, channels, take.rate, fade as usize, &options);
+            (shaped, sample_loop) = (faded, Some(silent));
+        }
+        (None, None) => {}
+    }
+    for v in &mut shaped {
+        *v *= gain;
+    }
     Pcm16 {
         rate: take.rate,
         channels: take.channels,
-        samples: wav::quantize(&raised),
+        samples: wav::quantize(&shaped),
         sample_loop,
     }
 }

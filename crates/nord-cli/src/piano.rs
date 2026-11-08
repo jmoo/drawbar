@@ -989,12 +989,14 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
 enum Source<'a> {
     /// A WAV of its own.
     File(PathBuf),
-    /// A region of a take, with the loop it holds counted from the region's start.
+    /// A region of a take, with the loop it holds and the frame its fade starts at,
+    /// both counted from the region's start.
     Region {
         path: &'a Path,
         take: &'a wav::Audio,
         region: &'a wav::Region,
         sample_loop: Option<wav::Loop>,
+        fade: Option<u32>,
     },
 }
 
@@ -1036,8 +1038,9 @@ impl StrokeFile<'_> {
                 take,
                 region,
                 sample_loop,
+                fade,
                 ..
-            } => Ok(crate::wav::cut(take, region, *sample_loop, gain)),
+            } => Ok(crate::wav::cut(take, region, *sample_loop, *fade, gain)),
         }
     }
 
@@ -1140,6 +1143,9 @@ fn release_balance(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<Op
         .collect()
 }
 
+/// The end of a region's label that makes it the fade of the stroke the rest names.
+const FADE_SUFFIX: &str = "-fade";
+
 fn in_stroke_order(strokes: &mut [StrokeFile]) {
     strokes.sort_by_key(|s| (s.root, s.bank.code(), s.layer, s.name()));
 }
@@ -1188,7 +1194,12 @@ fn region_strokes<'a>(
 ) -> Result<Vec<StrokeFile<'a>>, String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let mut out = Vec::new();
+    let mut fades = Vec::new();
     for (region, sample_loop) in marks.regions_with_loops().map_err(|e| named(&e))? {
+        if let Some(stroke) = region.label.strip_suffix(FADE_SUFFIX) {
+            fades.push((stroke, region));
+            continue;
+        }
         let (root, bank, layer) = parse_stroke_name(&region.label, Stem::None)
             .filter(|_| region.frames > 0)
             .ok_or_else(|| {
@@ -1204,11 +1215,45 @@ fn region_strokes<'a>(
                 take,
                 region,
                 sample_loop,
+                fade: None,
             },
             root,
             bank,
             layer,
         });
+    }
+    for (stroke, fade) in fades {
+        let refuse = |why: &str| named(&format!("region {:?} {why}", fade.label));
+        let owner = out
+            .iter_mut()
+            .find(|file| file.name() == stroke)
+            .ok_or_else(|| {
+                refuse(&format!(
+                    "fades no stroke: no region is labelled {stroke:?}"
+                ))
+            })?;
+        let Source::Region {
+            region,
+            sample_loop,
+            fade: at,
+            ..
+        } = &mut owner.source
+        else {
+            unreachable!("a take's strokes are its regions");
+        };
+        let end = |r: &wav::Region| r.start + r.frames;
+        if fade.start < region.start || end(fade) != end(region) {
+            return Err(refuse(&format!(
+                "must lie within {stroke:?} and end with it, where the fade reaches silence"
+            )));
+        }
+        if owner.bank == Bank::Release || sample_loop.is_some() || at.is_some() {
+            return Err(refuse(&format!(
+                "fades {stroke:?}, which is a release, loops, or fades already; only an \
+                 attack or resonance that does not loop fades"
+            )));
+        }
+        *at = Some(fade.start - region.start);
     }
     if out.is_empty() {
         return Err(named(&"no region to build a library from"));
@@ -1418,7 +1463,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     }
     if balanced > 0 {
         ui.note(format!(
-            "{balanced} release(s) play at their recorded level under their own attack,              lifted by at most 12 dB towards 14 dB under it"
+            "{balanced} release(s) play at their recorded level under their own attack, \
+             lifted by at most 12 dB towards 14 dB under it"
         ));
     }
     if raised > 0 {
@@ -1720,11 +1766,12 @@ mod tests {
         wav::read(&deep).unwrap()
     }
 
-    /// The regions of `take` written into `dir` as 16-bit WAVs of their own, unraised.
+    /// The regions of `take` written into `dir` as 16-bit WAVs of their own, unraised,
+    /// their loops shaped as a take's build shapes them.
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
-            let pcm = crate::wav::cut(take, found, sample_loop, 1.0);
+            let pcm = crate::wav::cut(take, found, sample_loop, None, 1.0);
             let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
             let loops = wav::Marks {
                 regions: vec![],
@@ -1860,6 +1907,38 @@ mod tests {
             "the release plays {:.2} dB against its attack",
             against(&raised, 2)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fade region must end with the attack it names, and only an attack or
+    /// resonance that does not loop fades.
+    #[test]
+    fn a_fade_that_is_not_an_attacks_end_is_refused() {
+        let dir = crate::edit::tests::scratch("piano-take-fade");
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples: tone(261.6, 20_000),
+        };
+        let path = dir.join("take.wav");
+        let cases = [
+            (region(4_000, 5_000, "060-b0-l00-fade"), "end with it"),
+            (region(15_000, 5_000, "060-b2-l00-fade"), "is a release"),
+            (region(4_000, 6_000, "062-b0-l00-fade"), "fades no stroke"),
+        ];
+        for (fade, reason) in cases {
+            let marks = wav::Marks {
+                regions: vec![
+                    region(0, 10_000, "060-b0-l00"),
+                    region(10_000, 10_000, "060-b2-l00"),
+                    fade,
+                ],
+                loops: vec![],
+            };
+            write_take(&path, &audio, &marks);
+            let err = build_from(&path, &dir.join("out.npno")).unwrap_err();
+            assert!(err.contains(reason), "want {reason:?}: {err}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -18,6 +18,11 @@ itself, so any WAV editor can show them.
   against the take's floor with its mains hum taken out (`hum`). Run at the rate
   of the take it was tuned on, it places the same strokes as the Python
   prototype.
+- `sustain` decides how each attack sustains while its key is held: a loop of whole
+  periods tuned for the best match, or, for a note that dies before its key-up, a
+  fade to silence. It also shapes them as the build reads them, evening out the
+  decay across a loop and crossfading its end, so a mark moved in an editor is
+  shaped the same way.
 - `filter` holds the Butterworth high-pass and notch sections these run on,
   forward only.
 

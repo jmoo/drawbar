@@ -228,7 +228,7 @@ pub fn hits(x: &[f64], rate: u32, env: &Envelope) -> Vec<Hit> {
 }
 
 /// The slope and intercept of the least-squares line through `(x, values[x - from])`.
-fn line(from: usize, values: &[f64]) -> (f64, f64) {
+pub(crate) fn line(from: usize, values: &[f64]) -> (f64, f64) {
     let n = values.len() as f64;
     let xs = (0..values.len()).map(|i| (from + i) as f64);
     let mean_x = xs.clone().sum::<f64>() / n;
