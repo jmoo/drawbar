@@ -56,7 +56,8 @@ are, and the take editor follows the other document editors.
 3. **Detect.** The notes in playing order: a list (`E3 G3 A#3 …`), or a start note, a step in
    semitones and a count. For a single take, the number of layers, and how they are chosen; takes of
    one layer each take their layer from their order. These are inputs to the detectors, not stored;
-   Detect runs only when pressed, writes regions and is done:
+   Detect runs only when pressed, writes regions and is done. Pressed again on a take with regions,
+   it first warns that it replaces them, and the user can cancel or go ahead:
    - **Playing order**: the first hit of a note is the loudest layer. This suits players who play
      loud, medium, soft, and recordings whose level can't be trusted (a phone's automatic gain made
      measured loudness useless on our test take).
@@ -78,6 +79,9 @@ are, and the take editor follows the other document editors.
 
 The editor uses the standard document top bar for the file name, Detect and Build. The left bar
 stays the file tree. The selected hit, its cut points and its audition sit in the right sidebar.
+While the take editor has focus, its cards sit above the global Selection and Tags cards, which
+stay collapsed. The cards follow the hit selected in the take view; selecting another file in the
+browser gives the sidebar back to that file.
 
 The WAV is the record. A user decides only where each stroke sits, what it is, and where its loop
 is, and standard RIFF chunks hold all three:
@@ -386,13 +390,9 @@ If nothing is done, library building stays limited to people willing to hand-edi
 
 ## Unresolved questions
 
-- **Detect again after edits.** Should Detect ask first, or only touch the regions the user hasn't
-  edited? The second needs a way to tell edited regions from detected ones without storing hit
-  states.
-- **Right sidebar and the global cards.** Proposed: while the take editor has focus, its cards (the
-  selected hit, its cut points, audition) sit above the global Selection and Tags cards, which stay
-  collapsed. The cards follow the hit selected in the take view; selecting another file in the
-  browser gives the sidebar back to that file. This touches every editor.
+- **Right sidebar and the global cards.** The take editor's cards sit above the global ones while it
+  has focus (see the walkthrough). This touches every editor, so it is for drawbar's other editors
+  to follow or not.
 - **Other editors.** Which editors keep `cue `/`adtl` regions and `smpl` loops when they save? To be
   checked before relying on them.
 - **Default layer values, trims and ladders for v6** are the build's job, tracked in #278 and #279.
