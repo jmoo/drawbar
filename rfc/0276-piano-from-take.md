@@ -189,9 +189,11 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   plays each stroke's own level, and nothing is raised.
 - Releases from a take keep their recorded level under their own attack (the region of their root at
   their layer), lifted by at most 12 dB and never louder than 14 dB under it. A release from a
-  directory of WAVs keeps #279's fixed trim, since each WAV may have been levelled on its own. The
-  level is measured once hum and hiss are removed: on the raw take, hum and hiss read the quiet treble
-  key-offs of the interface take about 10 dB louder than they are. Scaled with their attack's gain alone, they sat 35 to 57 dB down and could not
+  directory of WAVs keeps #279's fixed trim, since each WAV may have been levelled on its own. Both
+  levels are measured on the strokes as the build cleans them: on the raw take, hum and hiss read the
+  quiet treble key-offs of the interface take about 10 dB louder than they are. Cleaned, every
+  release from F#4 up plays within 0.1 dB of the prototype's balance less its 1 dB offset, and those
+  below within a few dB. Scaled with their attack's gain alone, they sat 35 to 57 dB down and could not
   be heard. Levelled all to one peak, the quiet key-offs were lifted 25 to 40 dB and their noise came
   up with them (heard on a Stage 4). Trims up to about 49 dB under the attack have played fine (heard on a Stage 4).
 
@@ -214,11 +216,10 @@ Two cases, decided by how the note decays before its key-up:
   best normalized correlation between the audio before the loop end and the audio before the loop
   start. At build the decay across the loop is evened out so its end meets its start. 100 ms loops
   repeated the hiss audibly and beat against the note (heard on a Stage 4).
-- Detect searches on the take with its hum removed. Once hum removal and hiss follow run at build,
-  it searches on the stroke as they leave it, so the points it finds are those that play. On the
-  interface take the search found loops for the same 65 hits as the prototype, which searched on the
-  cleaned strokes, of the same length to within 16 ms, starting a median 60 ms later, all matching
-  0.85 or better.
+- Detect searches on each attack as the build cleans it, so the points it finds are those that
+  play. On the interface take it loops the same 66 hits as the prototype and fades the same 9, the
+  loops the same length to within 21 ms, starting a median 40 ms later, all matching 0.85 or better.
+  Searched on the take with only its hum removed, three treble hits had swapped loop and fade.
 - At build, the last 30 ms before the loop end are crossfaded (raised cosine) into the audio before
   the loop start, so the wrap is continuous. The crossfade length is the one build setting in the
   first version; a loop's length is set by dragging it. The match score is reported, and the hit grid
@@ -246,7 +247,11 @@ Stage 4). Instead:
   top of the highest 1/6-octave band where the note is still 6 dB over the take's hiss. It never
   rises again after the first 50 ms, so the strike keeps all its treble, and never falls under 1.5 ×
   the fundamental. It removes the hiss above the note and leaves the note alone where it is above the
-  hiss. Treble boost and Dyno had made that hiss very loud (heard on a Stage 4).
+  hiss. Treble boost and Dyno had made that hiss very loud (heard on a Stage 4). The take's hiss is
+  measured in its quietest stretch with its hum out, on a 2048-point transform: 59 ms at 35,002 Hz,
+  where the prototype's 46 ms was 2048 points at 44.1 kHz.
+- A stroke is cleaned by its root's equal-tempered fundamental, so the build needs only the marks.
+  Its filters run in over the 2.5 s of take before it.
 - Takes should open with 3 to 5 s of silence, be free of ground loops, peak around −6 dBFS, and hold
   each note until it has died. The docs say so.
 
@@ -285,7 +290,8 @@ pub fn plan::Plan::regions(&self) -> Vec<Region>;
 pub fn plan::Plan::loops(&self) -> Vec<Loop>;
 pub fn sustain::even_loop(frames: &mut [f32], channels: usize, rate: u32, l: &Loop, o: &SustainOptions);
 pub fn sustain::fade_out(frames: &[f32], channels: usize, rate: u32, fade: usize, o: &SustainOptions) -> (Vec<f32>, Loop);
-pub fn clean(stroke: &[f32], rate: u32, pitch_hz: f32, hum: &Hum) -> Vec<f32>;  // to come
+pub fn clean::Noise::of(mono: &[f64], rate: u32) -> Noise;  // the take's hum and hiss
+pub fn clean::Noise::stroke(&self, take: &[f32], channels: usize, start: usize, frames: usize, f0: f64) -> Vec<f32>;
 ```
 
 ### Tests
@@ -311,7 +317,7 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 
 ### Pull requests
 
-The first three are written, on `mikesprad:feat/npno-prep`, and not yet opened.
+The first four are written, on `mikesprad:feat/npno-prep`, and not yet opened.
 
 - [ ] `npno-prep`: WAV handling moved from `nord-format`, with 24-bit and float reading, the
   resampler, and `cue `/`adtl` regions saved without touching other chunks. The build takes a
