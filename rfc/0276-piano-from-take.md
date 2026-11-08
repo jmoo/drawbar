@@ -43,15 +43,20 @@ Recording stays outside drawbar. Anyone recording an instrument already has an a
 software that records, so drawbar starts from the WAV. WAVs are documents in drawbar, as Nord files
 are, and the take editor follows the other document editors.
 
-1. **Open a take** (one or more WAVs, 16-bit, 24-bit or 32-bit float). Several takes are normal: one
-   per octave, or a retake of a few notes.
+1. **Open a take** (16-bit, 24-bit or 32-bit float). A take comes in one of two shapes, so the
+   detectors never have to guess where a gain change or a new noise floor begins:
+   - **One take**, each note played at every velocity in a row, loud to soft or in any order.
+   - **One take per velocity layer**, each playing every note once, loudest take first. Each take is
+     one layer whatever its level, so the gain may be raised for the softer ones, and each take's
+     floor and hum are measured on their own. A note played twice in a take keeps its last hit.
 2. **Resample.** Detect, the loop markers and Build work only at 35,002 Hz. At any other rate the
    document says so and offers Resample, which writes a new WAV next to the take and opens it. The
    original is never changed. The new WAV keeps the take's bit depth (24-bit or float); the build
    goes to 16-bit.
-3. **Detect.** For each take, the notes in playing order: a list (`E3 G3 A#3 …`), or a start note, a
-   step in semitones and a count. Then the number of layers, and how they are chosen. These are
-   inputs to the detectors, not stored; Detect runs only when pressed, writes regions and is done:
+3. **Detect.** The notes in playing order: a list (`E3 G3 A#3 …`), or a start note, a step in
+   semitones and a count. For a single take, the number of layers, and how they are chosen; takes of
+   one layer each take their layer from their order. These are inputs to the detectors, not stored;
+   Detect runs only when pressed, writes regions and is done:
    - **Playing order**: the first hit of a note is the loudest layer. This suits players who play
      loud, medium, soft, and recordings whose level can't be trusted (a phone's automatic gain made
      measured loudness useless on our test take).
@@ -79,7 +84,9 @@ is, and standard RIFF chunks hold all three:
 
 - a `cue ` point and a `LIST`/`adtl` `ltxt` region per stroke, labelled with the name the build
   already reads (`060-b0-l00` for the attack, `060-b2-l00` for the release);
-- a `smpl` loop tied to the attack's cue ID.
+- a `smpl` loop tied to the attack's cue ID, for a note that sustains;
+- for a note that dies before its key-up, a region at the end of its attack labelled
+  `060-b0-l00-fade`, where it starts fading to silence.
 
 A save rewrites only the `cue `, `LIST`/`adtl` and `smpl` chunks. The audio and every other chunk
 are kept byte for byte, so another app's data is never dropped. Nothing else is stored: no sheet, no
@@ -110,9 +117,11 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   normally 24-bit or float; #165's reader takes only 16-bit.
 - Resample writes a band-limited resample to 35,002 Hz at the take's own bit depth (24-bit, or float
   for a float take) as a new WAV. Detection and loop search run on that, so the loop points are
-  where the build plays them.
-- Stereo is not in the first version: the prototype mixes to mono. A stereo version needs one loop for
-  both channels.
+  where the build plays them. On the interface take, detecting at 35,002 Hz rather than the take's
+  44.1 kHz gave 146 strokes for 148: one key-up and one release fell just the other side of their
+  thresholds. That is accepted.
+- The detectors read the mean of a stereo take's channels. Its strokes keep both channels, with one
+  loop for both.
 
 ### Hits
 
@@ -156,10 +165,14 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   release.
 - Attack length is capped at 6 s by default. Vendor attacks are at most about 6.5 s, the lowest notes
   longest (inferred from specimens).
-- Release: from 5 ms before key-up to where it reaches 6 dB over the floor, at most 1 s, with a 5 ms
-  fade in and a 50 ms fade out. A release is kept only when the note is at least 25 dB over the floor
-  at key-up. Below that it was mostly hiss, and levelling made it buzz (heard on a Stage 4). Vendor
+- Release: from 5 ms before key-up to where it reaches 6 dB over the quiet just before its hit,
+  searched from the key-off's peak, at most 1 s. At build it fades in over 5 ms and out over at most
+  40 ms. Against the take-wide floor with its hum removed, key-offs ran on 100 to 500 ms into hum and
+  hiss. A release is kept when its key-off peak stands at least 10 dB over that quiet, or the note is
+  at least 25 dB over the floor at key-up, so a damper's thump on a note that has nearly died is kept.
+  Releases with neither were mostly hiss, and levelling made them buzz (heard on a Stage 4). Vendor
   releases run 0.5 to 0.9 s (inferred from specimens).
+- At build each attack fades in over 0.3 ms, so it never starts on a step.
 - No fade at the end of a looped attack: the end sits inside the loop. A fade there produced a loud
   square wave or fast clicking once the loop played (heard on a Stage 4).
 
@@ -168,8 +181,17 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 - The build levels from the audio (#279), so the regions are not normalised. Vendor libraries keep
   every layer near the same peak (inferred from specimens: attack layers peak at −12.5 to −17.5 dBFS),
   and the playback gain does the rest.
-- Releases keep their recorded level under their own attack, lifted by at most 12 dB and never louder
-  than 14 dB under it. Scaled with their attack's gain alone, they sat 35 to 57 dB down and could not
+- A format 6 library built from rules plays each stroke at its root's loudest layer's level, whatever
+  the stroke's own level. So before rounding to 16 bits, the build raises each softer region to that
+  layer's peak, and each release to its root's loudest attack. How loud it plays does not change. On
+  the interface take, the releases otherwise held 5 to 6 bits, needed more boost than the instrument
+  gives, and so turned the whole library down 24 dB. A format 5 library, or one from a template,
+  plays each stroke's own level, and nothing is raised.
+- Releases from a take keep their recorded level under their own attack (the region of their root at
+  their layer), lifted by at most 12 dB and never louder than 14 dB under it. A release from a
+  directory of WAVs keeps #279's fixed trim, since each WAV may have been levelled on its own. The
+  level is measured once hum and hiss are removed: on the raw take, hum and hiss read the quiet treble
+  key-offs of the interface take about 10 dB louder than they are. Scaled with their attack's gain alone, they sat 35 to 57 dB down and could not
   be heard. Levelled all to one peak, the quiet key-offs were lifted 25 to 40 dB and their noise came
   up with them (heard on a Stage 4). Trims up to about 49 dB under the attack have played fine (heard on a Stage 4).
 
@@ -177,20 +199,33 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 
 Two cases, decided by how the note decays before its key-up:
 
-- **Sustaining notes** (still within 20 dB of their peak 150 ms before key-up): a loop of about
-  500 ms ending 150 ms before the key-up, clear of the damper. Its length is a whole number of the
-  note's periods, tuned within one period either side for the best normalized correlation between
-  the audio before the loop end and the audio before the loop start, and the decay across the loop
-  is evened out at build so its end meets its start. 100 ms loops repeated the hiss audibly and beat
-  against the note (heard on a Stage 4).
-- **Dying notes** (short treble notes that fall 20 dB before the key-up): no loop in the note. At
-  build the stroke follows the note's own decay rate, slowing to a third of it, down to 70 dB under
-  its peak, then loops on silence. A loop placed in such a note sat in the noise and clicked, and a
-  straight line in dB was heard as a fade that stops (heard on a Stage 4). Vendor dying notes also loop
-  on silence, 48 to 63 dB under their peak (inferred from specimens).
+- **Dying notes** come within 20 dB of the floor before the damper, 150 ms before the key-up, and
+  would finish fading before it: mostly short treble notes. They get no loop. Detect writes a fade
+  region from where the note came that near the floor to where its fade reaches silence, and the
+  attack ends there. At build the stroke follows the note's own decay rate, fitted over the 400 ms
+  before, slowing to a third of it, down to 70 dB under its peak, then loops on 100 ms of silence.
+  The fade only lowers the audio, so the noise goes down with it. A loop placed in such a note sat in
+  the noise and clicked, and a straight line in dB was heard as a fade that stops (heard on a
+  Stage 4). Vendor dying notes also loop on silence, 48 to 63 dB under their peak (inferred from
+  specimens).
+- **Sustaining notes**, every other one, held ones included: a loop of about 500 ms, ending 150 ms
+  before the key-up, clear of the damper, or earlier where the note sinks to 30 dB over the floor.
+  Its length is a whole number of the note's periods, tuned within one period either side for the
+  best normalized correlation between the audio before the loop end and the audio before the loop
+  start. At build the decay across the loop is evened out so its end meets its start. 100 ms loops
+  repeated the hiss audibly and beat against the note (heard on a Stage 4).
+- Detect searches on the take with its hum removed. Once hum removal and hiss follow run at build,
+  it searches on the stroke as they leave it, so the points it finds are those that play. On the
+  interface take the search found loops for the same 65 hits as the prototype, which searched on the
+  cleaned strokes, of the same length to within 16 ms, starting a median 60 ms later, all matching
+  0.85 or better.
 - At build, the last 30 ms before the loop end are crossfaded (raised cosine) into the audio before
   the loop start, so the wrap is continuous. The crossfade length is the one build setting in the
-  first version. The match score is reported, and the hit grid warns below 0.5.
+  first version; a loop's length is set by dragging it. The match score is reported, and the hit grid
+  warns below 0.5.
+- The build shapes loops and fades from the marks alone, so a loop or fade moved in an editor is
+  shaped the same way. It does so only for a take's regions: a directory of WAVs with their own loops
+  is built as it is today.
 - Written as a `smpl` loop, type 0, end frame inclusive, tied to the attack's region by its cue ID.
 
 ### Noise
@@ -217,7 +252,8 @@ Stage 4). Instead:
 
 ### Output
 
-- 16-bit mono at 35,002 Hz with TPDF dither, at build.
+- 16-bit at 35,002 Hz, at build, mono or stereo as the take is. Raised to their root's peak first, the
+  regions are rounded without dither.
 
 ### Where the code goes
 
@@ -228,24 +264,28 @@ Stage 4). Instead:
   one home. Writing replaces only those chunks and copies the rest. `nord-format` stays a Nord format
   crate.
 - The build accepts a region of a WAV as a stroke, named by the region's label.
-- Pitch detection and hiss follow need an FFT. `rustfft` (MIT/Apache, pure Rust, builds for wasm) is the
-  candidate. Everything else is plain arithmetic and IIR filters.
-- `nord-cli` gets `nord piano prep TAKE.wav --notes … --layers N`. It writes the regions and loops
-  into the take (or a copy), and prints a listing of hits, layers and warnings.
+- Pitch detection, hum tracking and hiss follow need an FFT. The crate has its own radix-2 real FFT,
+  about 100 lines, so it adds no dependency or license to vendor. Everything else is plain arithmetic
+  and IIR filters.
+- `nord-cli` gets `nord piano prep TAKE.wav… --notes … [--layers N]`. It writes the regions and loops
+  into the take (or a copy, or one per take into a directory), and prints a listing of hits, layers,
+  loops and warnings. `nord piano build` takes one or more takes.
+- The prep command is how the steps are checked on real takes before the editor exists. A user of the
+  editor never needs it.
 - `drawbar` gets the take editor over a WAV document, playing regions through the existing player.
 
 ```rust
-pub struct Take { pub rate: u32, pub samples: Vec<f32> }
-pub struct Hit { pub onset: usize, pub next: usize, pub level_db: f32, pub pitch_hz: Option<f32> }
-pub struct Cuts { pub attack: Range<usize>, pub release: Option<Range<usize>> }
-pub enum Sustain { Loop { start: usize, len: usize, match_score: f32 }, Dies { rate_db_per_s: f32 } }
+pub struct Hit { pub number: usize, pub onset: usize, pub next: usize, pub level_db: f64, pub pitch: Option<f64> }
+pub struct Cuts { pub attack: Range<usize>, pub keyup: Option<usize>, pub release: Option<Range<usize>>, .. }
+pub enum Sustain { Loop { start: usize, len: usize, score: f64 }, Dies { fade: usize, end: usize } }
 
-pub fn resample(take: &Take, rate: u32) -> Take;
-pub fn hits(take: &Take) -> Vec<Hit>;
-pub fn assign(hits: &[Hit], notes: &NoteList, layers: &LayerRule) -> Vec<Assigned>;
-pub fn cut(take: &Take, hit: &Hit, options: &CutOptions) -> Cuts;
-pub fn find_sustain(attack: &[f32], rate: u32, pitch_hz: f32, keyup: usize) -> Sustain;
-pub fn clean(stroke: &[f32], rate: u32, pitch_hz: f32, hum: &HumProfile) -> Vec<f32>;
+pub fn resample::resample(take: &Audio, rate: u32) -> Result<Audio, Error>;
+pub fn plan::plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan;  // hits, notes, layers, cuts, sustain
+pub fn plan::Plan::regions(&self) -> Vec<Region>;
+pub fn plan::Plan::loops(&self) -> Vec<Loop>;
+pub fn sustain::even_loop(frames: &mut [f32], channels: usize, rate: u32, l: &Loop, o: &SustainOptions);
+pub fn sustain::fade_out(frames: &[f32], channels: usize, rate: u32, fade: usize, o: &SustainOptions) -> (Vec<f32>, Loop);
+pub fn clean(stroke: &[f32], rate: u32, pitch_hz: f32, hum: &Hum) -> Vec<f32>;  // to come
 ```
 
 ### Tests
@@ -271,18 +311,23 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 
 ### Pull requests
 
+The first three are written, on `mikesprad:feat/npno-prep`, and not yet opened.
+
 - [ ] `npno-prep`: WAV handling moved from `nord-format`, with 24-bit and float reading, the
   resampler, and `cue `/`adtl` regions saved without touching other chunks. The build takes a
   labelled region as a stroke.
 - [ ] Detectors: hits, notes and layers, cuts. `nord piano prep` writes regions. Fixtures and docs.
-- [ ] Sustain: loop search written as `smpl` loops on the regions (#257), and dying notes.
-- [ ] Hum removal and hiss follow as build rules.
+  Takes of one layer each. Releases keep their recorded balance in take builds.
+- [ ] Sustain: loop search written as `smpl` loops on the regions (#257), and dying notes as fade
+  regions, shaped at build.
+- [ ] Hum removal and hiss follow as build rules. Loop search and release levels then run on the
+  cleaned strokes.
 - [ ] drawbar: the take editor over a WAV document, with Resample, Detect, playback, loop-wrap
   audition and region edits. Docs.
 
 ## Drawbacks
 
-- It is a sizable addition: a new crate, an FFT dependency, a CLI command and a take editor.
+- It is a sizable addition: a new crate, a CLI command and a take editor.
 - The detectors are heuristics tuned on few recordings: two takes of one Wurlitzer, a four-note
   pilot and synthetic takes. Other instruments and rooms will find cases they miss, so the hit grid's
   region edits are not optional.
@@ -345,7 +390,9 @@ If nothing is done, library building stays limited to people willing to hand-edi
 - More build settings (#263): levels, fades, loop length, the hum and hiss rules.
 - Typed values for the cut and loop points, beside dragging.
 - Stereo takes, with one loop shared by both channels.
-- Several takes merged into one library, such as a retake of a few notes.
+- Other take shapes: one take per range of the keyboard, or a retake of a few notes merged into a
+  library. Each needs the detectors to place gain changes and noise floors they can't yet tell
+  apart.
 - Writing each hit's measured pitch into the fine-tune table.
 - Filling the keyboard past the recorded roots by pitching the lowest and highest notes, as the
   prototype does up to 12 semitones (with #279).
