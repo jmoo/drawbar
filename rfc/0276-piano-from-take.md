@@ -176,17 +176,28 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 - No fade at the end of a looped attack: the end sits inside the loop. A fade there produced a loud
   square wave or fast clicking once the loop played (heard on a Stage 4).
 
+### Keys past the take
+
+- A root plays from 12 semitones under it to one over. In a format 6 library built from rules, the
+  build pitches the lowest root's strokes down, and the highest's up, to roots that reach the 88 keys
+  A0 to C8, by at most 12 semitones each, as the prototype did. A stroke is pitched by the ratio of
+  denominator at most 2000 nearest its interval, after cleaning and before its loop or fade is
+  shaped, which are moved with it.
+
 ### Level
 
-- The build levels from the audio (#279), so the regions are not normalised. Vendor libraries keep
-  every layer near the same peak (inferred from specimens: attack layers peak at −12.5 to −17.5 dBFS),
-  and the playback gain does the rest.
-- A format 6 library built from rules plays each stroke at its root's loudest layer's level, whatever
-  the stroke's own level. So before rounding to 16 bits, the build raises each softer region to that
-  layer's peak, and each release to its root's loudest attack. How loud it plays does not change. On
-  the interface take, the releases otherwise held 5 to 6 bits, needed more boost than the instrument
-  gives, and so turned the whole library down 24 dB. A format 5 library, or one from a template,
-  plays each stroke's own level, and nothing is raised.
+- Vendor libraries keep every layer near the same peak (inferred from specimens: attack layers peak
+  at −12.5 to −17.5 dBFS), and the playback gain does the rest.
+- A format 6 library built from rules (#279) plays each stroke at its root's loudest layer's level,
+  whatever the stroke's own level, and each root at its loudest layer's audio level. So before
+  rounding to 16 bits, the build brings every region of a take to one peak, −13 dBFS, as the
+  prototype did. #279 levels each layer against its root's loudest, but not one root against
+  another. Kept at their recorded levels, the treble roots of the interface take played 2 to 12 dB
+  under the prototype's, and the top end sounded quiet and lifeless (heard on a Stage 4); brought
+  to one peak, every attack plays within 0.3 dB of the prototype's. Unraised, the releases held 5
+  to 6 bits, needed more boost than the instrument gives, and so turned the whole library down
+  24 dB. A format 5 library, or one from a template, plays each stroke's own level, and nothing is
+  changed.
 - Releases from a take keep their recorded level under their own attack (the region of their root at
   their layer), lifted by at most 12 dB and never louder than 14 dB under it. A release from a
   directory of WAVs keeps #279's fixed trim, since each WAV may have been levelled on its own. Both
@@ -400,8 +411,6 @@ If nothing is done, library building stays limited to people willing to hand-edi
   library. Each needs the detectors to place gain changes and noise floors they can't yet tell
   apart.
 - Writing each hit's measured pitch into the fine-tune table.
-- Filling the keyboard past the recorded roots by pitching the lowest and highest notes, as the
-  prototype does up to 12 semitones (with #279).
 - A denoiser for the hiss inside the note's band, stronger along each note: the attack keeps its
   character with a light touch, while the tail is a few clean partials and can take a heavy one, or a
   mask around the note's harmonics.
