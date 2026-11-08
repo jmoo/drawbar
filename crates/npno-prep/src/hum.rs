@@ -11,6 +11,13 @@ use crate::filter;
 /// Lines are notched up to this frequency, where a take's strong ones lie.
 pub const TOP_HZ: f64 = 1_250.0;
 
+/// Notes from here up (F4) get no notches, only the high-pass under the note: the strike
+/// sets every notch ringing, and their hum above the fundamental is the weak part.
+pub const NOTCH_UNDER_HZ: f64 = 350.0;
+
+/// A stroke's notches are only on lines this far over the hiss, in dB.
+pub const NOTCH_OVER_DB: f64 = 35.0;
+
 /// Seconds of take each frequency estimate covers.
 pub const TRACK_SECONDS: f64 = 4.0;
 
@@ -195,10 +202,63 @@ impl Hum {
     }
 
     /// `x` with every hum line up to [`TOP_HZ`] notched, each notch 0.6 Hz plus 0.02 Hz
-    /// per harmonic wide. The take is filtered in 2 s blocks, each at the mains frequency
-    /// of its time with 2 s of run-in, and the blocks are overlap-added under a Hann
-    /// window. Nothing else is touched.
+    /// per harmonic wide. Nothing else is touched.
     pub fn removed(&self, x: &[f64], rate: u32) -> Vec<f64> {
+        self.blocks(x, rate, 0.0, |mains| {
+            self.lines(mains)
+                .map(|(hz, width)| filter::notch(hz, hz / width, rate))
+                .collect()
+        })
+    }
+
+    /// `x`, starting `at` seconds into the take and playing a note of fundamental `f0`
+    /// Hz, with its hum taken out as a stroke's is.
+    ///
+    /// Under 0.7 × `f0` a 4th-order high-pass does the work: nothing of the note is
+    /// there, and it also takes out the action's knock. Above it, a notch rings on with
+    /// the note's own energy, and the strike sets every notch ringing, so only notes
+    /// under [`NOTCH_UNDER_HZ`] get notches, and only on lines [`NOTCH_OVER_DB`] over
+    /// the hiss and 30 notch widths from the nearest partial (heard on a Stage 4).
+    pub fn under(&self, x: &[f64], rate: u32, at: f64, f0: f64) -> Vec<f64> {
+        let highpass = filter::highpass(4, 0.7 * f0, rate);
+        self.blocks(x, rate, at, |mains| {
+            let mut sections = highpass.clone();
+            if f0 < NOTCH_UNDER_HZ {
+                sections.extend(
+                    self.lines(mains)
+                        .zip(&self.harmonics)
+                        .filter(|&((hz, width), &(_, db))| {
+                            let partial = (hz / f0).round().max(1.0) * f0;
+                            db >= NOTCH_OVER_DB
+                                && hz > 0.7 * f0
+                                && (hz - partial).abs() >= 30.0 * width
+                        })
+                        .map(|((hz, width), _)| filter::notch(hz, hz / width, rate)),
+                );
+            }
+            sections
+        })
+    }
+
+    /// Each harmonic's line at `mains`, up to [`TOP_HZ`], and its notch's width, both
+    /// in Hz, in the order of [`Hum::harmonics`].
+    fn lines(&self, mains: f64) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.harmonics
+            .iter()
+            .map(move |&(k, _)| (f64::from(k) * mains, 0.6 + 0.02 * f64::from(k)))
+            .take_while(|&(hz, _)| hz < TOP_HZ)
+    }
+
+    /// `x`, starting `at` seconds into the take, through `sections` for the mains
+    /// frequency of each 2 s block, each with 2 s of run-in, the blocks overlap-added
+    /// under a Hann window.
+    fn blocks(
+        &self,
+        x: &[f64],
+        rate: u32,
+        at: f64,
+        sections: impl Fn(f64) -> Vec<filter::Section>,
+    ) -> Vec<f64> {
         let hop = detect::samples(2.0, rate);
         let window: Vec<f64> = detect::hann(2 * hop + 1)[..2 * hop].to_vec();
         let mut padded = vec![0.0; hop];
@@ -206,17 +266,10 @@ impl Hum {
         padded.resize(x.len() + 2 * hop, 0.0);
         let mut y = vec![0.0; x.len() + 2 * hop];
         for c in (0..x.len() + hop).step_by(hop) {
-            let mains = self.mains_at(c as f64 / f64::from(rate));
-            let notches: Vec<filter::Section> = self
-                .harmonics
-                .iter()
-                .map(|&(k, _)| (f64::from(k) * mains, 0.6 + 0.02 * f64::from(k)))
-                .filter(|&(hz, _)| hz < TOP_HZ)
-                .map(|(hz, width)| filter::notch(hz, hz / width, rate))
-                .collect();
+            let chosen = sections(self.mains_at(at + c as f64 / f64::from(rate)));
             let from = c.saturating_sub(hop);
             let to = (c + 2 * hop).min(padded.len());
-            let run = filter::run(&notches, &padded[from..to]);
+            let run = filter::run(&chosen, &padded[from..to]);
             let m = (2 * hop).min(y.len() - c).min(to - c);
             for i in 0..m {
                 y[c + i] += run[c - from + i] * window[i];
@@ -278,6 +331,34 @@ mod tests {
                 i as f64 * FRAME
             );
         }
+    }
+
+    /// Under C4, its 150 Hz line comes down with the high-pass at 183 Hz, 8 dB, and its
+    /// 250 Hz line stays: a notch 12 Hz from the note's fundamental would ring on with it.
+    #[test]
+    fn a_stroke_loses_the_hum_under_its_note_and_keeps_a_line_by_a_partial() {
+        let rate = 35_002;
+        let x = hummed(rate, 12.0, 50.0);
+        let hum = find(&x, rate, &Envelope::of(&x, rate)).unwrap();
+        let f0 = 261.63;
+        let y = hum.under(&x, rate, 0.0, f0);
+        let quiet = detect::samples(8.0, rate)..detect::samples(11.0, rate);
+        let line = |v: &[f64], hz: f64| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for i in quiet.clone() {
+                let angle = 2.0 * std::f64::consts::PI * hz * i as f64 / f64::from(rate);
+                re += v[i] * angle.cos();
+                im += v[i] * angle.sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        let db = |hz: f64| 20.0 * (line(&y, hz) / line(&x, hz)).log10();
+        assert!(db(150.0) < -7.0, "150 Hz: {} dB", db(150.0));
+        assert!(db(250.0).abs() < 1.0, "250 Hz: {} dB", db(250.0));
+        let note = detect::samples(3.2, rate)..detect::samples(4.5, rate);
+        let rms = |v: &[f64]| (v[note.clone()].iter().map(|s| s * s).sum::<f64>()).sqrt();
+        let change = 20.0 * (rms(&y) / rms(&x)).log10();
+        assert!(change.abs() < 0.5, "the note changed {change} dB");
     }
 
     #[test]

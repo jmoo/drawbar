@@ -14,6 +14,7 @@ use nord_format::formats::npno::{
 };
 use nord_format::note;
 use nord_format::Entity;
+use npno_prep::clean::{self, Noise};
 use npno_prep::wav;
 
 use crate::edit::{write_edit, write_file};
@@ -989,12 +990,13 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
 enum Source<'a> {
     /// A WAV of its own.
     File(PathBuf),
-    /// A region of a take, with the loop it holds and the frame its fade starts at,
-    /// both counted from the region's start.
+    /// A region of a take, with its frames as the build cleans them, the loop it holds
+    /// and the frame its fade starts at, both counted from the region's start.
     Region {
         path: &'a Path,
         take: &'a wav::Audio,
         region: &'a wav::Region,
+        audio: Vec<f32>,
         sample_loop: Option<wav::Loop>,
         fade: Option<u32>,
     },
@@ -1036,13 +1038,13 @@ impl StrokeFile<'_> {
             Source::File(path) => crate::wav::pcm16(path),
             Source::Region {
                 take,
-                region,
+                audio,
                 sample_loop,
                 fade,
                 ..
             } => Ok(crate::wav::cut(
                 take,
-                region,
+                audio,
                 self.bank,
                 *sample_loop,
                 *fade,
@@ -1055,11 +1057,11 @@ impl StrokeFile<'_> {
     /// the encoder measures a stroke: the most power any 10 ms of its first half second
     /// averages, on its louder channel. None for a WAV, and for a silent region.
     fn level(&self) -> Option<f64> {
-        let Source::Region { take, region, .. } = &self.source else {
+        let Source::Region { take, audio, .. } = &self.source else {
             return None;
         };
         let channels = usize::from(take.channels).max(1);
-        let frames = crate::wav::frames(take, region);
+        let frames = audio;
         let span = (frames.len() / channels).min(take.rate as usize / 2);
         let width = span.min(take.rate as usize / 100).max(1);
         let loudest = (0..channels)
@@ -1081,11 +1083,9 @@ impl StrokeFile<'_> {
     fn peak(&self) -> Option<f32> {
         match &self.source {
             Source::File(_) => None,
-            Source::Region { take, region, .. } => Some(
-                crate::wav::frames(take, region)
-                    .iter()
-                    .fold(0.0, |most, x| f32::max(most, x.abs())),
-            ),
+            Source::Region { audio, .. } => {
+                Some(audio.iter().fold(0.0, |most, x| f32::max(most, x.abs())))
+            }
         }
     }
 }
@@ -1193,11 +1193,12 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile<'static>>, String> {
 }
 
 /// The regions of the take at `path`, with what their labels say each stroke is, in
-/// stroke order.
+/// stroke order, each cleaned of the take's `noise` by its root's pitch.
 fn region_strokes<'a>(
     path: &'a Path,
     take: &'a wav::Audio,
     marks: &'a wav::Marks,
+    noise: &Noise,
 ) -> Result<Vec<StrokeFile<'a>>, String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let mut out = Vec::new();
@@ -1216,11 +1217,19 @@ fn region_strokes<'a>(
                     region.label, region.start
                 ))
             })?;
+        let audio = noise.stroke(
+            &take.samples,
+            usize::from(take.channels.max(1)),
+            region.start as usize,
+            region.frames as usize,
+            clean::f0(root),
+        );
         out.push(StrokeFile {
             source: Source::Region {
                 path,
                 take,
                 region,
+                audio,
                 sample_loop,
                 fade: None,
             },
@@ -1380,7 +1389,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         false => {
             let mut files = Vec::new();
             for (path, (audio, marks)) in args.input.iter().zip(&takes) {
-                files.extend(region_strokes(path, audio, marks)?);
+                let noise = Noise::of(&npno_prep::plan::mono(audio), audio.rate);
+                files.extend(region_strokes(path, audio, marks, &noise)?);
             }
             in_stroke_order(&mut files);
             files
@@ -1774,12 +1784,20 @@ mod tests {
     }
 
     /// The regions of `take` written into `dir` as 16-bit WAVs of their own, unraised,
-    /// their loops shaped as a take's build shapes them.
+    /// cleaned and their loops shaped as a take's build does it.
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
+        let noise = Noise::of(&npno_prep::plan::mono(take), take.rate);
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
-            let (_, bank, _) = parse_stroke_name(&found.label, Stem::None).unwrap();
-            let pcm = crate::wav::cut(take, found, bank, sample_loop, None, 1.0);
+            let (root, bank, _) = parse_stroke_name(&found.label, Stem::None).unwrap();
+            let frames = noise.stroke(
+                &take.samples,
+                usize::from(take.channels),
+                found.start as usize,
+                found.frames as usize,
+                clean::f0(root),
+            );
+            let pcm = crate::wav::cut(take, &frames, bank, sample_loop, None, 1.0);
             let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
             let loops = wav::Marks {
                 regions: vec![],
@@ -1871,8 +1889,11 @@ mod tests {
                 .map(|x| x / 40.0)
                 .collect::<Vec<_>>()
         };
+        let gap = || vec![0.0f32; 2 * 9_000];
         let mut samples = tone(261.6, 9_000);
+        samples.extend(gap());
         samples.extend(soft(261.6, 9_000));
+        samples.extend(gap());
         samples.extend(soft(261.6, 2_000));
         let audio = wav::Audio {
             rate: codec::RATE,
@@ -1882,8 +1903,8 @@ mod tests {
         let marks = wav::Marks {
             regions: vec![
                 region(0, 9_000, "060-b0-l00"),
-                region(9_000, 9_000, "060-b0-l01"),
-                region(18_000, 2_000, "060-b2-l00"),
+                region(18_000, 9_000, "060-b0-l01"),
+                region(36_000, 2_000, "060-b2-l00"),
             ],
             loops: vec![],
         };

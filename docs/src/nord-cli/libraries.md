@@ -55,6 +55,14 @@ PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
 WAV of it would be. A region labelled any other way, or a loop that crosses a
 region's end, is refused.
 
+A take's strokes are cleaned first. The take's mains hum is found and followed
+as its frequency wanders, and its hiss is measured in its quietest stretch. Each
+stroke then loses everything under 0.7 times its root's fundamental, hum and the
+action's knock with it. A note below F4 also has its strongest hum lines notched
+where they lie clear of the note's own partials. As the note dies, a low-pass
+follows its top end down, so the hiss above it goes with it, while the strike
+keeps all its treble. Nothing is touched where the note stands over the hiss.
+
 A take's strokes are shaped as they are built. Each attack fades in over 0.3 ms,
 and each release over 5 ms, fading out over its last 40 ms. A looped region's loop
 has the decay across it evened out, so its end meets its start, and its last 30 ms
@@ -71,7 +79,7 @@ its root's loudest layer, whatever the stroke's own level. So before rounding,
 release to its root's loudest attack. The soft layers keep their detail above
 the 16-bit steps and play as loud as they would unraised. The library grows,
 because louder audio takes more bits to code. A release from a take plays at its
-recorded level under its own attack, the region of its root at its layer, lifted by
+recorded level under its own attack, both measured once cleaned, the region of its root at its layer, lifted by
 at most 12 dB towards 14 dB under it, so a quiet key-off stays quiet without being
 lost. A release with no such attack, or one from a directory of WAVs, plays 18 dB
 under its root's loudest attack. A format 5 library, or one built
@@ -97,7 +105,8 @@ out, is left out: levelled with the others, its hiss would come up with it. A
 key-off that stands clear of neither the quiet before its hit nor the floor gets
 no release. `--skip` leaves out hits by the number the listing gives them.
 
-Each attack also gets its sustain. A note still sounding at its key-up is looped:
+Each attack also gets its sustain, found on the attack as the build cleans it. A
+note still sounding at its key-up is looped:
 about half a second, a whole number of its periods, ending 150 ms before the key-up
 or where it sinks to 30 dB over the floor, tuned within a period for the best
 match between its end and its start. The listing gives each loop's match, and warns

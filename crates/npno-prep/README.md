@@ -23,6 +23,8 @@ itself, so any WAV editor can show them.
   fade to silence. It also shapes them as the build reads them, evening out the
   decay across a loop and crossfading its end, so a mark moved in an editor is
   shaped the same way.
+- `clean` takes a take's noise out of each stroke, as the build does: the hum
+  under and around the note, and the hiss above it as the note dies.
 - `filter` holds the Butterworth high-pass and notch sections these run on,
   forward only.
 

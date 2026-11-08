@@ -8,7 +8,7 @@ use std::path::Path;
 
 use nord_format::formats::npno::Bank;
 use npno_prep::sustain::{self, SustainOptions};
-use npno_prep::wav::{self, Audio, Loop, Marks, Pcm16, Region};
+use npno_prep::wav::{self, Audio, Loop, Marks, Pcm16};
 
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
 /// Neither format has a stroke that holds more than two channels.
@@ -41,16 +41,8 @@ pub fn take(path: &Path) -> Result<(Audio, Marks), String> {
     Ok((audio, marks))
 }
 
-/// The frames of `region`, the take's samples within it.
-/// The region lies within the take, as [`wav::read_marks`] checks.
-pub fn frames<'a>(take: &'a Audio, region: &Region) -> &'a [f32] {
-    let channels = usize::from(take.channels);
-    let start = region.start as usize * channels;
-    &take.samples[start..start + region.frames as usize * channels]
-}
-
-/// The frames of `region`, a stroke of `bank`, shaped, raised by `gain` and rounded to
-/// 16-bit PCM, with `sample_loop` counted from its start.
+/// `frames`, a region of `take` holding a stroke of `bank`, shaped, raised by `gain`
+/// and rounded to 16-bit PCM, with `sample_loop` counted from its start.
 ///
 /// An attack fades in over 0.3 ms, and a release over 5 ms, fading out over at most
 /// 40 ms. A looped region's loop is evened out and crossfaded so its end meets its
@@ -58,7 +50,7 @@ pub fn frames<'a>(take: &'a Audio, region: &Region) -> &'a [f32] {
 /// on silence after it.
 pub fn cut(
     take: &Audio,
-    region: &Region,
+    frames: &[f32],
     bank: Bank,
     sample_loop: Option<Loop>,
     fade: Option<u32>,
@@ -66,11 +58,12 @@ pub fn cut(
 ) -> Pcm16 {
     let channels = usize::from(take.channels.max(1));
     let options = SustainOptions::default();
-    let mut shaped = frames(take, region).to_vec();
+    let mut shaped = frames.to_vec();
     let (fade_in, fade_out) = match bank {
         Bank::Release => (
             sustain::RELEASE_FADE_IN,
-            sustain::RELEASE_FADE_OUT.min(f64::from(region.frames) / f64::from(take.rate) / 2.0),
+            sustain::RELEASE_FADE_OUT
+                .min((frames.len() / channels) as f64 / f64::from(take.rate) / 2.0),
         ),
         Bank::Attack | Bank::Resonance => (sustain::ATTACK_FADE_IN, 0.0),
     };

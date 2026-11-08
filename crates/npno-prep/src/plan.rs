@@ -1,5 +1,6 @@
 //! A take's hits as the regions of a library: every detector in turn.
 
+use crate::clean::{self, Noise};
 use crate::cut::{self, CutOptions, Cuts, Take};
 use crate::detect::{self, Envelope, Hit};
 use crate::hum::{self, Hum, NoHum};
@@ -109,9 +110,9 @@ pub fn mono(audio: &Audio) -> Vec<f64> {
 /// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, chooses
 /// each note's layers and cuts their strokes.
 ///
-/// Hits, pitch and key-ups are found on the take as recorded; levels against the floor,
-/// and each attack's loop or fade, on the take with its hum taken out, whose floor is
-/// lower.
+/// Hits, pitch and key-ups are found on the take as recorded, and levels against the
+/// floor on the take with its hum taken out, whose floor is lower. Each attack's loop or
+/// fade is found on the attack as the build cleans it.
 pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     let x = detect::highpassed(mono, rate);
     let env = Envelope::of(&x, rate);
@@ -123,6 +124,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     };
     let quiet = Envelope::of(&cleaned, rate);
     let floor = quiet.floor();
+    let noise = Noise::measured(rate, hum.as_ref().ok().cloned(), &cleaned, &quiet);
 
     let assigned = layers::assign(&hits, &options.notes, |hit| {
         options.skip.contains(&hit.number)
@@ -204,13 +206,13 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
             planned[i].fate = match choice {
                 Choice::Layer(layer) => {
                     let cuts = cut::cut(&take, &planned[i].hit, &options.cut);
-                    let sustain = sustain::find(
-                        &cleaned[cuts.attack.clone()],
-                        rate,
-                        note,
-                        floor,
-                        &options.sustain,
+                    let attack = noise.stroke_mono(
+                        mono,
+                        cuts.attack.start,
+                        cuts.attack.len(),
+                        clean::f0(note),
                     );
+                    let sustain = sustain::find(&attack, rate, note, floor, &options.sustain);
                     Fate::Kept {
                         layer,
                         value: values[layer],

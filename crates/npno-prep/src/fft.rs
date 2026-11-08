@@ -1,4 +1,4 @@
-//! The magnitude spectrum of real samples, for power-of-two sizes.
+//! The spectrum of real samples, and back, for power-of-two sizes.
 //!
 //! An iterative radix-2 transform of half the size, unpacked into the real input's
 //! spectrum: plain arithmetic, so the crate needs no FFT dependency and builds for wasm.
@@ -49,6 +49,18 @@ impl Plan {
     ///
     /// If `x` is longer than `n`.
     pub fn magnitudes(&self, x: &[f64]) -> Vec<f64> {
+        self.forward(x)
+            .iter()
+            .map(|&(re, im)| (re * re + im * im).sqrt())
+            .collect()
+    }
+
+    /// The `n / 2 + 1` bins of `x`, padded with zeros to `n`, as real and imaginary parts.
+    ///
+    /// # Panics
+    ///
+    /// If `x` is longer than `n`.
+    pub fn forward(&self, x: &[f64]) -> Vec<(f64, f64)> {
         assert!(x.len() <= self.n, "no longer than the transform");
         let half = self.n / 2;
         let at = |i: usize| x.get(i).copied().unwrap_or(0.0);
@@ -64,9 +76,34 @@ impl Plan {
                     k if k < half => self.twiddles[k],
                     _ => (-1.0, 0.0),
                 };
-                let (re, im) = (er + tr * or - ti * oi, ei + tr * oi + ti * or);
-                (re * re + im * im).sqrt()
+                (er + tr * or - ti * oi, ei + tr * oi + ti * or)
             })
+            .collect()
+    }
+
+    /// The `n` real samples whose bins are `bins`, as [`Plan::forward`] gives them.
+    ///
+    /// # Panics
+    ///
+    /// If there are not `n / 2 + 1` bins.
+    pub fn inverse(&self, bins: &[(f64, f64)]) -> Vec<f64> {
+        let half = self.n / 2;
+        assert_eq!(bins.len(), half + 1, "n / 2 + 1 bins");
+        let mut z: Vec<(f64, f64)> = (0..half)
+            .map(|k| {
+                let (xr, xi) = bins[k];
+                let (cr, ci) = (bins[half - k].0, -bins[half - k].1);
+                let (er, ei) = ((xr + cr) / 2.0, (xi + ci) / 2.0);
+                let (dr, di) = ((xr - cr) / 2.0, (xi - ci) / 2.0);
+                let (tr, ti) = self.twiddles[k];
+                let (or, oi) = (dr * tr + di * ti, di * tr - dr * ti);
+                // conjugated, so the forward transform runs it backwards
+                (er - oi, -(ei + or))
+            })
+            .collect();
+        self.complex(&mut z);
+        z.iter()
+            .flat_map(|&(re, im)| [re / half as f64, -im / half as f64])
             .collect()
     }
 
@@ -114,6 +151,17 @@ mod tests {
                 im += v * angle.sin();
             }
             assert!((got - (re * re + im * im).sqrt()).abs() < 1e-9, "bin {k}");
+        }
+    }
+
+    #[test]
+    fn the_inverse_gives_back_the_samples() {
+        let n = 64;
+        let x: Vec<f64> = (0..n).map(|i| ((i * 13 % 17) as f64 - 8.0) / 5.0).collect();
+        let plan = Plan::new(n);
+        let back = plan.inverse(&plan.forward(&x));
+        for (i, (a, b)) in x.iter().zip(&back).enumerate() {
+            assert!((a - b).abs() < 1e-12, "sample {i}: {a} {b}");
         }
     }
 
