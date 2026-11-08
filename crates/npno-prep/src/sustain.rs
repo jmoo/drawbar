@@ -225,6 +225,40 @@ pub fn even_loop(
     }
 }
 
+/// How long an attack's fade in is, in seconds: enough to start it from silence without
+/// softening the strike.
+pub const ATTACK_FADE_IN: f64 = 0.0003;
+
+/// How long a release's fade in is, in seconds.
+pub const RELEASE_FADE_IN: f64 = 0.005;
+
+/// The longest a release's fade out is, in seconds, and at most half the release. A
+/// key-off ends where it reaches the floor, and a longer tail ran on into hum and hiss.
+pub const RELEASE_FADE_OUT: f64 = 0.04;
+
+/// Fades `frames`, `channels` interleaved at `rate`, in over their first `fade_in`
+/// seconds and out over their last `fade_out`, on a raised cosine.
+pub fn fade_edges(frames: &mut [f32], channels: usize, rate: u32, fade_in: f64, fade_out: f64) {
+    let total = frames.len() / channels;
+    let ramp = |k: usize, n: usize| match n {
+        1 => 0.0,
+        _ => 0.5 - 0.5 * (std::f64::consts::PI * k as f64 / (n - 1) as f64).cos(),
+    } as f32;
+    let n_in = detect::samples(fade_in, rate).min(total);
+    for k in 0..n_in {
+        for v in &mut frames[k * channels..(k + 1) * channels] {
+            *v *= ramp(k, n_in);
+        }
+    }
+    let n_out = detect::samples(fade_out, rate).min(total);
+    for k in 0..n_out {
+        let i = total - n_out + k;
+        for v in &mut frames[i * channels..(i + 1) * channels] {
+            *v *= 1.0 - ramp(k, n_out);
+        }
+    }
+}
+
 /// How long the silence a dying stroke loops on is, in seconds.
 const SILENT_LOOP: f64 = 0.1;
 
@@ -405,6 +439,22 @@ mod tests {
         assert!(tail - before > 2.5, "lifted {:.2} dB", tail - before);
         assert_eq!(y[start + len - 1], x[start - 1]);
         assert_eq!(y[..start], x[..start]);
+    }
+
+    /// A release fades in over 5 ms and out over 40 ms, from and to silence, and is
+    /// untouched between.
+    #[test]
+    fn a_release_fades_in_and_out_at_its_edges() {
+        let rate = 35_002;
+        let mut x = vec![0.5f32; 2 * 10_000];
+        fade_edges(&mut x, 2, rate, RELEASE_FADE_IN, RELEASE_FADE_OUT);
+        assert_eq!((x[0], x[1]), (0.0, 0.0));
+        assert_eq!(x[2 * 175], 0.5);
+        assert_eq!(x[2 * 174], 0.5, "the in-fade's last frame is whole");
+        assert!(x[2 * 100] < 0.5);
+        assert_eq!(x[2 * (10_000 - 1_400) - 1], 0.5);
+        assert!(x[2 * (10_000 - 1_400) + 2] < 0.5);
+        assert_eq!(x[2 * 10_000 - 1], 0.0);
     }
 
     /// A dying stroke fades to silence at its end, never louder than it was, then

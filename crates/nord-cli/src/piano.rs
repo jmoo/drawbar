@@ -1040,7 +1040,14 @@ impl StrokeFile<'_> {
                 sample_loop,
                 fade,
                 ..
-            } => Ok(crate::wav::cut(take, region, *sample_loop, *fade, gain)),
+            } => Ok(crate::wav::cut(
+                take,
+                region,
+                self.bank,
+                *sample_loop,
+                *fade,
+                gain,
+            )),
         }
     }
 
@@ -1771,7 +1778,8 @@ mod tests {
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
-            let pcm = crate::wav::cut(take, found, sample_loop, None, 1.0);
+            let (_, bank, _) = parse_stroke_name(&found.label, Stem::None).unwrap();
+            let pcm = crate::wav::cut(take, found, bank, sample_loop, None, 1.0);
             let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
             let loops = wav::Marks {
                 regions: vec![],

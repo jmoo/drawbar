@@ -55,7 +55,8 @@ PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
 WAV of it would be. A region labelled any other way, or a loop that crosses a
 region's end, is refused.
 
-A take's strokes are shaped to sustain as they are built. A looped region's loop
+A take's strokes are shaped as they are built. Each attack fades in over 0.3 ms,
+and each release over 5 ms, fading out over its last 40 ms. A looped region's loop
 has the decay across it evened out, so its end meets its start, and its last 30 ms
 are crossfaded into the audio before its start. A region labelled with `-fade`
 after a stroke's name (`084-b0-l00-fade`) lies at the end of that attack, and the
