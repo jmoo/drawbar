@@ -9,6 +9,7 @@
 use std::ops::{Range, RangeInclusive};
 
 use eframe::egui;
+use nord_format::take::detect::{self, Envelope};
 use nord_format::wav::{self, Audio, Encoding, Layout};
 
 use super::controls::Sets;
@@ -17,12 +18,13 @@ use super::sample;
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
-use crate::workspace::LocalEntity;
+use crate::workspace::{Bytes, LocalEntity};
 
 /// The extension a WAV carries, and the tag it is kept under.
 pub const EXTENSION: &str = "wav";
 
-/// The path of a WAV's one edit: a gain in dB, applied to every sample.
+/// The path of a WAV's one edit: its total gain in dB against the bytes the document
+/// started from.
 pub const GAIN: &str = "gain";
 
 /// The gains the control offers, in dB.
@@ -117,12 +119,14 @@ fn gain_in_place(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
     clipped
 }
 
-/// The file with each `gain` set applied in turn to every sample of its data chunk, and
-/// how many samples were clipped.
-pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<(Vec<u8>, usize), String> {
-    let layout = wav::layout(bytes).map_err(|e| e.to_string())?;
-    let mut out = bytes.to_vec();
-    let mut clipped = 0;
+/// `original` at the last `gain` set, and that gain in dB.
+///
+/// ⚠️ A gain is a total, never a step: each one is applied to `original`, so a second
+/// gain replaces the first instead of stacking on it, and nothing the first clipped or
+/// rounded is carried into the second.
+pub fn apply(original: &[u8], sets: &[(String, String)]) -> Result<(Vec<u8>, f64), String> {
+    let layout = wav::layout(original).map_err(|e| e.to_string())?;
+    let mut total = None;
     for (path, value) in sets {
         if path != GAIN {
             return Err(format!("{path}: a WAV's only edit is its {GAIN}"));
@@ -131,14 +135,13 @@ pub fn apply(bytes: &[u8], sets: &[(String, String)]) -> Result<(Vec<u8>, usize)
             .trim()
             .parse()
             .map_err(|_| format!("{GAIN}: {value} is not a number of dB"))?;
-        let factor = factor(db)?;
-        clipped += gain_in_place(
-            &mut out[layout.data.clone()],
-            layout.format.encoding,
-            factor,
-        );
+        factor(db)?;
+        total = Some(db);
     }
-    Ok((out, clipped))
+    let mut out = original.to_vec();
+    let db = total.unwrap_or(0.0);
+    gain_in_place(&mut out[layout.data], layout.format.encoding, factor(db)?);
+    Ok((out, db))
 }
 
 /// The identity cell a WAV puts on the header: the rate, channels, encoding and length
@@ -174,52 +177,81 @@ fn facts(layout: &Layout) -> String {
     )
 }
 
-/// What a WAV's document keeps between frames: the gain typed so far, and a read of the
-/// bytes it is open on.
+/// What a WAV's document keeps between frames: the gain asked for, the bytes every gain
+/// is applied to, and a read of the bytes it is open on.
 pub struct State {
-    /// In dB, to one decimal.
+    /// The total gain asked for against `original`, in dB to one decimal.
     pub gain: f64,
+    /// The total gain the bytes hold against `original`.
+    applied: f64,
+    /// The bytes the document was opened on, or that last came to it from elsewhere.
+    original: Bytes,
+    /// The stamps of the bytes made here from `original`, and the gain each holds, so a
+    /// revert to one of them shows its gain again.
+    made: Vec<(u64, f64)>,
+    notes: Notes,
     read: Read,
 }
 
 /// One channel's envelope, as [`sample::channel_envelope`] takes it.
 type Lane = Vec<(f32, f32)>;
 
-/// The integer samples a gain could clip, so the clipping a gain would cause is counted
-/// before it is applied, exactly, without going through every sample again.
+/// The notes of the original, each by its quietest and loudest integer sample, so the
+/// notes a gain clips are counted before it is applied.
 ///
-/// Whether a sample clips grows with its distance from zero, so the samples that clip at
-/// a gain are the loudest few of each sign: two binary searches find them. Only the
-/// samples that clip at the control's top gain are kept, which for a take is a small
-/// share of it.
+/// A note runs from its onset, as `nord piano prep` finds it, to the next one; what comes
+/// before the first belongs to the first. A file with no onset is one note. A note clips
+/// where its loudest sample of either sign does.
 #[derive(Default)]
-struct Loud {
+struct Notes {
     bits: u16,
-    /// Ascending: the negative ones, then the positive ones.
-    samples: Vec<i32>,
+    peaks: Vec<(i32, i32)>,
 }
 
-impl Loud {
-    fn of(bytes: &[u8], layout: &Layout) -> Loud {
-        let Encoding::Int { bits } = layout.format.encoding else {
-            return Loud::default();
+impl Notes {
+    fn of(bytes: &[u8], audio: &Audio) -> Notes {
+        let Ok(layout) = wav::layout(bytes) else {
+            return Notes::default();
         };
-        let top = factor(*GAINS.end()).expect("the top of the range is in it");
-        let mut samples: Vec<i32> = ints(bytes, layout.data.clone(), bits)
-            .filter(|sample| scaled(*sample, top, bits).1)
-            .collect();
-        samples.sort_unstable();
-        Loud { bits, samples }
+        let Encoding::Int { bits } = layout.format.encoding else {
+            return Notes::default();
+        };
+        let x = detect::highpassed(&nord_format::take::plan::mono(audio), audio.rate);
+        let env = Envelope::of(&x, audio.rate);
+        // ⚠️ A file shorter than one envelope frame has no floor to find onsets over.
+        let onsets = match env.db.is_empty() {
+            true => Vec::new(),
+            false => detect::onsets(&env),
+        };
+        let mut starts: Vec<usize> = onsets.iter().map(|onset| onset * env.width).collect();
+        match starts.first_mut() {
+            Some(first) => *first = 0,
+            None => starts.push(0),
+        }
+        let channels = usize::from(layout.format.channels);
+        let mut peaks = vec![(0, 0); starts.len()];
+        let mut note = 0;
+        for (at, sample) in ints(bytes, layout.data, bits).enumerate() {
+            while starts
+                .get(note + 1)
+                .is_some_and(|next| at / channels >= *next)
+            {
+                note += 1;
+            }
+            let (low, high) = &mut peaks[note];
+            *low = sample.min(*low);
+            *high = sample.max(*high);
+        }
+        Notes { bits, peaks }
     }
 
-    /// How many samples a gain of `factor` clips.
-    fn clipped(&self, factor: f64) -> u64 {
-        let clips = |sample: &i32| scaled(*sample, factor, self.bits).1;
-        let split = self.samples.partition_point(|sample| *sample < 0);
-        let (negative, positive) = self.samples.split_at(split);
-        let low = negative.partition_point(clips);
-        let high = positive.len() - positive.partition_point(|sample| !clips(sample));
-        (low + high) as u64
+    /// How many notes a gain of `factor` clips.
+    fn clipped(&self, factor: f64) -> usize {
+        let clips = |sample: i32| scaled(sample, factor, self.bits).1;
+        self.peaks
+            .iter()
+            .filter(|(low, high)| clips(*low) || clips(*high))
+            .count()
     }
 }
 
@@ -232,23 +264,15 @@ struct Read {
     stamp: u64,
     /// The audio as float, or why the bytes do not read.
     source: Result<Audio, String>,
-    loud: Loud,
     /// Each channel's envelope, and the column count it was taken at.
     lanes: Option<(usize, Vec<Lane>)>,
 }
 
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
-        let bytes = &entity.bytes;
-        let read = wav::layout(bytes).and_then(|layout| Ok((wav::read(bytes)?, layout)));
-        let (source, loud) = match read {
-            Ok((audio, layout)) => (Ok(audio), Loud::of(bytes, &layout)),
-            Err(e) => (Err(e.to_string()), Loud::default()),
-        };
         Read {
             stamp: entity.stamp,
-            source,
-            loud,
+            source: wav::read(&entity.bytes).map_err(|e| e.to_string()),
             lanes: None,
         }
     }
@@ -266,31 +290,70 @@ impl Read {
         }
         self.lanes.as_ref().map(|(_, lanes)| lanes.as_slice())
     }
-
-    /// How many samples a gain of `db` would clip.
-    fn clipped(&self, db: f64) -> Result<u64, String> {
-        Ok(self.loud.clipped(factor(db)?))
-    }
 }
 
 impl State {
+    /// ⚠️ Finds the notes of the whole file, so it runs when the bytes come from
+    /// elsewhere and never per frame.
     pub fn new(entity: &LocalEntity) -> State {
+        let read = Read::of(entity);
+        let notes = match &read.source {
+            Ok(audio) => Notes::of(&entity.bytes, audio),
+            Err(_) => Notes::default(),
+        };
         State {
             gain: 0.0,
-            read: Read::of(entity),
+            applied: 0.0,
+            original: entity.bytes.clone(),
+            made: vec![(entity.stamp, 0.0)],
+            notes,
+            read,
         }
     }
 
-    /// Read the bytes again where they are no longer the ones read, keeping the gain typed.
+    /// Read the bytes again where they are no longer the ones read. Bytes this document
+    /// made keep the original and show their gain; any others become the original.
     pub fn follow(&mut self, entity: &LocalEntity) {
-        if self.read.stamp != entity.stamp {
-            self.read = Read::of(entity);
+        if self.read.stamp == entity.stamp {
+            return;
         }
+        match self.made.iter().find(|(stamp, _)| *stamp == entity.stamp) {
+            Some(&(_, total)) => {
+                self.applied = total;
+                self.gain = total;
+                self.read = Read::of(entity);
+            }
+            None => *self = State::new(entity),
+        }
+    }
+
+    /// The bytes every gain is applied to.
+    pub fn original(&self) -> &[u8] {
+        &self.original
+    }
+
+    /// Note that the bytes stamped `stamp` hold `total` against the original.
+    pub fn made(&mut self, stamp: u64, total: f64) {
+        self.made.retain(|(made, _)| *made != stamp);
+        self.made.push((stamp, total));
+        self.applied = total;
     }
 
     /// The audio as float, whatever the file stores it as.
     pub fn audio(&self) -> Option<&Audio> {
         self.read.source.as_ref().ok()
+    }
+
+    /// What a total gain of `db` would clip, in notes, or `None` where nothing clips.
+    pub fn clipping(&self, db: f64) -> Result<Option<String>, String> {
+        let clipped = self.notes.clipped(factor(db)?);
+        let notes = self.notes.peaks.len();
+        Ok(match (clipped, notes) {
+            (0, _) => None,
+            (_, 1) => Some("it clips".to_string()),
+            (1, _) => Some(format!("1 of {notes} notes clips")),
+            _ => Some(format!("{clipped} of {notes} notes clip")),
+        })
     }
 }
 
@@ -334,10 +397,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
 /// The label of the button that applies the gain.
 pub const APPLY_GAIN: &str = "Apply gain";
 
-/// The gain control, the samples it would clip, and the button that applies it.
+/// The gain control, the notes it would clip, and the button that applies it.
 ///
-/// ⚠️ Applied by a click and not as the control moves: each application scales what the
-/// last one left, clipping included, and every sample is written again.
+/// ⚠️ Applied by a click and not as the control moves: every sample is written again.
 fn gain(ui: &mut egui::Ui, state: &mut State, sets: &mut Sets) {
     ui.label("Gain");
     ui.add(
@@ -348,18 +410,14 @@ fn gain(ui: &mut egui::Ui, state: &mut State, sets: &mut Sets) {
             .suffix(" dB"),
     );
     state.gain = (state.gain * 10.0).round() / 10.0;
-    let apply = ui.add_enabled(state.gain != 0.0, egui::Button::new(APPLY_GAIN));
+    let apply = ui.add_enabled(state.gain != state.applied, egui::Button::new(APPLY_GAIN));
     if apply.clicked() {
         sets.push((GAIN.to_string(), format!("{:.1}", state.gain)));
-        state.gain = 0.0;
         return;
     }
-    let (said, ink) = match state.read.clipped(state.gain) {
-        Ok(0) => ("nothing clips".to_string(), app::caption(ui.visuals())),
-        Ok(clipped) => (
-            crate::strings::counted(clipped as usize, "sample clips", "samples clip"),
-            app::warn(ui.visuals()),
-        ),
+    let (said, ink) = match state.clipping(state.gain) {
+        Ok(None) => ("nothing clips".to_string(), app::caption(ui.visuals())),
+        Ok(Some(clipped)) => (clipped, app::warn(ui.visuals())),
         Err(why) => (why, app::bad(ui.visuals())),
     };
     ui.label(egui::RichText::new(said).small().color(ink));
@@ -397,37 +455,78 @@ mod tests {
         ints(bytes, layout.data, bits).collect()
     }
 
-    fn gained(bytes: &[u8], db: &str) -> Result<(Vec<u8>, usize), String> {
-        apply(bytes, &[(GAIN.to_string(), db.to_string())])
+    fn gained(bytes: &[u8], db: &str) -> Result<Vec<u8>, String> {
+        apply(bytes, &[(GAIN.to_string(), db.to_string())]).map(|(out, _)| out)
     }
 
-    /// A read of `bytes`, as the document makes it.
-    fn read(bytes: &[u8]) -> Read {
+    /// Samples clipped scaling `bytes` by `db`.
+    fn clipped_samples(bytes: &[u8], db: f64) -> usize {
+        let layout = wav::layout(bytes).unwrap();
+        let mut data = bytes[layout.data].to_vec();
+        gain_in_place(&mut data, layout.format.encoding, factor(db).unwrap())
+    }
+
+    /// The document's state on `bytes`, as it opens on them.
+    fn opened(bytes: &[u8]) -> State {
         let mut log = crate::log::Log::default();
         let mut workspace = crate::workspace::Workspace::new(crate::testing::context());
         let origin = crate::workspace::Origin::Fresh;
         let id = workspace.ingest("hit.wav".into(), origin, bytes.to_vec(), &mut log);
-        Read::of(workspace.get(id).unwrap())
+        State::new(workspace.get(id).unwrap())
+    }
+
+    /// A 16-bit take of decaying 440 Hz notes, one every 2 s from 0.5 s, peaking at each
+    /// of `peaks` (of full scale) in turn.
+    fn take(peaks: &[f64]) -> Vec<u8> {
+        let rate = 44_100.0;
+        let mut samples = vec![0.0; (rate * (0.5 + 2.0 * peaks.len() as f64)) as usize];
+        for (k, peak) in peaks.iter().enumerate() {
+            let from = (rate * (0.5 + 2.0 * k as f64)) as usize;
+            for (i, sample) in samples[from..from + rate as usize].iter_mut().enumerate() {
+                let t = i as f64 / rate;
+                *sample = peak * (std::f64::consts::TAU * 440.0 * t).sin() * (-t / 0.3).exp();
+            }
+        }
+        let samples: Vec<f64> = samples.iter().map(|s| (s * 32_767.0).round()).collect();
+        mono_as(Encoding::Int { bits: 16 }, &samples)
     }
 
     #[test]
     fn six_db_doubles_a_quiet_sample() {
-        let (out, clipped) = gained(&mono(&[1000, -1000, 0]), "6").unwrap();
+        let out = gained(&mono(&[1000, -1000, 0]), "6").unwrap();
         let samples = wav::read_pcm16(&out).unwrap().samples;
         // 10^(6/20) = 1.995, so 1000 becomes 1995.
         assert_eq!(samples, [1995, -1995, 0]);
-        assert_eq!(clipped, 0);
     }
 
     #[test]
-    fn a_gain_counts_the_samples_it_clips() {
+    fn a_gain_clips_at_the_range_of_16_bits() {
         let bytes = mono(&[20_000, -20_000, 100, i16::MIN]);
-        let (out, clipped) = gained(&bytes, "6.0").unwrap();
         assert_eq!(
-            wav::read_pcm16(&out).unwrap().samples,
+            wav::read_pcm16(&gained(&bytes, "6.0").unwrap())
+                .unwrap()
+                .samples,
             [i16::MAX, i16::MIN, 200, i16::MIN]
         );
-        assert_eq!(clipped, 3);
+        assert_eq!(clipped_samples(&bytes, 6.0), 3);
+    }
+
+    #[test]
+    fn a_second_gain_replaces_the_first_instead_of_stacking_on_it() {
+        let bytes = mono(&[1000, 20_000]);
+        let twelve = gained(&bytes, "12").unwrap();
+        let sets = [
+            (GAIN.to_string(), "10".to_string()),
+            (GAIN.to_string(), "12".to_string()),
+        ];
+        let (out, db) = apply(&bytes, &sets).unwrap();
+        assert_eq!(db, 12.0);
+        assert!(out == twelve, "10 then 12 dB is 12 dB in all");
+        let (back, _) = apply(&bytes, &[(GAIN.to_string(), "0".to_string())]).unwrap();
+        assert!(
+            back == bytes,
+            "0 dB is the original, clipping and all undone"
+        );
     }
 
     #[test]
@@ -439,7 +538,7 @@ mod tests {
         bytes[4..8].copy_from_slice(&size.to_le_bytes());
         let data = wav::layout(&bytes).unwrap().data;
 
-        let (out, _) = gained(&bytes, "-6").unwrap();
+        let out = gained(&bytes, "-6").unwrap();
         assert_eq!(out.len(), bytes.len());
         let changed: Vec<usize> = (0..bytes.len())
             .filter(|at| out[*at] != bytes[*at])
@@ -470,12 +569,12 @@ mod tests {
 
     #[test]
     fn a_gain_keeps_a_24_bit_file_24_bit_and_clips_at_its_own_range() {
-        let top = 8_388_607.0;
+        let top = 8_388_607;
         let bytes = mono_as(
             Encoding::Int { bits: 24 },
             &[1000.0, -1000.0, 5_000_000.0, -8_388_608.0, 1.0],
         );
-        let (out, clipped) = gained(&bytes, "6").unwrap();
+        let out = gained(&bytes, "6").unwrap();
         assert_eq!(out.len(), bytes.len());
         assert_eq!(
             wav::layout(&out).unwrap().format.encoding,
@@ -483,8 +582,8 @@ mod tests {
         );
         // 10^(6/20) = 1.995: below 16 bits' step the low sample still keeps its own
         // value, 1 becoming 2, where rounding to 16 bits would have made it 0.
-        assert_eq!(ints_of(&out), [1995, -1995, top as i32, -8_388_608, 2]);
-        assert_eq!(clipped, 2);
+        assert_eq!(ints_of(&out), [1995, -1995, top, -8_388_608, 2]);
+        assert_eq!(clipped_samples(&bytes, 6.0), 2);
     }
 
     #[test]
@@ -492,10 +591,10 @@ mod tests {
         for bits in [8, 16, 24, 32] {
             let encoding = Encoding::Int { bits };
             let bytes = mono_as(encoding, &[-50.0, 0.0, 50.0]);
-            let (out, clipped) = gained(&bytes, "6").unwrap();
+            let out = gained(&bytes, "6").unwrap();
             assert_eq!(wav::layout(&out).unwrap().format.encoding, encoding);
             assert_eq!(ints_of(&out), [-100, 0, 100], "{bits}-bit");
-            assert_eq!(clipped, 0, "{bits}-bit");
+            assert_eq!(clipped_samples(&bytes, 6.0), 0, "{bits}-bit");
         }
     }
 
@@ -504,7 +603,7 @@ mod tests {
         for bits in [32, 64] {
             let encoding = Encoding::Float { bits };
             let bytes = mono_as(encoding, &[0.25, -0.75, 0.0]);
-            let (out, clipped) = gained(&bytes, "6").unwrap();
+            let out = gained(&bytes, "6").unwrap();
             assert_eq!(wav::layout(&out).unwrap().format.encoding, encoding);
             let samples = wav::read(&out).unwrap().samples;
             let factor = 10f32.powf(0.3);
@@ -513,7 +612,8 @@ mod tests {
             }
             // -0.75 at +6 dB is past full scale: float keeps it.
             assert!(samples[1] < -1.0);
-            assert_eq!(clipped, 0);
+            assert_eq!(clipped_samples(&bytes, 6.0), 0);
+            assert_eq!(opened(&bytes).clipping(24.0), Ok(None));
         }
     }
 
@@ -525,47 +625,49 @@ mod tests {
                 Encoding::Float { .. } => 1.0,
             };
             let bytes = mono_as(encoding, &[0.5 * full, -0.25 * full]);
-            let read = read(&bytes);
-            let audio = read.source.as_ref().unwrap();
-            assert_eq!(audio.samples, [0.5, -0.25], "{encoding:?}");
+            let state = opened(&bytes);
+            assert_eq!(state.audio().unwrap().samples, [0.5, -0.25], "{encoding:?}");
         }
     }
 
     #[test]
-    fn the_clipping_a_gain_would_cause_is_counted_before_it_is_applied() {
-        let bytes = mono(&[20_000, -20_000, 100, 16_000]);
-        let read = read(&bytes);
-        for db in ["6.0", "0.0", "-12.0", "1.5"] {
-            let (_, applied) = gained(&bytes, db).unwrap();
-            assert_eq!(
-                read.clipped(db.parse().unwrap()),
-                Ok(applied as u64),
-                "{db}"
-            );
-        }
-        assert_eq!(read.clipped(6.0), Ok(2));
+    fn the_clipping_a_gain_would_cause_is_counted_in_notes() {
+        let state = opened(&take(&[0.9, 0.3, 0.05]));
+        assert_eq!(state.notes.peaks.len(), 3);
+        assert_eq!(state.clipping(0.0), Ok(None));
+        assert_eq!(state.clipping(-12.0), Ok(None));
+        // 0.9 x 1.995 is past full scale; 0.3 x 3.98 is too; 0.05 x 15.85 is not.
+        assert_eq!(state.clipping(6.0), Ok(Some("1 of 3 notes clips".into())));
+        assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 notes clip".into())));
+        assert_eq!(state.clipping(24.0), Ok(Some("2 of 3 notes clip".into())));
+        assert!(state.clipping(25.0).is_err());
     }
 
     #[test]
-    fn the_clipping_count_matches_the_gain_at_every_width_and_step() {
-        for bits in [8, 16, 24, 32] {
-            let full = (1i64 << (bits - 1)) as f64;
-            // A ramp over the whole range, both signs, with the edges themselves.
-            let samples: Vec<f64> = (0..=200)
-                .map(|step| ((step as f64 / 100.0 - 1.0) * full).round().min(full - 1.0))
-                .collect();
-            let bytes = mono_as(Encoding::Int { bits }, &samples);
-            let read = read(&bytes);
-            for tenths in -240..=240 {
-                let db = f64::from(tenths) / 10.0;
-                let (_, applied) = gained(&bytes, &format!("{db:.1}")).unwrap();
-                assert_eq!(
-                    read.clipped(db),
-                    Ok(applied as u64),
-                    "{bits}-bit at {db} dB"
-                );
+    fn a_note_clips_exactly_where_one_of_its_samples_does() {
+        let bytes = take(&[0.9, 0.3, 0.05]);
+        let state = opened(&bytes);
+        let layout = wav::layout(&bytes).unwrap();
+        let rate = 44_100;
+        for tenths in (0..=240).step_by(5) {
+            let db = f64::from(tenths) / 10.0;
+            // Each note on its own, at 0.5 + 2k s.
+            let mut clipped = 0;
+            for k in 0..3 {
+                let from = layout.data.start + 2 * (rate / 2 + 2 * rate * k);
+                let mut note = bytes[from..from + 2 * rate].to_vec();
+                let encoding = layout.format.encoding;
+                clipped += usize::from(gain_in_place(&mut note, encoding, factor(db).unwrap()) > 0);
             }
+            assert_eq!(state.notes.clipped(factor(db).unwrap()), clipped, "{db} dB");
         }
+    }
+
+    #[test]
+    fn a_file_with_no_onset_is_one_note() {
+        let state = opened(&mono(&[20_000, -20_000, 100]));
+        assert_eq!(state.notes.peaks, [(-20_000, 20_000)]);
+        assert_eq!(state.clipping(6.0), Ok(Some("it clips".into())));
     }
 
     #[test]
