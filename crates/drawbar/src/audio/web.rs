@@ -14,6 +14,8 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use web_sys::{AudioBufferSourceNode, AudioContext, AudioScheduledSourceNode};
 
+use super::Sample;
+
 #[derive(Default)]
 pub struct Output {
     context: Option<AudioContext>,
@@ -32,15 +34,20 @@ pub struct Voice {
 }
 
 impl Output {
-    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<Voice, String> {
+    pub fn play<S: Sample>(
+        &mut self,
+        samples: &[S],
+        channels: u16,
+        rate: f32,
+    ) -> Result<Voice, String> {
         let channels = NonZero::new(channels).ok_or("this zone declares no channels")?;
         self.start(samples, channels, rate)
             .map_err(|e| format!("the browser refused to play this zone: {e:?}"))
     }
 
-    fn start(
+    fn start<S: Sample>(
         &mut self,
-        samples: &[i16],
+        samples: &[S],
         channels: NonZero<u16>,
         rate: f32,
     ) -> Result<Voice, JsValue> {
@@ -56,13 +63,13 @@ impl Output {
             None => self.context.insert(AudioContext::new()?),
         };
         let buffer = context.create_buffer(channels, frames, FIELD_RATE as f32)?;
-        // Web Audio takes one plane per channel; the codec returns interleaved samples.
+        // Web Audio takes one plane per channel; the samples come interleaved.
         for channel in 0..channels {
             let plane: Vec<f32> = samples
                 .iter()
                 .skip(channel as usize)
                 .step_by(channels as usize)
-                .map(|s| f32::from(*s) / 32768.0)
+                .map(|s| s.level())
                 .collect();
             buffer.copy_to_channel(&plane, channel as i32)?;
         }

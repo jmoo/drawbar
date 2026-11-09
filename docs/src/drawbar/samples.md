@@ -53,11 +53,14 @@ encoder cannot reproduce stops the build with the reason.
 Drop WAVs on the window, or use **File ▸ Import…**, to copy them into your
 library, where they are listed beside your sounds. A WAV opens as a document of
 its own: the whole file's waveform, one lane per channel, with its rate,
-channels and length in the header. **Play** plays it. **Gain** with **Apply
-gain** scales every sample by that gain, and the line beside it first says how
-many samples would clip. A gain is an edit like any other: **Save** writes it
-into the file and **Revert** takes it back. A WAV drawbar cannot read, such as
-a 24-bit one, says why and offers neither.
+channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
+32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
+plays it. **Gain** with **Apply gain** scales every sample by that gain, and
+the line beside it first says how many samples would clip. The file keeps its
+own format: a 24-bit WAV stays 24-bit, and a float one never clips. A gain is
+an edit like any other: **Save** writes it into the file and **Revert** takes
+it back. A WAV drawbar cannot read, such as a compressed one, says why and
+offers neither.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in
