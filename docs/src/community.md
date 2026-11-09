@@ -27,6 +27,13 @@ A read-only web viewer for Stage 2, 2EX and 3 programs, built on the byte maps
 above. Open it at
 [chris55.github.io/ns3-program-viewer](https://chris55.github.io/ns3-program-viewer/).
 
+### [StageLoop](https://livekeytools.com/stageloop) · LiveKeyTools · Free, closed source
+
+A sample editor for macOS and Windows that prepares recordings for Nord Sample
+Editor. It trims, normalizes, finds loop points and crossfades, maps a
+multisample's root keys and zones, and exports a `.nsmpproj` project. Download it
+at [livekeytools.com/stageloop](https://livekeytools.com/stageloop).
+
 ## Adding to this list
 
 If you maintain a project that works with Nord files or instruments, open a pull
