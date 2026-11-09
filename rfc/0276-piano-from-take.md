@@ -118,7 +118,9 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 ### Input and resampling
 
 - The take is read as 16-bit, 24-bit or 32-bit float PCM. A recording straight from an interface is
-  normally 24-bit or float; #165's reader takes only 16-bit.
+  normally 24-bit or float; #165's reader takes only 16-bit. drawbar's WAV document reads all
+  three, converts to floating point for the waveform and the player, and keeps gain edits in the
+  file's own format. Only the build goes down to 16 bits.
 - Resample writes a band-limited resample to 35,002 Hz at the take's own bit depth (24-bit, or float
   for a float take) as a new WAV. Detection and loop search run on that, so the loop points are
   where the build plays them. On the interface take, detecting at 35,002 Hz rather than the take's
@@ -200,7 +202,8 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   under the prototype's, and the top end sounded quiet and lifeless (heard on a Stage 4); brought
   to one peak, every attack plays within 0.3 dB of the prototype's. Unraised, the releases held 5
   to 6 bits, needed more boost than the instrument gives, and so turned the whole library down
-  24 dB. A format 5 library, or one from a template, plays each stroke's own level, and nothing is
+  24 dB. Now a release that needs more boost than the instrument gives plays quieter, at the most
+  boost there is, and only an attack or resonance stroke turns the library down. A format 5 library, or one from a template, plays each stroke's own level, and nothing is
   changed.
 - Releases from a take keep their recorded level under their own attack (the region of their root at
   their layer), lifted by at most 12 dB and never louder than 14 dB under it. A release from a
@@ -272,8 +275,13 @@ Stage 4). Instead:
 
 ### Output
 
-- 16-bit at 35,002 Hz, at build, mono or stereo as the take is. Raised to their root's peak first, the
-  regions are rounded without dither.
+- 16-bit at 35,002 Hz, at build, mono or stereo as the take is. Brought to one peak first, the
+  regions are dithered: rounded after adding triangular noise of one step either way, so what
+  rounding loses becomes a steady hiss under the note, not distortion that follows it down.
+  Silence stays silent, so a note faded out loops on nothing. Each stroke has noise of its own,
+  so a chord's strokes don't share it and add up as little as possible. On the interface take,
+  the dither leaves the last half second of every attack within 3 dB of the plain rounding
+  (median 0 dB). It costs bits: the library grew from 9.1 to 11.4 MB.
 
 ### Where the code goes
 
