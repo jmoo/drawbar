@@ -27,13 +27,6 @@ A read-only web viewer for Stage 2, 2EX and 3 programs, built on the byte maps
 above. Open it at
 [chris55.github.io/ns3-program-viewer](https://chris55.github.io/ns3-program-viewer/).
 
-### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
-
-A viewer for Nord program, sample and piano files. It converts Stage 2 and 3
-programs to Stage 4, copies programs to and from the keyboard over USB, and lets
-players share programs they made. Open it at
-[opennord.gigmeister.app](https://opennord.gigmeister.app).
-
 ## Adding to this list
 
 If you maintain a project that works with Nord files or instruments, open a pull
