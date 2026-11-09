@@ -1259,6 +1259,7 @@ impl Document {
             return Ok(());
         };
         let (before, edited) = (entity.stamp, shape(entity));
+        let mut gained = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
             if let Err(why) = self.samples.take(id, file, index, &sets) {
                 log.error(why.clone());
@@ -1281,16 +1282,21 @@ impl Document {
             Shape::Piano => self.piano.take(&sets).map(|()| None),
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
             Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
-            Shape::Wav => wav::apply(&entity.bytes, &sets).map(|(out, clipped)| {
-                if clipped > 0 {
-                    log.warn(format!(
-                        "{}: {} clipped",
-                        entity.name,
-                        strings::counted(clipped, "sample", "samples")
-                    ));
-                }
-                Some(out)
-            }),
+            Shape::Wav => {
+                let held = self
+                    .open
+                    .as_ref()
+                    .filter(|open| open.id == id)
+                    .and_then(|open| open.wav.as_ref());
+                let original = held.map_or(&entity.bytes[..], wav::State::original);
+                wav::apply(original, &sets).map(|(out, db)| {
+                    if let Some(Ok(Some(clipped))) = held.map(|held| held.clipping(db)) {
+                        log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
+                    }
+                    gained = Some(db);
+                    Some(out)
+                })
+            }
             Shape::Fields | Shape::Verbatim | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
@@ -1308,6 +1314,13 @@ impl Document {
         // bodies are compared.
         if let Some(out) = made {
             workspace.replace_bytes(id, out, log);
+        }
+        if let (Some(db), Some(held)) = (gained, workspace.get(id)) {
+            let stamp = held.stamp;
+            let open = self.open.as_mut().filter(|open| open.id == id);
+            if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
+                state.made(stamp, db);
+            }
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
             if let Some(decoded) = held.entity.as_deref() {
@@ -3323,7 +3336,7 @@ mod tests {
     }
 
     /// The gain counts what it would clip before it is applied, lands on the working copy
-    /// when applied, and Revert takes it back.
+    /// when applied and stays shown as the total, and Revert takes it back.
     #[test]
     fn an_applied_gain_is_an_edit_that_reverts() {
         let bytes = wav_bytes();
@@ -3335,10 +3348,7 @@ mod tests {
         open.frame(Vec::new());
         open.state().wav.as_mut().unwrap().gain = 24.0;
         let said = open.frame(Vec::new());
-        assert!(
-            said.iter().any(|word| word.ends_with("samples clip")),
-            "{said:?}"
-        );
+        assert!(said.iter().any(|word| word == "it clips"), "{said:?}");
 
         open.state().wav.as_mut().unwrap().gain = 6.0;
         let said = open.painted(Vec::new());
@@ -3350,7 +3360,21 @@ mod tests {
         // 11999 at 10^(6/20) = 1.995 times is 23941.
         assert_eq!(peak(&bytes), Some(11_999));
         assert_eq!(peak(&open.entity().bytes), Some(23_941));
-        assert_eq!(open.state().wav.as_ref().unwrap().gain, 0.0);
+        open.frame(Vec::new());
+        assert_eq!(
+            open.state().wav.as_ref().unwrap().gain,
+            6.0,
+            "the total stays"
+        );
+
+        // A second gain is a new total against the original, not 6 dB more.
+        open.state().wav.as_mut().unwrap().gain = 1.5;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        // 11999 at 10^(1.5/20) = 1.1885 times is 14261.
+        assert_eq!(peak(&open.entity().bytes), Some(14_261));
 
         open.act(vec![crate::browser::Act::Revert(open.id)]);
         assert!(!open.entity().is_unsaved());
@@ -3358,6 +3382,7 @@ mod tests {
         open.frame(Vec::new());
         let held = open.state().wav.as_ref().unwrap();
         assert_eq!(held.audio().map(|audio| audio.samples.len()), Some(44_100));
+        assert_eq!(held.gain, 0.0, "reverted to the original");
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
     }
 
