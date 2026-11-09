@@ -309,32 +309,34 @@ sees, every fact is bound again:
    once, at the next scan, where it lists the path, under any spelling the volume
    takes for it, at the length and time the scan before listed there, or at those it
    listed where the entries read moved the file from, after writing it or while it
-   held other than the identity this view held there. A move leaves that read owed
-   where the file was too, since sync can keep another file there. The refresh
-   reports the file rewritten, since what the app read of it before may not be what
-   the other writer left, though this view may have read it since, and owes nothing
-   more, whatever the read found. Another writer's rewrite at the same length and
-   time whose file arrives after the scan of the refresh that read its entry is seen
-   at that file's next change, or at a commit naming the identity this view held
-   there. That commit is refused, since its precondition reads the file; the view
-   takes the length, time and identity the check read, or no file, as a listing of
-   that path under any spelling the volume takes for it, and the next report says
-   the file was rewritten. A commit naming only a length and time passes over it. A
-   commit logs each file it puts in place from staging with the identity of its
-   staged file, read before it goes into place, and takes the file then at the path
-   for it where the length matches, and the time too where moves rename; another
-   file, a directory or nothing there is reported rewritten, and the next scan shows
-   what is there. A file of the same length landing over it at the same time passes
-   for it, and where moves copy, at any time. A record this instance resumes keeps
-   what it read of its staged files; one a later instance resumes reads each file it
-   had put in place where it landed, and takes another file there by then for it.
-   Files of one fixed length, as instrument programs are, need only the same time
-   inside one clock tick for this. After a commit, only the paths its file effects
-   moved files from and to, and the directories they made or removed, are listed
-   again. Identities are read by the same rule, of every file whose identity is
-   unread and now decides a binding, such as a file of the length of a file fact the
-   commit wrote whose file is not at its path: that file may be the entity's, moved.
-   A refresh scans again only the paths named by the file facts the entries it read
+   held other than the identity this view held there. Where a fact gives that file
+   another identity than the scan before read, it reads none and the binding takes
+   the fact's. A move leaves that read owed where the file was too, since sync can
+   keep another file there. The refresh reports the file rewritten, since what the
+   app read of it before may not be what the other writer left, though this view may
+   have read it since, and owes nothing more, whatever the read found. Another
+   writer's rewrite at the same length and time whose file arrives after the scan of
+   the refresh that read its entry is seen at that file's next change, or at a
+   commit naming the identity this view held there. That commit is refused, since
+   its precondition reads the file. Where the view lists that path, under any
+   spelling the volume takes for it, it takes the length, time and identity the
+   check read, or no file, as that listing, and the next report says a file it took
+   so was rewritten. A commit naming only a length and time passes over it. A commit
+   logs each file it puts in place from staging with the identity of its staged
+   file, read before it goes into place, and takes the file then at the path for it
+   where the length matches, and the time too where moves rename; another file, a
+   directory or nothing there is reported rewritten, and the next scan shows what is
+   there. A file of the same length landing over it at the same time passes for it,
+   and where moves copy, at any time. A record this instance resumes keeps what it
+   read of its staged files; one a later instance resumes reads each file it had put
+   in place where it landed, and takes another file there by then for it. Files of
+   one fixed length, as instrument programs are, need only the same time inside one
+   clock tick for this. After a commit, only the paths its file effects moved files
+   from and to, and the directories they made or removed, are listed again.
+   Identities are read by the same rule, of every file whose identity is unread and
+   now decides a binding, such as a file of the length of a file fact the commit
+   wrote whose file is not at its path: that file may be the entity's, moved. A
+   refresh scans again only the paths named by the file facts the entries it read
    changed, before and after, the paths those entities were bound to, the paths
    other writers' `path` and `tree` ops among them name, from and to, and those
    their `file`, `pin` and `dir` ops name, with the same identity reads. A scan of
