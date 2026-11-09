@@ -602,6 +602,19 @@ impl Keyed {
     }
 }
 
+/// The entity the binding gives a file a `path` op left.
+struct Bound {
+    entity: EntityId,
+    /// The latest live write of its file register that says where its file is.
+    write: Write<Option<FileFact>>,
+    /// What `write` says.
+    fact: FileFact,
+    /// Whether the entity is in sync with the file the op left.
+    same: bool,
+    /// Whether `write` names the path the op left the file at.
+    named: bool,
+}
+
 fn changed<V>(write: &Write<V>) -> Refusal {
     Refusal::ChangedSince {
         by: write.by,
@@ -777,8 +790,9 @@ impl Reversing<'_> {
         self.unchanged(|op| op.touches(&tree))
     }
 
-    /// Refuses where the file at `path` is an entity's by another writer's file write
-    /// that the intent did not see, made concurrently with it.
+    /// Refuses where the file at `path` is an entity's by another writer's file write,
+    /// other than a binding's pin, that the intent did not see, made concurrently
+    /// with it.
     fn unclaimed(&self, path: &RelPath) -> Result<(), Refusal> {
         let Some(entity) = self.view.at(path) else {
             return Ok(());
@@ -795,7 +809,7 @@ impl Reversing<'_> {
         let writes = self.folded.file_writes(entity.id());
         let claim = writes.iter().find(|write| {
             let at = write.value.as_ref().is_some_and(|file| file.path == *path);
-            write.by != self.writer && at && unseen(write)
+            write.by != self.writer && at && !self.pinned(write) && unseen(write)
         });
         match claim {
             Some(write) => Err(changed(write)),
@@ -816,33 +830,40 @@ impl Reversing<'_> {
             self.unchanged(|op| op.names(&key))?;
             self.unclaimed(left)?;
         }
-        // A file since an entity's is moved back as that entity's file where it holds
-        // the entity's identity, and is put back or trashed so only where this writer
-        // made it the entity's, as its file. Any other is that entity's writer's now.
+        // A file since an entity's is renamed back or trashed as that entity's file, and
+        // has bytes brought back over it as its file where its file fact names it. Else
+        // the binding found the entity in it by its identity alone: the bytes come back as
+        // no entity's and the entity is missing again.
         let bound = file.and_then(|file| self.bound(file));
-        let ours = |write: &Write<Option<FileFact>>| {
-            write.by == self.writer && !self.finals.contains(&write.entry)
-        };
         let renames = matches!((from, file), (Some(from), Some(file)) if *from != file.path);
-        let taken = |(_, write, same): &(EntityId, Write<Option<FileFact>>, bool)| {
-            !same || !(renames || ours(write))
-        };
-        if let Some((_, write, _)) = bound.as_ref().filter(|bound| taken(bound)) {
-            return Err(changed(write));
+        if let Some(bound) = &bound {
+            let claim = Some(&bound.write).filter(|write| !self.pinned(write));
+            let taken =
+                |write: &&Write<Option<FileFact>>| !bound.same || !renames && self.foreign(write);
+            if let Some(write) = claim.filter(taken) {
+                return Err(changed(write));
+            }
         }
-        let bound = bound.map(|(entity, ..)| entity);
-        let adopted = bound.filter(|_| !renames);
+        let entity = bound.as_ref().map(|bound| bound.entity);
+        let named = bound.as_ref().filter(|bound| bound.named);
+        let named = named.map(|bound| bound.entity);
+        let found = entity.filter(|_| named.is_none());
         let restore = |path: &RelPath, expect| {
             let item = self.displaced.iter().find(|item| item.from == *path)?.item;
             let to = path.clone();
-            Some(match adopted {
+            Some(match named {
                 Some(entity) => FileChange::Restore {
                     entity,
                     item,
                     to,
                     expect,
                 },
-                None => FileChange::RestoreFile { item, to, expect },
+                None => FileChange::RestoreFile {
+                    item,
+                    to,
+                    expect,
+                    found,
+                },
             })
         };
         Ok(match (from, file) {
@@ -851,7 +872,7 @@ impl Reversing<'_> {
             }
             (Some(from), Some(file)) => {
                 let (to, expect) = (from.clone(), Expect::Holds(file.identity));
-                Some(match bound {
+                Some(match entity {
                     Some(entity) => FileChange::Rename { entity, to, expect },
                     None => FileChange::RenameFile {
                         from: file.path.clone(),
@@ -862,8 +883,12 @@ impl Reversing<'_> {
             }
             (None, Some(file)) => {
                 let expect = Expect::Holds(file.identity);
-                Some(match adopted {
-                    Some(entity) => FileChange::Trash { entity, expect },
+                Some(match bound {
+                    Some(bound) => FileChange::TrashLeaving {
+                        entity: bound.entity,
+                        expect,
+                        leaves: bound.fact,
+                    },
                     None => FileChange::TrashFile {
                         path: file.path.clone(),
                         expect,
@@ -876,16 +901,21 @@ impl Reversing<'_> {
     }
 
     /// The entity bound now to the file at the path `file` says an effect left where no
-    /// entity's file was, with the write of its file fact, and whether it is in sync
-    /// with `file`.
-    fn bound(&self, file: &FileFact) -> Option<(EntityId, Write<Option<FileFact>>, bool)> {
+    /// entity's file was.
+    fn bound(&self, file: &FileFact) -> Option<Bound> {
         let entity = self.view.at(&file.path)?;
         let bound = entity.file()?;
         let mut writes = self.folded.file_writes(entity.id()).into_iter();
         let write = writes.rfind(|write| write.value.is_some())?;
-        let fact = write.value.as_ref()?;
-        let same = bound.state == FileState::InSync && fact.identity == file.identity;
-        Some((entity.id(), write, same))
+        let fact = write.value.clone()?;
+        let key = |path: &RelPath| self.names.key(path.as_str());
+        Some(Bound {
+            entity: entity.id(),
+            same: bound.state == FileState::InSync && fact.identity == file.identity,
+            named: key(&fact.path) == key(&file.path),
+            write,
+            fact,
+        })
     }
 
     /// The file effect that puts back what a file write changed: the displaced

@@ -553,7 +553,7 @@ impl Resolver<'_> {
                 content,
                 expect,
             } => {
-                let path = self.unbound(path, env)?;
+                let path = self.unbound(path, None, env)?;
                 self.check(&path, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -568,7 +568,7 @@ impl Resolver<'_> {
                 self.end_unbound(from, Some(path));
             }
             FileChange::RenameFile { from, to, expect } => {
-                let from = self.unbound(from, env)?;
+                let from = self.unbound(from, None, env)?;
                 let to = self.library(to)?;
                 self.touch_destination(&from, &to, env)?;
                 self.check(&from, *expect);
@@ -576,7 +576,7 @@ impl Resolver<'_> {
                 self.end_unbound(Some(from), Some(to));
             }
             FileChange::TrashFile { path, expect } => {
-                let path = self.unbound(path, env)?;
+                let path = self.unbound(path, None, env)?;
                 self.check(&path, *expect);
                 self.step(EffectStep::ToTrash {
                     path: path.clone(),
@@ -584,8 +584,13 @@ impl Resolver<'_> {
                 });
                 self.end_unbound(Some(path), None);
             }
-            FileChange::RestoreFile { item, to, expect } => {
-                let to = self.unbound(to, env)?;
+            FileChange::RestoreFile {
+                item,
+                to,
+                expect,
+                found,
+            } => {
+                let to = self.unbound(to, *found, env)?;
                 self.check(&to, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -771,13 +776,19 @@ impl Resolver<'_> {
         });
     }
 
-    /// Takes `path` for one effect on a file no entity is bound to: refused where
-    /// an entity's file is, by the volume's names.
-    fn unbound(&mut self, path: &RelPath, env: &Env) -> std::result::Result<RelPath, Refusal> {
+    /// Takes `path` for one effect on a file no entity but `found` is bound to:
+    /// refused where another entity's file is, by the volume's names.
+    fn unbound(
+        &mut self,
+        path: &RelPath,
+        found: Option<EntityId>,
+        env: &Env,
+    ) -> std::result::Result<RelPath, Refusal> {
         let path = self.library(path)?;
         let key = env.names.key(path.as_str());
-        let bound = self.bindings.bound.values();
-        if let Some(file) = bound.into_iter().find(|file| {
+        let bound = self.bindings.bound.iter();
+        let mut bound = bound.filter(|(entity, _)| Some(**entity) != found);
+        if let Some((_, file)) = bound.find(|(_, file)| {
             file.state != FileState::Missing && env.names.key(file.path.as_str()) == key
         }) {
             return Err(invalid(Invalid::Bound(file.path.clone())));

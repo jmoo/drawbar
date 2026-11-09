@@ -875,6 +875,12 @@ through_both!(
     an_undo_of_a_save_is_refused_as_changed_since_once_a_writer_it_did_not_see_adopted_the_file,
     an_undo_of_a_save_acts_on_the_entity_this_writer_since_made_of_the_file,
     an_undo_of_a_save_over_another_writers_entity_found_in_it_is_refused_as_changed_since,
+    an_undo_of_a_new_file_this_writer_since_made_an_entitys_leaves_that_entity_lost,
+    an_undo_of_a_new_file_a_lost_entity_was_found_in_leaves_that_entity_lost,
+    an_undo_of_a_save_over_a_file_a_lost_entity_was_found_in_leaves_that_entity_lost,
+    an_undo_of_a_new_file_a_pin_gave_a_lost_entity_leaves_that_entity_lost,
+    an_undo_of_a_save_over_a_file_a_pin_gave_a_lost_entity_brings_bytes_back_as_its_file,
+    an_undo_of_a_save_is_not_refused_over_another_writers_pin_of_the_entity_found_in_it,
     an_undo_of_a_rename_moves_back_the_file_another_writers_entity_was_found_in,
     an_undo_of_a_rename_is_refused_as_changed_since_once_another_writer_adopted_the_file,
     a_redo_of_a_rename_is_refused_as_changed_since_once_another_writer_trashed_the_file,
@@ -6855,6 +6861,225 @@ fn an_undo_of_a_save_over_another_writers_entity_found_in_it_is_refused_as_chang
         "{undone:?}"
     );
     assert_eq!(facts(&a), before, "its file fact is its writer's");
+}
+
+/// Where the binding finds `entity`'s file, and its row's state.
+fn shown_at<F: Facade>(f: &F, entity: EntityId) -> (Option<(String, FileState)>, Option<RowState>) {
+    let view = f.view();
+    let file = view.entity(entity).and_then(|e| e.file());
+    let file = file.map(|file| (file.path.as_str().to_string(), file.state));
+    (file, view.row_of(entity).map(|row| row.state))
+}
+
+fn at(text: &str, state: FileState) -> Option<(String, FileState)> {
+    Some((text.to_string(), state))
+}
+
+/// A writer `a` over `a.wav`, which no entity is bound to, and another writer `b`,
+/// with an entity `by` tagged whose file `b.wav`, holding `wavy`, is gone since.
+fn lost<F: Facade>(folder: &MemDisk, clock: &TestClock, by: Tagger) -> (F, F, EntityId) {
+    put(folder, "b.wav", b"wavy");
+    let (mut a, mut b) = untagged_then::<F>(folder, clock, |_| {});
+    let tagger = match by {
+        Tagger::A => &mut a,
+        Tagger::B => &mut b,
+    };
+    let tagged = tagger.commit("Tag", |i| {
+        let (i, _) = i.create(|e| {
+            e.adopt(&path("b.wav"), Expect::Holds(identity(b"wavy")))
+                .add(TAGS, tag("Live"));
+        });
+        i
+    });
+    let entity = tagged.unwrap().created[0];
+    let removed = Io::Remove {
+        root: Root::Folder,
+        path: path("b.wav"),
+    };
+    folder.perform(removed).unwrap();
+    for writer in [&mut a, &mut b] {
+        writer.refresh().unwrap();
+        writer.rescan().unwrap();
+    }
+    (a, b, entity)
+}
+
+#[derive(Clone, Copy)]
+enum Tagger {
+    A,
+    B,
+}
+
+fn save_new<F: Facade>(a: &mut F, text: &str, bytes: &[u8]) {
+    a.commit("Save", |i| {
+        i.save_file(&path(text), bytes.to_vec(), Expect::Absent)
+    })
+    .unwrap();
+    a.rescan().unwrap();
+}
+
+/// Commits and undoes a tag of `entity`, a commit that pins the moves `a` holds.
+fn pin<F: Facade>(a: &mut F, entity: EntityId) {
+    a.commit("Tag", |i| i.add(entity, TAGS, tag("Kept")))
+        .unwrap();
+    a.undo().unwrap();
+}
+
+/// The path the latest live write of `entity`'s file register names.
+fn fact_at<F: Facade>(a: &F, entity: EntityId) -> Option<String> {
+    let writes = a.refolded().file_writes(entity);
+    let fact = writes.last()?.value.as_ref()?;
+    Some(fact.path.as_str().to_string())
+}
+
+fn an_undo_of_a_new_file_this_writer_since_made_an_entitys_leaves_that_entity_lost<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b) = untagged_then::<F>(&folder, &clock, |a| save_new(a, "c.wav", b"wavy"));
+    let tagged = a.commit("Tag", |i| {
+        let (i, _) = i.create(|e| {
+            e.adopt(&path("c.wav"), Expect::Holds(identity(b"wavy")))
+                .add(TAGS, tag("Live"));
+        });
+        i
+    });
+    let entity = tagged.unwrap().created[0];
+    a.forget_undo();
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "c.wav"), None);
+    let lost = (at("c.wav", FileState::Missing), Some(RowState::Missing));
+    assert_eq!(shown_at(&a, entity), lost, "undone");
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "c.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("c.wav", FileState::InSync),
+        "redone"
+    );
+}
+
+fn an_undo_of_a_new_file_a_lost_entity_was_found_in_leaves_that_entity_lost<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b, entity) = lost::<F>(&folder, &clock, Tagger::A);
+    save_new(&mut a, "c.wav", b"wavy");
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("c.wav", FileState::InSync),
+        "found"
+    );
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "c.wav"), None);
+    let lost = (at("b.wav", FileState::Missing), Some(RowState::Missing));
+    assert_eq!(shown_at(&a, entity), lost, "undone");
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "c.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("c.wav", FileState::InSync),
+        "redone"
+    );
+}
+
+fn an_undo_of_a_save_over_a_file_a_lost_entity_was_found_in_leaves_that_entity_lost<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b, entity) = lost::<F>(&folder, &clock, Tagger::A);
+    save_untagged(&mut a);
+    a.rescan().unwrap();
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("a.wav", FileState::InSync),
+        "found"
+    );
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+    let lost = (at("b.wav", FileState::Missing), Some(RowState::Missing));
+    assert_eq!(shown_at(&a, entity), lost, "undone");
+    let view = a.view();
+    let unbound: Vec<&str> = view.unbound().map(RelPath::as_str).collect();
+    assert_eq!(unbound, ["a.wav"]);
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("a.wav", FileState::InSync),
+        "redone"
+    );
+}
+
+fn an_undo_of_a_new_file_a_pin_gave_a_lost_entity_leaves_that_entity_lost<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b, entity) = lost::<F>(&folder, &clock, Tagger::A);
+    save_new(&mut a, "c.wav", b"wavy");
+    pin(&mut a, entity);
+    assert_eq!(fact_at(&a, entity).as_deref(), Some("c.wav"), "pinned");
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "c.wav"), None);
+    let lost = (at("c.wav", FileState::Missing), Some(RowState::Missing));
+    assert_eq!(shown_at(&a, entity), lost, "undone");
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "c.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("c.wav", FileState::InSync),
+        "redone"
+    );
+}
+
+fn an_undo_of_a_save_over_a_file_a_pin_gave_a_lost_entity_brings_bytes_back_as_its_file<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b, entity) = lost::<F>(&folder, &clock, Tagger::A);
+    save_untagged(&mut a);
+    a.rescan().unwrap();
+    pin(&mut a, entity);
+    assert_eq!(fact_at(&a, entity).as_deref(), Some("a.wav"), "pinned");
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("a.wav", FileState::InSync),
+        "undone"
+    );
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("a.wav", FileState::InSync),
+        "redone"
+    );
+}
+
+fn an_undo_of_a_save_is_not_refused_over_another_writers_pin_of_the_entity_found_in_it<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, entity) = lost::<F>(&folder, &clock, Tagger::B);
+    save_untagged(&mut a);
+    b.refresh().unwrap();
+    b.rescan().unwrap();
+    b.commit("Tag", |i| i.add(entity, TAGS, tag("Kept")))
+        .unwrap();
+    a.refresh().unwrap();
+    assert_eq!(fact_at(&a, entity).as_deref(), Some("a.wav"), "pinned");
+
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+    assert_eq!(
+        shown_at(&a, entity).0,
+        at("a.wav", FileState::InSync),
+        "undone"
+    );
 }
 
 fn an_undo_of_a_rename_moves_back_the_file_another_writers_entity_was_found_in<F: Facade>() {
