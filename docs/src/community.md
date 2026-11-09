@@ -29,10 +29,9 @@ above. Open it at
 
 ### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
 
-An open companion for Nord keyboards, starting with the Stage line. It reads
-Stage 2, 3 and 4 programs, keeps a searchable library of programs and samples,
-plays samples on an on-screen keyboard or from a MIDI controller, and reads and
-writes Stage 4 programs over USB. It is a decompilation project. Open it at
+A viewer for Nord program, sample and piano files. It converts Stage 2 and 3
+programs to Stage 4, copies programs to and from the keyboard over USB, and lets
+players share programs they made. Open it at
 [opennord.gigmeister.app](https://opennord.gigmeister.app).
 
 ## Adding to this list
