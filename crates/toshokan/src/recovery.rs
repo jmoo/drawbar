@@ -7,7 +7,8 @@ use std::rc::Rc;
 
 use crate::derive::Placed;
 use crate::effects::{
-    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Precondition, Progress, Staged,
+    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Precondition, Progress, SeenStaged,
+    Staged,
 };
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
@@ -54,6 +55,9 @@ pub struct Settling {
     pub pending: PendingRecord,
     /// How settling will end if nothing else changes the folder first.
     pub outcome: Outcome,
+    /// What its staged files held before they went into place, where this instance
+    /// carried the record out and read them.
+    pub(crate) staged: SeenStaged,
 }
 
 /// Reads every writer's pending records and sorts them. `own` is this writer and
@@ -151,6 +155,7 @@ pub fn predict(
                     record: name,
                     pending: record,
                     outcome,
+                    staged: SeenStaged::new(),
                 });
                 recovery
             })
@@ -207,6 +212,26 @@ pub fn settle(
     identify: Rc<dyn Identify>,
     capabilities: Capabilities,
 ) -> Task<'static, Result<Resumed>> {
+    settle_seen(
+        layout,
+        name,
+        record,
+        identify,
+        capabilities,
+        SeenStaged::new(),
+    )
+}
+
+/// [`settle`], knowing what an earlier run of the record read of staged files it put
+/// in place: `staged`.
+pub(crate) fn settle_seen(
+    layout: &Layout,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+    capabilities: Capabilities,
+    staged: SeenStaged,
+) -> Task<'static, Result<Resumed>> {
     let layout = layout.clone();
     effects::observe(&layout, name, &record)
         .and_then({
@@ -256,9 +281,13 @@ pub fn settle(
             each(stale, |path| flow::remove(Root::Folder, &path))
                 .and_then(set_aside)
                 .and_then(move |()| {
-                    flow::run(effects::apply(&layout, name, record, done, identify))
+                    let applied =
+                        effects::apply_seen(&layout, name, record, done, identify, staged);
+                    flow::run(applied).then(|applied| match applied {
+                        Ok(applied) => flow::ok(Resumed::Applied(Box::new(applied))),
+                        Err(stopped) => Flow::Done(Err(stopped.error)),
+                    })
                 })
-                .map_ok(Resumed::Applied)
         })
         .task()
 }
@@ -266,7 +295,7 @@ pub fn settle(
 /// How resuming a record of this writer's own went.
 pub enum Resumed {
     /// Its remaining steps were carried out, as this says.
-    Applied(Applied),
+    Applied(Box<Applied>),
     /// What a remaining step moves is gone, or is not what the intent checked, so
     /// none was taken.
     GivenUp,

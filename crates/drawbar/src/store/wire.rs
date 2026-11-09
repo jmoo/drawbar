@@ -122,6 +122,7 @@ mod tests {
         let cmd = Cmd::Intent(Intent::Batch(vec![
             Intent::Save {
                 id: 1,
+                row: None,
                 path: path("a.ne5p"),
                 bytes: b"saved bytes".to_vec(),
                 expect: toshokan::Expect::Absent,
@@ -180,25 +181,24 @@ mod tests {
 
     #[test]
     fn what_the_app_shows_comes_back_keyed_as_it_was() {
-        use super::super::shown::{Change, Shown};
-        use super::super::{Key, Stat};
+        use super::super::shown::{Change, Row, Shown};
 
         let entity = toshokan::EntityId::from_u128(0xab);
-        let file = |at: &str| {
-            (
-                path(at),
-                Some(Stat {
-                    len: 3,
-                    modified: Some(7),
-                }),
-            )
+        let file = |at: &str, entity: Option<_>| Row {
+            path: path(at),
+            state: toshokan::RowState::Present {
+                len: 3,
+                modified: Some(7),
+            },
+            entity,
+            worn: entity.map(|_| "Live".to_string()).into_iter().collect(),
+            wears: entity.is_some(),
+            came: None,
         };
+        let row = |n: u64| -> toshokan::FileId { serde_json::from_str(&n.to_string()).unwrap() };
         let mut shown = Shown::default();
-        shown.files.insert(Key::Entity(entity), file("Set/a.ne5p"));
-        shown
-            .files
-            .insert(Key::File(path("b: c.ne5p")), file("b: c.ne5p"));
-        shown.worn.insert(entity, ["Live".to_string()].into());
+        shown.rows.insert(row(1), file("Set/a.ne5p", Some(entity)));
+        shown.rows.insert(row(2), file("b: c.ne5p", None));
         let change = Change::Whole(shown);
         let back: Change = decode(encode(&change).unwrap()).unwrap();
         assert_eq!(back, change);
@@ -258,6 +258,7 @@ mod tests {
     fn a_message_naming_a_missing_attachment_does_not_decode() {
         let mut message = encode(&Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("a.ne5p"),
             bytes: b"bytes".to_vec(),
             expect: toshokan::Expect::Absent,

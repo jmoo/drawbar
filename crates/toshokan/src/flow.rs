@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
-use crate::env::Identify;
+use crate::env::{Identify, Names};
 use crate::error::{Error, Result};
 use crate::ids::Identity;
 use crate::io::{
@@ -198,6 +198,56 @@ pub(crate) fn spelled_in<'a>(
             })
         },
     )
+}
+
+/// `path`, which is there, as its directories list it: each name as listed, else
+/// the first listed name the volume takes for it under `names`; `None` where a
+/// directory lists neither. Lists only the directories `listings` does not hold,
+/// and gives `listings` back holding them too.
+pub(crate) fn listed_as<'a>(
+    root: Root,
+    path: &RelPath,
+    names: Rc<dyn Names>,
+    listings: Listings,
+) -> Fallible<'a, (Option<RelPath>, Listings)> {
+    let components: Vec<String> = path.components().map(str::to_owned).collect();
+    fold(
+        components.into_iter(),
+        (Some(RelPath::ROOT), listings),
+        move |(dir, mut listings), name| {
+            let Some(dir) = dir else {
+                return ok((None, listings));
+            };
+            if let Some(listed) = listings.get(&dir) {
+                return ok((listed_name(&dir, &name, listed, &*names), listings));
+            }
+            let names = Rc::clone(&names);
+            list(root, &dir).map_ok(move |entries| {
+                let listed: BTreeSet<String> =
+                    entries.into_iter().map(|entry| entry.name).collect();
+                let spelled = listed_name(&dir, &name, &listed, &*names);
+                listings.insert(dir, listed);
+                (spelled, listings)
+            })
+        },
+    )
+}
+
+/// `dir`'s entry `name` as `listed`, its names, spell it: as asked, else the first
+/// the volume takes for it under `names`.
+fn listed_name(
+    dir: &RelPath,
+    name: &str,
+    listed: &BTreeSet<String>,
+    names: &dyn Names,
+) -> Option<RelPath> {
+    let asked = dir.join(name).ok()?;
+    if listed.contains(name) {
+        return Some(asked);
+    }
+    let key = names.key(asked.as_str());
+    let mut paths = listed.iter().filter_map(|listed| dir.join(listed).ok());
+    paths.find(|path| names.key(path.as_str()) == key)
 }
 
 pub(crate) fn read<'a>(root: Root, path: &RelPath, range: Range) -> Fallible<'a, Vec<u8>> {

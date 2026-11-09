@@ -1,7 +1,7 @@
 //! What this build writes is what the fixtures hold: every file of every state
 //! decodes to members this build knows and encodes back to the same bytes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use toshokan::binding::Scan;
 use toshokan::env::TestClock;
@@ -237,7 +237,7 @@ fn every_identities_file_encodes_back_byte_for_byte() {
 }
 
 #[test]
-fn compacting_one_writer_open_writes_the_snapshot_one_writer_compacted_holds() {
+fn compacting_one_writer_open_writes_the_snapshot_one_writer_compacted_holds_with_its_binds() {
     let machine = load("one-writer-open");
     let backend = Faulty::new(&machine);
     let (mut library, _) = open(&backend, "fixture", 99, &TestClock::at(100_000));
@@ -249,8 +249,16 @@ fn compacting_one_writer_open_writes_the_snapshot_one_writer_compacted_holds() {
     let held = held
         .iter()
         .find(|(path, _)| path.as_str().contains("/snapshot-"));
+    let mut snapshot = Snapshot::decode(written).unwrap();
+    // The fixture's last entry, n 10, is a `bind` entry pinning `moved/five.syx`.
     assert_eq!(
-        String::from_utf8_lossy(written),
+        snapshot.binds,
+        BTreeSet::from([snapshot.head.hash]),
+        "the folded bind entry"
+    );
+    snapshot.binds.clear();
+    assert_eq!(
+        String::from_utf8_lossy(&snapshot.encode()),
         String::from_utf8_lossy(held.unwrap().1)
     );
 }

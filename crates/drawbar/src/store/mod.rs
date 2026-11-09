@@ -29,7 +29,7 @@ mod unsaved;
 pub(crate) mod wire;
 mod zip;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, local_root, openable, starting, sync_dir, Backend};
+pub use native::{default_root, local_root, openable, starting, sync_dir, Ambient, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -118,7 +118,8 @@ pub use mirror::{Pass, Store};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use toshokan::EntityId;
+use toshokan::rows::RowChange;
+use toshokan::{EntityId, FileId};
 
 use crate::ondisk::OnDisk;
 use crate::rewrite::Pieces;
@@ -178,24 +179,13 @@ impl LibPath {
 
     /// The last name, or the empty string for the root.
     pub fn leaf(&self) -> &str {
-        self.0
-            .rsplit_once('/')
-            .map_or(self.0.as_str(), |(_, leaf)| leaf)
-    }
-
-    /// How many folders down this is: 0 for an entry in the root.
-    pub fn depth(&self) -> usize {
-        self.0.matches('/').count()
+        self.0.rsplit('/').next().unwrap_or_default()
     }
 
     /// Whether this is `dir` or somewhere inside it.
     pub fn is_in(&self, dir: &LibPath) -> bool {
-        dir.is_root()
-            || self.0 == dir.0
-            || self
-                .0
-                .strip_prefix(&dir.0)
-                .is_some_and(|rest| rest.starts_with('/'))
+        let rest = self.0.strip_prefix(&dir.0);
+        dir.is_root() || rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     }
 
     /// Where this ends up when `from` is renamed to `to`: moved with it if it is `from` or
@@ -340,7 +330,7 @@ pub struct Found {
     /// CRC-32 over the whole file, taken only where its contents decide something: its
     /// [`Stat`] moved from one whose CRC is known, or it may be a known file moved.
     pub crc: Option<u32>,
-    /// The file's identity, where its contents were read.
+    /// The file's identity, where its contents were read or written.
     pub identity: Option<toshokan::Identity>,
 }
 
@@ -503,15 +493,23 @@ pub enum Source {
     Edited(LibPath, Fingerprint, Arc<Pieces>),
 }
 
-/// An unsaved edit of an asset an earlier session kept, as opening found it.
+/// An unsaved edit of an asset an earlier session kept, as the first scan of every file
+/// found it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Kept {
     /// The file it is of.
     pub of: Key,
+    /// The row of its file: its entity's, as joins carried it, or for a file kept by its
+    /// path, the row there where the file holds what the edit was made over.
+    pub row: Option<FileId>,
     /// The clock it was kept at: of two kept of one asset, the later is the newer.
     pub at: u64,
     /// Whether the file still holds what the edit was made over.
     pub holds: bool,
+    /// The identity of the file it was made over.
+    pub base: toshokan::Identity,
+    /// Where its file was, as the library last said.
+    pub path: Option<LibPath>,
     #[serde(with = "wire::bytes")]
     pub bytes: Vec<u8>,
 }
@@ -578,12 +576,12 @@ pub enum Cmd {
         orphan: toshokan::report::Orphan,
         how: toshokan::log::Settlement,
     },
-    /// Read each of these files for the asset whose id comes with it, reading at most
-    /// `room` bytes whole between them. A piano or sample instrument may be left resting
-    /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
-    /// knew of the file. Answered by [`Event::Read`].
+    /// Read each of these files for the asset whose id comes with it, with the row the
+    /// file is, reading at most `room` bytes whole between them. A piano or sample
+    /// instrument may be left resting in its file instead, which takes none of `room`.
+    /// The fingerprint is what drawbar knew of the file. Answered by [`Event::Read`].
     Read {
-        files: Vec<(u64, LibPath, Option<Fingerprint>)>,
+        files: Vec<(u64, FileId, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
     /// Open this copy of a library, as File ▸ Export library saves one, into
@@ -620,7 +618,7 @@ pub enum Intent {
     /// where `make` says, add the tag to the library's list of tags as
     /// [`Intent::MakeTag`] does.
     Tag {
-        files: Vec<Key>,
+        files: Vec<Tagged>,
         name: String,
         make: bool,
     },
@@ -654,10 +652,12 @@ pub enum Intent {
     /// Never show or merge the changes of `run` again, nor those after it.
     Dismiss { run: toshokan::log::Run },
     /// Write a file whole: a new one where `expect` is [`toshokan::Expect::Absent`],
-    /// with an entity saying where it came from where `came` says. Answered by
+    /// with an entity saying where it came from where `came` says. The file of `row`'s
+    /// entity, where it has one, whether or not the folder holds it. Answered by
     /// [`Event::Saved`].
     Save {
         id: u64,
+        row: Option<FileId>,
         path: LibPath,
         #[serde(with = "wire::bytes")]
         bytes: Vec<u8>,
@@ -722,6 +722,14 @@ fn gesture(parts: &[Intent]) -> Option<&Intent> {
 
 /// What the Edit menu calls the take-in of the list an older drawbar kept.
 pub const TAKE_IN: &str = "Bring in kept sounds";
+
+/// A file an [`Intent::Tag`] puts its tag on: a row of the view, or the file a save in
+/// the same batch makes at this path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tagged {
+    Row(FileId),
+    Saved(LibPath),
+}
 
 /// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
 /// says, to `to`.
@@ -1016,8 +1024,6 @@ pub struct Opened {
     /// What the library kept of its view, which lists no file until a
     /// [`Cmd::Rescan`] has scanned every one.
     pub viewed: Viewed,
-    /// The unsaved edits of assets an earlier session kept, or why one does not read.
-    pub drafts: Vec<Result<Kept, String>>,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
     /// What opening tried to tidy and could not: finishing a change a crash or
@@ -1030,16 +1036,13 @@ pub struct Opened {
 pub struct Viewed {
     /// What the answer changed of what the app shows.
     pub shown: shown::Change,
-    /// Every folder below the root, in path order, where the answer listed them.
-    pub dirs: Option<Vec<LibPath>>,
-    /// What changed since the view before, and who changed it.
+    /// What changed of the entities since the view before, and who changed it.
     pub changes: Vec<toshokan::report::Change>,
-    /// The files the answer's scan found moved outside drawbar, from and to.
-    pub moves: Vec<(LibPath, LibPath)>,
-    /// What this session's undo, redo or settling of an unfinished change did, which
-    /// the workspace follows without a word: each tree it moved, then each file no
-    /// entity is bound to that it made, moved or trashed, from and to.
-    pub followed: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
+    /// Each change of a row since the view the app was last shown, and who made it.
+    pub rows: Vec<RowChange>,
+    /// Whether the answer is to this session's undo, redo or settling of an unfinished
+    /// change, which the workspace follows without a word.
+    pub quiet: bool,
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
     pub unlisted: Option<Vec<LibPath>>,
@@ -1056,11 +1059,14 @@ pub struct Viewed {
     pub left: Vec<LibPath>,
     /// The paths a change of drawbar's own names that its next change finishes.
     pub finishing: Vec<LibPath>,
-    /// Where each file was that the answer's scan newly found several files could each
-    /// be, with those files.
-    pub ambiguous: Vec<(LibPath, Vec<LibPath>)>,
-    /// Each file whose entities the answer's own change joined, with the entities.
-    pub joined: Vec<(LibPath, toshokan::report::Joined)>,
+    /// The unsaved edits of assets an earlier session kept, or why one does not read,
+    /// where the answer is the first to scan every file.
+    pub drafts: Option<Vec<Result<Kept, String>>>,
+    /// The row of each file an answer the app lost said was written, by its asset.
+    pub wrote: Vec<(u64, FileId)>,
+    /// The rows whose file was rewritten, with the identity written where the answer
+    /// knows it: each is read again unless drawbar holds that identity.
+    pub rewritten: Vec<(FileId, Option<toshokan::Identity>)>,
 }
 
 /// A fault a test makes the library's thread or worker show.
@@ -1120,22 +1126,23 @@ pub enum Event {
     /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
+    /// What an [`Intent::Save`] wrote, with its file's row.
     Saved {
         id: u64,
         path: LibPath,
-        result: Result<Fingerprint, Failure>,
+        result: Result<(FileId, Fingerprint), Failure>,
     },
-    /// What an [`Intent::Rewrite`] wrote, as a listing finds it.
+    /// What an [`Intent::Rewrite`] wrote, as a listing finds it, with its file's row.
     Rewritten {
         id: u64,
         path: LibPath,
-        result: Result<Found, Failure>,
+        result: Result<(FileId, Found), Failure>,
     },
-    /// What an [`Intent::Import`] copied, as a listing finds it.
+    /// What an [`Intent::Import`] copied, as a listing finds it, with its file's row.
     Imported {
         id: u64,
         path: LibPath,
-        result: Result<Found, Failure>,
+        result: Result<(FileId, Found), Failure>,
     },
     /// Whether an [`Intent::Move`] or an [`Intent::MoveFolder`] moved anything, and why
     /// not.
@@ -1249,12 +1256,8 @@ impl Codes {
     }
 
     fn failed<T>(&self, result: &Result<T, Failure>) -> std::collections::BTreeSet<&'static str> {
-        result
-            .as_ref()
-            .err()
-            .map(|failure| self.of(failure))
-            .into_iter()
-            .collect()
+        let failed = result.as_ref().err().map(|failure| self.of(failure));
+        failed.into_iter().collect()
     }
 }
 

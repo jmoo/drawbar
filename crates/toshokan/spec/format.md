@@ -305,6 +305,7 @@ merged state exist only in readers and in snapshots.
 | `n`, `head` | The number and hash of the last folded entry       |
 | `certified` | What lets a reader recognize every folded entry    |
 | `state`     | What the writer contributes                        |
+| `binds`     | Optional: the folded `bind` entries `state` holds  |
 
 Members a reader does not know are kept, and a compaction carries those of the
 snapshot it folds into the new one.
@@ -319,6 +320,14 @@ members of `certified`, such as a `heads` list, whose entries the rest already
 name.
 A reader refuses a snapshot with a certificate whose last line comes before its
 first, or that names an entry numbered past its head.
+
+`binds` is `["<hash>",…]`, in hash order, written only where it names any: the
+folded `bind` entries whose `pin` writes `state` holds as the writer's latest to
+each file register, at most one per entity, and none once a later write replaces a
+pin. It lets a reader tell a binding's pin from an intent's once the entry is
+folded; a reader keeps only the hashes of `pin` writes `state` holds. A snapshot
+without it, as an earlier build writes, names none, and an earlier build that
+compacts a snapshot carries the member over as it found it.
 
 `state` holds, per entity, records that each name a field: no member for
 existence, `key` for a register, `key` and `value` for a set's member, `"file":true`

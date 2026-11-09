@@ -8,7 +8,7 @@
 //! goes [`PATIENCE`] without a sign of life.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::io;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use std::time::Duration;
 use eframe::egui;
 use js_sys::{Function, Promise};
 use toshokan::web::{Folder as Kept, Hint, Hints};
-use toshokan::RelPath;
+use toshokan::{FileId, RelPath};
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
@@ -31,6 +31,7 @@ use web_sys::{
 use super::dom::failure;
 use super::exec::{self, Fs};
 use super::refusing::refused;
+use super::shown::{Change, Class};
 use super::worker::Worker;
 use super::{Cmd, Event, Fingerprint, LibPath, Rescue, Stat};
 use crate::js::{describe, field};
@@ -518,7 +519,7 @@ async fn drive(
         }
         if let Ok(folder) = &folder {
             folder.forget();
-            folder.follow(&moved(&answers)).await;
+            folder.follow(&placed(&answers)).await;
         }
         for answer in answers {
             if let (Event::Committed { made, finished, .. }, Some(hints)) = (&answer, &hints) {
@@ -581,34 +582,33 @@ fn after(ms: i32) -> Promise {
     })
 }
 
-/// Every file and folder `answers` say moved, from and to, in order.
-fn moved(answers: &[Event]) -> Vec<(LibPath, LibPath)> {
-    let viewed = |viewed: &super::Viewed| {
-        let followed = viewed.followed.iter().flatten();
-        let followed = followed.filter_map(|(from, to)| Some((from.clone()?, to.clone()?)));
-        viewed
-            .moves
-            .iter()
-            .cloned()
-            .chain(followed)
-            .collect::<Vec<_>>()
-    };
-    answers
-        .iter()
-        .flat_map(|answer| match answer {
-            Event::Moved {
-                from,
-                to,
-                result: Ok(()),
-            } => vec![(from.clone(), to.clone())],
+/// Where each file is that the views `answers` end with show, by its row.
+fn placed(answers: &[Event]) -> BTreeMap<FileId, LibPath> {
+    let mut placed = BTreeMap::new();
+    for answer in answers {
+        let viewed = match answer {
             Event::Committed {
-                result: Ok(seen), ..
+                result: Ok(viewed), ..
             }
-            | Event::Scanned(Ok(seen)) => viewed(seen),
-            Event::Opened(Ok(opened)) => viewed(&opened.viewed),
-            _ => Vec::new(),
-        })
-        .collect()
+            | Event::Scanned(Ok(viewed)) => viewed,
+            Event::Opened(Ok(opened)) => &opened.viewed,
+            _ => continue,
+        };
+        match &viewed.shown {
+            Change::Whole(shown) => {
+                let files = shown.class(Class::File);
+                placed.extend(files.map(|(file, row)| (file, row.path.clone())));
+            }
+            Change::Rows { rows, .. } => {
+                let files = rows.iter().filter_map(|(file, row)| {
+                    let row = row.as_ref().filter(|row| row.class() == Class::File)?;
+                    Some((*file, row.path.clone()))
+                });
+                placed.extend(files);
+            }
+        }
+    }
+    placed
 }
 
 /// The next job, waiting for one while there is none, or `None` once the backend is
@@ -966,9 +966,9 @@ struct Folder {
     /// ⚠️ Safari and Firefox keep a handle on its folder wherever it moves, so the handles
     /// are let go around each read, since the worker may have moved a folder since.
     dirs: RefCell<HashMap<String, FileSystemDirectoryHandle>>,
-    /// The files left resting, each at the path it is at now, so a move takes their
-    /// snapshots again where they went.
-    resting: RefCell<Vec<(Weak<OnDisk>, LibPath)>>,
+    /// The files left resting, each with its row and the path it is at now, so a move
+    /// takes their snapshots again where they went.
+    resting: RefCell<Vec<(Weak<OnDisk>, FileId, LibPath)>>,
 }
 
 impl Folder {
@@ -978,16 +978,16 @@ impl Folder {
         self.dirs.borrow_mut().clear();
     }
 
-    /// Follow the files left resting through `moves`, each a file or a folder from and
-    /// to: each moved takes its snapshot again where it went.
-    async fn follow(&self, moves: &[(LibPath, LibPath)]) {
+    /// Follow the files left resting to where `placed` puts their rows: each moved takes
+    /// its snapshot again where it went.
+    async fn follow(&self, placed: &BTreeMap<FileId, LibPath>) {
         let mut moved = Vec::new();
-        for (file, at) in self.resting.borrow_mut().iter_mut() {
-            let Some(to) = moves.iter().find_map(|(from, to)| at.moved(from, to)) else {
+        for (file, row, at) in self.resting.borrow_mut().iter_mut() {
+            let Some(to) = placed.get(row).filter(|to| **to != *at) else {
                 continue;
             };
             *at = to.clone();
-            moved.push((file.clone(), to));
+            moved.push((file.clone(), to.clone()));
         }
         for (file, at) in moved {
             let (Some(file), Ok(handle)) = (file.upgrade(), self.file(at.as_str()).await) else {
@@ -998,6 +998,7 @@ impl Folder {
             }
         }
     }
+
     /// The folder at `root`, or why this browser gives the page no storage. Some private
     /// windows refuse it.
     async fn open(root: Root) -> Result<Folder, String> {
@@ -1140,6 +1141,7 @@ impl Fs for Folder {
     /// the library makes.
     async fn rest(
         &self,
+        row: FileId,
         path: &str,
         known: Option<Fingerprint>,
     ) -> io::Result<Option<Arc<OnDisk>>> {
@@ -1150,8 +1152,8 @@ impl Fs for Folder {
         let (file, at) = (Arc::new(file), LibPath::parse(path));
         if let Some(at) = at {
             let mut resting = self.resting.borrow_mut();
-            resting.retain(|(file, _)| file.strong_count() > 0);
-            resting.push((Arc::downgrade(&file), at));
+            resting.retain(|(file, ..)| file.strong_count() > 0);
+            resting.push((Arc::downgrade(&file), row, at));
         }
         Ok(Some(file))
     }

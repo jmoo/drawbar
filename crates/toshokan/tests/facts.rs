@@ -3,10 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use toshokan::binding::Bindings;
 use toshokan::contribution::Contribution;
 use toshokan::derive::{derive, Seen, SeenSegment};
-use toshokan::env::SeededRandom;
+use toshokan::env::{ExactNames, SeededRandom};
 use toshokan::intent::{ops, Driver, Intent};
 use toshokan::line::Line;
 use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Logged, Op, Ref};
@@ -65,12 +64,7 @@ fn plan(intent: Intent<Ids>) -> Plan {
 fn view(folded: Folded) -> View {
     View::new(Parts {
         folded,
-        bindings: Bindings::default().into(),
-        listing: None,
-        writers: Vec::new(),
-        forks: Vec::new(),
-        gaps: Vec::new(),
-        items: Vec::new(),
+        ..Parts::default()
     })
 }
 
@@ -123,6 +117,7 @@ fn compacted(writer: WriterId, entries: &[Rc<Entry>]) -> Rc<Snapshot> {
             ..Certified::default()
         },
         state,
+        binds: Default::default(),
         unknown: BTreeMap::new(),
     };
     Rc::new(Snapshot::decode(&snapshot.encode()).unwrap())
@@ -161,7 +156,17 @@ impl Writer {
             .last()
             .map_or((EntryHash::ZERO, 0), |last| (last.hash(), last.n() + 1));
         let before = match &kind {
-            EntryKind::Intent(logged) => Before::of(&logged.ops, &self.folded, &[]),
+            EntryKind::Intent(logged) => {
+                let chains = self.chains.iter();
+                let seen = chains.filter_map(|(by, chain)| Some((*by, chain.last()?.n())));
+                Before::of(
+                    &logged.ops,
+                    &self.folded,
+                    &[],
+                    &BTreeMap::new(),
+                    seen.collect(),
+                )
+            }
             _ => Before::default(),
         };
         let logged = match &kind {
@@ -234,12 +239,16 @@ impl Writer {
     }
 
     fn undo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = self.history.plan_undo(self.id, &self.view())?;
+        let plan = self
+            .history
+            .plan_undo(self.id, &self.view(), &BTreeMap::new(), &ExactNames)?;
         Ok(self.commit(plan, now).unwrap())
     }
 
     fn redo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = self.history.plan_redo(self.id, &self.view())?;
+        let plan = self
+            .history
+            .plan_redo(self.id, &self.view(), &BTreeMap::new(), &ExactNames)?;
         Ok(self.commit(plan, now).unwrap())
     }
 }
@@ -700,9 +709,10 @@ fn undo_is_refused_where_another_writer_changed_the_thing_since() {
         ),
     ];
     for (what, mine, theirs) in cases {
-        // A remove of a value the remover never saw added does nothing.
+        // A remove of a value the remover never saw added does nothing, and a delete
+        // concurrent with the intent leaves the intent's write live.
         let concurrency: &[bool] = match what {
-            "a remove of the added value" => &[false],
+            "a remove of the added value" | "a delete" => &[false],
             _ => &[false, true],
         };
         for &concurrent in concurrency {
@@ -851,7 +861,10 @@ fn undo_puts_files_back_and_leaves_pins_alone() {
             take: None,
         };
         let changed = a.intent(3, vec![file, pin], trashed);
-        let plan = a.history.plan_undo(a.id, &a.view()).unwrap();
+        let plan = a
+            .history
+            .plan_undo(a.id, &a.view(), &BTreeMap::new(), &ExactNames)
+            .unwrap();
         assert_eq!(plan.files, expected, "{what}");
         assert_eq!(plan.facts, [], "{what}");
         assert_eq!(plan.reverses, Some(changed.hash()), "{what}");

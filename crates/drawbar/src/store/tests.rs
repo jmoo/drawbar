@@ -12,6 +12,9 @@ use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
+mod two_drawbars;
+mod walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
@@ -1006,7 +1009,7 @@ fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
         origin.label()
     );
     assert!(
-        matches!(third.store.key(kept), Some(Key::Entity(_))),
+        third.store.entity(kept).is_some(),
         "an entity says where it came from"
     );
 }
@@ -1554,42 +1557,43 @@ fn a_folder_opened_is_left_as_it_was_until_something_changes() {
     assert_eq!(again.worn(again.only()), ["Sunday"]);
 }
 
-/// A rescan that finds several changes made outside drawbar says each in the log and all
-/// of them in the status line; one delete or move is said by its own line. Only a file
-/// the library says something about is followed through a move.
+/// A rescan that finds files changed outside drawbar says nothing of those nothing tags,
+/// follows a tagged file through a move without a word, and counts in one line the
+/// tagged files that went.
 #[test]
-fn a_rescan_reports_what_changed() {
+fn a_rescan_says_only_how_many_tagged_files_went() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
-    for (name, gain) in [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")] {
+    let files = [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")];
+    for (name, gain) in files {
         fs::write(root.at(name), with_gain(&program, gain)).unwrap();
     }
     let mut first = Session::open(&root);
-    let keys = first.named("Keys.ne5p");
-    first.tag(&[keys], "Sunday");
+    let tagged = [first.named("Keys.ne5p"), first.named("Pad.ne5p")];
+    first.tag(&tagged, "Sunday");
     first.close();
     let mut session = Session::open(&root);
+    let keys = session.named("Keys.ne5p");
+    let said = session.bench.log.iter().count();
     fs::write(root.at("Lead.ne5p"), with_gain(&program, "40")).unwrap();
     fs::remove_file(root.at("Bass.ne5p")).unwrap();
     fs::rename(root.at("Keys.ne5p"), root.at("Organ.ne5p")).unwrap();
-    session.refocus();
-
-    assert_eq!(session.said("“Bass.ne5p” was deleted outside drawbar."), 1);
-    assert_eq!(
-        session.said("“Keys.ne5p” was moved to Organ.ne5p outside drawbar"),
-        1
-    );
-    assert_eq!(
-        session.bench.log.status().1,
-        "Outside drawbar, 1 file appeared, 1 was deleted and 1 was moved."
-    );
-
     fs::remove_file(root.at("Pad.ne5p")).unwrap();
     session.refocus();
+
+    let transcript = session.bench.log.transcript();
+    assert_eq!(session.bench.log.iter().count(), said + 1, "{transcript}");
     assert_eq!(
         session.bench.log.status().1,
-        "“Pad.ne5p” was deleted outside drawbar."
+        "1 tagged file is no longer in the library folder."
     );
+    assert_eq!(session.path(keys).as_deref(), Some("Organ.ne5p"));
+    assert_eq!(session.worn(keys), ["Sunday"]);
+    let lost = session.bench.browser.folders.lost().iter();
+    let lost: Vec<String> = lost.map(|lost| lost.path.to_string()).collect();
+    let missing = session.bench.browser.folders.missing.iter();
+    let missing: Vec<Option<String>> = missing.map(|id| session.path(*id)).collect();
+    assert_eq!((lost, missing), (vec!["Pad.ne5p".to_string()], vec![]));
 }
 
 /// An asset deleted while its first write is in flight loses its file once that write
@@ -1621,8 +1625,10 @@ fn an_asset_deleted_while_its_file_is_written_goes_without_coming_back() {
     assert_eq!(root.names(""), [".drawbar"], "the file is gone");
 }
 
+/// A file deleted outside drawbar goes, and one with tags stays as a lost row with
+/// them, under the asset's id, now and after a restart.
 #[test]
-fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
+fn a_file_deleted_outside_goes_and_a_tagged_one_stays_lost_with_its_tags() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let (tagged, plain) = (session.create(), session.create());
@@ -1636,11 +1642,14 @@ fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
         session.bench.workspace.get(plain).is_none(),
         "gone with its file"
     );
-    assert!(
-        session.bench.workspace.get(tagged).is_some(),
+    let lost = session.bench.browser.folders.lost().iter();
+    let lost: Vec<(u64, String)> = lost.map(|lost| (lost.id, lost.path.to_string())).collect();
+    assert_eq!(
+        lost,
+        [(tagged, "untitled.ne5p".to_string())],
         "its tag is kept"
     );
-    assert!(session.bench.browser.folders.missing.contains(&tagged));
+    assert!(session.bench.browser.folders.missing.is_empty());
     session.close();
     assert_eq!(
         root.names(""),
@@ -4049,22 +4058,15 @@ fn a_file_keeps_its_id_as_it_becomes_an_entity_and_stops_being_one() {
     mixed(&root);
     let mut session = Session::listed(&root);
     let grand = session.named("Grand.ne5p");
-    assert_eq!(
-        session.store.key(grand),
-        Some(Key::File(LibPath::parse("Live/Grand.ne5p").unwrap()))
-    );
+    assert_eq!(session.store.entity(grand), None);
     session.tag(&[grand], "Sunday");
     assert!(
-        matches!(session.store.key(grand), Some(Key::Entity(_))),
+        session.store.entity(grand).is_some(),
         "an entity once tagged"
     );
     assert_eq!(session.named("Grand.ne5p"), grand);
     session.undo();
-    assert_eq!(
-        session.store.key(grand),
-        Some(Key::File(LibPath::parse("Live/Grand.ne5p").unwrap())),
-        "a file again"
-    );
+    assert_eq!(session.store.entity(grand), None, "a file again");
     assert_eq!(session.named("Grand.ne5p"), grand, "the same asset");
     assert_eq!(session.bench.workspace.listed().count(), 4);
     assert!(session.worn(grand).is_empty());
@@ -4321,7 +4323,10 @@ fn a_whole_view_mid_session_keeps_what_was_shown_and_adds_the_rest() {
     }
     session.settle();
     let shown = session.store.shown().expect("shown");
-    let shown = (shown.files.len(), shown.others().len());
+    let shown = (
+        shown.class(shown::Class::File).count(),
+        shown.others().len(),
+    );
     assert_eq!(shown, (1, 1100), "every file is shown once");
     let entity = session
         .bench
@@ -5064,14 +5069,16 @@ fn a_lost_row_keeps_its_id_until_it_is_forgotten() {
     assert_eq!(lost(&again), Vec::<u64>::new());
 }
 
-/// A tagged asset whose file went while the library was open is missing, and deleting it
-/// lets the library go of it with its tags: no lost row stands in for it.
+/// A tagged asset with an unsaved edit whose file went while the library was open is
+/// missing, and deleting it lets the library go of it with its tags: no lost row stands
+/// in for it.
 #[test]
 fn a_missing_tagged_asset_deleted_leaves_no_lost_row() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
     session.tag(&[id], "Sunday");
+    session.edit(id, "12");
     fs::remove_file(root.at("untitled.ne5p")).unwrap();
     session.refocus();
     assert!(
@@ -5162,7 +5169,9 @@ fn each_answer_lists_what_the_whole_view_lists() {
     let mut session = Session::open(&root);
     let step = |session: &mut Session, what: &str| {
         let fresh = Session::listed(&root);
-        assert_eq!(session.store.shown(), fresh.store.shown(), "after {what}");
+        let shown = |session: &Session| session.store.shown().cloned().unwrap_or_default();
+        let (ours, theirs) = (shown(session), shown(&fresh));
+        assert_eq!(ours.rows_shown(), theirs.rows_shown(), "after {what}");
         fresh.close();
     };
     let id = session.create();
@@ -5359,6 +5368,28 @@ fn a_selection_deleted_together_is_one_undo_step() {
     session.undo();
     session.undo();
     assert_eq!(root.names(""), files, "two undos bring all three back");
+}
+
+#[test]
+fn a_tagged_file_deleted_again_by_redo_goes_without_being_kept_as_missing() {
+    let root = Temp::new();
+    fs::write(root.at("Strings.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let file = session.named("Strings.ne5p");
+    session.tag(&[file], "Live");
+    session.bench.act(vec![crate::browser::Act::Remove(file)]);
+    session.sync();
+    session.undo();
+    session.redo();
+    assert_eq!(root.names(""), [".drawbar"]);
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert!(session.bench.browser.folders.missing.is_empty());
+    assert_eq!(
+        session.said("missing from the library folder"),
+        0,
+        "{}",
+        session.bench.log.transcript()
+    );
 }
 
 /// The segments of drawbar's history in the library folder, each with what it holds.
@@ -6053,33 +6084,138 @@ fn an_unsaved_edit_follows_its_file_through_a_folder_rename_and_its_undo() {
     assert!(again.bytes(id) == edited, "the edit came back");
 }
 
-/// Two windows that kept unsaved edits of one file: the newer comes back, and the
-/// older is let go, with a word.
+/// Two windows that kept unsaved edits of one file: the newer comes back over the file,
+/// and the older as an unsaved copy of its own, again after each restart.
 #[test]
-fn of_two_windows_edits_of_one_file_the_newer_comes_back() {
+fn of_two_windows_edits_of_one_file_the_newer_comes_back_and_the_older_as_a_copy() {
     let root = Temp::new();
     fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut first = Session::open(&root);
     let mut second = Session::open(&root);
     let a = first.named("a.ne5p");
-    first.edit(a, "12");
+    let older = first.edit(a, "12");
     first.close();
     std::thread::sleep(std::time::Duration::from_millis(20));
     let a = second.named("a.ne5p");
     let newer = second.edit(a, "24");
     second.close();
 
-    let again = Session::open(&root);
-    let a = again.named("a.ne5p");
-    assert!(again.bytes(a) == newer, "the newer edit");
-    assert_eq!(
-        again.said("the newer is shown, and the older was let go"),
-        1
+    for _ in 0..2 {
+        let mut again = Session::open(&root);
+        let held: Vec<(u64, bool)> = (again.bench.workspace.listed())
+            .map(|entity| {
+                (
+                    entity.id,
+                    again.bench.browser.folders.missing.contains(&entity.id),
+                )
+            })
+            .collect();
+        let [file, copy] = held[..] else {
+            panic!("the file and a copy: {held:?}");
+        };
+        let ((file, false), (copy, true)) = (file, copy) else {
+            panic!("the copy is missing: {held:?}");
+        };
+        assert!(again.bytes(file) == newer, "the newer edit over the file");
+        assert!(again.bytes(copy) == older, "the older edit kept apart");
+        assert_eq!(
+            again.path(copy).as_deref(),
+            Some("a 2.ne5p"),
+            "beside the file"
+        );
+        again.autosave();
+        again.close();
+    }
+    assert!(root.read("a.ne5p") != newer, "nothing was written unasked");
+}
+
+/// An undo of a save under an unsaved edit puts the file back as it was and keeps the
+/// edit over it, asking nothing.
+#[test]
+fn an_undo_of_a_save_keeps_the_unsaved_edit_over_it_without_asking() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.bench.act(vec![crate::browser::Act::SaveDoc(grand)]);
+    session.sync();
+    let edited = session.edit(grand, "34");
+    session.undo();
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), program, "the save is undone");
+    assert!(session.bytes(grand) == edited, "the edit stays");
+    assert!(session.bench.workspace.get(grand).unwrap().is_unsaved());
+    assert_eq!(session.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(session.said("changed on disk"), 0);
+}
+
+/// An undo of a save that puts the file back at the length and time of the save, as a
+/// volume whose times are coarser than its writes does, shows the file put back.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_undo_of_a_save_shows_the_file_put_back_at_the_saves_length_and_time() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let file = fs::File::options().write(true).open(root.at("Grand.ne5p"));
+    file.and_then(|file| file.set_modified(then)).unwrap();
+    let ambient = Ambient {
+        clock: Box::new(toshokan::env::SystemClock),
+        random: Box::new(toshokan::env::OsRandom::new()),
+        stamp: Some(Box::new(move |_, _| then)),
+    };
+    let mut session = Session::ambient(&root, &root.local(), ambient);
+    session.read_all();
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.bench.act(vec![crate::browser::Act::SaveDoc(grand)]);
+    session.sync();
+
+    session.undo();
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), program, "the save is undone");
+    assert!(session.bytes(grand) == program, "the file as it is again");
+    assert_eq!(session.said("changed on disk"), 0);
+}
+
+/// An unsaved edit an earlier session kept of a file gone since comes back as an
+/// unsaved copy at the file's last path, shown missing, which a save writes anew.
+#[test]
+fn an_edit_kept_of_a_file_gone_since_comes_back_as_a_copy_a_save_writes() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let edited = first.edit(grand, "12");
+    first.autosave();
+    first.close();
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+
+    let mut again = Session::open(&root);
+    let copy = again.named("Grand.ne5p");
+    assert!(
+        again.bytes(copy) == edited,
+        "{}",
+        again.bench.log.transcript()
     );
+    assert!(again.bench.browser.folders.missing.contains(&copy));
+    assert_eq!(again.said("drawbar still holds your changes"), 1);
+    again.bench.act(vec![crate::browser::Act::SaveDoc(copy)]);
+    again.sync();
+    assert_eq!(root.read("Grand.ne5p"), edited);
+    assert!(!again.bench.browser.folders.missing.contains(&copy));
+    again.autosave();
     again.close();
     let last = Session::open(&root);
-    assert_eq!(last.said("the older was let go"), 0, "the older is gone");
-    assert!(last.bytes(last.named("a.ne5p")) == newer);
+    assert_eq!(
+        last.bench.workspace.listed().count(),
+        1,
+        "the draft was let go"
+    );
+    assert_eq!(last.said("drawbar still holds your changes"), 0);
 }
 
 /// Two windows of this install keep their unsaved edits of two files. Opened again with
@@ -6555,6 +6691,20 @@ impl Session {
         session.opened();
         session
     }
+
+    /// Open the library with this install's own state at `local`, telling the time and
+    /// drawing ids as `ambient` does.
+    fn ambient(root: &Temp, local: &std::path::Path, ambient: Ambient) -> Session {
+        let bench = Bench::new();
+        let (root, local) = (root.0.clone(), local.to_path_buf());
+        let backend = Backend::start_with(&bench.ctx, root, local, ambient);
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session
+    }
 }
 
 /// Two drawbars on `root`, the second with its own state at `local`, that each tagged
@@ -6600,43 +6750,6 @@ fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
     }
 }
 
-/// The drawbar that joins the entities two drawbars made of one file says so in the
-/// activity log, naming the file, and the other, which only reads the join, does not.
-#[test]
-fn the_drawbar_that_joins_the_tags_of_one_file_logs_it() {
-    let root = Temp::new();
-    let other = Temp::new();
-    let (mut here, mut there) = tagged_unseen(&root, &other);
-
-    here.refresh();
-    there.refresh();
-    let line = "“Grand.ne5p”: joined the tags of entity";
-    assert_eq!(here.said(line), 1, "the drawbar that joined them");
-    assert_eq!(there.said(line), 0, "the drawbar that read the join");
-}
-
-/// A file gone outside drawbar whose contents two files now hold is said once, however
-/// often the library is looked at again.
-#[test]
-fn a_file_two_files_could_each_be_is_told_once() {
-    let root = Temp::new();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut session = Session::open(&root);
-    let grand = session.named("Grand.ne5p");
-    session.tag(&[grand], "Gig");
-    fs::copy(root.at("Grand.ne5p"), root.at("Left.ne5p")).unwrap();
-    fs::rename(root.at("Grand.ne5p"), root.at("Right.ne5p")).unwrap();
-    session.settle();
-    session.settle();
-    assert_eq!(
-        session.said(
-            "drawbar cannot tell which of “Left.ne5p” and “Right.ne5p” is the file that was \
-             at “Grand.ne5p”"
-        ),
-        1
-    );
-}
-
 /// An unsaved edit kept of a file by its path comes back though another drawbar made
 /// the file an entity since, and is kept by the entity from then on.
 #[test]
@@ -6674,10 +6787,10 @@ fn a_tagged_file_saved_back_keeps_its_tags() {
     let mut session = Session::open(&root);
     let grand = session.named("Grand.ne5p");
     session.tag(&[grand], "Sunday");
+    session.edit(grand, "12");
     fs::remove_file(root.at("Grand.ne5p")).unwrap();
     session.refocus();
     assert!(session.bench.browser.folders.missing.contains(&grand));
-    session.edit(grand, "12");
     session.bench.workspace.mark_saved(grand);
     session.sync();
     let listed: Vec<u64> = session
@@ -7116,7 +7229,7 @@ fn a_session_whose_history_forked_says_it_goes_on_with_its_own() {
 }
 
 /// An unsaved edit an earlier session kept, of a file that goes before drawbar reads it,
-/// stays kept for when the file is back.
+/// shows missing and stays kept for when the file is back.
 #[test]
 fn an_edit_waiting_for_its_file_to_be_read_is_kept_when_the_file_goes() {
     let root = Temp::new();
@@ -7132,10 +7245,9 @@ fn an_edit_waiting_for_its_file_to_be_read_is_kept_when_the_file_goes() {
     fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
     second.settle();
     second.autosave();
-    assert_eq!(
-        second.said("The unsaved edit of “Grand.ne5p” is still kept"),
-        1
-    );
+    let grand = second.only();
+    assert!(second.bench.browser.folders.missing.contains(&grand));
+    assert_eq!(second.said("no longer in the library folder"), 1);
     second.close();
 
     fs::rename(away.at("Grand.ne5p"), root.at("Grand.ne5p")).unwrap();
@@ -7334,6 +7446,36 @@ fn an_unsaved_edit_a_crash_left_unkept_over_a_file_changed_since_asks() {
     again.take_in(&mut kept);
     let (title, _) = again.bench.browser.asking().expect("a question");
     assert_eq!(title, "“Pad.ne5p” changed on disk");
+}
+
+/// Two windows' edits of one tagged file, both kept as drawbar quit, come back once each
+/// though drawbar ends before it keeps them again.
+#[test]
+fn edits_two_windows_kept_of_one_file_come_back_once_each_after_a_crash() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let a = first.named("a.ne5p");
+    first.tag(&[a], "Live");
+    let mut second = Session::open(&root);
+    let b = second.named("a.ne5p");
+    let older = first.edit(a, "12");
+    first.close();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let newer = second.edit(b, "24");
+    second.close();
+    drop(Session::open(&root));
+
+    let last = Session::open(&root);
+    let holding = |bytes: &Vec<u8>| {
+        let listed = last.bench.workspace.listed();
+        listed
+            .filter(|asset| last.bytes(asset.id) == *bytes)
+            .count()
+    };
+    let transcript = last.bench.log.transcript();
+    assert_eq!((holding(&older), holding(&newer)), (1, 1), "{transcript}");
+    assert_eq!(last.bench.workspace.listed().count(), 2, "{transcript}");
 }
 
 #[test]
@@ -7849,6 +7991,322 @@ fn a_landed_save_whose_answers_are_lost_ends_saved_without_asking() {
     assert_eq!(session.said("was not saved"), 0);
 }
 
+/// An unsaved edit of a file that leaves the folder and comes back is the file's again,
+/// with nothing asked.
+#[test]
+fn an_edit_of_a_file_that_leaves_and_comes_back_is_the_files_again() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    let edited = session.edit(grand, "96");
+    let away = Temp::new();
+    fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&grand));
+    fs::rename(away.at("Grand.ne5p"), root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert_eq!(session.only(), grand);
+    assert!(!session.bench.browser.folders.missing.contains(&grand));
+    assert!(session.bytes(grand) == edited);
+    assert_eq!(session.bench.browser.asking(), None);
+    session.bench.workspace.mark_saved(grand);
+    session.sync();
+    assert!(root.read("Grand.ne5p") == edited);
+}
+
+/// A new file's save refused as another file took its name first, whose answers are
+/// lost, leaves the other file an asset of its own.
+#[test]
+fn an_unheard_save_whose_name_another_file_took_is_not_given_that_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let ours = session.bytes(id);
+    let theirs = with_gain(&ours, "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.store.fault(Fault::Unread);
+    session.sync();
+    session.read_all();
+    let mut listed = session.bench.workspace.listed();
+    let at = |entity: &&crate::workspace::LocalEntity| {
+        entity.path.as_ref().map(LibPath::as_str) == Some("untitled.ne5p")
+    };
+    let other = listed.find(|entity| entity.id != id && at(entity));
+    let other = other.expect("the other file is an asset of its own").id;
+    assert!(session.bytes(other) == theirs);
+    assert!(session.bytes(id) == ours, "the asset keeps what it held");
+}
+
+/// An edit saved and not yet written outlives its file going: the asset keeps it, and
+/// the save writes it.
+#[test]
+fn a_save_not_yet_written_survives_its_file_going() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bytes(id) == edited, "the asset keeps its edit");
+    session.sync();
+    assert!(root.read("Grand.ne5p") == edited, "the save is written");
+}
+
+/// An explicit save of an unsaved copy edited back to what its file held writes it as a
+/// file of its own.
+#[test]
+fn saving_a_copy_edited_back_to_its_files_bytes_writes_it() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    let held = session.bytes(id);
+    session.edit(id, "96");
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&id));
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, held.clone(), log);
+    session.bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+    session.sync();
+    session.sync();
+    let transcript = session.bench.log.transcript();
+    assert_eq!(holding(&root, &held), 1, "{transcript}");
+    assert!(session.bench.workspace.get(id).is_some(), "{transcript}");
+    assert!(!session.bench.browser.folders.missing.contains(&id));
+}
+
+/// An asset shown missing in the nearest folder left is shown at its file once the file
+/// is back.
+#[test]
+fn a_missing_file_back_where_it_was_is_shown_there_again() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    session.tag(&[id], "Gig");
+    session.edit(id, "96");
+    fs::remove_file(root.at("Live/Grand.ne5p")).unwrap();
+    fs::remove_dir(root.at("Live")).unwrap();
+    session.refocus();
+    assert_eq!(
+        session.path(id).as_deref(),
+        Some("Grand.ne5p"),
+        "in the top level"
+    );
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/Grand.ne5p"), &program).unwrap();
+    session.refocus();
+    assert!(!session.bench.browser.folders.missing.contains(&id));
+    assert_eq!(session.path(id).as_deref(), Some("Live/Grand.ne5p"));
+}
+
+/// A save of an asset whose file went is written where the asset is shown, beside the
+/// file that took that name, and carries the asset's tags.
+#[test]
+fn a_save_of_a_missing_file_whose_place_is_taken_writes_it_beside() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/Grand.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Grand.ne5p"), with_gain(&program, "36")).unwrap();
+    let mut session = Session::open(&root);
+    let ids: Vec<u64> = session.bench.workspace.listed().map(|e| e.id).collect();
+    let id = ids
+        .into_iter()
+        .find(|id| session.path(*id).as_deref() == Some("Live/Grand.ne5p"));
+    let id = id.expect("Live/Grand.ne5p is listed");
+    session.tag(&[id], "Gig");
+    let edited = session.edit(id, "96");
+    fs::remove_file(root.at("Live/Grand.ne5p")).unwrap();
+    fs::remove_dir(root.at("Live")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&id));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.settle();
+    let transcript = session.bench.log.transcript();
+    assert!(root.read("Grand 2.ne5p") == edited, "{transcript}");
+    assert!(
+        root.read("Grand.ne5p") == with_gain(&program, "36"),
+        "{transcript}"
+    );
+    assert_eq!(session.path(id).as_deref(), Some("Grand 2.ne5p"));
+    assert_eq!(session.worn(id), ["Gig"]);
+}
+
+/// A save of an asset whose file went, whose answers are lost, leaves the asset the
+/// file's: shown present, and saved over it next time.
+#[test]
+fn a_save_of_a_missing_file_whose_answers_are_lost_rests_in_the_file_it_wrote() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    let edited = session.edit(id, "96");
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&id));
+    session.store.fault(Fault::Unread);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.settle();
+    assert!(root.read("Grand.ne5p") == edited, "the save landed");
+    assert!(
+        !session.bench.browser.folders.missing.contains(&id),
+        "the asset is its file's"
+    );
+    let again = session.edit(id, "12");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.sync();
+    assert!(
+        root.read("Grand.ne5p") == again,
+        "the next save goes over it"
+    );
+    let names = root.names("").into_iter();
+    let files: Vec<String> = names.filter(|name| !name.starts_with('.')).collect();
+    assert_eq!(files, ["Grand.ne5p"], "and writes no other file");
+}
+
+/// Of two assets a merge meets on one file, one whose edit is saved and not yet written
+/// keeps it, apart from the file, and the save writes it beside that file.
+#[test]
+fn a_save_not_yet_written_survives_a_merge() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let tagged = session.create();
+    session.tag(&[tagged], "Live");
+    fs::copy(root.at("untitled.ne5p"), root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    session.read_all();
+    let copy = session.named("Grand.ne5p");
+    let saved = session.edit(copy, "12");
+    session.bench.workspace.mark_saved(copy);
+    session.edit(tagged, "96");
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.refocus();
+    assert_eq!(session.path(tagged).as_deref(), Some("Grand.ne5p"));
+    assert!(session.bytes(copy) == saved, "the saved edit stays");
+    session.sync();
+    assert_eq!(
+        holding(&root, &saved),
+        1,
+        "the save is written beside the file"
+    );
+}
+
+/// How many files in the library's root hold `bytes`.
+fn holding(root: &Temp, bytes: &[u8]) -> usize {
+    let names = root.names("").into_iter();
+    names
+        .filter(|name| fs::read(root.at(name)).is_ok_and(|held| held == bytes))
+        .count()
+}
+
+/// The next save of a new file whose first save's answers were lost goes over that file,
+/// whatever looks at the folder came between.
+#[test]
+fn a_save_after_a_first_one_whose_answers_were_lost_goes_over_its_file() {
+    for looks in [0, 2] {
+        let root = Temp::new();
+        let mut session = Session::open(&root);
+        let id = session.create();
+        session.store.fault(Fault::Unread);
+        session.sync();
+        for _ in 0..looks {
+            session.refocus();
+        }
+        session.read_all();
+        let edited = session.edit(id, "96");
+        session.bench.workspace.mark_saved(id);
+        session.sync();
+        session.sync();
+        assert!(root.read("untitled.ne5p") == edited, "after {looks} looks");
+        assert_eq!(
+            session.bench.workspace.listed().count(),
+            1,
+            "after {looks} looks"
+        );
+    }
+}
+
+/// An unsaved copy of a file that went, put back at the next open, leaves a file that
+/// arrives at its path as it is, and saves beside it.
+#[test]
+fn an_unsaved_copy_saves_beside_a_file_that_arrives_at_its_path() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Bass.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut first = Session::open(&root);
+    let bass = first.named("Bass.ne5p");
+    let edited = first.edit(bass, "74");
+    first.close();
+    fs::remove_file(root.at("Bass.ne5p")).unwrap();
+
+    let mut second = Session::open(&root);
+    let copy = second.only();
+    assert!(second.bytes(copy) == edited);
+    let theirs = with_gain(&program, "40");
+    fs::write(root.at("Bass.ne5p"), &theirs).unwrap();
+    second.refocus();
+    second.read_all();
+    second.bench.workspace.mark_saved(copy);
+    second.sync();
+    second.sync();
+    assert_eq!(root.read("Bass.ne5p"), theirs, "theirs is not saved over");
+    assert_eq!(holding(&root, &edited), 1, "the copy is saved beside it");
+}
+
+/// A save held in memory where nothing may be written outlives its file going, and is
+/// back at the next open.
+#[test]
+fn a_save_held_in_a_read_only_library_outlives_its_file_going() {
+    let (root, _) = newer_drawbar_wrote();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(session.store.read_only().is_some());
+    let grand = session.named("Grand.ne5p");
+    let saved = session.edit(grand, "34");
+    session.bench.workspace.mark_saved(grand);
+    session.autosave();
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    session.autosave();
+    assert!(session.bytes(grand) == saved, "the asset keeps it");
+    session.close();
+    let again = Session::open(&root);
+    let mut listed = again.bench.workspace.listed();
+    assert!(
+        listed.any(|entity| *entity.bytes == saved[..]),
+        "the next open has it"
+    );
+}
+
+/// Another drawbar's new file at the name of a first save that failed is an asset of its
+/// own.
+#[test]
+fn another_drawbars_file_at_the_name_of_a_first_save_that_failed_is_its_own_asset() {
+    let (theirs, root) = (Temp::new(), Temp::new());
+    let mut here = Session::open(&root);
+    let mut there = Session::elsewhere(&root, &theirs);
+    here.create();
+    here.store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    here.sync();
+    there.create();
+    there.sync();
+    here.refocus();
+    let transcript = here.bench.log.transcript();
+    assert_eq!(here.bench.workspace.listed().count(), 2, "{transcript}");
+}
+
 /// An unsaved edit kept by its file's path, once the file becomes an entity, is kept
 /// under the entity before the draft under the path goes: a library that stops right
 /// after keeps it.
@@ -7879,6 +8337,7 @@ fn an_edit_kept_under_a_new_key_is_kept_before_the_old_draft_goes() {
     let again = Session::open(&crashed);
     let grand = again.named("Grand.ne5p");
     assert!(again.bytes(grand) == edited, "the edit is back");
+    assert_eq!(again.bench.workspace.listed().count(), 1, "once");
 }
 
 /// A slot's former occupant taken into the library is no step Undo takes back: the copy
@@ -9019,4 +9478,234 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
     session.answer_reads();
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
+}
+
+/// A save that makes another file hold a missing tagged file's bytes takes that file's
+/// row; the missing file's unsaved edit stays shown missing, and its save writes it.
+#[test]
+fn an_edit_of_a_missing_file_whose_row_another_save_takes_stays_and_saves() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("A.ne5p"), &program).unwrap();
+    fs::write(root.at("B.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.named("A.ne5p"), session.named("B.ne5p"));
+    session.tag(&[a], "Live");
+    let edited = session.edit(a, "96");
+    fs::remove_file(root.at("A.ne5p")).unwrap();
+    session.refocus();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(b, program.clone(), log);
+    workspace.mark_saved(b);
+    session.sync();
+    session.refocus();
+    assert!(root.read("B.ne5p") == program);
+    assert!(
+        session.bytes(a) == edited,
+        "{}",
+        session.bench.log.transcript()
+    );
+    assert!(session.bench.browser.folders.missing.contains(&a));
+
+    session.bench.act(vec![crate::browser::Act::SaveDoc(a)]);
+    session.sync();
+    assert!(
+        root.read("A.ne5p") == edited,
+        "{}",
+        session.bench.log.transcript()
+    );
+}
+
+/// An undo of an overwrite from outside rewrites a file drawbar has not read; an outside
+/// change under an unsaved edit of that file later is still asked about.
+#[test]
+fn an_outside_change_under_an_edit_is_asked_about_after_an_undone_overwrite() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(outside.at("Grand.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Grand.ne5p"),
+        dir: LibPath::root(),
+        name: "Grand.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.undo();
+    session.settle();
+    assert_eq!(root.read("Grand.ne5p"), program);
+    session.read(&[grand]);
+    session.edit(grand, "96");
+    fs::write(root.at("Grand.ne5p"), with_gain(&program, "40")).unwrap();
+    session.refocus();
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "{}",
+        session.bench.log.transcript()
+    );
+}
+
+/// An edit whose file left is kept apart from it; once the file is back after a restart,
+/// the edit is that file's again, as it is in one session.
+#[test]
+fn an_edit_whose_file_left_is_its_files_again_once_back_after_a_restart() {
+    let (root, away) = (Temp::new(), Temp::new());
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    let edited = session.edit(grand, "96");
+    fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    session.autosave();
+    session.close();
+    fs::rename(away.at("Grand.ne5p"), root.at("Grand.ne5p")).unwrap();
+
+    let again = Session::open(&root);
+    let listed = again.bench.workspace.listed().count();
+    assert_eq!(listed, 1, "{}", again.bench.log.transcript());
+    let id = again.only();
+    assert!(again.bytes(id) == edited);
+    assert_eq!(again.path(id).as_deref(), Some("Grand.ne5p"));
+}
+
+/// After a restart with a tagged file gone, its edit saves as that file, with its tags,
+/// as it does in one session; and with the file back under another name, the edit is
+/// that file's.
+#[test]
+fn after_a_restart_a_missing_tagged_files_edit_is_still_that_files() {
+    let (root, away) = (Temp::new(), Temp::new());
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    session.tag(&[grand], "Live");
+    let edited = session.edit(grand, "96");
+    session.autosave();
+    session.close();
+    fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
+
+    let mut again = Session::open(&root);
+    let id = again.only();
+    assert!(again.bench.browser.folders.missing.contains(&id));
+    fs::rename(away.at("Grand.ne5p"), root.at("Piano.ne5p")).unwrap();
+    again.refocus();
+    let listed = again.bench.workspace.listed().count();
+    assert_eq!(listed, 1, "{}", again.bench.log.transcript());
+    assert!(again.bytes(again.only()) == edited);
+    assert!(
+        again.bench.browser.asking().is_none(),
+        "the file holds the edit's base"
+    );
+    assert_eq!(again.worn(again.only()), ["Live"]);
+    again.close();
+
+    fs::remove_file(root.at("Piano.ne5p")).unwrap();
+    let mut last = Session::open(&root);
+    let id = last.only();
+    last.bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+    last.sync();
+    last.refocus();
+    let saved = last.path(last.only()).unwrap();
+    assert!(
+        root.read(&saved) == edited,
+        "{}",
+        last.bench.log.transcript()
+    );
+    assert_eq!(last.worn(last.only()), ["Live"]);
+}
+
+/// Two windows kept edits of one tagged file whose file is then gone: both edits come
+/// back, the newer as the file's and the older as a copy, through the file's return
+/// and a restart.
+#[test]
+fn two_windows_edits_of_a_gone_tagged_file_both_come_back() {
+    let (root, away) = (Temp::new(), Temp::new());
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let a = first.named("a.ne5p");
+    first.tag(&[a], "Live");
+    let mut second = Session::open(&root);
+    let b = second.named("a.ne5p");
+    let older = first.edit(a, "12");
+    first.close();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let newer = second.edit(b, "24");
+    second.close();
+    fs::rename(root.at("a.ne5p"), away.at("a.ne5p")).unwrap();
+    let holds = |session: &Session, bytes: &Vec<u8>| {
+        let mut listed = session.bench.workspace.listed();
+        listed.any(|entity| session.bytes(entity.id) == *bytes)
+    };
+
+    let mut again = Session::open(&root);
+    assert!(
+        holds(&again, &older) && holds(&again, &newer),
+        "with the file gone"
+    );
+    fs::rename(away.at("a.ne5p"), root.at("a.ne5p")).unwrap();
+    again.refocus();
+    assert!(
+        holds(&again, &older) && holds(&again, &newer),
+        "with the file back"
+    );
+    assert!(again.bench.browser.asking().is_none(), "nothing to choose");
+    again.autosave();
+    again.close();
+    let last = Session::open(&root);
+    assert!(
+        holds(&last, &older) && holds(&last, &newer),
+        "after a restart"
+    );
+}
+
+/// Two tag changes another drawbar made to one file are said once; a change that
+/// leaves its tags as they were is not said.
+#[test]
+fn another_drawbars_tag_changes_to_a_file_are_said_once_and_only_when_they_change_it() {
+    let (root, theirs) = (Temp::new(), Temp::new());
+    fs::write(root.at("Strings.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut here = Session::open(&root);
+    let mut there = Session::elsewhere(&root, &theirs);
+    let file = there.named("Strings.ne5p");
+    let mine = here.named("Strings.ne5p");
+    here.tag(&[mine], "Live");
+    here.tag(&[mine], "Gig");
+    there.refresh();
+    assert_eq!(there.worn(file), ["Gig", "Live"]);
+    assert_eq!(there.said("changed the tags of"), 1);
+
+    here.tag(&[mine], "Studio");
+    here.undo();
+    there.refresh();
+    assert_eq!(there.worn(file), ["Gig", "Live"]);
+    assert_eq!(there.said("changed the tags of"), 1, "tags as they were");
+}
+
+/// An undo of a change to a tagged file that is gone waits for the file, and says which
+/// step waits.
+#[test]
+fn an_undo_whose_file_is_gone_says_which_step_waits_for_it() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.only();
+    session.tag(&[grand], "Live");
+    let name = "Piano".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id: grand, name }]);
+    session.sync();
+    fs::remove_file(root.at("Piano.ne5p")).unwrap();
+    session.refocus();
+    session.undo();
+    session.settle();
+    assert_eq!(
+        session.said("Undo of Rename “Grand.ne5p” waits for its file."),
+        1,
+        "{}",
+        session.bench.log.transcript()
+    );
+    assert_eq!(session.said("did not change as asked"), 0);
 }

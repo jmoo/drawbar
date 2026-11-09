@@ -1737,7 +1737,10 @@ fn save_doc(
             ),
         };
         let spot = owed(entity);
-        workspace.mark_saved(id);
+        match browser.folders.missing.contains(&id) {
+            true => workspace.mark_saved_anew(id),
+            false => workspace.mark_saved(id),
+        }
         let waiting = queue.entry(id).map(|held| (held.class, held.at));
         match spot {
             // Already waiting for that slot, so the save only moved the baseline.

@@ -3608,6 +3608,17 @@ impl Workspace {
         }
     }
 
+    /// [`Workspace::mark_saved`] for an asset whose file is missing, which a save writes
+    /// as a file of its own even where it holds what that file did.
+    pub fn mark_saved_anew(&mut self, id: u64) {
+        self.mark_saved(id);
+        let ask = FileAsk::Save(id);
+        let placed = self.get(id).is_some_and(|e| e.kept && e.path.is_some());
+        if placed && !self.file_asks.contains(&ask) {
+            self.file_asks.push(ask);
+        }
+    }
+
     /// [`Workspace::mark_saved`] for bytes the asset's file already holds, asking for no
     /// write. Returns whether the baseline moved.
     fn settle_saved(&mut self, id: u64) -> bool {
@@ -3731,12 +3742,15 @@ impl Workspace {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
-        let formatless = self.get(id).is_some_and(LocalEntity::has_no_format);
-        if formatless || matches!(verify, VerifyState::Ok) {
+        let Some(held) = self.get(id) else {
+            return;
+        };
+        if held.has_no_format() || matches!(verify, VerifyState::Ok) {
             return;
         }
         log.warn(format!(
-            "after editing, verify {}: {}",
+            "{}: after editing, verify {}: {}",
+            held.name,
             verify.badge(),
             verify.detail()
         ));
@@ -3830,12 +3844,28 @@ impl Workspace {
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
+        self.moved();
         if let (true, Some(path)) = (gone.kept, &gone.path) {
             let path = path.clone();
             self.file_asks.push(FileAsk::Delete { id, path });
         }
-        self.moved();
         Some(gone)
+    }
+
+    /// Let go of the assets `ids`, whose files are gone, without a word and asking
+    /// nothing of their files.
+    pub fn drop_gone(&mut self, ids: &std::collections::BTreeSet<u64>) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.arriving.remove(id);
+            self.moving_over.remove(id);
+            self.saving_over.remove(id);
+            self.edits.remove(id);
+        }
+        self.entities.retain(|entity| !ids.contains(&entity.id));
+        self.moved();
     }
 
     /// Let go of every asset on this computer, as another library takes its place, and

@@ -1,23 +1,27 @@
-//! Which workspace id stands for which file of the library this session.
+//! Which workspace id stands for which row of the library's view this session, and the
+//! keys unsaved edits are kept by across sessions.
 //!
-//! A workspace id lives for one session; the library knows a file by the entity bound to
-//! it, or, for a file nothing is said about, by its path alone.
+//! A workspace id and a FileId each live for one session; an unsaved edit is kept by the
+//! entity bound to its file, or, for a file nothing is said about, by its path alone.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use toshokan::EntityId;
+use toshokan::{EntityId, FileId};
 
 use super::LibPath;
 
-/// How the library knows a file: by the entity bound to it, or by its path.
+/// What an unsaved edit is kept by: the entity bound to its file, or its path, or, for
+/// an unsaved copy with no file, the path it was last at and a number of its own.
 ///
-/// Serialized as one string, `e:<entity>` or `f:<path>`, so a map keyed by it serializes
-/// wherever a map keyed by strings does.
+/// Serialized as one string, `e:<entity>`, `f:<path>` or `c:<number>:<path>`, the
+/// number in 32 hex digits, so a map keyed by it serializes wherever a map keyed by
+/// strings does.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Key {
     Entity(EntityId),
     File(LibPath),
+    Copy(LibPath, u128),
 }
 
 impl Serialize for Key {
@@ -25,6 +29,7 @@ impl Serialize for Key {
         let text = match self {
             Key::Entity(entity) => format!("e:{entity}"),
             Key::File(path) => format!("f:{path}"),
+            Key::Copy(path, number) => format!("c:{number:032x}:{path}"),
         };
         serializer.serialize_str(&text)
     }
@@ -39,71 +44,52 @@ impl<'de> Deserialize<'de> for Key {
         match text.split_once(':') {
             Some(("e", entity)) => entity.parse().map(Key::Entity).map_err(|_| wrong()),
             Some(("f", path)) => LibPath::parse(path).map(Key::File).ok_or_else(wrong),
+            Some(("c", copy)) => {
+                let (number, path) = copy.split_once(':').ok_or_else(wrong)?;
+                let number = u128::from_str_radix(number, 16).map_err(|_| wrong())?;
+                let path = LibPath::parse(path).ok_or_else(wrong)?;
+                Ok(Key::Copy(path, number))
+            }
             _ => Err(wrong()),
         }
     }
 }
 
-impl Key {
-    pub fn entity(&self) -> Option<EntityId> {
-        match self {
-            Key::Entity(entity) => Some(*entity),
-            Key::File(_) => None,
-        }
-    }
-}
-
-/// Workspace ids and keys, one to one.
+/// Workspace ids and the rows of the library's view, one to one.
 #[derive(Default)]
 pub struct Ids {
-    keys: BTreeMap<u64, Key>,
-    ids: BTreeMap<Key, u64>,
+    files: BTreeMap<u64, FileId>,
+    ids: BTreeMap<FileId, u64>,
 }
 
 impl Ids {
-    pub fn key(&self, id: u64) -> Option<&Key> {
-        self.keys.get(&id)
+    pub fn file(&self, id: u64) -> Option<FileId> {
+        self.files.get(&id).copied()
     }
 
-    pub fn id(&self, key: &Key) -> Option<u64> {
-        self.ids.get(key).copied()
+    pub fn id(&self, file: FileId) -> Option<u64> {
+        self.ids.get(&file).copied()
     }
 
-    /// Every id with its key, by id.
-    pub fn iter(&self) -> impl Iterator<Item = (u64, &Key)> {
-        self.keys.iter().map(|(id, key)| (*id, key))
+    /// Every id with its row, by id.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, FileId)> + '_ {
+        self.files.iter().map(|(id, file)| (*id, *file))
     }
 
-    /// Give `id` the key `key`, which leaves whatever id or key either had before.
-    pub fn insert(&mut self, id: u64, key: Key) {
+    /// Give `id` the row `file`, which leaves whatever row or id either had before, and
+    /// return the id that row leaves.
+    pub fn insert(&mut self, id: u64, file: FileId) -> Option<u64> {
         self.remove(id);
-        if let Some(had) = self.ids.remove(&key) {
-            self.keys.remove(&had);
-        }
-        self.keys.insert(id, key.clone());
-        self.ids.insert(key, id);
+        let had = self.ids.insert(file, id);
+        had.inspect(|had| _ = self.files.remove(had));
+        self.files.insert(id, file);
+        had
     }
 
-    pub fn remove(&mut self, id: u64) -> Option<Key> {
-        let key = self.keys.remove(&id)?;
-        self.ids.remove(&key);
-        Some(key)
-    }
-
-    /// Follow a rename of `from` to `to` drawbar made: each file known by a path at or
-    /// under `from` is known by where it went. An entity's file is followed by toshokan.
-    pub fn moved(&mut self, from: &LibPath, to: &LibPath) {
-        let moving: Vec<(u64, LibPath)> = self
-            .keys
-            .iter()
-            .filter_map(|(id, key)| match key {
-                Key::File(path) => Some((*id, path.moved(from, to)?)),
-                Key::Entity(_) => None,
-            })
-            .collect();
-        for (id, path) in moving {
-            self.insert(id, Key::File(path));
-        }
+    pub fn remove(&mut self, id: u64) -> Option<FileId> {
+        let file = self.files.remove(&id)?;
+        self.ids.remove(&file);
+        Some(file)
     }
 }
 
@@ -111,39 +97,40 @@ impl Ids {
 mod tests {
     use super::*;
 
-    fn file(text: &str) -> Key {
-        Key::File(LibPath::parse(text).unwrap())
+    fn file(n: u64) -> FileId {
+        serde_json::from_str(&n.to_string()).unwrap()
     }
 
     #[test]
-    fn an_id_and_a_key_stand_for_each_other_alone() {
+    fn a_key_reads_back_as_it_was_written() {
+        let path = LibPath::parse("Live/a: b.ne5p").unwrap();
+        let keys = [
+            Key::Entity(EntityId::from_u128(7)),
+            Key::File(path.clone()),
+            Key::Copy(path, u128::MAX - 1),
+        ];
+        for key in keys {
+            let text = serde_json::to_string(&key).unwrap();
+            assert_eq!(serde_json::from_str::<Key>(&text).unwrap(), key, "{text}");
+        }
+        assert!(serde_json::from_str::<Key>(r#""c:12:a""#).is_ok());
+        assert!(serde_json::from_str::<Key>(r#""c:zz:a""#).is_err());
+    }
+
+    #[test]
+    fn an_id_and_a_row_stand_for_each_other_alone() {
         let mut ids = Ids::default();
-        let entity = Key::Entity(EntityId::from_u128(7));
-        ids.insert(1, file("a.ns3"));
-        ids.insert(2, entity.clone());
-        ids.insert(1, entity.clone());
-        assert_eq!(ids.key(1), Some(&entity));
-        assert_eq!(ids.key(2), None, "the key went to 1");
-        assert_eq!(ids.id(&file("a.ns3")), None, "1 left its path");
+        assert_eq!(ids.insert(1, file(10)), None);
+        assert_eq!(ids.insert(2, file(20)), None);
+        assert_eq!(ids.insert(1, file(20)), Some(2), "the row leaves 2");
+        assert_eq!(ids.file(1), Some(file(20)));
+        assert_eq!(ids.file(2), None, "the row went to 1");
+        assert_eq!(ids.id(file(10)), None, "1 left its row");
         assert_eq!(ids.iter().count(), 1);
-    }
-
-    #[test]
-    fn a_rename_drawbar_made_moves_the_paths_under_it_and_no_entity() {
-        let mut ids = Ids::default();
-        let entity = Key::Entity(EntityId::from_u128(7));
-        ids.insert(1, file("Old/a.ns3"));
-        ids.insert(2, file("Old/Deep/b.wav"));
-        ids.insert(3, file("Older/c.ns3"));
-        ids.insert(4, entity.clone());
-        let (from, to) = (
-            LibPath::parse("Old").unwrap(),
-            LibPath::parse("New").unwrap(),
+        assert_eq!(
+            ids.insert(1, file(20)),
+            None,
+            "a row an id has leaves no other"
         );
-        ids.moved(&from, &to);
-        assert_eq!(ids.id(&file("New/a.ns3")), Some(1));
-        assert_eq!(ids.id(&file("New/Deep/b.wav")), Some(2));
-        assert_eq!(ids.id(&file("Older/c.ns3")), Some(3));
-        assert_eq!(ids.id(&entity), Some(4));
     }
 }

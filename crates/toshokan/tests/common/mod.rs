@@ -507,7 +507,8 @@ pub fn complete(d: &mut impl Driven, run: &Run) -> Result<Applied, Error> {
         Rc::clone(&run.record),
         0,
         identify(),
-    ))?;
+    ));
+    let applied = applied.map_err(|stopped| stopped.error)?;
     close(d, run.record.writer, run.plan.record)?;
     d.run(effects::finish(&layout, run.plan.record, &run.record))?;
     Ok(applied)

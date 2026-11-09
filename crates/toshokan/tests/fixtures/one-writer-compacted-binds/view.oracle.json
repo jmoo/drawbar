@@ -1,0 +1,46 @@
+{
+  "mode": "writable",
+  "start": "resumed 7ef1fd0ed1548fcd1f8410633ef306ac",
+  "writers": { "7ef1fd0ed1548fcd1f8410633ef306ac": "fixture" },
+  "entities": {
+    "f893a2eefb32555e71c18690ee42c90b": {
+      "origin": "uno",
+      "note": null,
+      "tags": ["after", "b"],
+      "file": { "path": "one.syx", "state": "in-sync", "bytes": "one v2" }
+    },
+    "e099ec6cd7363ca585e7bb0f12278575": {
+      "file": { "path": "loose/adopt.syx", "state": "in-sync", "bytes": "adopted" }
+    },
+    "491718de357e3da8cb435c8e74616796": {
+      "tags": ["tree"],
+      "file": { "path": "forest/sub/four.syx", "state": "in-sync", "bytes": "four" }
+    },
+    "6775dc7701564f619afcd44d14cf8bfe": {
+      "file": { "path": "moved/five.syx", "state": "in-sync", "bytes": "five" }
+    }
+  },
+  "unbound": ["forest/a.syx", "made/inside.txt", "new.txt", "renamed.txt"],
+  "items": [],
+  "forks": [],
+  "gaps": [],
+  "orphans": [],
+  "ignored": [],
+  "unreadable": [],
+  "settled": [
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "099545b4ca73e0f305a2e18941c3936b"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "4d4673ef77ba057421af8cfd4c4cbee5"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "65ace2685a072c6d70616f2f48dce01c"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "7476cf8a4baa5dc087b341d690d7a28a"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "c09a1a817914ffbc88b894e1401ed25b"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "dca0c749607e2c86b54b3c40881e2907"],
+    ["7ef1fd0ed1548fcd1f8410633ef306ac", "f55540b2bff06252e02852925a4dc852"]
+  ],
+  "trash": [
+    { "writer": "7ef1fd0ed1548fcd1f8410633ef306ac", "item": "64c70b0b0c5b4a8f167587272751ecaf", "from": "junk.txt", "len": 4, "bytes": "junk" },
+    { "writer": "7ef1fd0ed1548fcd1f8410633ef306ac", "item": "40d6824e2ef3fc17879e2e2256feff0c", "from": "one.syx", "len": 6, "bytes": "one v1" },
+    { "writer": "7ef1fd0ed1548fcd1f8410633ef306ac", "item": "3c821fbf59108163a7ff0d388687ffb2", "from": "two.syx", "len": 3, "bytes": "two" }
+  ],
+  "unknown": 0,
+  "extended": 0
+}

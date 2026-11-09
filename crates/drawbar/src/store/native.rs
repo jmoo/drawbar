@@ -70,13 +70,9 @@ pub fn local_root(root: &Path) -> PathBuf {
     }
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let hash = blake3::hash(root.as_os_str().as_encoded_bytes());
-    let name: String = hash.as_bytes()[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
     let data =
         eframe::storage_dir(crate::APP).unwrap_or_else(|| std::env::temp_dir().join(crate::APP));
-    data.join(LIBRARIES).join(name)
+    data.join(LIBRARIES).join(&hash.to_hex()[..32])
 }
 
 /// How long a library let go may run a command without a sign of life before it is
@@ -157,9 +153,40 @@ impl Life {
     }
 }
 
+/// What a library's thread takes from outside drawbar: the time and randomness, and in
+/// tests the time each file it writes is given in place of the disk's.
+pub struct Ambient {
+    pub clock: Box<dyn toshokan::Clock + Send>,
+    pub random: Box<dyn toshokan::Random + Send>,
+    #[cfg(test)]
+    pub stamp: Option<Stamp>,
+}
+
+/// The modification time of the file just written at a path, or, with the time it has,
+/// staged and moved into place there.
+#[cfg(test)]
+pub type Stamp =
+    Box<dyn FnMut(&Path, Option<std::time::SystemTime>) -> std::time::SystemTime + Send>;
+
 impl Backend {
     /// The library at `root`, with this install's own state for it at `local`.
     pub fn start(ctx: &egui::Context, root: PathBuf, local: PathBuf) -> Backend {
+        let ambient = Ambient {
+            clock: Box::new(SystemClock),
+            random: Box::new(OsRandom::new()),
+            #[cfg(test)]
+            stamp: None,
+        };
+        Backend::start_with(ctx, root, local, ambient)
+    }
+
+    /// [`Backend::start`], with what the thread takes from outside drawbar.
+    pub fn start_with(
+        ctx: &egui::Context,
+        root: PathBuf,
+        local: PathBuf,
+        ambient: Ambient,
+    ) -> Backend {
         let (tx, commands) = channel::<Cmd>();
         let (answers, rx) = channel();
         let unrun = Arc::new(AtomicUsize::new(0));
@@ -179,12 +206,14 @@ impl Backend {
         let faults = fault.clone();
         #[cfg(test)]
         let refusing = signs.clone();
-        let clock = Box::new(SystemClock);
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it. A look at the folder
             // that hangs is a command that shows no life.
             living.run(true);
-            let mut keeper = keeper(&folder, &kept, counted, clock);
+            let native = Blocking::new(&folder, &kept);
+            #[cfg(test)]
+            let native = native.stamping(&folder, &kept, ambient.stamp);
+            let mut keeper = keeper_of(native, &folder, counted, ambient.clock, ambient.random);
             living.run(false);
             nord_usb::block_on(async {
                 let mut landed = Vec::new();
@@ -228,6 +257,7 @@ impl Backend {
                     #[cfg(test)]
                     if let Some(refusing) = unread.take() {
                         landed = refusing.answers("its answers were made to be lost", false);
+                        keeper.forget_shown();
                     }
                     for event in landed.drain(..) {
                         let _ = answers.send(exec::rest_landed(&disk, event).await);
@@ -381,31 +411,106 @@ impl Drop for Backend {
 
 /// The keeper of the library in `folder`, with this install's own state for it in
 /// `local`, counting into `signs` what its storage does.
+#[cfg(test)]
 pub(super) fn keeper(
     folder: &Path,
     local: &Path,
     signs: Arc<Signs>,
     clock: Box<dyn toshokan::Clock>,
 ) -> Keeper<Counted<Blocking>> {
+    let native = Blocking::new(folder, local);
+    keeper_of(native, folder, signs, clock, Box::new(OsRandom::new()))
+}
+
+fn keeper_of(
+    native: Blocking,
+    folder: &Path,
+    signs: Arc<Signs>,
+    clock: Box<dyn toshokan::Clock>,
+    random: Box<dyn toshokan::Random>,
+) -> Keeper<Counted<Blocking>> {
     let names = Box::new(keys::Volume::probe(folder));
-    let env = keeper::env(clock, Box::new(OsRandom::new()), names);
-    let native = Blocking(RefCell::new(Native::new(folder, local)));
+    let env = keeper::env(clock, random, names);
     Keeper::new(Counted::new(native, signs), env)
 }
 
 /// toshokan's native backend, as storage the async keeper drives.
-pub(super) struct Blocking(RefCell<Native>);
+pub(super) struct Blocking {
+    native: RefCell<Native>,
+    #[cfg(test)]
+    stamps: Option<Stamps>,
+}
+
+impl Blocking {
+    fn new(folder: &Path, local: &Path) -> Blocking {
+        Blocking {
+            native: RefCell::new(Native::new(folder, local)),
+            #[cfg(test)]
+            stamps: None,
+        }
+    }
+
+    /// Give each file written the time `stamp` says, where there is one.
+    #[cfg(test)]
+    fn stamping(self, folder: &Path, local: &Path, stamp: Option<Stamp>) -> Blocking {
+        let stamps = stamp.map(|stamp| Stamps {
+            folder: folder.to_path_buf(),
+            local: local.to_path_buf(),
+            stamp: RefCell::new(stamp),
+        });
+        Blocking { stamps, ..self }
+    }
+}
+
+/// The roots of a test's library, and the time each file written there is given.
+#[cfg(test)]
+struct Stamps {
+    folder: PathBuf,
+    local: PathBuf,
+    stamp: RefCell<Stamp>,
+}
+
+#[cfg(test)]
+impl Stamps {
+    fn give(&self, root: Root, path: &toshokan::RelPath, staged: bool) {
+        let top = match root {
+            Root::Folder => &self.folder,
+            Root::Local => &self.local,
+        };
+        let at = top.join(path.as_str());
+        let had = staged.then(|| fs::metadata(&at).and_then(|meta| meta.modified()).ok());
+        let modified = (self.stamp.borrow_mut())(&at, had.flatten());
+        let file = File::options().write(true).open(&at);
+        file.and_then(|file| file.set_modified(modified))
+            .unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+    }
+}
 
 impl toshokan::asynch::Fs for Blocking {
     fn capabilities(&self, root: Root) -> Capabilities {
-        let disk = self.0.borrow().capabilities(root);
+        let disk = self.native.borrow().capabilities(root);
         #[cfg(test)]
         let disk = crate::testing::abilities(root, disk);
         disk
     }
 
     async fn perform(&self, io: Io) -> IoResult {
-        self.0.borrow_mut().perform(io)
+        #[cfg(test)]
+        let written = match &io {
+            Io::Create { root, path, .. }
+            | Io::Append { root, path, .. }
+            | Io::Write { root, path, .. } => Some((*root, path.clone(), false)),
+            Io::Rename { root, from, to } if from.as_str().contains("/tmp/") => {
+                Some((*root, to.clone(), true))
+            }
+            _ => None,
+        };
+        let done = self.native.borrow_mut().perform(io);
+        #[cfg(test)]
+        if let (Some(stamps), Some((root, path, staged)), Ok(_)) = (&self.stamps, written, &done) {
+            stamps.give(root, &path, staged);
+        }
+        done
     }
 }
 
@@ -525,6 +630,7 @@ impl Fs for Disk {
 
     async fn rest(
         &self,
+        _: toshokan::FileId,
         path: &str,
         known: Option<Fingerprint>,
     ) -> io::Result<Option<Arc<OnDisk>>> {

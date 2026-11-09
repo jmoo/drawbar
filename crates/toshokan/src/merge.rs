@@ -111,18 +111,70 @@ pub(crate) fn side_by_side<'a, K: Ord, V>(
     })
 }
 
-/// The live writes in `now` that `was` does not hold, marked gained, or, where
-/// there are none, those in `was` that `now` does not hold, marked lost.
-fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, bool)> {
+/// The live writes in `now` that `was` does not hold, and those in `was` that
+/// `now` does not hold.
+fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, Shift)> {
     let missing = |writes: &'a [Held<V>], held: &'a [Held<V>]| {
         writes
             .iter()
             .filter(move |write| !held.iter().any(|kept| kept.at == write.at))
     };
-    let gained: Vec<_> = missing(now, was).map(|write| (write, true)).collect();
-    match gained.is_empty() {
-        false => gained,
-        true => missing(was, now).map(|write| (write, false)).collect(),
+    let mut changed: Vec<_> = missing(now, was)
+        .map(|write| (write, Shift::Gained))
+        .collect();
+    let lost = match changed.is_empty() {
+        true => Shift::Lost,
+        false => Shift::Replaced,
+    };
+    changed.extend(missing(was, now).map(|write| (write, lost)));
+    changed
+}
+
+/// How a live write of a part differs between two states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shift {
+    /// The later state holds it.
+    Gained,
+    /// The earlier state held it, and the part gained nothing in its place.
+    Lost,
+    /// The earlier state held it, beside a write the part gained, which explains
+    /// the change instead.
+    Replaced,
+}
+
+/// A change of one part of an entity, as [`Folded::since`] finds it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Since {
+    pub entity: EntityId,
+    pub part: Part,
+    pub write: Ref,
+    pub stamp: Hlc,
+    pub shift: Shift,
+}
+
+impl Since {
+    fn of<V>(entity: EntityId, part: Part, write: &Held<V>, shift: Shift) -> Self {
+        Self {
+            entity,
+            part,
+            write: write.at,
+            stamp: write.stamp,
+            shift,
+        }
+    }
+
+    /// Whether the change gained a write that `lost`, a write lost, may have
+    /// replaced: an older one in its part, which the loss gives back.
+    pub fn given_back_by(&self, lost: &Since) -> bool {
+        self.shift == Shift::Gained
+            && (self.entity, &self.part) == (lost.entity, &lost.part)
+            && self.stamp < lost.stamp
+    }
+
+    /// Whether the change is the write's: one it gained, or one it lost with
+    /// nothing in its place.
+    pub fn causes(&self) -> bool {
+        self.shift != Shift::Replaced
     }
 }
 
@@ -168,6 +220,13 @@ pub struct Shown<'a> {
     pub logged: Option<&'a RelPath>,
 }
 
+/// Whether two file facts say the same file: its path, identity and length. A
+/// modification time only spares reading an identity, and a move that copies gives
+/// a file a new one.
+pub fn same_file(a: &FileFact, b: &FileFact) -> bool {
+    (&a.path, a.identity, a.len) == (&b.path, b.identity, b.len)
+}
+
 fn oldest_first<V>(writes: &mut [Held<V>]) {
     writes.sort_by_key(|held| (held.stamp, held.at.writer, held.at.hash));
 }
@@ -206,15 +265,31 @@ impl EntityState {
             || (self.existence.is_empty() && self.fields_live())
     }
 
-    /// The live file writes that say where the file is, oldest first.
+    /// The live file writes that say where the file is, those equal but for their
+    /// modification time as one fact, in order of each fact's latest write.
     fn file_facts(&self) -> Box<[Fact]> {
-        let facts = self.file.iter().filter_map(|held| {
-            Some(Fact {
-                value: held.value.clone()?,
-                entry: held.at,
-            })
-        });
-        facts.collect()
+        let mut facts: Vec<Fact> = Vec::new();
+        for held in &self.file {
+            let Some(value) = &held.value else {
+                continue;
+            };
+            let same = facts.iter().position(|fact| same_file(&fact.value, value));
+            let mut fact = match same {
+                Some(at) => facts.remove(at),
+                None => Fact {
+                    value: value.clone(),
+                    entries: Vec::new(),
+                    times: Vec::new(),
+                },
+            };
+            fact.value = value.clone();
+            fact.entries.push(held.at);
+            if !fact.times.contains(&value.modified) {
+                fact.times.push(value.modified);
+            }
+            facts.push(fact);
+        }
+        facts.into()
     }
 
     /// The live file write that names a file, latest by clock, writer and entry.
@@ -252,10 +327,11 @@ impl EntityState {
         }
         let mut files = self.file.iter().filter_map(|held| held.value.as_ref());
         let first = files.next();
+        let conflicted = files.any(|file| first.is_some_and(|first| !same_file(first, file)));
         Some(Shown {
             values: self.values(),
             deletion_conflicted: self.deletion_conflicted(),
-            file_conflicted: files.any(|file| first.is_some_and(|first| first != file)),
+            file_conflicted: conflicted,
             logged: self.latest_file().map(|file| &file.path),
         })
     }
@@ -420,24 +496,20 @@ impl Folded {
                 held != *added
             }
             (FieldKey::File(entity), Value::File { fact, .. }) => {
-                let now: Vec<FileFact> = self
-                    .file(*entity)
-                    .iter()
-                    .map(|fact| fact.value.clone())
-                    .collect();
-                match fact {
-                    Some(fact) => now != [fact.clone()],
-                    None => !now.is_empty(),
+                let now = self.file(*entity);
+                match (fact, &now[..]) {
+                    (Some(fact), [only]) => !same_file(&only.value, fact),
+                    (Some(_), _) => true,
+                    (None, now) => !now.is_empty(),
                 }
             }
             _ => true,
         }
     }
 
-    /// Each part of an entity that changed since `before`, with the writer of
-    /// each live write `before` does not hold, or, where the part gained none,
-    /// of each live write it lost.
-    pub fn since(&self, before: &Folded) -> Vec<(EntityId, Part, WriterId)> {
+    /// Each part of an entity that changed since `before`, with each live write
+    /// one of them holds and the other does not.
+    pub fn since(&self, before: &Folded) -> Vec<Since> {
         let mut found = Vec::new();
         let gone = EntityState::default();
         for pair in side_by_side(&self.entities, &before.entities) {
@@ -450,18 +522,23 @@ impl Folded {
             if std::ptr::eq(old, now) {
                 continue;
             }
-            for (write, gained) in changed(&now.existence, &old.existence) {
-                let part = match write.value == gained {
+            for (write, shift) in changed(&now.existence, &old.existence) {
+                let part = match write.value == (shift == Shift::Gained) {
                     true => Part::Created,
                     false => Part::Deleted,
                 };
-                found.push((entity, part, write.at.writer));
+                found.push(Since::of(entity, part, write, shift));
             }
             let keys: BTreeSet<&Name> = now.registers.keys().chain(old.registers.keys()).collect();
             for key in keys {
                 let (now, was) = (now.registers.get(&**key), old.registers.get(&**key));
-                for (write, _) in changed(writes(now), writes(was)) {
-                    found.push((entity, Part::Field(key.to_string()), write.at.writer));
+                for (write, shift) in changed(writes(now), writes(was)) {
+                    found.push(Since::of(
+                        entity,
+                        Part::Field(key.to_string()),
+                        write,
+                        shift,
+                    ));
                 }
             }
             let keys: BTreeSet<&Name> = now.sets.keys().chain(old.sets.keys()).collect();
@@ -475,13 +552,18 @@ impl Folded {
                 for member in members {
                     let now = now.and_then(|now| now.get(member));
                     let was = was.and_then(|was| was.get(member));
-                    for (write, _) in changed(writes(now), writes(was)) {
-                        found.push((entity, Part::Field(key.to_string()), write.at.writer));
+                    for (write, shift) in changed(writes(now), writes(was)) {
+                        found.push(Since::of(
+                            entity,
+                            Part::Field(key.to_string()),
+                            write,
+                            shift,
+                        ));
                     }
                 }
             }
-            for (write, _) in changed(&now.file, &old.file) {
-                found.push((entity, Part::File, write.at.writer));
+            for (write, shift) in changed(&now.file, &old.file) {
+                found.push(Since::of(entity, Part::File, write, shift));
             }
         }
         found
@@ -735,6 +817,19 @@ impl Folded {
             .collect();
         items.sort_by_key(|item| (item.at, item.item));
         items
+    }
+
+    /// The path of each item of `writer`'s trash one of `entries` displaced, by entry.
+    pub fn trashed<'a>(
+        &'a self,
+        writer: WriterId,
+        entries: &'a BTreeSet<EntryHash>,
+    ) -> impl Iterator<Item = (EntryHash, RelPath)> + 'a {
+        let items = self
+            .trash
+            .range((writer, Nonce::from_u128(0))..=(writer, Nonce::from_u128(u128::MAX)));
+        let by = items.filter(|(_, trashed)| entries.contains(&trashed.entry));
+        by.map(|(_, trashed)| (trashed.entry, trashed.from.clone()))
     }
 
     /// Every unfinished effect some writer settled, by its writer and record.
