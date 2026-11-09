@@ -40,7 +40,7 @@ proceed? [y/N]
 ```
 
 `move` reports a swap rather than an overwrite, because the instrument exchanges
-the two slots and nothing is lost. It also lists the set lists that point at the
+the two slots and nothing is lost. It also lists the songs that point at the
 program, since the instrument updates them to follow it. `put` names the slot
 after the file.
 

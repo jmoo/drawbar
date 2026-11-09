@@ -1,11 +1,9 @@
-//! Browser MIDI input: Web MIDI input ports, each with its own handler.
+//! Browser MIDI input: Web MIDI input ports, each with a handler that decodes, queues,
+//! and requests a repaint. Nothing here waits.
 //!
 //! ⚠️ `requestMIDIAccess()` asks the user for permission, and a browser lets the page ask
 //! only while a click's user activation is live. The promise is created in the click and
 //! awaited in a task, as the device chooser does (see [`crate::device::web`]).
-//!
-//! There is one thread, so a handler does what the desktop driver thread does: decode,
-//! queue, and request a repaint. Nothing here waits.
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -35,8 +35,7 @@ pub enum Finger {
 
 /// The playback rate that shifts a stroke `semitones` from the key it was recorded at.
 ///
-/// One octave doubles the rate. This is the resampling any sampler does to play a key
-/// from a stroke recorded at another.
+/// One octave doubles the rate.
 pub fn rate(semitones: i16) -> f32 {
     2.0_f32.powf(f32::from(semitones) / 12.0)
 }

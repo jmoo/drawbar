@@ -267,7 +267,7 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Cbin<Sample>, Error>
 /// file round-trips byte-exactly, and the name, zone boundaries and root keys patch in
 /// place without touching the audio.
 ///
-/// Every corpus specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
+/// Every specimen chains `NSMP`, `hdr`, `cat`, `map`, N × `stk`, `sty`,
 /// `meta`, in that order, in both container generations. Inferred from
 /// specimens; not confirmed on hardware.
 ///

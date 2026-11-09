@@ -1,19 +1,7 @@
-//! `nord piano`: the verbs that apply only to a piano library.
+//! `nord piano`: the verbs that apply only to a piano library file.
 //!
-//! A library is a directory of strokes: one recording per root note, bank and
-//! velocity layer, each owning a span of encoded audio. `inspect` reports that
-//! directory, `decode` turns one stroke back into a WAV, and `edit`, `trim` and
-//! `split` are the transforms `nord_format`'s model can express: renaming,
-//! retuning and rerouting keys, dropping banks and layers, narrowing the key range,
-//! and cutting a library in two. None of these re-encodes audio; a stroke that
-//! survives a transform is copied byte for byte.
-//!
-//! `build` and `rebuild` write audio. `build` lays a library out from a directory of
-//! WAVs, and `rebuild` re-encodes a library's own strokes and reports how each one
-//! came back.
-//!
-//! These verbs take a file. A library is tens of megabytes, so it moves to or from
-//! the instrument with `nord piano get` and `nord piano put`.
+//! `edit`, `trim` and `split` copy every stroke they keep byte for byte. Only `build`
+//! and `rebuild` encode audio.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -169,16 +157,12 @@ pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
     /// 0 attack, 1 pedal resonance and 2 release. `l00`, `l01`, … count from the
-    /// loudest and are spread over the layer values the instrument selects by, 20 apart
-    /// in format 6 between spans of 0..50 and 0..100, and a fifth of that in format 5.
-    /// Write `v12` in place of `l00` to set a
-    /// layer's value directly; all layers of one root and bank must use the same form.
-    /// Files that are not WAVs are skipped, and a WAV named any other way is refused.
+    /// loudest. Write `v12` in place of `l00` to set a layer's value directly; every
+    /// layer of one root and bank must use the same form. Files that are not WAVs are
+    /// skipped, and a WAV named any other way is refused.
     ///
-    /// A stroke holds whole blocks and every frame of its WAV, so it includes the
-    /// silence that pads out the WAV's last block. A looped stroke ends with the block
-    /// holding its loop's end instead. The `frames` column in the output counts the
-    /// WAV's frames, not the stroke's.
+    /// The `frames` column in the output counts the WAV's frames. A stroke pads them
+    /// out to whole blocks, or ends with the block holding its loop's end.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
@@ -186,13 +170,6 @@ pub struct BuildArgs {
     /// coefficients, per-note tables, playback parameters, format and the word at the
     /// start of the body. Each new stroke inherits from the template's stroke of the
     /// same bank and nearest root, and is trimmed by its own layer value.
-    ///
-    /// Without a template, those fields follow fixed rules: each stroke decaying from
-    /// note-on as the instrument's own pianos of `--kind` do, held loops fading as
-    /// `--loop-fade` says, a fade at key-up, and the damper covering the keys `--kind`
-    /// implies. A format 6 library trims each layer to play at the level of its root's
-    /// loudest, softer layers a little above it as pianos of `--kind` are, and a format
-    /// 5 library trims each stroke by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 

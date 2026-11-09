@@ -89,9 +89,9 @@ pub trait Transport {
     /// Write one message to the OUT endpoint.
     ///
     /// ⚠️ The device reads a message until a short packet ends it, so a backend that
-    /// moves real packets must terminate a frame whose length is a whole multiple of the
-    /// endpoint's `wMaxPacketSize`. An unterminated frame does not fail: the device
-    /// never answers, and the session stays open.
+    /// moves real packets must follow a frame whose length is a whole multiple of the
+    /// endpoint's `wMaxPacketSize` with a zero-length packet. An unterminated frame does
+    /// not fail: the device never answers, and the session stays open.
     async fn write(&mut self, buf: &[u8]) -> Result<()>;
 
     /// Read one complete device message from the IN endpoint.

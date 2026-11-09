@@ -1,7 +1,5 @@
-//! The operations, run against whichever transport the target supplies.
-//!
-//! Everything here is generic over [`Transport`], so the browser and the desktop run
-//! the same code and only the spawn glue is cfg'd.
+//! The operations, generic over [`Transport`], so the browser and the desktop run the
+//! same code and only the spawn glue is cfg'd.
 //!
 //! ⚠️ Every operation attempts explicit session cleanup, including after an error.
 //! [`Device::read`] and [`Device::destructive`] own that contract here.
@@ -60,9 +58,8 @@ fn hung_up(e: &Error) -> bool {
 
 /// Report the classes the instrument declares, from its own partition table.
 ///
-/// The first thing a connection does, because nothing can ask for a class before it
-/// knows the instrument has one. The table is read once and kept, and later operations
-/// answer from it.
+/// The first thing a connection does. The table is read once and kept, and later
+/// operations answer from it.
 pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow {
     let started = crate::telemetry::now();
     let rows = match device.geometry().await {
@@ -1653,9 +1650,7 @@ mod wire_tests {
                     Some((4, Vec::new()))
                 }
                 cmd::PARTITIONS => Some((0, partition_table(&self.partitions))),
-                // Five words in the order `nord_usb::wire::Status` decodes them. Its doc
-                // describes this shape and the zero `dirty` and `spare` that classes
-                // outside the libraries report.
+                // Five words in the order `nord_usb::wire::Status` decodes them.
                 cmd::STATUS => {
                     let count = self.filled.as_ref().map_or(0, Vec::len) as u32;
                     let total: u32 = self.banks.iter().map(|(_, slots)| slots).sum();

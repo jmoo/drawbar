@@ -18,23 +18,39 @@ layout of `nix build .#site`, with the app taken from the latest `drawbar-v*` ta
 ## Checks
 
 `nix flake check` runs the formatting check, Clippy and rustdoc with warnings
-denied, and the tests of `scripts/bump.bash` and the telemetry collector.
+denied, the tests of `scripts/bump.bash` and the telemetry collector, and TLC's
+model check of toshokan's protocol. It also checks that the Rust and
+wasm-bindgen versions CI installs outside Nix match the ones Nix pins.
 `nix build .#nord.tests` runs the workspace tests and CLI checks together, using
 optimized code without full link-time optimization. `nix build .#nord.packages`
-builds each crate's shipping package on its own features, without its tests. CI
-runs both on Linux and macOS, runs the tests and CLI checks on Windows, and builds
-the production browser bundle and this guide with `nix build .#site`. In-repository pull requests also run the private corpus tests.
+builds each crate's shipping package on its own features, without its tests.
 
 On Linux, `nix build .#nord.browser-tests` runs each crate's declared browser
 suites in headless Chromium and Firefox. Declare their Cargo test names in
 `package.metadata.nix.browserTests`; `testFeatures` supplies their features.
 A crate without browser suites needs no declaration.
 
-`nix build .#<crate>` builds and tests one crate with the shipping profile.
-`nix build .#nord.all` adds every cross target, the browser bundle and this guide.
-Cross targets remain available for local checks. `nix fmt` formats everything.
+`nix build .#<crate>` builds and tests one crate with the shipping profile, and
+for nord-cli also runs the installed binary. `nix build .#nord.all` adds every
+cross target, the browser bundle and this guide. A crate's Windows cross build,
+`nix build .#<crate>-windows`, only compiles it. `nix fmt` formats everything.
 [Testing](testing.md) describes the suites, and [Contributing](contributing.md)
 the house rules.
+
+### In CI
+
+| Job | Runs |
+|---|---|
+| `check` | `nix flake check` |
+| `native` | `nix build .#nord.tests .#nord.packages` on Linux and macOS, and `scripts/test.bash` on Windows |
+| `web` | `nix build .#site .#nord.browser-tests`: the production browser bundle, this guide and the browser suites |
+| `corpus` | `nix build .#nord.all-corpus`, on `master` and in-repository pull requests |
+| `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
+
+On `master`, `release` publishes the crates, `telemetry` deploys the collector,
+and `pages` deploys drawbar.app. An optional `safari` workflow runs the browser
+suites in Safari when toshokan or drawbar's library changes. Cross targets are
+checked locally only.
 
 ## Generated files
 

@@ -366,8 +366,7 @@ impl DrawbarApp {
             Ok(bar) => self.menubar = Some(bar),
             Err(e) => {
                 self.log.error(format!("the menu bar: {e}"));
-                self.log
-                    .trouble("drawbar could not build its menu bar; the menus are not there.");
+                self.log.trouble("drawbar could not build its menu bar.");
             }
         }
         crate::platform::center_traffic_lights(cc);
@@ -1147,8 +1146,6 @@ impl eframe::App for DrawbarApp {
             &mut self.log,
         );
         self.tabs.prune(&self.workspace);
-        // Unedited views have no owner once their tab closes. An edited view is the only
-        // copy of that edit and must survive.
         self.workspace
             .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
         self.midi.report(&mut self.log);
@@ -1189,8 +1186,7 @@ impl eframe::App for DrawbarApp {
             arrived.push(browser::Act::SendAll);
         }
         drop_hint(ctx);
-        // Opened by choosing WAVs under New. It is drawn before anything else this frame
-        // because it is a modal over the whole window.
+        // Drawn before anything else this frame: it is a modal over the whole window.
         if let Some(made) = crate::newproject::dialog(
             ctx,
             &mut self.workspace,

@@ -193,9 +193,8 @@ enum Asked {
 
 /// The state one open document keeps between frames.
 ///
-/// ⚠️ Switching to another asset replaces all of it. Clearing fields one by one on a
-/// switch would eventually miss one, and a half-typed value would follow the user into
-/// the next tab.
+/// ⚠️ Switching to another asset replaces all of it, so no half-typed value follows the
+/// user into the next tab.
 struct Opened {
     /// The asset this is open on.
     id: u64,
@@ -1274,9 +1273,8 @@ impl Document {
             self.follow_sample(id, workspace);
             return Ok(());
         }
-        // ⚠️ Works on the asset's own bytes, never a copy. A piano library is hundreds
-        // of megabytes and every set of every frame comes through here; the piano arm
-        // makes no bytes because its sets go into a plan.
+        // ⚠️ Works on the asset's own bytes, never a copy: every set of every frame comes
+        // through here.
         let made = match edited {
             Shape::Sample => sample::apply(&entity.bytes, &sets).map(Some),
             Shape::Project => project::apply(&entity.bytes, &sets).map(Some),

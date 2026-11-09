@@ -1,12 +1,9 @@
 //! A tab closing while the library would lose an edit.
 //!
-//! A browser runs no code of the page's after it closes, and does not wait for the
-//! asynchronous writes of the private file system or a picked folder, so a closing tab
-//! cannot finish what drawbar still has to write. What it allows is a question: a
-//! `beforeunload` listener that cancels the event makes the browser ask whether to leave.
-//! The page keeps running while the user decides, and staying lets the writes land. A
-//! browser asks only once the page has been interacted with, and it may skip the question
-//! where the tab is discarded or the browser itself is quit.
+//! A closing tab cannot finish drawbar's asynchronous writes, so a `beforeunload`
+//! listener that cancels the event makes the browser ask whether to leave, and staying
+//! lets the writes land. A browser asks only once the page has been interacted with, and
+//! may skip the question when the tab is discarded or the browser quits.
 
 use std::cell::Cell;
 

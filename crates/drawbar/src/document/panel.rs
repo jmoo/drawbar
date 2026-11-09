@@ -1,10 +1,6 @@
-//! What is known about the piano a program plays: the one fact in a field document
-//! that the file alone cannot supply.
-//!
-//! `nord_format::panel` divides a body into sections and [`super::field`] draws the
-//! cells. This module is the catalog beside them: the id the file stores, the name only
-//! an attached instrument has for it, and the Model dial as that instrument's list of
-//! pianos.
+//! What is known about the piano a program plays, the one fact in a field document that
+//! the file alone cannot supply: the id the file stores, the name only an attached
+//! instrument has for it, and the Model dial as that instrument's list of pianos.
 
 use eframe::egui;
 use nord_format::fields::{ControlKind, Field, Library};
@@ -18,11 +14,9 @@ pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 
 /// What is known about the piano a program plays, and what it would take to know more.
 ///
-/// ⚠️ The file stores an **id** for the piano and, separately, the panel's category and
-/// Model dial position. The id identifies the piano; the dial position means something
-/// only in the instrument's own library. Only the id resolves to a name, and only the
-/// instrument can resolve it, so a name shown here always comes from the instrument and
-/// never from the file.
+/// ⚠️ The file stores the piano's id and, separately, the panel's category and Model dial
+/// position, which mean something only in the instrument's own library. Only the
+/// instrument resolves the id to a name, so a name shown here never comes from the file.
 pub struct PianoLookup {
     /// The id the file names, or `None` where it references no piano at all.
     pub id: Option<u32>,

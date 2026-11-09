@@ -2,10 +2,8 @@
 //! and written by copying the file through with the edit in place, so neither the file
 //! nor the edited copy is ever held whole.
 //!
-//! The desktop copies through a handle that reads by position. The browser cannot wait
-//! for a read, and a writer that reads as it writes must wait for each, so there the
-//! copy is laid out as [`Pieces`] first, and [`stream`] fetches each kept range as the
-//! writer takes it.
+//! The browser cannot wait for a read, so there the copy is laid out as [`Pieces`] first,
+//! and [`stream`] fetches each kept range as the writer takes it.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

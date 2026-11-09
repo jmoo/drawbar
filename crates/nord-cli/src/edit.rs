@@ -2,17 +2,10 @@
 //! edit` and `nord sample edit`: change fields in an Electro 5 body or a sample
 //! instrument.
 //!
-//! Field paths and values come from the registry `#[bitbody]` generates, so
-//! `--fields` cannot go stale and a field becomes settable by being declared.
-//! The live buffer is the program body under another tag, so both nouns run
-//! this command with the class fixed. The set list and the sample instrument have
-//! no registry; they are set through [`editors::SongEditor`] and
-//! [`editors::SampleEditor`], with the same `--set` syntax.
-//!
-//! A file and a slot are the same command. The slot form reads, changes and
-//! writes back over USB, so it follows the rule for every mutation: describe the
-//! target, then refuse without `--yes`. Editing a file in place takes the same
-//! guard, and `-o` avoids it.
+//! Field paths come from the registry `#[bitbody]` generates, so `--fields` cannot go
+//! stale. The set list and the sample instrument have no registry and are set through
+//! [`editors::SongEditor`] and [`editors::SampleEditor`] with the same `--set` syntax.
+//! Editing a slot, or a file in place, describes the target and then needs `--yes`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -316,10 +309,9 @@ pub(crate) fn write_file(ui: &Ui, path: &Path, bytes: &[u8]) -> Result<(), Strin
 /// Every write this CLI makes goes through here, so every verb creates a missing
 /// destination directory.
 ///
-/// ⚠️ The bytes go to a sibling file that is then renamed over the target, because an
-/// edit's destination is often its source: a write that truncated first and failed
-/// partway would leave neither the original nor the edit. The temporary is a sibling so
-/// the rename stays within one filesystem and replaces the target in one step.
+/// ⚠️ The bytes go to a sibling file renamed over the target, because an edit's
+/// destination is often its source and a write that truncated first and failed partway
+/// would leave neither. A sibling keeps the rename on one filesystem.
 ///
 /// ⚠️ A rename replaces the name it is given, so an existing destination is resolved
 /// first. Editing through a symlink rewrites the file it points at and keeps the link,
@@ -670,8 +662,6 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(&held).unwrap().count(), 1);
     }
 
-    /// `-o` naming the input overwrites the file being edited, so it needs `--yes` as
-    /// an in-place edit does.
     #[test]
     fn an_output_that_is_the_input_takes_the_in_place_guard() {
         let dir = scratch("edit-in-place");
@@ -695,8 +685,6 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
-    /// A target that does not decode says which target it was, as every other file
-    /// error in the CLI does.
     #[test]
     fn a_target_that_does_not_decode_is_named_in_the_error() {
         let dir = scratch("edit-undecodable");

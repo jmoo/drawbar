@@ -1,5 +1,5 @@
 // The collector. `POST /e` takes a beacon of anonymous rows into Analytics Engine;
-// `POST /report` emails one report an operator sent to reports@drawbar.app, exactly as
+// `POST /report` emails one report a person sent to reports@drawbar.app, exactly as
 // sent. Neither keeps the client's address or user agent.
 
 import { admitted, agent, allowed, report, rows } from "./check.js";

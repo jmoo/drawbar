@@ -8733,7 +8733,6 @@ fn a_project_builds_beside_itself_into_what_its_folder_on_disk_builds() {
     );
 }
 
-/// A build takes a WAV as its asset holds it, an unsaved gain included.
 #[test]
 fn a_build_encodes_a_wavs_unsaved_gain() {
     let root = Temp::new();

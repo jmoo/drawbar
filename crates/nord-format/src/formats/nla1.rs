@@ -2,7 +2,7 @@
 //!
 //! Same tag inversion as the Lead 4: `.nlas` is a program, `.nlap` a performance.
 //! Several schema versions occur in the factory banks; the differences between
-//! them are unmapped, which is one more reason the body stays raw.
+//! them are unmapped.
 
 use super::raw::raw_format;
 

@@ -116,8 +116,6 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
-    /// A save's bytes and a copy's file go beside the text, and come back where the text
-    /// names them.
     #[test]
     fn bytes_and_files_go_beside_the_text_and_come_back_in_place() {
         let outside = Outside::from("/music/Grand.npno");
@@ -206,8 +204,6 @@ mod tests {
         assert_eq!(back, change);
     }
 
-    /// Changes kept apart cross to the page, and a take of them to the worker, naming
-    /// the run as it was.
     #[test]
     fn changes_kept_apart_and_a_take_of_them_come_back_as_they_were() {
         use super::super::{KeptApart, KeptChange, KeptDo, KeptKind};

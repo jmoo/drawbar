@@ -1,11 +1,7 @@
-//! The header strip at the top of every document.
-//!
-//! Left to right: what the document is, its name, where it lives, how big it is, its
-//! state, which face is showing, and the one action this kind of document is for. A
-//! kind with nothing for one of those parts leaves the part out.
-//!
-//! The strip runs edge to edge on the window fill with a hairline under it; only the
-//! body below it has a margin.
+//! The header strip at the top of every document. Left to right: what the document is,
+//! its name, where it lives, how big it is, its state, which face is showing, and the one
+//! action this kind of document is for. A kind with nothing for one of those parts leaves
+//! the part out.
 
 use eframe::egui;
 use nord_format::accept::Family;

@@ -11,8 +11,8 @@ terminal.
 > instruments. [What is supported](getting-started/support.md) lists what has
 > been tested on hardware.
 
-**Open drawbar** at [drawbar.app](https://drawbar.app/) in Chrome, Edge or
-Brave.
+**Open drawbar** at [drawbar.app](https://drawbar.app/). Connecting an
+instrument from the browser needs Chrome, Edge or Brave.
 [Install](getting-started/install.md) covers the desktop app and `nord`.
 
 ## In this guide
@@ -23,9 +23,10 @@ Brave.
 - **Reference** is for developers: building from source, the file formats, the
   USB protocol, and how to contribute.
 
-Both tools are built on two Rust libraries you can use in your own projects:
-`nord-format` for files and `nord-usb` for the instrument. The source is on
-[GitHub](https://github.com/jmoo/drawbar).
+Both tools are built on Rust libraries you can use in your own projects:
+`nord-format` for files and `nord-usb` for the instrument. drawbar's library is
+built on `toshokan`, which keeps tags and history beside a folder of files. The
+source is on [GitHub](https://github.com/jmoo/drawbar).
 
 ## Disclaimer
 

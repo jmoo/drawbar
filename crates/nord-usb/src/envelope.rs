@@ -218,6 +218,9 @@ impl FileSink for std::fs::File {
 
 /// [`unwrap`] for a file read through a [`FileSource`], a transfer chunk at a time: the
 /// header, once every byte has been checked against the stored checksum.
+///
+/// A write runs this check before its first frame. Call it alone to know the file is
+/// whole before touching the instrument.
 pub async fn verify(file: &mut impl FileSource) -> Result<Header> {
     Ok(open(file, crate::op::WRITE_CHUNK).await?.header)
 }

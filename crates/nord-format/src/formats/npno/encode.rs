@@ -31,11 +31,9 @@
 //! a stroke ends in up to one block of silence, and no frame is dropped.
 //!
 //! Both layouts code again unchanged. The cap is what the stroke has left to own, so a
-//! stroke whose blocks land on its frame count gives the search the same room the
-//! second time, and the search reaches the same widths. A stroke laid out with no cap
-//! states the sum of its blocks. A capped search over that sum admits every one of
-//! those blocks, since each is no longer than what is left when it starts and the cap
-//! only removes candidates. So it lays out the same blocks and this time lands exactly.
+//! capped stroke gives the search the same room the second time. An uncapped stroke
+//! states the sum of its blocks, and a capped search over that sum admits every one of
+//! them, so it lays out the same blocks and this time lands exactly.
 //!
 //! Libraries built here load and play on the instrument: mono and stereo, every key of
 //! a full-keyboard library including its lowest and highest root, each of three attack

@@ -103,7 +103,6 @@ pub enum Routing {
     /// It behaves as off (no light, no effect), and a front-panel store preserves it,
     /// while the panel itself writes off as `0`. Confirmed on hardware. That it is the
     /// encoding before firmware 2.04: Inferred from specimens; not confirmed on hardware.
-    /// Every program holding it is a factory program or predates the 2.04 update.
     Unknown = 1,
     Lower = 2,
     Upper = 3,
@@ -160,8 +159,7 @@ sparse_enum!(
     /// Effect 1's modulation type.
     ///
     /// Values are as stored, which is rotated from the panel's order: stored 0 is trem 1,
-    /// not pan 1. Inferred from specimens; not confirmed on hardware. Each specimen is
-    /// named for the panel setting it was stored from.
+    /// not pan 1. Inferred from specimens; not confirmed on hardware.
     Fx1Type, 4, {
         0 => Trem1, "trem 1";
         1 => Trem2, "trem 2";

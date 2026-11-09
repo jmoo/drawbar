@@ -195,9 +195,6 @@ fn shortened(name: String) -> String {
 mod tests {
     use super::*;
 
-    /// A folder renamed in case alone moves through a name beside it, so no step's
-    /// destination is its own source on a disk that ignores case; any other move is one
-    /// step.
     #[test]
     fn a_name_moved_through_names_the_folder_it_was_moved_from() {
         assert_eq!(moved_through(&aside("cello", 3)), Some("cello"));

@@ -1,5 +1,5 @@
-//! Nord Electro 5: program (`ne5p`), live slot (`ne5l`), song / set
-//! (`ne5t`), settings (`ne5s`), and the ZIP backup bundle.
+//! Nord Electro 5: program (`ne5p`), live slot (`ne5l`), song
+//! (`ne5t`, an entry of a set list), settings (`ne5s`), and the ZIP backup bundle.
 
 mod center_panel;
 mod effects_panel;

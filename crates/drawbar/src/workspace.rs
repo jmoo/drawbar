@@ -1,10 +1,8 @@
 //! This computer: the assets held in memory, and the ways bytes get in and out of them.
+//! [`crate::browser`] draws the list.
 //!
-//! An entity is bytes first and a decode second. A file that does not parse still gets a
-//! row, with its error shown and its raw body exportable, because reporting a bad file is
-//! the point of opening it.
-//!
-//! [`crate::browser`] draws the list; this module holds the model and the file dialogs.
+//! A file that does not parse still gets a row, with its error shown and its raw body
+//! exportable.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -178,8 +176,7 @@ impl VerifyState {
 pub struct Container {
     pub header: Header,
     /// Where the body sits in the file, checked against the file's length when it was
-    /// read. Anything that needs the body reads this range instead of adding a declared
-    /// length to its own start offset.
+    /// read. Read the body through this range, never through a declared length.
     pub body: std::ops::Range<usize>,
     pub checksum_ok: bool,
     /// `crc32:` or `crc16:`. The two generations store different checksums in different
@@ -450,10 +447,7 @@ impl Baseline {
 
     /// The [`LocalEntity::stamp`] of these bytes: the asset's current stamp while it
     /// still holds them, and a separate stamp once it does not.
-    ///
-    /// ⚠️ [`LocalEntity::is_unsaved`] compares stamps, not bodies. Comparing two bodies
-    /// costs time proportional to the library's size, and the header alone asks twice a
-    /// frame.
+    /// [`LocalEntity::is_unsaved`] compares these.
     pub fn stamp(&self) -> u64 {
         self.stamp
     }
@@ -575,10 +569,8 @@ impl Baseline {
 
 /// A write this app made: the slot it wrote to, and the checksum of the bytes it wrote.
 ///
-/// This is the only thing this app knows about a slot without reading it back. It is
-/// evidence for a class whose slots report no checksum, and only while the asset is
-/// still saved as those bytes: `crc32` is compared with [`Baseline::crc32`], which
-/// changes as soon as the asset is saved as anything else.
+/// It is evidence for a class whose slots report no checksum, and only while the asset is
+/// still saved as those bytes: `crc32` is compared with [`Baseline::crc32`].
 #[derive(Clone, Copy)]
 pub struct Wrote {
     pub class: ObjectClass,
@@ -696,23 +688,18 @@ pub struct LocalEntity {
     /// Whether an editor holds an edit of this asset that its bytes do not. The editor
     /// keeps this current through [`Workspace::mark_pending`].
     pending: bool,
-    /// Whether this is on this computer, as opposed to a view of a slot.
-    ///
-    /// A view is a working copy like any other, edited and sent back the same way, but
-    /// it is not in the local list and goes when its tab closes. [`Workspace::keep`]
-    /// promotes one, and [`Workspace::close_views`] promotes one that holds changes.
+    /// Whether this is on this computer, as opposed to a view of a slot, which is not in
+    /// the local list and goes when its tab closes. [`Workspace::keep`] promotes a view,
+    /// and [`Workspace::close_views`] promotes one that holds changes.
     pub kept: bool,
     /// Distinct for every set of bytes this id has held, so a cache of their decode can
-    /// tell when it is stale.
-    ///
-    /// It is the list revision when the bytes landed, so a rename or a send does not
-    /// change it.
+    /// tell when it is stale. It is the list revision when the bytes landed, so a rename
+    /// or a send does not change it.
     pub stamp: u64,
     /// The slot on the attached instrument that holds these bytes, from
     /// [`crate::device::link`].
     ///
-    /// Derived from the scan cache and never persisted: it is recomputed whenever that
-    /// cache changes and cleared when the instrument goes. An edit leaves it alone, so an
+    /// Derived from the scan cache and never persisted. An edit leaves it alone, so an
     /// edited asset still points at the slot it was matched to.
     pub link: Option<(ObjectClass, Location)>,
     /// The last write this app made from this asset. See [`Wrote`] and
@@ -860,11 +847,10 @@ impl LocalEntity {
                 facts.slot_crc = slot_crc;
                 facts.whole_crc = decoded.crc;
             }
-            // ⚠️ Writes the slot checksum of the bytes decoded over the one a send reported
-            // for the file, though the file holds other bytes. A send of the file that lands
-            // while the asset's own bytes wait to be decoded then leaves `wrote.crc32`
-            // naming what the slot took and the baseline naming the decoded bytes, and
-            // `library::wrote` no longer matches the slot.
+            // ⚠️ Writes the slot checksum of the decoded bytes over the one a send
+            // reported for the file, which holds other bytes. A send that lands while the
+            // asset's own bytes wait to be decoded then leaves `library::wrote` not
+            // matching the slot.
             Content::Resting {
                 check: Check::Checking { reported },
                 ..
@@ -1081,8 +1067,8 @@ impl LocalEntity {
     /// pending edit included.
     ///
     /// ⚠️ Compares two stamps, not two bodies: every listed row and every frame of the
-    /// header ask this, and a piano library is hundreds of megabytes. The stamps are
-    /// settled wherever a baseline moves. See [`Baseline::stamp`].
+    /// header ask this, and a piano library is hundreds of megabytes. See
+    /// [`Baseline::stamp`].
     pub fn is_unsaved(&self) -> bool {
         self.pending || self.stamp != self.saved.stamp
     }
@@ -1193,11 +1179,8 @@ pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
     (a.len() != b.len()).then(|| a.len().min(b.len()))
 }
 
-/// Whether an asset holds something no other copy of it does.
-///
-/// This decides what happens to a view when its last tab closes: **an unsaved or owed
-/// view is precious, and a saved one is disposable.** A saved view holds the slot's
-/// bytes, which the instrument still has; an unsaved one is the only copy.
+/// Whether an asset holds something no other copy of it does: an unsaved or owed view,
+/// which [`Workspace::close_views`] keeps. A saved view holds what the slot still has.
 pub fn precious(entity: &LocalEntity, queue: &Queue) -> bool {
     entity.is_unsaved() || queue.holds(entity.id)
 }
@@ -1334,8 +1317,8 @@ pub struct Family {
 /// so nothing is out of range. Build one under the newest version the decoder is
 /// validated against.
 ///
-/// ⚠️ Legal is not **default**. The result has every control at zero, which no panel
-/// ships with. [`Fresh::zeroed`] lets the menu warn the user before they make one.
+/// ⚠️ Legal is not default: every control is at zero, which no panel ships with.
+/// [`Fresh::zeroed`] lets the menu warn the user before they make one.
 macro_rules! zeroed {
     ($body:ty, $len:expr, $format:expr, $versions:expr, $wrap:expr) => {{
         let body = <$body>::try_from([0u8; $len]).map_err(|e| format!("{e}"))?;
@@ -1350,10 +1333,9 @@ macro_rules! zeroed {
 /// The objects the New menu offers, across every format this app can build from
 /// nothing.
 ///
-/// ⚠️ Only bodies that **decode** are here, plus the note, which has no body. A stub
-/// format, such as the Stage 3's song or any Stage's settings, round-trips its container
-/// and nothing more. A zeroed one would be 45 bytes of nothing under a tag, and this app
-/// could say nothing true about it.
+/// ⚠️ Only formats whose bodies decode are here, plus the note. A stub format, such as
+/// the Stage 3's song or any Stage's settings, round-trips its container and nothing
+/// more, so a zeroed one would say nothing true.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fresh {
     /// The Electro 5's four kinds, each built by `nord-format`'s constructor.
@@ -1469,14 +1451,10 @@ impl Fresh {
     /// the file to find something out.
     pub fn note(self) -> Option<&'static str> {
         match self {
-            Fresh::Text => Some(
-                "A text file. It stays on this computer, since no instrument has a \
-                 folder for one.",
-            ),
-            _ => self.zeroed().then_some(
-                "Every control at zero. The file decodes and re-saves byte for byte, but \
-                 it is not a factory program. This app does not know what one would hold.",
-            ),
+            Fresh::Text => Some("A text file. It stays on this computer."),
+            _ => self
+                .zeroed()
+                .then_some("Every control at zero. Not a factory program."),
         }
     }
 
@@ -1851,10 +1829,9 @@ impl Workspace {
 
     /// The families of the listed assets, in [`accept::Family::ALL`] order.
     ///
-    /// Files that name no family (the shared library formats, the carriers, bytes that did
-    /// not decode) add none, so a list of samples spans no families. Taken again only
-    /// when the list or one of its assets changes, so a frame that draws a family word
-    /// per row does not take it per row.
+    /// Files that name no family (the shared library formats, the carriers, bytes that
+    /// did not decode) add none, so a list of samples spans no families. Taken again only
+    /// when the list or one of its assets changes.
     pub fn families_present(&self) -> Vec<accept::Family> {
         self.taken(&self.families, || {
             #[cfg(test)]
@@ -1868,8 +1845,7 @@ impl Workspace {
         })
     }
 
-    /// The sample generations of the listed assets, sorted. Taken again only when the
-    /// list or one of its assets changes, as the families are.
+    /// The sample generations of the listed assets, sorted, cached as the families are.
     pub fn generations_present(&self) -> Vec<&'static str> {
         self.taken(&self.generations, || {
             let mut here: Vec<&'static str> =
@@ -1880,8 +1856,8 @@ impl Workspace {
         })
     }
 
-    /// The kinds of the listed assets, in [`crate::browser::Kind::ALL`] order. Taken again
-    /// only when the list or one of its assets changes, as the families are.
+    /// The kinds of the listed assets, in [`crate::browser::Kind::ALL`] order, cached as
+    /// the families are.
     pub fn kinds(&self) -> Vec<crate::browser::Kind> {
         use crate::browser::Kind;
         self.taken(&self.kinds, || {
@@ -1983,10 +1959,8 @@ impl Workspace {
         self.get(id).is_some_and(|entity| !entity.kept)
     }
 
-    /// Take a copy of a slot without putting it in the local list.
-    ///
-    /// A double-click on a slot opens one: a tab and a document over a working copy,
-    /// which is edited and sent back like any other and goes when its tab closes.
+    /// Take a copy of a slot without putting it in the local list. It goes when its tab
+    /// closes.
     pub fn view(&mut self, name: String, origin: Origin, bytes: Vec<u8>, log: &mut Log) -> u64 {
         let (id, _) = self.add(name, origin, bytes, log);
         let Some(entity) = self.get_mut(id) else {
@@ -2031,14 +2005,9 @@ impl Workspace {
 
     /// Drop the views no open tab shows anymore, except those holding changes.
     ///
-    /// A view lives as long as its tab. Nothing lists it, so a view left behind could
-    /// never be reached or removed.
-    ///
-    /// ⚠️ **A view is the only copy of what it holds.** Nothing lists it and the store
-    /// skips it, so closing its tab is the only gesture in this app that can destroy an
-    /// edit, and the × sits beside the badge saying the edit is owed to a slot. An edited
-    /// or owed view is promoted into the list instead, and only an untouched one is
-    /// dropped.
+    /// ⚠️ A view is the only copy of what it holds: nothing lists it and the store skips
+    /// it. An edited or owed view is promoted into the list instead, and only an
+    /// untouched one is dropped.
     pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
         let mut rescued = Vec::new();
         let before = self.entities.len();
@@ -2360,9 +2329,8 @@ impl Workspace {
 
     /// Something needs `id` whole: it is open, or acted on. One not read yet is asked of
     /// the library ahead of everything else, and one not decoded yet is decoded ahead of
-    /// the others.
-    /// Either way it is needed now, and is not let go for room until a frame passes
-    /// without it being needed.
+    /// the others. It is not let go for room until a frame passes without it being
+    /// needed.
     pub fn hurry(&self, id: u64) {
         self.need(id, Need::Now);
     }
@@ -3195,8 +3163,6 @@ impl Workspace {
     /// holds those same bytes, and a new stamp otherwise.
     ///
     /// ⚠️ Compares two bodies, so it runs only when a baseline moves and never per frame.
-    /// That keeps [`LocalEntity::is_unsaved`] and the caches over the pair a comparison
-    /// of two integers.
     fn stamp_for(&mut self, id: u64, bytes: &[u8]) -> u64 {
         match self
             .get(id)
@@ -3371,7 +3337,6 @@ impl Workspace {
     }
 
     /// Hand bytes to the user under `name`, through this target's way of saving a file.
-    /// Exports of whole assets and of per-zone WAVs both use it.
     pub fn save_bytes(&self, name: String, bytes: Vec<u8>) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
@@ -3663,14 +3628,12 @@ impl Workspace {
     /// Record a write that reached a slot: the bytes it carried become the saved
     /// baseline, and the slot becomes the link.
     ///
-    /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. A write
-    /// takes as long as the instrument takes, and an edit made while one was in flight
-    /// exists only on this computer. Calling it saved would let it be discarded with its
-    /// tab.
+    /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. An edit
+    /// made while the write was in flight exists only on this computer, and calling it
+    /// saved would let it be discarded with its tab.
     ///
-    /// ⚠️ The only place a link is set instead of derived. A write is the only evidence
-    /// about a slot this app does not have to read back, and [`crate::device::link`]
-    /// keeps it until a walk of that slot says otherwise.
+    /// ⚠️ The only place a link is set instead of derived. [`crate::device::link`] keeps
+    /// it until a walk of that slot says otherwise.
     pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
         let resting = self
             .get(id)
@@ -3763,8 +3726,7 @@ impl Workspace {
 
     /// Swap in edited bytes, keeping the entity's identity.
     ///
-    /// The decode and the verify run again: an editor's output is bytes like any other and
-    /// is checked the same way as a file from disk.
+    /// The decode and the verify run again, as they do for a file from disk.
     pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
@@ -3920,14 +3882,12 @@ impl Workspace {
 
     /// Restore what a previous session held, and return how many assets were refused.
     ///
-    /// Every asset is verified on the way in: bytes from a store have been somewhere
-    /// this app does not control and get no more trust than bytes from a disk. An asset
-    /// held whole is decoded and re-encoded off the frame, a few at a time, and is
-    /// [`VerifyState::Reading`] until then; one holding an unsaved edit is decoded here.
-    /// One resting in its file decodes nothing, and its checksum is checked off the
-    /// frame. See [`Workspace::poll`]. One unread holds nothing until
-    /// [`Workspace::took`]. An id is refused if it leaves no room for the next id or is
-    /// already in the list.
+    /// Every asset is verified on the way in, as bytes from a disk are. One held whole is
+    /// decoded and re-encoded off the frame, and is [`VerifyState::Reading`] until then;
+    /// one holding an unsaved edit is decoded here; one resting in its file has its
+    /// checksum checked off the frame (see [`Workspace::poll`]); one unread holds nothing
+    /// until [`Workspace::took`]. An id is refused if it leaves no room for the next id
+    /// or is already in the list.
     pub fn restore(&mut self, saved: Vec<Saved>, next_id: Option<u64>, log: &mut Log) -> usize {
         let mut refused = 0;
         // Kept current with each asset restored, so an id is looked up, not searched for.
@@ -4171,8 +4131,6 @@ pub(crate) fn spawn<F: std::future::Future<Output = ()> + 'static>(future: F) {
 mod tests {
     use super::*;
 
-    /// A file swapped, between its index and its check, for one of the same length in
-    /// the other container generation is refused, not described by both.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_check_of_a_file_swapped_for_the_other_generation_is_refused() {
@@ -4215,8 +4173,6 @@ mod tests {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
     }
 
-    /// An edit made while the save of an earlier one was in flight outlives that save's
-    /// answer: it is made again over the file the save wrote, still unsaved.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn an_edit_made_during_its_save_is_kept_over_the_file_the_save_wrote() {
@@ -4249,9 +4205,7 @@ mod tests {
         assert!(!workspace.saving_edit(id), "and waits to be saved again");
     }
 
-    /// A send of a resting file that lands after the asset's edit was saved into another
-    /// file leaves the asset resting in what the save wrote: the edit stays saved, and
-    /// the write records the checksum of the file the slot took.
+    /// The write records the checksum of the file the slot took.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_send_landing_after_an_edit_was_saved_keeps_the_saved_edit() {
@@ -4279,8 +4233,6 @@ mod tests {
         assert_ne!(entity.saved.crc32(), Some(crc32), "so the slot is behind");
     }
 
-    /// A file an asset is rebased onto keeps the slot checksum its check took, though
-    /// the asset's own bytes are decoded after the check answers.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_decode_after_the_check_leaves_the_checksum_the_check_took() {
@@ -4317,8 +4269,6 @@ mod tests {
         assert_eq!(entity.saved.crc32(), checked);
     }
 
-    /// An asset counted unsaved before its file was read holds no bytes, and a decode
-    /// of them gives its unread file no whole-file CRC.
     #[test]
     fn a_decode_gives_a_file_not_read_no_checksum() {
         let mut workspace = Workspace::new(egui::Context::default());
@@ -4398,8 +4348,7 @@ mod tests {
         assert_eq!(entity.saved.crc32(), Some(hashed));
     }
 
-    /// Each fresh default carries its own tag and round-trips. That is all the New menu
-    /// claims about a zeroed body: it decodes and re-saves byte for byte.
+    /// The New menu claims no more than this about a zeroed body.
     #[test]
     fn every_fresh_default_round_trips_under_its_own_tag() {
         for kind in Fresh::ALL.iter().filter(|kind| **kind != Fresh::Text) {
@@ -4426,8 +4375,7 @@ mod tests {
         );
     }
 
-    /// Every kind is on the New menu once: a kind on no menu cannot be found, and one on
-    /// two is offered twice.
+    /// A kind on no menu cannot be found, and one on two is offered twice.
     #[test]
     fn every_kind_is_offered_exactly_once() {
         let mut seen: Vec<Fresh> = Fresh::FAMILIES
@@ -4443,8 +4391,6 @@ mod tests {
         assert!(seen.is_empty());
     }
 
-    /// A zeroed body is not a factory program, and the menu says so before the user
-    /// finds out.
     #[test]
     fn a_zeroed_body_says_that_it_is_one() {
         assert!(!Fresh::Program.zeroed() && Fresh::Program.note().is_none());
@@ -4523,8 +4469,6 @@ mod tests {
         assert!(workspace.get(id).expect("held").is_text(), "and back again");
     }
 
-    /// A slot opened for a look is a working copy that nothing lists, and it goes when
-    /// the tab looking at it does.
     #[test]
     fn a_view_is_not_on_this_computer_until_it_is_kept() {
         let ctx = egui::Context::default();
@@ -4621,8 +4565,6 @@ mod tests {
         assert_eq!(wrote(&workspace), Some(landed), "and neither is a revert");
     }
 
-    /// A view is dropped once no tab holds it. A kept asset stays whether or not a tab
-    /// shows it.
     #[test]
     fn a_view_goes_when_the_last_tab_on_it_closes() {
         let ctx = egui::Context::default();
@@ -4649,9 +4591,7 @@ mod tests {
         assert!(workspace.get(local).is_some(), "kept is kept");
     }
 
-    /// ⚠️ A view is the only copy of what it holds: nothing lists it and the store skips
-    /// it. The × on its tab sits next to a badge saying the edit is owed to a slot, with
-    /// no undo. An edited or owed view is kept; only an untouched one is dropped.
+    /// ⚠️ A view is the only copy of what it holds, and the × on its tab has no undo.
     #[test]
     fn a_view_with_changes_in_it_is_kept_rather_than_dropped() {
         let ctx = egui::Context::default();
@@ -4729,9 +4669,8 @@ mod tests {
         assert!(!workspace.is_view(planning), "and is listed");
     }
 
-    /// ⚠️ A library is hundreds of megabytes. The chosen file is replaced only by a
-    /// rename, so a write that stops halfway leaves the old file, and no temporary file is
-    /// left beside it either way.
+    /// ⚠️ A library is hundreds of megabytes, so the chosen file is replaced only by a
+    /// rename.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_save_lands_whole_and_leaves_no_temporary_beside_it() {
@@ -4757,8 +4696,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// One view per slot, so a second double-click goes to the existing view instead of
-    /// making a second working copy.
     #[test]
     fn a_slot_has_at_most_one_view() {
         let ctx = egui::Context::default();
@@ -4866,8 +4803,6 @@ mod tests {
         assert_eq!(stamp(&workspace), first);
     }
 
-    /// Unsaved is holding bytes other than the ones this asset was last saved as. An
-    /// edit makes it so, saving and reverting each end it.
     #[test]
     fn an_asset_is_unsaved_while_it_holds_something_its_baseline_does_not() {
         let ctx = egui::Context::default();
@@ -4945,9 +4880,7 @@ mod tests {
         );
     }
 
-    /// A write that reached a slot saves the bytes it carried, not the ones the asset
-    /// holds now: an edit made while the write was in flight exists only on this
-    /// computer, and calling it saved would let it be discarded with its tab.
+    /// An edit made while the write was in flight exists only on this computer.
     #[test]
     fn a_write_that_landed_saves_what_it_carried_rather_than_a_later_edit() {
         let mut workspace = Workspace::new(egui::Context::default());
@@ -4997,7 +4930,6 @@ mod tests {
         assert_eq!(export_filename("My Kit", &bytes), "My-Kit.nsmpproj");
     }
 
-    /// A file that does not decode is still a row: the error is the report.
     #[test]
     fn bytes_that_do_not_decode_are_kept_with_their_error() {
         let entity = ingest("junk.bin", vec![0x00, 0xff, 0x01, 0xfe]);
@@ -5122,8 +5054,7 @@ mod tests {
         );
     }
 
-    /// What a previous session held comes back keeping its name, its origin and its id,
-    /// and is decoded and checked off the frame.
+    /// What a previous session held is decoded and checked off the frame.
     #[test]
     fn a_restored_asset_keeps_what_it_was() {
         let ctx = egui::Context::default();
@@ -5217,7 +5148,6 @@ mod tests {
         assert!(searched <= PARTS as usize, "searched {searched} times");
     }
 
-    /// The assets asked for first are decoded first, whatever order the rest arrived in.
     #[test]
     fn an_asset_hurried_is_decoded_before_the_others() {
         let mut workspace = Workspace::new(egui::Context::default());
@@ -5633,8 +5563,6 @@ mod tests {
         }
     }
 
-    /// An asset let go of for room still draws as it did and matches its slot, from what
-    /// its read found, and reads the same once read again.
     #[test]
     fn an_asset_let_go_reads_as_it_did_and_the_same_once_read_again() {
         let program = Fresh::Program.bytes().unwrap();
@@ -5684,8 +5612,6 @@ mod tests {
         assert_eq!(entity.saved.crc32(), slot_of(&program));
     }
 
-    /// A check answers for the file it read. An asset that rests in another file by then
-    /// goes on waiting for that file's check.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_check_answers_only_for_the_file_the_asset_still_rests_in() {
@@ -5719,9 +5645,8 @@ mod tests {
         assert_eq!(entity.saved.crc32(), slot_of(&piano));
     }
 
-    /// A write that landed saves the asset as what it sent, and the slot it reached
-    /// becomes its link: bytes held in memory, or the file it rests in once that file's
-    /// check has passed.
+    /// The slot it reached becomes its link, for bytes held in memory or for the file it
+    /// rests in once that file's check has passed.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_write_that_landed_saves_the_asset_as_what_it_sent() {
@@ -5755,8 +5680,7 @@ mod tests {
         assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&sample));
     }
 
-    /// A send of a file to a slot saves an asset held in memory as that file, with the
-    /// checksum the slot reports for it. The bytes held stay, now unsaved against it.
+    /// The bytes the asset holds stay, now unsaved against that file.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_send_of_a_file_that_landed_saves_the_asset_as_that_file() {
@@ -5783,8 +5707,8 @@ mod tests {
         assert!(entity.is_unsaved());
     }
 
-    /// A revert puts back what the asset was saved as: the bytes, held once with the
-    /// baseline, or the file it rests in, checked again.
+    /// A revert puts back the bytes, held once with the baseline, or the file the asset
+    /// rests in, checked again.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_revert_returns_to_what_the_asset_was_saved_as() {

@@ -63,7 +63,8 @@ layer to play at the level of its root's loudest layer, softer layers a little
 louder as the instrument's own grand pianos have them, so the recordings carry the
 dynamics, and trims each release 18 dB below the loudest. When a soft layer needs more
 boost than the instrument gives, the whole library is turned down to fit. A 5.x
-library trims each layer by its value, as a library built on a template does.
+library, like one built on a template, trims each attack and resonance stroke
+3 dB more than its layer's value states, and each release stroke 12 dB.
 
 A WAV with a loop, which most sample editors can set, makes a stroke that loops
 there while the key is held, and the dialog marks it. Audio after the loop's end

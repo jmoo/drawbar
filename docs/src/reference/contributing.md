@@ -1,8 +1,8 @@
 # Contributing
 
 [CONTRIBUTING.md](https://github.com/jmoo/drawbar/blob/master/CONTRIBUTING.md) is
-the authority on style, tests, tooling and releases. Issues and pull requests are
-on [GitHub](https://github.com/jmoo/drawbar/issues).
+the authority on the research boundary, style, tests, tooling and releases. Issues
+and pull requests are on [GitHub](https://github.com/jmoo/drawbar/issues).
 
 Two rules bear repeating. All reverse engineering is black-box work for
 interoperability, from files and USB traffic produced by instruments the
@@ -15,5 +15,4 @@ tools.
 
 The guide is an [mdBook](https://rust-lang.github.io/mdBook/) under `docs/`.
 `nix build .#docs` renders it, and `nix develop -c mdbook serve docs` previews it
-with live reload. Every push to master publishes it at
-[drawbar.app/docs](https://drawbar.app/docs/), beside the app's latest release.
+with live reload. It is published at [drawbar.app/docs](https://drawbar.app/docs/).

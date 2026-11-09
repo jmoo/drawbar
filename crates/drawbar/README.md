@@ -6,8 +6,7 @@ Runs in the browser or on the desktop.
 
 ![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
 
-Open [drawbar.app](https://drawbar.app/) in Chrome, Edge or Brave, or run
-the desktop app:
+Open [drawbar.app](https://drawbar.app/), or run the desktop app:
 
 ```sh
 nix run github:jmoo/drawbar#drawbar
@@ -34,15 +33,12 @@ cargo install drawbar
   use it from every computer that syncs it; see
   [Your files](../../docs/src/drawbar/this-computer.md#opening-another-folder).
 
+Connecting an instrument from the browser needs Chrome, Edge or Brave.
+
 Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before
 trusting alpha software with sounds you cannot re-create.
-
-## Building
-
-`nix develop`, then from `crates/`: `cargo run -p drawbar` and `cargo test -p
-drawbar`. `nix build .#drawbar-web` makes the browser bundle. The rest is in
-[Building from source](../../docs/src/reference/building.md).
+[Building from source](../../docs/src/reference/building.md) covers a checkout.
 
 ## Disclaimer
 

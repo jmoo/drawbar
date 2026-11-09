@@ -17,7 +17,7 @@ use crate::workspace::{LocalEntity, Workspace};
 /// What an asset is, which decides the folder it belongs in.
 ///
 /// Every decoded [`nord_format::Entity`] has a kind of its own, so a decoded file is never
-/// called just a file. Declaration order matches [`Kind::ALL`], the order any set of kinds
+/// called only a file. Declaration order matches [`Kind::ALL`], the order any set of kinds
 /// is listed in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {

@@ -68,7 +68,7 @@ The form shows exactly what will be sent before you send it. These are sent even
 sharing is off, because you asked.
 
 Reports are emailed to drawbar's developer and are never published. They are deleted
-after three months. When a report is sent, drawbar shows its number. Write to
+after 90 days. When a report is sent, drawbar shows its number. Write to
 contact@drawbar.app with that number, or the email address you gave, to see what we
 hold or to have it deleted sooner.
 

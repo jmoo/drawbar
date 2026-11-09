@@ -1,17 +1,10 @@
-//! The sample-instrument document.
-//!
-//! A sample is mostly encoded audio, so what is settable is what the format can patch in
+//! The sample-instrument document. What is settable is what the format can patch in
 //! place without touching a stroke: the name, each zone's root key and boundaries, and
-//! the v2 keyboard map's per-key gain and detune. Every generation is editable. Where a
-//! container also describes the keyboard note by note, that description is recomputed
-//! from the zones as they move.
+//! the v2 keyboard map's per-key gain and detune. The project editor shares the key map,
+//! the zone rows, and the cells of an open row.
 //!
-//! ⚠️ Decoding a stroke is expensive and a library instrument is hundreds of megabytes,
-//! so nothing here decodes to draw a frame. A zone's audio is decoded once, when a row
-//! that shows it is opened, and kept in a [`Cache`] while its stroke is unchanged.
-//!
-//! The project editor shares the key map, the zone rows, and the cells of an open row,
-//! which live here because an `.nsmpproj` is the same object seen from the source side.
+//! ⚠️ Nothing here decodes to draw a frame. A zone's audio is decoded when a row that
+//! shows it is opened, and kept in a [`Cache`] while its stroke is unchanged.
 
 use std::io::Cursor;
 
@@ -1157,9 +1150,8 @@ pub struct MapZone {
 
 /// Whether a struck key can be heard here.
 ///
-/// A project's audio is not decoded: it must be built into an instrument first, and the
-/// codec for that is not understood. The map says which zone answers the key and that
-/// nothing will sound.
+/// A project's audio is not decoded: it must be built into an instrument first. The map
+/// says which zone answers the key and that nothing will sound.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sounds {
     Now,
@@ -1872,8 +1864,8 @@ pub fn ui(
 
 /// The key × velocity field, on the generations whose records state a window.
 ///
-/// Read-only: `nord-format` has no setter for a wide zone's window, and every shipped
-/// instrument answers the full window. Clicking a block still opens its row.
+/// Read-only: `nord-format` has no setter for a wide zone's window. Clicking a block
+/// still opens its row.
 fn velocity(ui: &mut egui::Ui, state: &mut State, snapshot: &Snapshot) {
     let stated: Vec<(usize, &Zone)> = snapshot
         .zones
@@ -2330,8 +2322,7 @@ fn key_table(ui: &mut egui::Ui, state: &mut State, table: &KeyTable) {
 /// Read the map the asset was last saved with, once per set of saved bytes.
 ///
 /// ⚠️ Paint marks are the difference between what is held and what was saved, so the
-/// baseline must be the saved bytes, not the working copy. Measured against itself,
-/// nothing would ever read as painted.
+/// baseline must be the saved bytes, not the working copy.
 pub fn follow(state: &mut State, id: u64, saved: &Baseline) {
     let resting = saved
         .file()

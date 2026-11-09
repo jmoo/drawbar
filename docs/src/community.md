@@ -27,13 +27,12 @@ A read-only web viewer for Stage 2, 2EX and 3 programs, built on the byte maps
 above. Open it at
 [chris55.github.io/ns3-program-viewer](https://chris55.github.io/ns3-program-viewer/).
 
-### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
+### [StageLoop](https://livekeytools.com/stageloop) · LiveKeyTools · Free, closed source
 
-A browser companion for the Stage 4 and Stage 2 that reads, organizes and
-transfers programs and samples, with a fully decoded Stage 4 program body and
-hardware-verified USB transfer in both directions. Its documentation is
-thorough and marks what has been verified on hardware. Open it at
-[opennord.gigmeister.app](https://opennord.gigmeister.app).
+A sample editor for macOS and Windows that prepares recordings for Nord Sample
+Editor. It trims, normalizes, finds loop points and crossfades, maps a
+multisample's root keys and zones, and exports a `.nsmpproj` project. Download it
+at [livekeytools.com/stageloop](https://livekeytools.com/stageloop).
 
 ## Adding to this list
 

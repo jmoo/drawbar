@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 version = "0.8.0"
 
-# The binary is `nord`; the package is `nord-cli`.
 [[bin]]
 name = "nord"
 path = "src/main.rs"
@@ -30,7 +29,7 @@ clap = { version = "4", features = ["derive"] }
 # terminal's own line discipline cannot be given a starting buffer. Default features are
 # off because the password, editor and fuzzy prompts are unused.
 dialoguer = { version = "0.12", default-features = false }
-# Pull in the `bundle` feature so `nord inspect` can also open ZIP backup bundles.
+# `bundle` lets `nord inspect` read ZIP bundles and backups.
 nord-format = { path = "../nord-format", version = "0.8.0", features = [
   "bundle",
 ] }

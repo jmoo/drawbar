@@ -1,16 +1,10 @@
-//! MIDI input: a controller's keys, played as clicks on the front key map.
+//! MIDI input: a controller's keys, played as clicks on whichever key map is showing.
+//! Listening belongs to the app and is started and stopped from the Instrument menu. The
+//! backend, `midir` on the desktop and Web MIDI in a browser, opens every input port it
+//! can and leaves note messages in a queue that each frame drains.
 //!
-//! Listening belongs to the app, not to a document: it is started and stopped from the
-//! Instrument menu, and whichever key map is showing responds to the keys.
-//!
-//! ⚠️ Input only. Nothing here opens an output port or sends a byte. A controller plays
-//! this app's own audition and reaches no instrument: writes to a Nord go over USB, from
-//! [`crate::device`], when the user asks for them.
-//!
-//! Only the backend differs between targets: `midir` on the desktop and Web MIDI in a
-//! browser. Each opens every input port it can, decodes each port's bytes as they
-//! arrive, and leaves note messages in a queue that each frame drains. A browser tab has
-//! no thread to drain it on, and nothing here may block one.
+//! ⚠️ Input only. Nothing here opens an output port or sends a byte, so a controller
+//! reaches no instrument.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -170,10 +164,9 @@ impl Midi {
 /// What one frame's note messages play. `down` holds the keys held before the frame and
 /// is updated to those held after it.
 ///
-/// Every key struck sounds, each on its own voice. A key struck and released within one
-/// frame still sounds: the queue does not keep the keyboard's timing, and a key that came
-/// and went unheard would do nothing. A release before a key's strike is passed on, and
-/// stops whatever that key sounded in an earlier frame.
+/// Every key struck sounds, each on its own voice, even one released within the same
+/// frame. A release before a key's strike is passed on, and stops whatever that key
+/// sounded in an earlier frame.
 fn played(notes: &[Note], down: &mut BTreeSet<u8>) -> Played {
     let mut played = Played::default();
     for note in notes {

@@ -2,28 +2,51 @@
 
 drawbar was developed against a Nord Electro 5, and that is where its claims have
 been tested. Files from other instruments are supported from documentation and
-sample files. Connecting other instruments over USB has not been tried.
+sample files. Of the other instruments, only a Stage 4 has been connected over USB.
 
 ## Files
 
 | Files | What drawbar does | Tested on an instrument |
 |---|---|---|
-| Electro 5 programs, live slots, set lists and settings | View, edit, transfer | Yes |
+| Electro 5 programs, live slots, songs and settings | View, edit, transfer | Yes |
 | Stage 2, 3 and 4 programs and live slots, and Stage 3 and 4 presets | View, edit | No |
 | Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, build from Sample Editor projects, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
-| Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs with loops, transfer | Trimmed, built and re-encoded libraries play, mono and stereo, across every key they cover. A library built without a template fades a note out within about 30 ms of key-up, and its notes decay over a held key at the rate its kind sets. On an Electro 5, a 6.x library built without a template switches velocity layers within two velocities of where its layer values put them, plays each layer at the level its trims state, and plays its releases about 35 dB under the note at key-up. Loops built from WAVs sustain on an Electro 5 until the key is released, mono and stereo, on their own keys and transposed ones, and fade at the rate their kind and `--loop-fade` set. Loops built by hand in the same layout sustain on a Stage 4. Libraries are written in format 6.x unless 5.x is chosen. An Electro 5 on OS 2.04 plays both formats, built by rules or against a 6.x template, with their velocity layers, trims, releases and loops. A release plays at the level the note has fallen to at key-up. The velocities drawbar gives for each layer are an Electro 5's. Renames, retunes, remaps and a narrowed key range have not been played |
+| Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs with loops, transfer | See [Piano libraries](#piano-libraries) |
 | Electro 5 bundles (`.ne5pbundle`, `.ne5tbundle`) | Import to a folder, export from this computer or the instrument. Only uncompressed bundles open, as Nord Sound Manager writes them | Nord Sound Manager opens the bundles drawbar writes and sends them to the instrument. Bundles made from the instrument match what nord-cli makes. A piano or sample built in drawbar has not yet gone to the instrument in a bundle |
 | Other Nord files | Recognized and kept byte for byte, without editing | |
 | Text files | Edit, keep beside your files | Never sent to an instrument |
 
+nord-cli's `bundle` commands handle the same Electro 5 bundles.
+
+### Piano libraries
+
+- Trimmed, built and re-encoded libraries play, mono and stereo, across every key
+  they cover.
+- A library built without a template fades a note out within about 30 ms of
+  key-up, and its notes decay over a held key at the rate its kind sets.
+- On an Electro 5, a 6.x library built without a template switches velocity
+  layers within two velocities of where its layer values put them, plays each
+  layer at the level its trims state, and plays its releases about 35 dB under
+  the note at key-up.
+- Loops built from WAVs sustain on an Electro 5 until the key is released, mono
+  and stereo, on their own keys and transposed ones, and fade at the rate their
+  kind and `--loop-fade` set. Loops built by hand in the same layout sustain on a
+  Stage 4.
+- A release plays at the level the note has fallen to at key-up.
+- An Electro 5 on OS 2.04 plays both formats, built by rules or against a 6.x
+  template, with their velocity layers, trims, releases and loops.
+- The velocities drawbar gives for each layer are an Electro 5's.
+- Renames, retunes, remaps and a narrowed key range have not been played.
+
 ## USB
 
 Reading and writing programs, set lists, live slots, settings, samples and pianos
-works on the Electro 5 from macOS, Linux and the browser. Windows builds pass the
-protocol tests, and drawbar on Windows has connected to a Stage 4 and listed its
-storage, but nothing has been written from Windows. The Stage 4 is the only other
-instrument connected so far, and no file has been read from it or written to it, so
-USB support for other models cannot be guaranteed.
+works on the Electro 5 from macOS, Linux and the browser. Moving, deleting,
+renaming, duplicating and selecting slots have been confirmed from macOS. Windows
+builds pass the protocol tests, and drawbar on Windows has connected to a Stage 4
+and listed its storage, but nothing has been written from Windows. The Stage 4 is
+the only other instrument connected so far, and no file has been read from it or
+written to it, so USB support for other models cannot be guaranteed.
 
 drawbar and nord-cli find programs, samples and the rest by the name the instrument
 gives each kind of storage, so another model's folders show what it keeps in them.
@@ -35,6 +58,9 @@ every such write.
 
 The safeguards drawbar applies when it writes, listed under
 [Safety](../drawbar/instrument.md#safety), have been confirmed on the Electro 5.
+
+In the browser, Chrome, Edge and Brave can connect to an instrument. Firefox and
+Safari cannot.
 
 ## The library in the browser
 

@@ -2,9 +2,8 @@
 # the title is the commit that lands on master, and version bumps and release
 # notes read it.
 #
-# Its own workflow because it is the one check that has to re-run on `edited`.
-# ci.yml cannot take that trigger: `edited` fires on every title and body tweak,
-# and rebuilding the cross matrix for a typo is not worth it.
+# Its own workflow because it is the one check that re-runs on `edited`, which
+# fires on every title and body change and would rerun all of ci.yml.
 #
 # ⚠️ `commits` is a required check on master. Renaming this job renames the
 # check, and every open PR blocks on a context that no longer reports.

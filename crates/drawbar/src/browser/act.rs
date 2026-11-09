@@ -783,7 +783,7 @@ pub fn apply(
             }
             Act::ClearQueue => {
                 queue.clear();
-                log.say("The send queue is empty. Nothing was sent.");
+                log.say("The send queue is empty.");
             }
             Act::SendAll => send_batch(queue, workspace, device, log),
             Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
@@ -969,7 +969,7 @@ fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
 fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
     let names: Vec<&String> = held.iter().map(|(name, _)| name).collect();
     let said = format!(
-        "{} in {} count as one name. Rename one of them first.",
+        "{} in {} count as one name.",
         crate::strings::quoted_some(&names, names.len()),
         spoken(dir)
     );
@@ -1023,9 +1023,7 @@ fn import(
         return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
-        return log.trouble(format!(
-            "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
-        ));
+        return log.trouble(format!("“{name}” was not taken onto this computer: {why}."));
     }
     let root = LibPath::root();
     match browser.folders.clash(&root, &name, workspace, None) {
@@ -1063,9 +1061,7 @@ fn take(
         return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
-        return log.trouble(format!(
-            "“{name}” was not taken onto this computer: {why}. Rename it and open it again."
-        ));
+        return log.trouble(format!("“{name}” was not taken onto this computer: {why}."));
     }
     let Some(len) = outside_len(&from) else {
         return log.trouble(format!("“{name}” could not be read."));
@@ -1485,7 +1481,7 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     }
     if let Some(name) = checking {
         return log.trouble(format!(
-            "Nothing was sent: “{name}” is still being checked. Send again once it is."
+            "Nothing was sent: “{name}” is still being checked."
         ));
     }
     // The whole batch is checked before the first delete-then-write.
@@ -1657,8 +1653,7 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
 /// Each entry joins the queue before the next is placed, so unlinked assets fill the
 /// free slots in address order instead of all landing on the first.
 ///
-/// A folder with no free slot is named in the log; dropping the entry silently would
-/// look like a bug.
+/// A folder with no free slot is named in the log.
 fn queue_all(
     workspace: &Workspace,
     device: &mut Device,
@@ -1714,10 +1709,9 @@ fn queue_all(
 
 /// What ⌘S does for each kind of document.
 ///
-/// A view is the instrument's own copy, opened in place, so saving it writes it back at
-/// once. Its baseline moves when the instrument confirms the write. Anything on this
-/// computer is already kept, so saving it moves its baseline and, if it belongs to a
-/// slot, queues it for that slot.
+/// Saving a view writes it back to its slot at once, and its baseline moves when the
+/// instrument confirms the write. Saving anything on this computer moves its baseline
+/// and, if it belongs to a slot, queues it for that slot.
 ///
 /// `ask` is false once the user has confirmed the write's warnings.
 #[allow(clippy::too_many_arguments)]
@@ -1891,7 +1885,7 @@ mod tests {
         assert_eq!(
             ambiguous(&held, &LibPath::root()),
             "“Scan.pdf” and “scan.pdf” in the top level of the library count as one name. \
-             Rename one of them first. “scan.pdf” is a hidden file."
+             “scan.pdf” is a hidden file."
         );
     }
 
@@ -1979,7 +1973,7 @@ mod tests {
         );
         assert_eq!(
             bench.log.status().1,
-            "Nothing was sent: “Upright.npno” is still being checked. Send again once it is."
+            "Nothing was sent: “Upright.npno” is still being checked."
         );
 
         bench.workspace.settle_files(&mut bench.log);
@@ -2516,10 +2510,7 @@ mod tests {
 
         bench.act(vec![Act::ClearQueue]);
         assert!(bench.queue.is_empty());
-        assert_eq!(
-            bench.log.status().1,
-            "The send queue is empty. Nothing was sent."
-        );
+        assert_eq!(bench.log.status().1, "The send queue is empty.");
         assert_eq!(
             bench.workspace.listed().count(),
             3,
