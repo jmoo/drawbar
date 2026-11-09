@@ -58,9 +58,10 @@ pub const COPYING: Capabilities = Capabilities {
 };
 
 /// Every state, each written by an earlier build.
-pub const STATES: [&str; 5] = [
+pub const STATES: [&str; 6] = [
     "one-writer-open",
     "one-writer-compacted",
+    "one-writer-compacted-binds",
     "two-writers-fork",
     "pending",
     "local",

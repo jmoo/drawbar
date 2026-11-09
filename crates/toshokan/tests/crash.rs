@@ -735,7 +735,7 @@ fn carry_out(d: &mut Process, plan: EffectPlan, how: Settlement) {
         0,
         identify(),
     ))
-    .unwrap_or_else(|error| panic!("{how:?}: {error}"));
+    .unwrap_or_else(|stopped| panic!("{how:?}: {}", stopped.error));
     d.run(effects::finish(&layout, plan.record, &record))
         .unwrap();
 }

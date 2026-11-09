@@ -80,11 +80,7 @@ impl Unsaved {
 /// What the names of the files kept of `of` start with.
 fn tag(of: &Of) -> String {
     let said = serde_json::to_vec(of).expect("an edit's owner serializes");
-    hex(&blake3::hash(&said).as_bytes()[..16])
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    blake3::hash(&said).to_hex()[..32].to_string()
 }
 
 fn dir() -> RelPath {
@@ -162,10 +158,7 @@ impl Store {
         let same = held
             .filter_map(|held| held.kept)
             .filter(|kept| kept.1 == digest);
-        let at = match same.map(|(at, _)| at).max() {
-            Some(at) => at,
-            None => self.tick(),
-        };
+        let at = same.map(|(at, _)| at).max().unwrap_or_else(|| self.tick());
         let name = format!("{tag}-{:032x}-{}", self.instance, self.made);
         self.made += 1;
         let unsaved = Unsaved {

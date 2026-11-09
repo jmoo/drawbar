@@ -36,6 +36,8 @@ impl Level {
 pub struct Entry {
     pub level: Level,
     pub text: String,
+    /// It says what another drawbar or another program changed in the library.
+    pub theirs: bool,
     /// Seconds since the app started.
     pub at: f64,
 }
@@ -86,6 +88,14 @@ impl Log {
         self.push(Level::Info, text);
     }
 
+    /// [`Log::say`] what another drawbar or another program changed in the library.
+    pub fn theirs(&mut self, text: impl Into<String>) {
+        self.say(text);
+        if let Some(entry) = self.entries.back_mut() {
+            entry.theirs = true;
+        }
+    }
+
     /// Like [`Log::say`], for something that went wrong.
     pub fn trouble(&mut self, text: impl Into<String>) {
         let text = text.into();
@@ -104,6 +114,7 @@ impl Log {
         self.entries.push_back(Entry {
             level,
             text: text.into(),
+            theirs: false,
             at: self.clock,
         });
     }

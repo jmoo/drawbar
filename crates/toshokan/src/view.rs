@@ -3,11 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::binding::{Bindings, Scanned};
-use crate::ids::EntityId;
-use crate::merge::{side_by_side, Folded, Paired};
+use crate::binding::Bindings;
+use crate::ids::{EntityId, WriterId};
+use crate::log::Ref;
+use crate::merge::Folded;
 use crate::path::RelPath;
-use crate::report::{Fork, Gap, Item, Joined, WriterInfo};
+use crate::report::{Fork, Gap, Item, Joined, Presence, WriterInfo};
+use crate::rows::{self, FileId, Merges, Row, RowChanges, RowState, Rows};
 use crate::schema::{Field, Key, KeyKind, Keyed, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
@@ -29,8 +31,14 @@ struct Shared {
 pub struct Parts {
     pub folded: Folded,
     pub bindings: Arc<Bindings>,
-    /// The library files the last scan found; `None` until a scan of every file.
-    pub listing: Option<Arc<BTreeMap<RelPath, Listed>>>,
+    pub rows: Arc<Rows>,
+    /// What the looks since this one's merged: the rows that ended in another.
+    pub merges: Arc<Merges>,
+    /// Every writer seen, in the order first seen, whatever the view.
+    pub table: Arc<[WriterId]>,
+    /// The writes the merged state lost because their entries stopped being read,
+    /// and does not hold again.
+    pub away: Arc<BTreeSet<Ref>>,
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
@@ -66,21 +74,12 @@ pub enum FileState {
     Unscanned,
 }
 
-/// A library file as the last scan listed it.
+/// A library file's length and time, as a listing or a check read them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Listed {
     pub len: u64,
     /// When the file last changed, as [`crate::io::Meta::modified`] gives it.
     pub modified: Option<u64>,
-}
-
-impl Listed {
-    pub(crate) fn of(file: &Scanned) -> Self {
-        Self {
-            len: file.len,
-            modified: file.modified,
-        }
-    }
 }
 
 /// The distinct values of a key, each with how many entities hold it.
@@ -259,74 +258,70 @@ impl View {
         &self.parts().bindings.report.joined
     }
 
-    /// Whether the library file at `path` is one no entity is bound to.
-    pub fn is_unbound(&self, path: &RelPath) -> bool {
-        self.parts().bindings.unbound.contains(path)
-    }
-
     /// The library file at `path` as the last scan listed it; `None` where it
-    /// listed none, and for every file until a scan of every file has run.
+    /// listed none, where a scan since could not list it, and for every file until
+    /// a scan of every file has run.
     pub fn listed(&self, path: &RelPath) -> Option<Listed> {
-        self.parts().listing.as_ref()?.get(path).copied()
+        match self.parts().rows.listed(path)?.state {
+            RowState::Present { len, modified } => Some(Listed { len, modified }),
+            RowState::Unknown | RowState::Missing => None,
+        }
     }
 
-    /// What differs from `before`, a view of the same library. Costs a step per
-    /// entity and file.
-    pub fn changed_since(&self, before: &View) -> Changed {
-        let (now, was) = (self.parts(), before.parts());
-        let mut entities: BTreeSet<EntityId> =
-            now.folded.changed(&was.folded).into_iter().collect();
-        let mut files = BTreeSet::new();
-        if !Arc::ptr_eq(&now.bindings, &was.bindings) {
-            let (bound, unbound) = (&now.bindings.unbound, &was.bindings.unbound);
-            entities.extend(differing(side_by_side(
-                &now.bindings.bound,
-                &was.bindings.bound,
-            )));
-            files.extend(bound.symmetric_difference(unbound).cloned());
-            let joined = |parts: &'_ Parts| -> BTreeSet<Joined> {
-                parts.bindings.report.joined.iter().copied().collect()
-            };
-            let (joined, was_joined) = (joined(now), joined(was));
-            for Joined { entity, into } in joined.symmetric_difference(&was_joined) {
-                entities.extend([*entity, *into]);
-            }
-        }
-        match (&now.listing, &was.listing) {
-            (Some(listing), Some(listed)) if Arc::ptr_eq(listing, listed) => {}
-            (Some(listing), Some(listed)) => files.extend(differing(side_by_side(listing, listed))),
-            (listing, listed) => {
-                let every = |listing: &Option<Arc<BTreeMap<RelPath, Listed>>>| {
-                    let paths = listing.iter().flat_map(|listing| listing.keys());
-                    paths.cloned().collect::<Vec<_>>()
-                };
-                files.extend(every(listing).into_iter().chain(every(listed)));
-            }
-        }
-        Changed { entities, files }
+    /// Every row: the listing's by path, then the absent rows by FileId.
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.parts().rows.iter()
     }
-}
 
-/// What differs between two views of one library, as [`View::changed_since`]
-/// finds it.
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
-pub struct Changed {
-    /// The entities whose state, or whose file's binding, differs.
-    pub entities: BTreeSet<EntityId>,
-    /// The library files whose listing differs, or that one view has as a file no
-    /// entity is bound to and the other does not.
-    pub files: BTreeSet<RelPath>,
-}
+    pub fn row(&self, file: FileId) -> Option<&Row> {
+        self.parts().rows.row(file)
+    }
 
-/// The keys whose entries differ, of two maps [`side_by_side`].
-fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
-    pairs: impl Iterator<Item = Paired<'a, K, V>> + 'a,
-) -> impl Iterator<Item = K> + 'a {
-    pairs.filter_map(|pair| match pair {
-        (Some((_, now)), Some((_, was))) if now == was => None,
-        (Some((key, _)), _) | (None, Some((key, _))) => Some(key.clone()),
-        (None, None) => None,
-    })
+    /// The row at `path`: the listing's, else an absent one. Paths compare
+    /// exactly, as the view shows them.
+    pub fn row_at(&self, path: &RelPath) -> Option<&Row> {
+        self.parts().rows.at(path)
+    }
+
+    /// The row of `entity`'s file; `None` where it has no file fact or another's
+    /// row shows it, as for each of [`View::joined`].
+    pub fn row_of(&self, entity: EntityId) -> Option<&Row> {
+        self.parts().rows.of(entity)
+    }
+
+    /// The directories below the root the listing holds, empty ones included, in
+    /// order.
+    pub fn dirs(&self) -> impl Iterator<Item = &RelPath> {
+        self.parts().rows.dirs()
+    }
+
+    /// The writers [`rows::Who::Writer`] numbers: each index names one writer in
+    /// every view of one library.
+    pub fn writer_table(&self) -> &[WriterId] {
+        &self.parts().table
+    }
+
+    /// What changed of each row and directory since `earlier`, a view of the same
+    /// library, with who changed each entity's row as the merged state says. Costs
+    /// a step per row.
+    pub fn changes_since(&self, earlier: &View) -> RowChanges {
+        fn side(view: &View) -> rows::Side<'_> {
+            let parts = view.parts();
+            let here = parts
+                .writers
+                .iter()
+                .find(|info| info.here == Presence::This);
+            rows::Side {
+                rows: &parts.rows,
+                merges: &parts.merges,
+                folded: &parts.folded,
+                bindings: &parts.bindings,
+                away: &parts.away,
+                own: here.map(|info| info.writer),
+            }
+        }
+        rows::changes(&side(self), &side(earlier), &self.parts().table)
+    }
 }
 
 impl EntityView<'_> {
@@ -382,7 +377,8 @@ impl EntityView<'_> {
 
     /// Where the view binds the entity's file; [`FileState::Missing`] at the
     /// logged path when no binding was derived for it, and `None` where it has no
-    /// file fact or is one of [`View::joined`].
+    /// file fact or another's row shows it: it is one of [`View::joined`] or of
+    /// [`Bindings::alike`](crate::binding::Bindings::alike).
     pub fn file(&self) -> Option<FileRef> {
         let bindings = &self.view.parts().bindings;
         if let Some(bound) = bindings.bound.get(&self.id) {
@@ -390,7 +386,7 @@ impl EntityView<'_> {
         }
         let joined = &bindings.report.joined;
         let joined = joined.binary_search_by_key(&self.id, |joined| joined.entity);
-        if joined.is_ok() {
+        if joined.is_ok() || bindings.alike.contains_key(&self.id) {
             return None;
         }
         Some(FileRef {

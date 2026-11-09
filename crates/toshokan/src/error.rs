@@ -5,6 +5,7 @@ use crate::io::{Capability, IoError, Root};
 use crate::path::RelPath;
 use crate::plan::Expect;
 use crate::report::Rekey;
+use crate::view::Listed;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -118,6 +119,8 @@ pub struct Mismatch {
     pub path: RelPath,
     pub expected: Expect,
     pub found: Option<Identity>,
+    /// The length and time of the file found, as the check read them.
+    pub listed: Option<Listed>,
 }
 
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
