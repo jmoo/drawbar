@@ -1037,8 +1037,9 @@ impl StrokeFile<'_> {
         }
     }
 
-    /// The stroke's audio, a region's raised by `gain` before it is rounded to 16 bits.
+    /// The stroke's audio, a region's raised by `gain` before it is dithered to 16 bits.
     fn pcm(&self, gain: f32) -> Result<wav::Pcm16, String> {
+        let seed = dither_seed(self.root, self.bank, self.layer);
         match &self.source {
             Source::File(path) => crate::wav::pcm16(path),
             Source::Region {
@@ -1054,6 +1055,7 @@ impl StrokeFile<'_> {
                 *sample_loop,
                 *fade,
                 gain,
+                seed,
             )),
         }
     }
@@ -1093,6 +1095,15 @@ impl StrokeFile<'_> {
             }
         }
     }
+}
+
+/// The dither noise of a stroke's audio, its own: its root, bank and layer pick it.
+fn dither_seed(root: u8, bank: Bank, layer: LayerTag) -> u64 {
+    let layer = match layer {
+        LayerTag::Index(index) => index,
+        LayerTag::Value(value) => value,
+    };
+    u64::from(root) << 16 | u64::from(bank.code()) << 8 | u64::from(layer)
 }
 
 /// The peak every region of a take is brought to before it is rounded to 16 bits, in
@@ -1886,7 +1897,7 @@ mod tests {
         std::fs::create_dir(dir).unwrap();
         let noise = Noise::of(&npno_prep::plan::mono(take), take.rate);
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
-            let (root, bank, _) = parse_stroke_name(&found.label, Stem::None).unwrap();
+            let (root, bank, layer) = parse_stroke_name(&found.label, Stem::None).unwrap();
             let frames = noise.stroke(
                 &take.samples,
                 usize::from(take.channels),
@@ -1894,7 +1905,15 @@ mod tests {
                 found.frames as usize,
                 clean::f0(root),
             );
-            let pcm = crate::wav::cut(take, &frames, bank, sample_loop, None, 1.0);
+            let pcm = crate::wav::cut(
+                take,
+                &frames,
+                bank,
+                sample_loop,
+                None,
+                1.0,
+                dither_seed(root, bank, layer),
+            );
             let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
             let loops = wav::Marks {
                 regions: vec![],

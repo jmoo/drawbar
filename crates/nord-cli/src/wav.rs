@@ -42,7 +42,8 @@ pub fn take(path: &Path) -> Result<(Audio, Marks), String> {
 }
 
 /// `frames`, a region of `take` holding a stroke of `bank`, shaped, raised by `gain`
-/// and rounded to 16-bit PCM, with `sample_loop` counted from its start.
+/// and dithered to 16-bit PCM with the noise `seed` picks, with `sample_loop` counted
+/// from its start.
 ///
 /// An attack fades in over 0.3 ms, and a release over 5 ms, fading out over at most
 /// 40 ms. A looped region's loop is evened out and crossfaded so its end meets its
@@ -55,6 +56,7 @@ pub fn cut(
     sample_loop: Option<Loop>,
     fade: Option<u32>,
     gain: f32,
+    seed: u64,
 ) -> Pcm16 {
     let channels = usize::from(take.channels.max(1));
     let options = SustainOptions::default();
@@ -84,7 +86,7 @@ pub fn cut(
     Pcm16 {
         rate: take.rate,
         channels: take.channels,
-        samples: wav::quantize(&shaped),
+        samples: wav::dithered(&shaped, seed),
         sample_loop,
     }
 }

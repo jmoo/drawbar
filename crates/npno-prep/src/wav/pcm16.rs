@@ -64,6 +64,35 @@ pub fn quantize(samples: &[f32]) -> Vec<i16> {
         .collect()
 }
 
+/// Samples as 16-bit PCM stores them, dithered: rounded after adding triangular noise of
+/// one step either way, so what the rounding loses becomes a steady hiss under the
+/// note rather than distortion that follows it down. Silence stays silent, so a note
+/// faded out loops on nothing. `seed` picks the noise, so a build is repeatable and
+/// strokes played together do not share it.
+pub fn dithered(samples: &[f32], seed: u64) -> Vec<i16> {
+    let mut state = seed;
+    let mut uniform = move || {
+        // SplitMix64.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) as f64 / (u64::MAX as f64 + 1.0)
+    };
+    samples
+        .iter()
+        .map(|&x| {
+            let noise = uniform() + uniform() - 1.0;
+            match x {
+                0.0 => 0,
+                _ => (f64::from(x) * 32_768.0 + noise)
+                    .round()
+                    .clamp(-32_768.0, 32_767.0) as i16,
+            }
+        })
+        .collect()
+}
+
 /// Write mono 16-bit PCM at `rate` without resampling.
 pub fn mono_pcm16(samples: &[i16], rate: u32) -> Result<Vec<u8>, Error> {
     pcm16(samples, rate, 1)
@@ -222,6 +251,22 @@ mod tests {
         let stored = read_pcm16(&write(&audio, Encoding::Int { bits: 16 }).unwrap()).unwrap();
         assert_eq!(quantize(&audio.samples), stored.samples);
         assert_eq!(quantize(&[1.0, -1.5]), [i16::MAX, i16::MIN]);
+    }
+
+    /// A level a quarter of a step up rounds to nothing, but dithered it holds on
+    /// average, each sample within a step and a half of it; silence stays silent.
+    #[test]
+    fn dithered_samples_keep_what_rounding_loses_and_silence_silent() {
+        let quarter = vec![0.25f32 / 32_768.0; 100_000];
+        assert!(quantize(&quarter).iter().all(|&v| v == 0));
+        let out = dithered(&quarter, 1);
+        let mean = out.iter().map(|&v| f64::from(v)).sum::<f64>() / out.len() as f64;
+        assert!((mean - 0.25).abs() < 0.01, "{mean}");
+        assert!(out.iter().all(|&v| (f64::from(v) - 0.25).abs() <= 1.5));
+        assert!(dithered(&[0.0; 1_000], 1).iter().all(|&v| v == 0));
+        assert_eq!(dithered(&quarter, 1), out);
+        assert_ne!(dithered(&quarter, 2), out);
+        assert_eq!(dithered(&[1.0, -1.5], 1), [i16::MAX, i16::MIN]);
     }
 
     #[test]

@@ -7,7 +7,9 @@ mod pcm16;
 use std::ops::Range;
 
 pub use marks::{read_marks, with_marks, Loop, Marks, Play, Region};
-pub use pcm16::{mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout};
+pub use pcm16::{
+    dithered, mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout,
+};
 
 use crate::{malformed, out_of_bounds, Error};
 

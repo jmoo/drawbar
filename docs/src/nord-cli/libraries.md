@@ -51,8 +51,9 @@ extensible WAV format. Any sample rate is accepted.
 `build` also takes one WAV holding every stroke, such as a recorded take, whose
 regions are the strokes. Each region is labelled as a stroke's WAV is named
 (`060-b0-l00`), and a loop inside a region is that stroke's loop. The take may be
-PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
-WAV of it would be. A region labelled any other way, or a loop that crosses a
+PCM of 8 to 32 bits or float, and each region is dithered to 16 bits: rounded
+after adding a little noise, so the quietest part of a decay turns to a steady
+hiss rather than distortion. Silence stays silent. A region labelled any other way, or a loop that crosses a
 region's end, is refused.
 
 A take's strokes are cleaned first. The take's mains hum is found and followed
@@ -178,7 +179,7 @@ kind do, faster on higher keys. In format 6, each layer is trimmed to play at th
 level of its root's loudest layer, softer layers a little louder as that kind's are,
 up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer needs more boost than the instrument gives at `--gain`, the whole library is
-turned down to fit. In format 5, each stroke's level follows its layer.
+turned down to fit. A release that needs more just plays quieter. In format 5, each stroke's level follows its layer.
 
 [What is supported](../getting-started/support.md) says which of these libraries
 have been played on an instrument.
