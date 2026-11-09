@@ -167,11 +167,13 @@ pub enum FileChange {
     /// Moves the file at `path`, which is no entity's, to this writer's trash.
     TrashFile { path: RelPath, expect: Expect },
     /// Brings displaced bytes back from this writer's trash to `to`, as no entity's
-    /// file.
+    /// file. `found` is an entity the binding found in the file at `to` by its
+    /// identity alone, which the bytes brought back leave missing.
     RestoreFile {
         item: Nonce,
         to: RelPath,
         expect: Expect,
+        found: Option<EntityId>,
     },
 }
 

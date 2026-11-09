@@ -554,10 +554,16 @@ to goes back with the tree as it is, and so does a file put in the tree after th
 move. The move back logs a `tree` op, so a redo moves the tree again. A `path` op
 changes no fact; undo reads it to rename the file back, bring its displaced bytes
 back from the trash, or trash the file it made. Where the file it left is now an
-entity's, in sync, undo renames it back as that entity's file, and brings bytes back
-over it or trashes it so only where this writer wrote that entity's file fact, as an
-adoption. Otherwise it is refused, naming the writer and entry of that entity's file
-fact: another writer's entity holds the file now.
+entity's, undo renames it back as that entity's file. It brings bytes back over it
+as that entity's file where the entity's file fact names it, as this writer's
+adoption or a binding's pin does; elsewhere the binding found the entity in it by
+its identity alone, so the bytes come back as no entity's file and the entity is
+missing again. It trashes it as that entity's file and leaves the entity's file fact
+as it was, so the entity is missing. It is refused, naming the writer and entry of
+the latest write of that fact other than a binding's pin, where the entity is not in
+sync with the file the op left, or where that write is another writer's and the undo
+would bring bytes back over the file or trash it: another writer's entity holds the
+file now.
 
 ## File effects and pending records
 
@@ -872,8 +878,9 @@ the entry names it in `binds`, so its pins still refuse nothing; a snapshot an
 earlier build wrote names none, and its pins refuse as an intent's do.
 
 An undo or redo of a `path` op is refused, too, where the file at the path it left
-the file at is now an entity's by another writer's file write the instance had not
-read when it committed the intent: two writers made it so at once.
+the file at is now an entity's by another writer's file write, other than a
+binding's pin, the instance had not read when it committed the intent: two writers
+made it so at once.
 
 A file register holds what the intent left while every live write of it but a `bind`
 entry's pin, named in a snapshot's `binds` once folded, names the same path and
