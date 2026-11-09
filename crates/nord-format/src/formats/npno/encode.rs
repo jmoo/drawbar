@@ -555,8 +555,9 @@ impl Recoded {
 /// layer value above the loudest's, and each release stroke is trimmed 18 dB under its root's
 /// loudest attack stroke. A recording's level is the most power any 10 ms of its first
 /// half second holds, on its louder channel. Where a stroke would need more boost than
-/// [`V6_MOST_BOOST`] leaves at the library's gain, every stroke is turned down by the
-/// shortfall, so the balance holds. A recording silent over its first half second, or a
+/// [`V6_MOST_BOOST`] leaves at the library's gain, an attack or resonance stroke turns
+/// every stroke down by the shortfall, so the balance holds; a release stroke just
+/// plays quieter, at the most boost there is. A recording silent over its first half second, or a
 /// release stroke whose root has no attack stroke, has nothing to be leveled against
 /// and is refused.
 pub fn build(
@@ -1076,12 +1077,18 @@ fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
     }
 
     let lowest = f64::from(rules.gain) - f64::from(V6_MOST_BOOST);
-    let shortfall = tenths
+    let shortfall = order
         .iter()
-        .fold(0.0, |most, &trim| f64::max(most, lowest - trim));
-    tenths
-        .into_iter()
-        .map(|trim| v6_trim(trim + shortfall))
+        .zip(&tenths)
+        .filter(|(recording, _)| recording.bank != Bank::Release)
+        .fold(0.0, |most, (_, &trim)| f64::max(most, lowest - trim));
+    order
+        .iter()
+        .zip(tenths)
+        .map(|(recording, trim)| match recording.bank {
+            Bank::Release => v6_trim((trim + shortfall).max(lowest)),
+            Bank::Attack | Bank::Resonance => v6_trim(trim + shortfall),
+        })
         .collect()
 }
 
@@ -2619,6 +2626,21 @@ mod tests {
                 &twelve_decibels_apart()
             ),
             [62, -58, 122]
+        );
+    }
+
+    /// A release 40 dB under its attack would need 19 dB of boost to play 21 dB under
+    /// it, more than the 5.8 left at +5.0 dB of gain. It plays quieter, at the most
+    /// boost there is, and the attack keeps its trim.
+    #[test]
+    fn a_release_too_quiet_for_the_boost_left_plays_quieter_on_its_own() {
+        let recordings = [
+            one(60, Bank::Attack, 0, steady(7_962)),
+            one(60, Bank::Release, 0, steady(80)),
+        ];
+        assert_eq!(
+            trims_at(Version::V6, Kind::Harpsichord, DEFAULT_GAIN, &recordings),
+            [30, -58]
         );
     }
 
