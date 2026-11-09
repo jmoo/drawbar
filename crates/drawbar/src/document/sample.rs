@@ -1010,8 +1010,8 @@ pub fn envelope(samples: &[i16], channels: u16, columns: usize) -> Vec<(f32, f32
 }
 
 /// [`envelope`] of one channel, counted from 0, or of every channel for `None`.
-pub fn channel_envelope(
-    samples: &[i16],
+pub fn channel_envelope<S: crate::audio::Sample>(
+    samples: &[S],
     channels: u16,
     channel: Option<usize>,
     columns: usize,
@@ -1021,7 +1021,6 @@ pub fn channel_envelope(
     if columns == 0 || frames == 0 {
         return Vec::new();
     }
-    let scale = |v: i16| f32::from(v) / 32768.0;
     let (skip, step) = match channel {
         Some(channel) => (channel.min(channels - 1), channels),
         None => (0, 1),
@@ -1037,9 +1036,13 @@ pub fn channel_envelope(
                 .iter()
                 .skip(skip)
                 .step_by(step);
-            let low = span.clone().min().copied().unwrap_or(0);
-            let high = span.max().copied().unwrap_or(0);
-            (scale(low), scale(high))
+            let (low, high) = span.fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), s| {
+                (low.min(s.level()), high.max(s.level()))
+            });
+            match low <= high {
+                true => (low, high),
+                false => (0.0, 0.0),
+            }
         })
         .collect()
 }

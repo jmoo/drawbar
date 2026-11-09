@@ -526,7 +526,7 @@ impl Document {
                 Asked::Export => self.export(ui.ctx(), id, workspace, log),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
-                Asked::Audition => self.audition(id, workspace, log),
+                Asked::Audition => self.audition(id, log),
             }
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
@@ -899,24 +899,23 @@ impl Document {
     }
 
     /// Play the open WAV through the app's player, or stop it where it is playing.
-    fn audition(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
-        let Some(pcm) = self
+    ///
+    /// Played as float, whatever the file stores: a 24-bit take is heard at its own
+    /// depth, not rounded to the 16 bits a library holds.
+    fn audition(&mut self, id: u64, log: &mut Log) {
+        let Some(audio) = self
             .open
             .as_ref()
             .and_then(|open| open.wav.as_ref())
-            .and_then(wav::State::pcm)
+            .and_then(wav::State::audio)
         else {
             return;
         };
-        hear(
-            &mut self.player,
-            workspace,
-            log,
-            (id, 0),
-            (&pcm.samples, pcm.channels, pcm.rate),
-            Hear::Play,
-            "WAV",
-        );
+        let clock = audio.rate as f32 / codec::FIELD_RATE as f32;
+        let played = self
+            .player
+            .toggle((id, 0), &audio.samples, audio.channels, clock);
+        refused(played, log, "WAV");
     }
 
     fn sample_body(
@@ -1435,6 +1434,11 @@ fn hear(
             return;
         }
     };
+    refused(played, log, what);
+}
+
+/// Say so where the player refused to sound `what`.
+fn refused(played: Result<(), String>, log: &mut Log, what: &str) {
     if let Err(why) = played {
         crate::telemetry::fault("audio", "refused");
         log.error(why);
@@ -3264,19 +3268,50 @@ mod tests {
     fn a_wav_document_offers_what_its_audio_allows() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         let said = open.twice();
-        for offered in ["Play", "Gain", wav::APPLY_GAIN, "44100 Hz · mono · 1.000 s"] {
+        for offered in [
+            "Play",
+            "Gain",
+            wav::APPLY_GAIN,
+            "44100 Hz · mono · 16-bit · 1.000 s",
+        ] {
             assert!(
                 said.iter().any(|word| word == offered),
                 "{offered}: {said:?}"
             );
         }
 
-        let mut deep = wav_bytes();
-        deep[34] = 24;
-        let mut open = Open::file("Marimba hit.wav", deep);
+        let take = nord_format::wav::Audio {
+            rate: 48_000,
+            channels: 2,
+            samples: vec![0.25; 96_000],
+        };
+        for (encoding, stated) in [
+            (
+                nord_format::wav::Encoding::Int { bits: 24 },
+                "48000 Hz · stereo · 24-bit · 1.000 s",
+            ),
+            (
+                nord_format::wav::Encoding::Float { bits: 32 },
+                "48000 Hz · stereo · 32-bit float · 1.000 s",
+            ),
+        ] {
+            let bytes = nord_format::wav::write(&take, encoding).unwrap();
+            let mut open = Open::file("Wurli take.wav", bytes);
+            let said = open.twice();
+            for offered in ["Play", "Gain", wav::APPLY_GAIN, stated] {
+                assert!(
+                    said.iter().any(|word| word == offered),
+                    "{offered}: {said:?}"
+                );
+            }
+        }
+
+        let mut odd = wav_bytes();
+        odd[34] = 12;
+        let mut open = Open::file("Marimba hit.wav", odd);
         let said = open.twice();
         assert!(
-            said.iter().any(|word| word.contains("24-bit")),
+            said.iter().any(|word| word.contains("12-bit")),
             "it says why: {said:?}"
         );
         for refused in ["Play", "Gain", wav::APPLY_GAIN] {
@@ -3322,7 +3357,7 @@ mod tests {
         assert!(open.entity().bytes == bytes);
         open.frame(Vec::new());
         let held = open.state().wav.as_ref().unwrap();
-        assert_eq!(held.pcm().map(|pcm| pcm.samples.len()), Some(44_100));
+        assert_eq!(held.audio().map(|audio| audio.samples.len()), Some(44_100));
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
     }
 

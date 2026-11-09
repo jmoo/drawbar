@@ -40,6 +40,25 @@ pub fn rate(semitones: i16) -> f32 {
     2.0_f32.powf(f32::from(semitones) / 12.0)
 }
 
+/// A sample the player sounds: 16-bit as the codec decodes it, or float as a WAV of any
+/// encoding reads.
+pub trait Sample: Copy {
+    /// The sample in -1.0..1.0, the scale both backends mix at.
+    fn level(self) -> f32;
+}
+
+impl Sample for i16 {
+    fn level(self) -> f32 {
+        f32::from(self) / 32768.0
+    }
+}
+
+impl Sample for f32 {
+    fn level(self) -> f32 {
+        self
+    }
+}
+
 #[derive(Default)]
 pub struct Player {
     output: Output,
@@ -62,10 +81,10 @@ impl Player {
     ///
     /// ⚠️ Nothing is marked as sounding until the backend accepts it: a device that
     /// refuses must not leave a Stop button over silence.
-    pub fn toggle(
+    pub fn toggle<S: Sample>(
         &mut self,
         zone: Zone,
-        samples: &[i16],
+        samples: &[S],
         channels: u16,
         rate: f32,
     ) -> Result<(), String> {
@@ -81,11 +100,11 @@ impl Player {
     ///
     /// ⚠️ Not a toggle: a struck key must sound even when the zone answering it is
     /// already playing, and two keys of one zone are two different notes.
-    pub fn strike(
+    pub fn strike<S: Sample>(
         &mut self,
         finger: Finger,
         zone: Zone,
-        samples: &[i16],
+        samples: &[S],
         channels: u16,
         rate: f32,
     ) -> Result<(), String> {

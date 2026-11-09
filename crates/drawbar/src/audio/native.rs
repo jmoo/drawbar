@@ -10,6 +10,8 @@ use nord_format::formats::nsmp::codec::FIELD_RATE;
 use rodio::buffer::SamplesBuffer;
 use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
 
+use super::Sample;
+
 /// The rate the codec decodes to, in the mixer's units. A zero here is a compile error.
 const RATE: NonZero<u32> = match NonZero::new(FIELD_RATE) {
     Some(rate) => rate,
@@ -37,7 +39,12 @@ pub struct Output {
 pub struct Voice(rodio::Player);
 
 impl Output {
-    pub fn play(&mut self, samples: &[i16], channels: u16, rate: f32) -> Result<Voice, String> {
+    pub fn play<S: Sample>(
+        &mut self,
+        samples: &[S],
+        channels: u16,
+        rate: f32,
+    ) -> Result<Voice, String> {
         let channels = NonZero::new(channels).ok_or("this zone declares no channels")?;
         let device = match &self.device {
             Some(device) => device,
@@ -46,8 +53,8 @@ impl Output {
                 .insert(DeviceSinkBuilder::open_default_sink().map_err(|e| e.to_string())?),
         };
         let player = rodio::Player::connect_new(device.mixer());
-        // rodio mixes in f32; the codec decodes to 16-bit samples.
-        let source: Vec<f32> = samples.iter().map(|s| f32::from(*s) / 32768.0).collect();
+        // rodio mixes in f32 and owns what it plays.
+        let source: Vec<f32> = samples.iter().map(|s| s.level()).collect();
         player.append(SamplesBuffer::new(channels, clocked(rate), source));
         Ok(Voice(player))
     }
