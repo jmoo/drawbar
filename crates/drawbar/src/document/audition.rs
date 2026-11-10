@@ -16,7 +16,7 @@ use nord_format::formats::npno::encode::{self, Kind, Rules};
 use nord_format::formats::npno::{Bank, Version};
 use nord_format::formats::nsmp::codec;
 use nord_format::take::clean::{self, Noise};
-use nord_format::take::layers;
+use nord_format::take::layers::{self, TAKE_PEAK_DB};
 use nord_format::take::sustain;
 use nord_format::wav::{Audio, Loop, Play};
 
@@ -49,6 +49,13 @@ const SILENT_DB: f64 = 100.0;
 /// How far before the loop's end [`Sounding::wrap`] starts, in seconds.
 const WRAP_LEAD: f64 = 1.0;
 
+/// How much of the gap between a sample and its root's loudest layer, in dB, the
+/// audition keeps. A rule build plays every layer at its root's loudest's level, and the
+/// instrument makes the dynamics from velocity in ways not measured; kept whole, soft
+/// layers were too quiet to judge, and brought all to one level, they sounded as loud
+/// as the hardest.
+const LAYER_GAP_KEPT: f64 = 0.5;
+
 /// How long [`Sounding::wrap`] cycles the loop for, in seconds.
 const WRAP_MOST: f64 = 30.0;
 
@@ -56,8 +63,8 @@ const WRAP_MOST: f64 = 30.0;
 /// key is held on through the whole sample, as [`Sounding::tapped`] says.
 const TAP_MOST: f64 = 0.3;
 
-/// A sample's strokes, shaped as the build shapes them, at the level they were recorded
-/// at, with the fades the instrument plays them under.
+/// A sample's strokes, shaped as the build shapes them, at the level [`Sounding::of`]
+/// plays them at, with the fades the instrument plays them under.
 #[derive(Clone, Debug)]
 pub struct Sounding {
     pub rate: u32,
@@ -109,12 +116,17 @@ fn region(audio: &Audio, span: &Range<u32>, root: u8, noise: Option<&Noise>) -> 
 impl Sounding {
     /// The sample `cuts` marks in `audio`, recorded at `root`, cleaned of `noise` where it
     /// is given, as a library of `rules` plays it, or none where it has no attack.
+    ///
+    /// Its root's loudest layer, whose recorded peak is `loudest`, plays at the peak the
+    /// build brings every region to, and a softer one [`LAYER_GAP_KEPT`] of its recorded
+    /// gap under that: easy to hear, and still softer.
     pub fn of(
         audio: &Audio,
         cuts: &Cuts,
         root: u8,
         rules: &Rules,
         noise: Option<&Noise>,
+        loudest: f32,
     ) -> Option<Sounding> {
         let channels = usize::from(audio.channels.max(1));
         let span = cuts.attack.as_ref().filter(|span| !span.is_empty())?;
@@ -125,7 +137,18 @@ impl Sounding {
             play: Play::Forward,
         });
         let fade = cuts.fade.as_ref().map(|fade| fade.start - span.start);
-        let (attack, held) = sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);
+        let (mut attack, held) =
+            sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);
+        let peak = raw.iter().fold(0.0f32, |most, v| most.max(v.abs()));
+        let gain_db = match peak > 0.0 {
+            true => {
+                let own = 20.0 * f64::from(peak).log10();
+                let gap = (20.0 * f64::from(loudest.max(peak)).log10() - own).max(0.0);
+                TAKE_PEAK_DB - LAYER_GAP_KEPT * gap - own
+            }
+            false => 0.0,
+        };
+        faded(&mut attack, channels, |_| gain_db);
         let release = cuts
             .release
             .as_ref()
@@ -145,7 +168,9 @@ impl Sounding {
                 });
                 let fading = rules.held_fade(Bank::Release, root);
                 let rate = f64::from(audio.rate);
-                faded(&mut release, channels, |i| lift - fading * i as f64 / rate);
+                faded(&mut release, channels, |i| {
+                    gain_db + lift - fading * i as f64 / rate
+                });
                 release
             });
         Some(Sounding {
@@ -679,13 +704,13 @@ mod tests {
     }
 
     #[test]
-    fn a_held_sample_plays_at_its_recorded_level_and_fades_along_its_loop() {
+    fn a_held_sample_plays_at_the_build_s_peak_and_fades_along_its_loop() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
-        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None).unwrap();
+        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, 0.0).unwrap();
         let held = sounding.held();
         let second = RATE as usize;
-        assert!((db(peak(&held[..second / 10])) - db(0.5)).abs() < 0.1);
+        assert!((db(peak(&held[..second / 10])) - TAKE_PEAK_DB).abs() < 0.1);
         assert!(held.len() > 4 * second, "the loop plays on past the attack");
         let at = |s: usize| db(peak(&held[s * second..s * second + second / 10]));
         let fell = at(3) - at(4);
@@ -697,7 +722,7 @@ mod tests {
     fn key_up_fades_the_attack_away_and_plays_the_release_at_its_balance() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
-        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None).unwrap();
+        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, 0.0).unwrap();
         let held = sounding.held();
         let after = sounding.let_go(&held, RATE as usize);
         let release = sounding.release().unwrap();
@@ -724,7 +749,8 @@ mod tests {
     fn a_key_over_the_damper_rings_on_at_key_up() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
-        let sounding = Sounding::of(&audio, &cuts, rules.damper_top + 1, &rules, None).unwrap();
+        let sounding =
+            Sounding::of(&audio, &cuts, rules.damper_top + 1, &rules, None, 0.0).unwrap();
         let held = sounding.held();
         let after = sounding.let_go(&held, RATE as usize);
         assert_eq!(after.len(), held.len() - RATE as usize);
@@ -734,7 +760,7 @@ mod tests {
     fn the_wrap_cycles_the_loop_at_one_level() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
-        let wrap = Sounding::of(&audio, &cuts, 60, &rules, None)
+        let wrap = Sounding::of(&audio, &cuts, 60, &rules, None, 0.0)
             .unwrap()
             .wrap()
             .unwrap();
@@ -745,10 +771,22 @@ mod tests {
             looped: None,
             ..take().1
         };
-        assert!(Sounding::of(&audio, &none, 60, &rules, None)
+        assert!(Sounding::of(&audio, &none, 60, &rules, None, 0.0)
             .unwrap()
             .wrap()
             .is_none());
+    }
+
+    /// A layer recorded 12 dB under its root's loudest plays 6 dB under the build's peak.
+    #[test]
+    fn a_softer_layer_keeps_half_its_gap_to_the_loudest() {
+        let (audio, cuts) = take();
+        let rules = Sounding::rules(encode::Kind::Wurlitzer);
+        let louder = 0.5 * 10f32.powf(12.0 / 20.0);
+        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, louder).unwrap();
+        let held = sounding.held();
+        let start = db(peak(&held[..RATE as usize / 10]));
+        assert!((start - (TAKE_PEAK_DB - 6.0)).abs() < 0.1, "{start}");
     }
 
     /// A click holds the key through the attack and once round the loop; without a
@@ -757,7 +795,7 @@ mod tests {
     fn a_click_lets_the_key_go_once_the_loop_has_gone_round() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
-        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None).unwrap();
+        let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, 0.0).unwrap();
         let found = sounding.looped.clone().unwrap();
         assert_eq!(sounding.tapped(), 2 * found.end - found.start);
         assert!(
@@ -768,7 +806,7 @@ mod tests {
             looped: None,
             ..take().1
         };
-        let sounding = Sounding::of(&audio, &none, 60, &rules, None).unwrap();
+        let sounding = Sounding::of(&audio, &none, 60, &rules, None, 0.0).unwrap();
         assert_eq!(sounding.tapped(), sounding.frames());
     }
 }

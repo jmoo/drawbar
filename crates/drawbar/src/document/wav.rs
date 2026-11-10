@@ -744,7 +744,21 @@ impl State {
     pub fn sounding(&self, noise: Option<&nord_format::take::clean::Noise>) -> Option<audition::Sounding> {
         let (cuts, audio, root) = (self.cuts()?, self.audio()?, self.view.picked?.0);
         let rules = audition::Sounding::rules(self.kind());
-        audition::Sounding::of(audio, &cuts, root, &rules, noise)
+        let marked = self.read.marked.as_ref().ok()?;
+        let channels = usize::from(audio.channels.max(1));
+        let loudest = marked
+            .regions
+            .iter()
+            .filter(|mark| {
+                mark.hit.is_some_and(|hit| hit.0 == root)
+                    && matches!(mark.part, take::Part::Attack | take::Part::Resonance)
+            })
+            .flat_map(|mark| {
+                let at = |frame: u32| (frame as usize * channels).min(audio.samples.len());
+                &audio.samples[at(mark.frames.start)..at(mark.frames.end)]
+            })
+            .fold(0.0f32, |most, v| most.max(v.abs()));
+        audition::Sounding::of(audio, &cuts, root, &rules, noise, loudest)
     }
 
     /// Whether the file marks samples, so the take's cards show.

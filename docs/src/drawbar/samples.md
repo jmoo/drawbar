@@ -96,7 +96,8 @@ are edits like a gain, kept in the WAV on **Save**, and the build follows them:
 a take with Clean audio off is built as recorded. Click **Play sample** to hear
 the whole sample: the attack, once round its loop, then the key-off. Hold it
 down as you would hold a key: the attack plays shaped as `nord piano build`
-shapes it, with its loop evened out and crossfaded, at its recorded level,
+shapes it, with its loop evened out and crossfaded, the note's loudest layer at
+the peak the build brings it to and a softer layer half its recorded gap under it,
 fading from the start as a library of that category fades, then round its loop,
 fading as that category's loops fade, until you let go. Let go, and it fades
 away as a key-up fades it, under its release, at the balance the build plays the
