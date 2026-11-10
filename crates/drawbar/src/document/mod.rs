@@ -3669,7 +3669,8 @@ mod tests {
         }
 
         assert!(
-            said.iter().any(|word| word == "pick a sample in the take"),
+            said.iter()
+                .any(|word| word == "(select from the WAV, above)"),
             "{said:?}"
         );
         let said = open.painted(Vec::new());
@@ -3758,7 +3759,7 @@ mod tests {
         let mut open = Open::file("Wurli take.wav", bytes);
         open.twice();
         let said = open.dock();
-        for shown in ["Audition", "Kind", "Grand", "pick a sample in the take"] {
+        for shown in ["Audition", "Kind", "Grand", "(select from the WAV, above)"] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 

@@ -69,7 +69,7 @@ The waveform is the take's lane: its level, the louder channel at each point, ri
 Under the take, the picked sample is drawn close up, from its first cut to its last
 with a margin: its attack, loop, release and fade, and a marker at each cut
 point (attack start and end, loop start and end, release start and end, and
-where a fade starts). **Play as recorded** plays the picked sample as the take holds it, from its first cut to its last, unshaped. Hover over a marker for its name and time. **Zoom in**
+where a fade starts). **Play original** plays the picked sample as the take holds it, from its first cut to its last, unshaped. Hover over a marker for its name and time. **Zoom in**
 and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole sample**
 the whole sample again; drag the lane to move along. Drag a marker to move its
 cut: both lanes follow it, and when you let go its region or loop is written to

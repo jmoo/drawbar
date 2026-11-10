@@ -663,7 +663,7 @@ impl State {
         self.applied = total;
     }
 
-    /// What Play plays: the picked hit as recorded, from its first cut to its last, or
+    /// What Play plays: the picked sample as recorded, from its first cut to its last, or
     /// the whole file where none is picked.
     pub fn heard(&self) -> Option<&[f32]> {
         let audio = self.audio()?;
@@ -862,7 +862,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
 
 /// The label of Play while a sample is picked: it plays that sample as the take holds it,
 /// from its first cut to its last, unshaped.
-pub const PLAY_HIT: &str = "Play as recorded";
+pub const PLAY_HIT: &str = "Play original";
 
 /// The label of the button that applies the gain.
 pub const APPLY_GAIN: &str = "Apply gain";
