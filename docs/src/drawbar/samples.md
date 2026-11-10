@@ -84,25 +84,28 @@ other app: Undo takes back the most recent change, whether it was to the library
 such as a rename or a save, or to the open WAV, and Redo makes again the change
 undone last, until a new change is made. Typing in a box undoes its own text.
 
-The right dock's **Audition** card plays the picked sample as the instrument
-will play it. **Kind** is the kind of instrument the take is heard and built as,
-one of those a piano library files itself under, grand until you choose. **Clean
-audio**, on unless you turn it off, cleans each sample of the take's hum and
-hiss as `nord piano build` cleans it; the take's noise is found once, which takes
-a few seconds on a long take, and the audition waits for it. Both are edits like
-a gain, kept in the WAV on **Save**, and the build follows them: a take with
-Clean audio off is built as recorded. Hold **Play sample** down as you would
-hold a key: the attack plays shaped as `nord piano build` shapes it, with its
-loop evened out and crossfaded, at the peak the build brings it to, fading from
-the start as a library of that kind fades, then round its loop, fading as that
-kind's loops fade. Let go, and it fades away as a key-up fades it, under its
-release, at the balance the build plays the release at; a key above the kind's
-damper rings on instead. **Loop wrap** plays from a second before the loop's end
-and round the loop, at one level, so the join is heard and not the fade; click
-it again to stop. **Release** plays the release alone. The fades are the ones a
-library built from rules states: the key-up fade is confirmed on the instrument,
-and each kind's rates are fitted to vendor libraries, so take them as close, not
-exact.
+Under the picked sample, beside **Play original**, its controls play it as the
+instrument will. The right dock's **Instrument** card holds its **Category**,
+one of those a piano library files itself under, grand until you choose; the
+build applies that category's defaults, and levels and fades can be changed
+afterwards in the piano editor. **Clean audio**, on unless you turn it off,
+cleans each sample of the take's hum and hiss as `nord piano build` cleans it;
+the take's noise is found once, from when the take opens, which takes a few
+seconds on a long take, and a control pressed before then says to wait. Both
+are edits like a gain, kept in the WAV on **Save**, and the build follows them:
+a take with Clean audio off is built as recorded. Click **Play sample** to hear
+the whole sample: the attack, once round its loop, then the key-off. Hold it
+down as you would hold a key: the attack plays shaped as `nord piano build`
+shapes it, with its loop evened out and crossfaded, at its recorded level,
+fading from the start as a library of that category fades, then round its loop,
+fading as that category's loops fade, until you let go. Let go, and it fades
+away as a key-up fades it, under its release, at the balance the build plays the
+release at; a key above the category's damper rings on instead. **Loop wrap**
+plays from a second before the loop's end and round the loop, at one level, so
+the join is heard and not the fade; click it again to stop. **Release** plays
+the release alone. The fades are the ones a library built from rules states: the
+key-up fade is confirmed on the instrument, and each category's rates are fitted
+to vendor libraries, so take them as close, not exact.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in

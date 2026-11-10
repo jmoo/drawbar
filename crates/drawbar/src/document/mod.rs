@@ -952,7 +952,7 @@ impl Document {
         let player = &self.player;
         let playing = player.sounds((id, 0));
         let held = self.open.as_mut()?.wav.as_mut()?;
-        match wav::ui(ui, held, playing, |zone| player.sounds((id, zone)), sets) {
+        match wav::ui(ui, held, playing, |zone| player.played((id, zone)), sets) {
             (true, _) => Some(Asked::Audition),
             (false, Some(ask)) => Some(Asked::Hear(ask)),
             (false, None) => None,
@@ -3758,7 +3758,7 @@ mod tests {
         let mut open = Open::file("Wurli take.wav", bytes);
         open.twice();
         let said = open.dock();
-        for shown in [audition::INSTRUMENT, "Kind", "Grand"] {
+        for shown in [audition::INSTRUMENT, audition::CATEGORY, "Grand"] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 

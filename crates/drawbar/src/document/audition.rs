@@ -16,7 +16,7 @@ use nord_format::formats::npno::encode::{self, Kind, Rules};
 use nord_format::formats::npno::{Bank, Version};
 use nord_format::formats::nsmp::codec;
 use nord_format::take::clean::{self, Noise};
-use nord_format::take::layers::{self, TAKE_PEAK_DB};
+use nord_format::take::layers;
 use nord_format::take::sustain;
 use nord_format::wav::{Audio, Loop, Play};
 
@@ -56,8 +56,8 @@ const WRAP_MOST: f64 = 30.0;
 /// key is held on through the whole sample, as [`Sounding::tapped`] says.
 const TAP_MOST: f64 = 0.3;
 
-/// A sample's strokes, shaped and levelled, with the fades the instrument plays them
-/// under.
+/// A sample's strokes, shaped as the build shapes them, at the level they were recorded
+/// at, with the fades the instrument plays them under.
 #[derive(Clone, Debug)]
 pub struct Sounding {
     pub rate: u32,
@@ -125,14 +125,7 @@ impl Sounding {
             play: Play::Forward,
         });
         let fade = cuts.fade.as_ref().map(|fade| fade.start - span.start);
-        let (mut attack, held) =
-            sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);
-        let peak = raw.iter().fold(0.0f32, |most, v| most.max(v.abs()));
-        let gain_db = match peak > 0.0 {
-            true => TAKE_PEAK_DB - 20.0 * f64::from(peak).log10(),
-            false => 0.0,
-        };
-        faded(&mut attack, channels, |_| gain_db);
+        let (attack, held) = sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);
         let release = cuts
             .release
             .as_ref()
@@ -152,9 +145,7 @@ impl Sounding {
                 });
                 let fading = rules.held_fade(Bank::Release, root);
                 let rate = f64::from(audio.rate);
-                faded(&mut release, channels, |i| {
-                    gain_db + lift - fading * i as f64 / rate
-                });
+                faded(&mut release, channels, |i| lift - fading * i as f64 / rate);
                 release
             });
         Some(Sounding {
@@ -294,8 +285,16 @@ impl Sounding {
 /// new bytes, as the lanes' views are.
 #[derive(Default)]
 pub struct Audition {
-    /// The sample sounding while Play sample is held down, and what it plays.
+    /// The sample sounding while its key is down, and what it plays.
     held: Option<(Sounding, Vec<f32>)>,
+    /// Whether Play sample is held down.
+    pressed: bool,
+    /// Where a click lets the key go, in frames of what is held, once it has played that
+    /// far.
+    up_at: Option<usize>,
+    /// Whether a control was pressed while the take's noise is still being found, so
+    /// the wait is said.
+    waiting: bool,
     /// The noise of the audio whose [`print`] this is, found or being found.
     noise: Option<(u64, Search)>,
     /// The picked sample made ready to play, and what it was made from: the bytes'
@@ -383,8 +382,11 @@ impl Audition {
 pub enum Ask {
     /// Play sample went down: the key is held.
     Hold,
-    /// Play sample came up: the key is let go.
+    /// Play sample came up: the key is let go, or, after a click, held on through the
+    /// whole sample.
     LetGo,
+    /// A clicked sample has played through: the key goes up.
+    Up,
     /// Start or stop the loop's wrap.
     Wrap,
     /// Start or stop the release alone.
@@ -398,13 +400,14 @@ pub enum Ask {
 /// The label of the clean toggle.
 pub const CLEAN_AUDIO: &str = "Clean audio";
 
-/// The take's card for the right dock: the kind of instrument it is heard and built as.
+/// The take's card for the right dock: the category of instrument it is heard and built
+/// as, whose defaults the build applies.
 pub fn card(ui: &mut egui::Ui, state: &wav::State) -> Option<Ask> {
     let mut asked = None;
     let kind = state.kind();
     dock_card(ui, Head::fixed(Glyph::Piano, INSTRUMENT), |ui| {
         ui.horizontal(|ui| {
-            ui.label("Kind");
+            ui.label(CATEGORY);
             let mut chosen = kind;
             egui::ComboBox::from_id_salt("take-kind")
                 .selected_text(super::piano::kind_name(kind.code()))
@@ -425,56 +428,102 @@ pub fn card(ui: &mut egui::Ui, state: &wav::State) -> Option<Ask> {
     asked
 }
 
+/// The label of the category picker.
+pub const CATEGORY: &str = "Category";
+
 /// The title of the take's card in the right dock.
 pub const INSTRUMENT: &str = "Instrument";
 
 /// The picked sample's controls, under it beside Play original: the sample played as
 /// the instrument will play it, and whether the take is cleaned. Nothing where no
-/// attack is picked. `sounds` says whether one of the document's zones is sounding.
+/// attack is picked. `played` says how far the pointer's voice on one of the document's
+/// zones has played, in seconds, where it sounds.
 pub fn controls(
     ui: &mut egui::Ui,
     state: &mut wav::State,
-    sounds: impl Fn(usize) -> bool,
+    played: impl Fn(usize) -> Option<f64>,
 ) -> Option<Ask> {
     let cuts = state.cuts().filter(|cuts| cuts.attack.is_some())?;
     let mut asked = None;
-    let holding = state.audition.held.is_some();
     let clean = state.clean();
-    state.follow_noise(ui.ctx());
     state.prepare();
     let finding = state
         .audio()
         .is_some_and(|audio| matches!(state.audition.cleaning(audio, clean), Cleaning::Finding));
+    let audition = &mut state.audition;
+    audition.waiting &= finding;
     let accent = app::accent(ui.visuals());
-    ui.add_enabled_ui(!finding || holding, |ui| {
-        let play = super::sample::action_response(ui, PLAY_SAMPLE, Glyph::Piano, accent);
-        let down = play.is_pointer_button_down_on();
-        match (holding, down) {
-            (false, true) => asked = Some(Ask::Hold),
-            (true, false) => asked = Some(Ask::LetGo),
-            _ => {}
+    let play = super::sample::action_response(ui, PLAY_SAMPLE, Glyph::Piano, accent);
+    // ⚠️ The press and let-go are the pointer's own, not the button's: egui stops
+    // counting a press held past its click time as on the button, and that let the key
+    // go after a second and struck it again.
+    let (struck, down) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
+    if struck && play.contains_pointer() {
+        match finding {
+            true => audition.waiting = true,
+            false => asked = Some(Ask::Hold),
         }
-        if down {
-            // ⚠️ Let go is seen on the next frame: without one, the key-up waits for the
-            // pointer to move.
-            ui.ctx().request_repaint();
+    } else if audition.pressed && !down {
+        asked = Some(Ask::LetGo);
+    }
+    if audition.pressed {
+        // Let go is seen on the next frame: without one, the key-up waits for the
+        // pointer to move.
+        ui.ctx().request_repaint();
+    }
+    if let Some((up, rate)) = audition.up_at.zip(
+        audition
+            .held
+            .as_ref()
+            .map(|(sounding, _)| f64::from(sounding.rate)),
+    ) {
+        match played(HELD) {
+            Some(seconds) if seconds * rate >= up as f64 => asked = Some(Ask::Up),
+            Some(_) => ui.ctx().request_repaint(),
+            None => audition.up_at = None,
         }
-        play.on_hover_text(PLAY_SAMPLE_HINT);
-        let mut toggle = |label: &str, glyph: Glyph, zone: usize, there: bool| {
-            let (label, glyph) = match sounds(zone) {
-                true => ("Stop", Glyph::X),
-                false => (label, glyph),
-            };
-            ui.add_enabled_ui(there, |ui| super::sample::action(ui, label, glyph, accent))
-                .inner
+    }
+    let rect = play.rect;
+    play.on_hover_text(PLAY_SAMPLE_HINT);
+    let mut toggle = |label: &str, glyph: Glyph, zone: usize, there: bool| {
+        let (label, glyph) = match played(zone).is_some() {
+            true => ("Stop", Glyph::X),
+            false => (label, glyph),
         };
-        if toggle(LOOP_WRAP, Glyph::RefreshCw, WRAP, cuts.looped.is_some()) {
-            asked = Some(Ask::Wrap);
+        ui.add_enabled_ui(there, |ui| super::sample::action(ui, label, glyph, accent))
+            .inner
+    };
+    for (label, glyph, zone, there, ask) in [
+        (
+            LOOP_WRAP,
+            Glyph::RefreshCw,
+            WRAP,
+            cuts.looped.is_some(),
+            Ask::Wrap,
+        ),
+        (
+            RELEASE_ALONE,
+            Glyph::Waves,
+            RELEASE,
+            cuts.release.is_some(),
+            Ask::Release,
+        ),
+    ] {
+        if toggle(label, glyph, zone, there) {
+            match finding {
+                true => state.audition.waiting = true,
+                false => asked = Some(ask),
+            }
         }
-        if toggle(RELEASE_ALONE, Glyph::Waves, RELEASE, cuts.release.is_some()) {
-            asked = Some(Ask::Release);
-        }
-    });
+    }
+    if state.audition.waiting {
+        egui::Area::new(egui::Id::new("take-noise-wait"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + egui::vec2(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(NOISE_WAIT));
+            });
+    }
     ui.add_space(8.0);
     let mut cleaned = clean;
     if ui.checkbox(&mut cleaned, CLEAN_AUDIO).changed() {
@@ -489,6 +538,9 @@ pub fn controls(
     }
     asked
 }
+
+/// What a control pressed while the take's noise is being found says.
+pub const NOISE_WAIT: &str = "Generating the noise profile, please wait…";
 
 /// What Play sample does, on hover.
 pub const PLAY_SAMPLE_HINT: &str =
@@ -508,6 +560,8 @@ pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> R
             let Some(sounding) = sounding(state) else {
                 return Ok(());
             };
+            state.audition.pressed = true;
+            state.audition.up_at = None;
             let held = sounding.held();
             player.strike(
                 Finger::Pointer,
@@ -518,28 +572,24 @@ pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> R
             )?;
             state.audition.held = Some((sounding, held));
         }
-        Ask::LetGo => {
+        Ask::LetGo | Ask::Up => {
+            state.audition.pressed = false;
+            let played = player.played((id, HELD));
+            if ask == Ask::LetGo && played.is_some_and(|seconds| seconds < TAP_MOST) {
+                // A click: the key stays down through the whole sample, then goes up.
+                state.audition.up_at = state.audition.held.as_ref().map(|(s, _)| s.tapped());
+                return Ok(());
+            }
+            state.audition.up_at = None;
             let Some((sounding, held)) = state.audition.held.take() else {
                 return Ok(());
             };
-            let channels = usize::from(sounding.channels);
-            let rate = f64::from(sounding.rate);
-            let played = player.played((id, HELD));
             let frame = match played {
-                Some(seconds) => (seconds * rate) as usize,
+                Some(seconds) => (seconds * f64::from(sounding.rate)) as usize,
                 // A held attack that does not loop may have played out.
-                None => held.len() / channels,
+                None => held.len() / usize::from(sounding.channels),
             };
-            let after = match played.is_some_and(|seconds| seconds < TAP_MOST) {
-                // A click: the key stays down through the whole sample, then goes up.
-                true => {
-                    let up = sounding.tapped().clamp(frame, held.len() / channels);
-                    let mut after = held[frame * channels..up * channels].to_vec();
-                    after.extend(sounding.let_go(&held, up));
-                    after
-                }
-                false => sounding.let_go(&held, frame),
-            };
+            let after = sounding.let_go(&held, frame);
             match after.is_empty() {
                 true => player.silence((id, HELD)),
                 false => player.strike(
@@ -552,6 +602,12 @@ pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> R
             }
         }
         Ask::Wrap | Ask::Release => {
+            // The pointer's voice is the held key's too: this one takes its place.
+            (
+                state.audition.held,
+                state.audition.pressed,
+                state.audition.up_at,
+            ) = (None, false, None);
             let zone = match ask {
                 Ask::Wrap => WRAP,
                 _ => RELEASE,
@@ -623,13 +679,13 @@ mod tests {
     }
 
     #[test]
-    fn a_held_sample_plays_at_the_build_s_peak_and_fades_along_its_loop() {
+    fn a_held_sample_plays_at_its_recorded_level_and_fades_along_its_loop() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
         let sounding = Sounding::of(&audio, &cuts, 60, &rules, None).unwrap();
         let held = sounding.held();
         let second = RATE as usize;
-        assert!((db(peak(&held[..second / 10])) - TAKE_PEAK_DB).abs() < 0.1);
+        assert!((db(peak(&held[..second / 10])) - db(0.5)).abs() < 0.1);
         assert!(held.len() > 4 * second, "the loop plays on past the attack");
         let at = |s: usize| db(peak(&held[s * second..s * second + second / 10]));
         let fell = at(3) - at(4);
