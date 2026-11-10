@@ -20,7 +20,7 @@ use crate::app;
 const NARROWEST: f64 = 3.0;
 
 /// The height of the lane.
-const HEIGHT: f32 = 100.0;
+const HEIGHT: f32 = 70.0;
 
 /// The height of the row of times under the lane, and of the scroll bar.
 const TICKS: f32 = 14.0;
