@@ -900,23 +900,20 @@ impl Document {
         wav::ui(ui, held, playing, sets).then_some(Asked::Audition)
     }
 
-    /// Play the open WAV through the app's player, or stop it where it is playing.
+    /// Play the open WAV through the app's player, or the hit picked in it, or stop it
+    /// where it is playing.
     ///
     /// Played as float, whatever the file stores: a 24-bit take is heard at its own
     /// depth, not rounded to the 16 bits a library holds.
     fn audition(&mut self, id: u64, log: &mut Log) {
-        let Some(audio) = self
-            .open
-            .as_ref()
-            .and_then(|open| open.wav.as_ref())
-            .and_then(wav::State::audio)
-        else {
+        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
+            return;
+        };
+        let (Some(audio), Some(heard)) = (held.audio(), held.heard()) else {
             return;
         };
         let clock = audio.rate as f32 / codec::FIELD_RATE as f32;
-        let played = self
-            .player
-            .toggle((id, 0), &audio.samples, audio.channels, clock);
+        let played = self.player.toggle((id, 0), heard, audio.channels, clock);
         refused(played, log, "WAV");
     }
 
@@ -3420,8 +3417,7 @@ mod tests {
             "TAKE",
             "C4 v22",
             "G4 v00",
-            "attack",
-            "release",
+            "note",
             take::WHOLE,
             "2 hits · 3 regions · 0 loops",
         ] {
@@ -3435,7 +3431,13 @@ mod tests {
         let said = open.painted(Vec::new());
         open.frame(testing::click(testing::where_(&said, "G4 v00").center()));
         let said = open.twice();
-        for shown in ["HIT", hit::WHOLE] {
+        let held = open.state().wav.as_ref().unwrap();
+        assert_eq!(
+            held.heard().map(<[f32]>::len),
+            Some(2 * 35_002 * 20),
+            "Play plays the picked hit: G4 v00, 20 s of stereo"
+        );
+        for shown in ["HIT", hit::WHOLE, wav::PLAY_HIT] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
         assert_eq!(
