@@ -275,7 +275,7 @@ impl Step {
                     format!("{} {cut}", take::mark(label, 0..0).text)
                 }
                 None if path == KIND => format!(
-                    "kind {}",
+                    "category {}",
                     encode::Kind::from_word(value).map_or(value.clone(), |kind| {
                         super::piano::kind_name(kind.code())
                     })
@@ -781,11 +781,16 @@ pub fn ui(
     ui: &mut egui::Ui,
     state: &mut State,
     playing: bool,
-    sounds: impl Fn(usize) -> bool,
+    played: impl Fn(usize) -> Option<f64>,
     sets: &mut Sets,
 ) -> (bool, Option<audition::Ask>) {
     let mut audition = false;
     let mut asked = None;
+    if state.marks_samples() {
+        // From the take's opening, so its samples are ready to hear by the time one is
+        // picked.
+        state.follow_noise(ui.ctx());
+    }
     // ⚠️ The gain sits over the take, not by Play: it is applied to the whole file, never
     // to the picked hit alone.
     if state.audio().is_some() {
@@ -863,7 +868,7 @@ pub fn ui(
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
             if state.marks_samples() {
-                asked = audition::controls(ui, state, sounds);
+                asked = audition::controls(ui, state, played);
             }
         });
     }
