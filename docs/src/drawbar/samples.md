@@ -76,7 +76,9 @@ cut: both lanes follow it, and when you let go its region or loop is written to
 the file's marks, one edit a drag, with no sample changed. A marker stops at the
 cuts either side of it, so a loop stays inside its attack and a fade ends with
 it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
-them back, and a gain applied after them keeps them.
+them back, and a gain applied after them keeps them. **Undo**, beside the gain,
+takes back the last edit, a gain or a moved cut, one at a time back to the
+file as last saved; hover over it to see what it undoes.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in

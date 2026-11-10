@@ -126,6 +126,7 @@ enum Verb {
     RollBack,
     Reopen,
     MoveUp,
+    Revert,
 }
 
 impl Verb {
@@ -142,6 +143,7 @@ impl Verb {
             Verb::RollBack => "Roll back",
             Verb::Reopen => "Close and reopen",
             Verb::MoveUp => "Move them up too",
+            Verb::Revert => "Revert",
         }
     }
 
@@ -157,7 +159,8 @@ impl Verb {
             | Verb::Overwrite
             | Verb::TakeTheirs
             | Verb::Discard
-            | Verb::Reopen => sheet::destructive(ui, glyph, label),
+            | Verb::Reopen
+            | Verb::Revert => sheet::destructive(ui, glyph, label),
         }
     }
 
@@ -170,7 +173,7 @@ impl Verb {
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
             Verb::Finish | Verb::MoveUp => Glyph::Check,
-            Verb::RollBack => Glyph::RotateCcw,
+            Verb::RollBack | Verb::Revert => Glyph::RotateCcw,
             Verb::Reopen => Glyph::RefreshCw,
         }
     }
@@ -835,6 +838,16 @@ impl Browser {
                 both,
             ),
         });
+    }
+
+    /// Ask before reverting an asset to the bytes it was last saved as.
+    pub(crate) fn ask_revert(&mut self, id: u64, name: &str) {
+        self.raise(Ask::new(
+            format!("Revert “{name}”?"),
+            Some("Every change since it was last saved is lost.".into()),
+            Verb::Revert,
+            vec![Act::Revert(id)],
+        ));
     }
 
     /// Ask what to do about a file changed on disk while this app held an unsaved edit of

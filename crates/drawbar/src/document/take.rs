@@ -449,12 +449,6 @@ pub fn ui(
             .color(app::caption(ui.visuals())),
         );
         let visuals = ui.visuals().clone();
-        // A note's box is named on the lane; only a region that names no stroke needs a
-        // legend.
-        if boxes.iter().any(|boxed| boxed.hit.is_none()) {
-            let edge = ink(Part::Other, &visuals);
-            legend(ui, edge.gamma_multiply(0.18), edge, "other region");
-        }
         if marked.as_ref().is_ok_and(|marks| marks.regions.is_empty()) {
             ui.label(
                 egui::RichText::new("no regions")

@@ -222,6 +222,8 @@ pub enum Act {
     WriteBack(u64),
     /// Revert to the bytes it was last saved as.
     Revert(u64),
+    /// Ask before [`Act::Revert`]: every edit since the last save is lost.
+    AskRevert(u64),
     /// Bring one of the center's tabs forward.
     ShowTab(Spot),
     /// Show the keyboard tab, switched to one class.
@@ -360,6 +362,7 @@ impl Act {
             | Act::SendAll
             | Act::QueueChanged
             | Act::AskSendAll
+            | Act::AskRevert(_)
             | Act::Rearrange { .. }
             | Act::RenameLocal { .. }
             | Act::RenameFolder { .. }
@@ -811,6 +814,11 @@ pub fn apply(
             Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
             Act::WriteBack(id) => save_doc(browser, workspace, device, queue, log, id, false),
             Act::Revert(id) => workspace.revert(id, log),
+            Act::AskRevert(id) => {
+                if let Some(entity) = workspace.get(id) {
+                    browser.ask_revert(id, &entity.name);
+                }
+            }
             Act::ShowTab(spot) => tabs.show(spot),
             Act::ShowClass(class) => {
                 tabs.show(Spot::Keyboard);
@@ -3239,6 +3247,37 @@ mod tests {
         bench.browser.forget_gone(&bench.workspace);
 
         assert!(!bench.browser.selection.holds(Item::Tag(tag)));
+    }
+
+    /// Revert asks first, and only a yes restores the saved bytes.
+    #[test]
+    fn a_revert_asks_before_it_drops_the_edits() {
+        let mut bench = Bench::new();
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let saved = bench.workspace.get(id).unwrap().bytes.to_vec();
+        let mut edited = saved.clone();
+        *edited.last_mut().unwrap() ^= 1;
+        bench.workspace.replace_bytes(id, edited, &mut bench.log);
+        assert!(bench.workspace.get(id).unwrap().is_unsaved());
+
+        bench.act(vec![Act::AskRevert(id)]);
+        let (title, answers) = bench.browser.asking().expect("it asks");
+        assert!(title.starts_with("Revert “"), "{title}");
+        assert_eq!(answers, ["Cancel", "Revert"]);
+        assert!(bench.browser.answer("Cancel").is_empty());
+        assert!(
+            bench.workspace.get(id).unwrap().is_unsaved(),
+            "Cancel keeps the edit"
+        );
+
+        bench.act(vec![Act::AskRevert(id)]);
+        let acts = bench.browser.answer("Revert");
+        bench.act(acts);
+        assert!(bench.workspace.get(id).unwrap().bytes == saved[..]);
+        assert!(!bench.workspace.get(id).unwrap().is_unsaved());
     }
 
     /// Nothing may be written to a read-only library, so deleting or saving there only
