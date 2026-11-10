@@ -305,8 +305,9 @@ pub fn ui(
     if let Some(attack) = &cuts.attack {
         spanned(attack, rect.top(), take::ink(Part::Attack, &visuals));
     }
+    // ⚠️ The loop fills the lower half, so the attack it sits in shows over it.
     if let Some(found) = &cuts.looped {
-        spanned(found, rect.top(), app::accent(&visuals));
+        spanned(found, rect.center().y, app::accent(&visuals));
     }
     if let Some(release) = &cuts.release {
         spanned(release, rect.top(), take::ink(Part::Release, &visuals));

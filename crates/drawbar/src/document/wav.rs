@@ -457,11 +457,18 @@ impl State {
     }
 }
 
-/// Draw the document: the waveform with Play and the gain over it where the bytes read,
+/// Draw the document: the gain over the take's lane, the picked hit's lane and Play under
+/// it where the bytes read,
 /// and why not where they do not. `true` once the operator has asked to play the file, or
 /// to stop it where it is playing.
 pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) -> bool {
     let mut audition = false;
+    // ⚠️ The gain sits over the take, not by Play: it is applied to the whole file, never
+    // to the picked hit alone.
+    if state.audio().is_some() {
+        ui.horizontal(|ui| gain(ui, state, sets));
+        ui.add_space(6.0);
+    }
     let read = &mut state.read;
     match &read.source {
         Ok(audio) => {
@@ -502,8 +509,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
                 (false, false) => ("Play", Glyph::AudioLines),
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
-            ui.add_space(12.0);
-            gain(ui, state, sets);
         });
     }
     audition

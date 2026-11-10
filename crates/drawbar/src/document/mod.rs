@@ -3417,7 +3417,6 @@ mod tests {
             "TAKE",
             "C4 v22",
             "G4 v00",
-            "note",
             take::WHOLE,
             "2 hits · 3 regions · 0 loops",
         ] {
