@@ -8531,7 +8531,7 @@ fn a_gain_edit_reverts_and_saves_like_any_edit() {
     let id = session.named("hit.wav");
     let gain = |session: &mut Session| {
         let sets = [(crate::document::wav::GAIN.to_string(), "6.0".to_string())];
-        let (gained, _) = crate::document::wav::apply(&wav, &sets).unwrap();
+        let (gained, _) = crate::document::wav::apply(&wav, &wav, &sets).unwrap();
         let Bench { workspace, log, .. } = &mut session.bench;
         workspace.replace_bytes(id, gained.clone(), log);
         assert!(workspace.get(id).unwrap().is_unsaved());
@@ -8739,7 +8739,7 @@ fn a_build_encodes_a_wavs_unsaved_gain() {
     let project = project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
     let saved = root.read("Marimba/c3.wav");
     let sets = [(crate::document::wav::GAIN.to_string(), "-6.0".to_string())];
-    let (gained, _) = crate::document::wav::apply(&saved, &sets).unwrap();
+    let (gained, _) = crate::document::wav::apply(&saved, &saved, &sets).unwrap();
     let expected = built_from(&project, |_| gained.clone());
     assert!(expected != built_from(&project, |_| saved.clone()));
 

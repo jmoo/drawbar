@@ -23,8 +23,17 @@ use crate::workspace::{Bytes, LocalEntity};
 /// The extension a WAV carries, and the tag it is kept under.
 pub const EXTENSION: &str = "wav";
 
-/// The path of a WAV's one edit: its total gain in dB against the file as last saved.
+/// The path of a WAV's gain: its total in dB against the file as last saved.
 pub const GAIN: &str = "gain";
+
+/// The start of the path of a moved cut, `cut/060-b0-v22/attack-end`: the hit by its
+/// attack's label, then the cut. Its value is the frame the cut moves to.
+pub const CUT: &str = "cut/";
+
+/// The path that moves `cut` of the hit whose attack is labelled `label`.
+pub fn cut_path(label: &str, cut: hit::Cut) -> String {
+    format!("{CUT}{label}/{}", cut.slug())
+}
 
 /// The gains the control offers, in dB.
 const GAINS: RangeInclusive<f64> = -24.0..=24.0;
@@ -124,29 +133,72 @@ fn gain_in_place(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
     clipped
 }
 
-/// `original` at the last `gain` set, and that gain in dB.
+/// `current` with `sets` applied, and the gain in dB where one was set.
+///
+/// A gain is applied to `original`, and `current`'s marks carried over where they differ
+/// from its own. A moved cut moves it in `current`'s marks, and changes no sample.
 ///
 /// ⚠️ A gain is a total, never a step: each one is applied to `original`, so a second
 /// gain replaces the first instead of stacking on it, and nothing the first clipped or
 /// rounded is carried into the second.
-pub fn apply(original: &[u8], sets: &[(String, String)]) -> Result<(Vec<u8>, f64), String> {
-    let layout = wav::layout(original).map_err(|e| e.to_string())?;
+pub fn apply(
+    original: &[u8],
+    current: &[u8],
+    sets: &[(String, String)],
+) -> Result<(Vec<u8>, Option<f64>), String> {
+    let error = |e: nord_format::take::Error| e.to_string();
+    let layout = wav::layout(original).map_err(error)?;
     let mut total = None;
+    let mut marks: Option<wav::Marks> = None;
     for (path, value) in sets {
-        if path != GAIN {
-            return Err(format!("{path}: a WAV's only edit is its {GAIN}"));
+        if path == GAIN {
+            let db: f64 = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{GAIN}: {value} is not a number of dB"))?;
+            factor(db)?;
+            total = Some(db);
+            continue;
         }
-        let db: f64 = value
+        let Some((label, slug)) = path
+            .strip_prefix(CUT)
+            .and_then(|rest| rest.rsplit_once('/'))
+        else {
+            return Err(format!("{path}: a WAV's edits are its {GAIN} and its cuts"));
+        };
+        let (Some(hit), Some(cut)) = (take::mark(label, 0..0).hit, hit::Cut::from_slug(slug))
+        else {
+            return Err(format!("{path}: names no cut of a hit"));
+        };
+        let frame: u32 = value
             .trim()
             .parse()
-            .map_err(|_| format!("{GAIN}: {value} is not a number of dB"))?;
-        factor(db)?;
-        total = Some(db);
+            .map_err(|_| format!("{path}: {value} is not a frame"))?;
+        let held = match marks.take() {
+            Some(held) => held,
+            None => wav::read_marks(current).map_err(error)?,
+        };
+        let frames = wav::layout(current).map_err(error)?.frames() as u32;
+        marks = Some(hit::moved(&held, hit, cut, frame, frames)?);
     }
-    let mut out = original.to_vec();
-    let db = total.unwrap_or(0.0);
-    gain_in_place(&mut out[layout.data], layout.format.encoding, factor(db)?);
-    Ok((out, db))
+    let mut out = match total {
+        Some(db) => {
+            let mut out = original.to_vec();
+            gain_in_place(&mut out[layout.data], layout.format.encoding, factor(db)?);
+            let now = wav::read_marks(current).ok();
+            match (&marks, now) {
+                (None, Some(now)) if wav::read_marks(original).ok() != Some(now.clone()) => {
+                    wav::with_marks(&out, &now).map_err(error)?
+                }
+                _ => out,
+            }
+        }
+        None => current.to_vec(),
+    };
+    if let Some(marks) = &marks {
+        out = wav::with_marks(&out, marks).map_err(error)?;
+    }
+    Ok((out, total))
 }
 
 /// The identity cells a WAV puts on the header: the rate, channels, encoding and length
@@ -288,7 +340,9 @@ struct Read {
     stamp: u64,
     /// The audio as float, or why the bytes do not read.
     source: Result<Audio, String>,
-    /// The regions and loops the file marks, or why they do not read.
+    /// The regions and loops the file marks, as it holds them and as the lanes draw them,
+    /// or why they do not read.
+    marks: Result<wav::Marks, String>,
     marked: Result<take::Marked, String>,
     summary: take::Summary,
     drawn: take::Drawn,
@@ -299,11 +353,16 @@ struct Read {
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
         let source = wav::read(&entity.bytes).map_err(|e| e.to_string());
+        let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
         Read {
             stamp: entity.stamp,
             summary: source.as_ref().map(take::Summary::of).unwrap_or_default(),
             source,
-            marked: take::Marked::of(&entity.bytes),
+            marked: marks
+                .as_ref()
+                .map(take::Marked::from_marks)
+                .map_err(Clone::clone),
+            marks,
             drawn: take::Drawn::default(),
             close: take::Drawn::default(),
         }
@@ -345,7 +404,8 @@ fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> 
         return None;
     }
     let db = (20.0 * ratio.log10() * 10.0).round() / 10.0;
-    let (made, _) = apply(was, &[(GAIN.to_string(), format!("{db:.1}"))]).ok()?;
+    // With the cuts the edited bytes mark, so moved cuts and a gain both count.
+    let (made, _) = apply(was, now, &[(GAIN.to_string(), format!("{db:.1}"))]).ok()?;
     (made == now).then_some(db)
 }
 
@@ -412,6 +472,11 @@ impl State {
         &self.original
     }
 
+    /// The total gain the bytes hold against the original.
+    pub fn applied(&self) -> f64 {
+        self.applied
+    }
+
     /// Note that the bytes stamped `stamp` hold `total` against the original.
     pub fn made(&mut self, stamp: u64, total: f64) {
         self.made.retain(|(made, _)| *made != stamp);
@@ -472,26 +537,46 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     let read = &mut state.read;
     match &read.source {
         Ok(audio) => {
+            let picked = state.view.picked;
+            // Both lanes draw a dragged cut where it is now; the file moves it when the
+            // drag ends.
+            let frames = (audio.samples.len() / usize::from(audio.channels.max(1))) as u32;
+            let dragged = match (&read.marks, picked, state.close.dragging(picked)) {
+                (Ok(marks), Some(hit), Some((cut, frame))) => {
+                    hit::moved(marks, hit, cut, frame, frames)
+                        .ok()
+                        .map(|moved| Ok(take::Marked::from_marks(&moved)))
+                }
+                _ => None,
+            };
+            let marked = dragged.as_ref().unwrap_or(&read.marked);
             take::ui(
                 ui,
                 audio,
                 &read.summary,
                 &mut read.drawn,
-                &read.marked,
+                marked,
                 &mut state.view,
                 playing,
             );
             ui.add_space(10.0);
-            hit::ui(
+            let dropped = hit::ui(
                 ui,
                 audio,
                 &read.summary,
                 &mut read.close,
-                &read.marked,
-                state.view.picked,
+                marked,
+                picked,
                 &mut state.close,
                 playing,
             );
+            if let (Some((cut, frame)), Some(hit), Ok(held)) = (dropped, picked, &read.marked) {
+                let cuts = hit::Cuts::of(held, hit);
+                let was = cuts.points().into_iter().find(|(each, _)| *each == cut);
+                if was.is_some_and(|(_, at)| at != frame) {
+                    sets.push((cut_path(&cuts.label, cut), frame.to_string()));
+                }
+            }
         }
         Err(why) => {
             ui.label(
@@ -579,7 +664,7 @@ mod tests {
     }
 
     fn gained(bytes: &[u8], db: &str) -> Result<Vec<u8>, String> {
-        apply(bytes, &[(GAIN.to_string(), db.to_string())]).map(|(out, _)| out)
+        apply(bytes, bytes, &[(GAIN.to_string(), db.to_string())]).map(|(out, _)| out)
     }
 
     /// Samples clipped scaling `bytes` by `db`.
@@ -654,10 +739,10 @@ mod tests {
             (GAIN.to_string(), "10".to_string()),
             (GAIN.to_string(), "12".to_string()),
         ];
-        let (out, db) = apply(&bytes, &sets).unwrap();
-        assert_eq!(db, 12.0);
+        let (out, db) = apply(&bytes, &bytes, &sets).unwrap();
+        assert_eq!(db, Some(12.0));
         assert!(out == twelve, "10 then 12 dB is 12 dB in all");
-        let (back, _) = apply(&bytes, &[(GAIN.to_string(), "0".to_string())]).unwrap();
+        let (back, _) = apply(&bytes, &bytes, &[(GAIN.to_string(), "0".to_string())]).unwrap();
         assert!(
             back == bytes,
             "0 dB is the original, clipping and all undone"
@@ -691,8 +776,8 @@ mod tests {
         assert!(gained(&bytes, "25").unwrap_err().contains("runs from"));
         assert!(gained(&bytes, "NaN").is_err());
         assert!(gained(&bytes, "loud").unwrap_err().contains("not a number"));
-        let other = apply(&bytes, &[("name".to_string(), "x".to_string())]);
-        assert!(other.unwrap_err().contains("only edit"));
+        let other = apply(&bytes, &bytes, &[("name".to_string(), "x".to_string())]);
+        assert!(other.unwrap_err().contains("its cuts"));
     }
 
     #[test]
@@ -836,9 +921,14 @@ mod tests {
         let saved = take(&[0.9, 0.3, 0.05]);
         let (mut workspace, id) = library(&saved);
         let mut state = State::new(workspace.get(id).unwrap());
-        let (out, db) = apply(state.original(), &[(GAIN.to_string(), "6.0".into())]).unwrap();
+        let (out, db) = apply(
+            state.original(),
+            state.original(),
+            &[(GAIN.to_string(), "6.0".into())],
+        )
+        .unwrap();
         edited(&mut workspace, id, out.clone());
-        state.made(workspace.get(id).unwrap().stamp, db);
+        state.made(workspace.get(id).unwrap().stamp, db.unwrap());
         state.follow(workspace.get(id).unwrap());
         assert_eq!(state.gain, 6.0);
 
@@ -846,6 +936,83 @@ mod tests {
         state.follow(workspace.get(id).unwrap());
         assert_eq!(state.gain, 0.0);
         assert!(state.original() == &out[..]);
+    }
+
+    /// `take(peaks)` with an attack and release marked on its first note, and a loop.
+    fn marked_take(peaks: &[f64]) -> Vec<u8> {
+        let region = |start: u32, frames: u32, label: &str| wav::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(22_050, 30_000, "069-b0-v22"),
+                region(52_050, 4000, "069-b2-v22"),
+            ],
+            loops: vec![wav::Loop {
+                start: 40_000,
+                end: 41_999,
+                play: wav::Play::Forward,
+            }],
+        };
+        wav::with_marks(&take(peaks), &marks).unwrap()
+    }
+
+    fn cut(cut: hit::Cut, frame: u32) -> (String, String) {
+        (cut_path("069-b0-v22", cut), frame.to_string())
+    }
+
+    #[test]
+    fn a_moved_cut_is_written_to_the_marks_and_changes_no_sample() {
+        let bytes = marked_take(&[0.9, 0.3]);
+        let sets = [
+            cut(hit::Cut::AttackEnd, 51_000),
+            cut(hit::Cut::LoopStart, 39_000),
+        ];
+        let (out, db) = apply(&bytes, &bytes, &sets).unwrap();
+        assert_eq!(db, None);
+        let marks = wav::read_marks(&out).unwrap();
+        assert_eq!(marks.regions[0].frames, 51_000 - 22_050);
+        assert_eq!((marks.loops[0].start, marks.loops[0].end), (39_000, 41_999));
+        assert_eq!(
+            marks.regions[1],
+            wav::read_marks(&bytes).unwrap().regions[1]
+        );
+        let data = wav::layout(&bytes).unwrap().data;
+        assert!(out[wav::layout(&out).unwrap().data] == bytes[data]);
+
+        let past = apply(&bytes, &bytes, &[cut(hit::Cut::LoopEnd, 60_000)]);
+        assert!(
+            past.unwrap_err().contains("loop end"),
+            "past the attack's end"
+        );
+        let none = (format!("{CUT}070-b0-v22/attack-end"), "100".to_string());
+        assert!(apply(&bytes, &bytes, &[none]).is_err(), "no such hit");
+    }
+
+    #[test]
+    fn a_gain_keeps_the_cuts_moved_before_it() {
+        let saved = marked_take(&[0.9, 0.3]);
+        let (moved, _) = apply(&saved, &saved, &[cut(hit::Cut::ReleaseEnd, 58_000)]).unwrap();
+        let (out, db) = apply(&saved, &moved, &[(GAIN.to_string(), "-6.0".into())]).unwrap();
+        assert_eq!(db, Some(-6.0));
+        assert_eq!(
+            wav::read_marks(&out).unwrap(),
+            wav::read_marks(&moved).unwrap()
+        );
+        assert!(
+            wav::read(&out).unwrap().samples
+                == wav::read(&gained(&saved, "-6.0").unwrap()).unwrap().samples
+        );
+
+        // Closed unsaved and opened again: the gain is found, and the saved file is still
+        // what it is applied to.
+        let (mut workspace, id) = library(&saved);
+        edited(&mut workspace, id, out);
+        let state = State::new(workspace.get(id).unwrap());
+        assert_eq!(state.gain, -6.0);
+        assert!(state.original() == &saved[..]);
     }
 
     #[test]

@@ -1288,11 +1288,14 @@ impl Document {
                     .filter(|open| open.id == id)
                     .and_then(|open| open.wav.as_ref());
                 let original = held.map_or(&entity.bytes[..], wav::State::original);
-                wav::apply(original, &sets).map(|(out, db)| {
-                    if let Some(Ok(Some(clipped))) = held.map(|held| held.clipping(db)) {
+                wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
+                    if let (Some(db), Some(Ok(Some(clipped)))) =
+                        (db, held.zip(db).map(|(held, db)| held.clipping(db)))
+                    {
                         log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
                     }
-                    gained = Some(db);
+                    // A moved cut keeps the gain the bytes hold.
+                    gained = db.or(held.map(wav::State::applied));
                     Some(out)
                 })
             }
@@ -3384,6 +3387,93 @@ mod tests {
         assert_eq!(held.audio().map(|audio| audio.samples.len()), Some(44_100));
         assert_eq!(held.gain, 0.0, "reverted to the original");
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
+    }
+
+    /// A cut point dragged on the hit's lane moves in the file's marks once let go, and
+    /// the samples stay as they were.
+    #[test]
+    fn a_dragged_cut_point_moves_in_the_file() {
+        use nord_format::wav as prep;
+        let rate = 8000;
+        let audio = prep::Audio {
+            rate,
+            channels: 1,
+            samples: vec![0.1; rate as usize * 10],
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let region = |start: u32, frames: u32, label: &str| prep::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = prep::Marks {
+            regions: vec![
+                region(rate, 3 * rate, "060-b0-v22"),
+                region(4 * rate, rate / 2, "060-b2-v22"),
+            ],
+            loops: vec![prep::Loop {
+                start: 2 * rate,
+                end: 2 * rate + rate / 2 - 1,
+                play: prep::Play::Forward,
+            }],
+        };
+        let bytes = prep::with_marks(&bytes, &marks).unwrap();
+        let mut open = Open::file("take.wav", bytes.clone());
+        open.twice();
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(testing::where_(&said, "C4 v22").center()));
+        open.frame(Vec::new());
+
+        // The markers' handles, left to right: the first is the attack's start.
+        let output = open.output(Vec::new());
+        let mut handles: Vec<egui::Rect> = testing::rects(&output)
+            .into_iter()
+            .map(|shape| shape.rect)
+            .filter(|rect| rect.size() == egui::Vec2::splat(10.0))
+            .collect();
+        // Lowest of the 10-point squares: the legend's swatches sit higher, in its caption.
+        let low = handles.iter().map(|rect| rect.top()).fold(0.0, f32::max);
+        handles.retain(|rect| rect.top() == low);
+        handles.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        assert_eq!(handles.len(), 6, "{handles:?}");
+        let from = handles[0].center();
+        let to = from - egui::vec2(30.0, 0.0);
+        open.frame(vec![
+            egui::Event::PointerMoved(from),
+            testing::button(from, true),
+        ]);
+        open.frame(vec![egui::Event::PointerMoved(
+            from - egui::vec2(15.0, 0.0),
+        )]);
+        open.frame(vec![egui::Event::PointerMoved(to)]);
+        assert!(
+            open.state()
+                .wav
+                .as_ref()
+                .unwrap()
+                .close
+                .dragging(Some((
+                    60,
+                    nord_format::formats::npno::encode::LayerTag::Value(22)
+                )))
+                .is_some(),
+            "dragging the attack's start"
+        );
+        assert!(open.entity().bytes == bytes, "nothing written until let go");
+        open.frame(vec![testing::button(to, false)]);
+        open.frame(Vec::new());
+
+        let moved = prep::read_marks(&open.entity().bytes).unwrap();
+        let attack = &moved.regions[0];
+        assert!(attack.start < rate, "moved earlier: {attack:?}");
+        assert_eq!(attack.start + attack.frames, 4 * rate, "its end stays");
+        assert_eq!(moved.regions[1], marks.regions[1]);
+        assert_eq!(moved.loops, marks.loops);
+        assert!(open.entity().is_unsaved());
+        assert!(
+            prep::read(&open.entity().bytes).unwrap().samples
+                == prep::read(&bytes).unwrap().samples
+        );
     }
 
     /// A take's regions are drawn on its lane by note and layer; a click on one picks its
