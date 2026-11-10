@@ -280,6 +280,9 @@ pub enum Qualifier {
     Family(Family),
     /// `v2`, `v3` or `v4`, as [`nord_format::Sample::generation`] spells it.
     Generation(&'static str),
+    /// A WAV that marks a stroke region, as `nord piano prep` writes: a take ready to
+    /// build, against one as recorded.
+    Take,
 }
 
 impl Qualifier {
@@ -287,6 +290,7 @@ impl Qualifier {
         match self {
             Qualifier::Family(family) => family.label(),
             Qualifier::Generation(generation) => generation,
+            Qualifier::Take => "take",
         }
     }
 }
@@ -318,6 +322,9 @@ pub fn qualifier(
     kept: &Kept,
     instrument: Option<Family>,
 ) -> Option<Qualifier> {
+    if Kind::of(entity) == Kind::Wav {
+        return crate::document::wav::is_take(&entity.bytes).then_some(Qualifier::Take);
+    }
     if let Some(generation) = entity.generation() {
         return (kept.generations.len() > 1).then_some(Qualifier::Generation(generation));
     }
