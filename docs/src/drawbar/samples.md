@@ -76,6 +76,14 @@ pick its hit. **Zoom in** and **Zoom out** halve and double the time shown, down
 to 3 seconds; drag the lane, or the scroll bar under it, to move along the take;
 **Selected** shows the picked hit, and **Whole take** the whole file.
 
+Under the take, the picked hit is drawn close up, from its first cut to its last
+with a margin: its attack, loop, release and fade, and a marker at each cut
+point (attack start and end, loop start and end, release start and end, and
+where a fade starts). Hover over a marker for its name and time. **Zoom in**
+and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole hit**
+the whole hit again; drag the lane to move along. The markers show where the
+file cuts; they cannot be dragged yet.
+
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in
 a new folder named after it. Its WAVs are copied beside it, so Build and the

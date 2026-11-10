@@ -20,16 +20,16 @@ use crate::app;
 const NARROWEST: f64 = 3.0;
 
 /// The height of each channel's band in the lane, and the least height of the lane.
-const BAND: f32 = 110.0;
-const LEAST: f32 = 110.0;
+const BAND: f32 = 77.0;
+const LEAST: f32 = 77.0;
 
 /// The height of the row of times under the lane, and of the scroll bar.
 const TICKS: f32 = 14.0;
 const SCROLL: f32 = 12.0;
 
 /// The text of a region's label, a time and a legend entry.
-const SMALL_TEXT: f32 = 10.0;
-const LEGEND_TEXT: f32 = 11.0;
+pub(super) const SMALL_TEXT: f32 = 10.0;
+pub(super) const LEGEND_TEXT: f32 = 11.0;
 
 /// The frames a summary block covers. A view wider than this per column is drawn from
 /// the blocks, so the whole take draws without touching each of its samples.
@@ -86,7 +86,7 @@ fn layer(tag: LayerTag) -> String {
 }
 
 /// The region labelled `label` over `frames`, read as `nord piano build` reads it.
-fn mark(label: &str, frames: Range<u32>) -> Mark {
+pub(super) fn mark(label: &str, frames: Range<u32>) -> Mark {
     let (stroke, fade) = match label.strip_suffix(FADE_SUFFIX) {
         Some(stroke) => (stroke, true),
         None => (label, false),
@@ -163,7 +163,7 @@ impl Marked {
     }
 
     /// The frames from the first of `hit`'s regions to the end of its last.
-    fn extent(&self, hit: Hit) -> Option<Range<u32>> {
+    pub(super) fn extent(&self, hit: Hit) -> Option<Range<u32>> {
         let mut spans = self
             .regions
             .iter()
@@ -208,7 +208,12 @@ impl Summary {
 
 /// Every channel's envelope across `columns` over `frames` of the take, from the
 /// summary where a column spans a block or more, and from the samples where it does not.
-fn envelopes(audio: &Audio, summary: &Summary, frames: Range<usize>, columns: usize) -> Vec<Lane> {
+pub(super) fn envelopes(
+    audio: &Audio,
+    summary: &Summary,
+    frames: Range<usize>,
+    columns: usize,
+) -> Vec<Lane> {
     let channels = usize::from(audio.channels.max(1));
     let total = audio.samples.len() / channels;
     let frames = frames.start.min(total)..frames.end.min(total);
@@ -264,7 +269,7 @@ pub struct Drawn {
 }
 
 impl Drawn {
-    fn lanes(
+    pub(super) fn lanes(
         &mut self,
         audio: &Audio,
         summary: &Summary,
@@ -331,7 +336,7 @@ impl View {
 }
 
 /// `m:ss`, or `m:ss.s` to `decimals`.
-fn clock(seconds: f64, decimals: usize) -> String {
+pub(super) fn clock(seconds: f64, decimals: usize) -> String {
     let minutes = (seconds / 60.0).floor();
     let rest = seconds - minutes * 60.0;
     let width = match decimals {
@@ -342,7 +347,7 @@ fn clock(seconds: f64, decimals: usize) -> String {
 }
 
 /// The step between times under a lane showing `span` seconds: at most 8 of them.
-fn step(span: f64) -> f64 {
+pub(super) fn step(span: f64) -> f64 {
     const STEPS: [f64; 14] = [
         0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0,
     ];
@@ -353,7 +358,7 @@ fn step(span: f64) -> f64 {
 }
 
 /// The decimals a time on a lane of `step` seconds needs.
-fn decimals(step: f64) -> usize {
+pub(super) fn decimals(step: f64) -> usize {
     match step {
         s if s >= 1.0 => 0,
         s if s >= 0.1 => 1,
@@ -362,7 +367,7 @@ fn decimals(step: f64) -> usize {
 }
 
 /// The ink a part is drawn in.
-fn ink(part: Part, visuals: &egui::Visuals) -> egui::Color32 {
+pub(super) fn ink(part: Part, visuals: &egui::Visuals) -> egui::Color32 {
     match part {
         Part::Attack | Part::Resonance => app::good(visuals),
         Part::Release => app::caption(visuals),
@@ -383,7 +388,7 @@ fn named(part: Part) -> &'static str {
 }
 
 /// A legend entry: a swatch and its word.
-fn legend(ui: &mut egui::Ui, fill: egui::Color32, edge: egui::Color32, word: &str) {
+pub(super) fn legend(ui: &mut egui::Ui, fill: egui::Color32, edge: egui::Color32, word: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(10.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 2.0, fill);
     ui.painter().rect_stroke(
@@ -577,38 +582,12 @@ pub fn ui(
 
     let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
     let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
-    let lanes = drawn.lanes(audio, summary, frames, columns);
-    let wave = match playing {
-        true => accent,
-        false => visuals.text_color(),
-    };
-    let band = rect.height() / channels as f32;
-    for (channel, lane) in lanes.iter().enumerate() {
-        let middle = rect.top() + band * (channel as f32 + 0.5);
-        painter.hline(
-            rect.x_range(),
-            middle,
-            egui::Stroke::new(1.0_f32, app::unlit(&visuals)),
-        );
-        if lane.is_empty() {
-            continue;
-        }
-        let column = (rect.width() / lane.len() as f32).max(1.0);
-        let half = band / 2.0 - 1.0;
-        for (i, (low, high)) in lane.iter().enumerate() {
-            let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
-            let top = middle - high.clamp(-1.0, 1.0) * half;
-            let bottom = middle - low.clamp(-1.0, 1.0) * half;
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(left, top),
-                    egui::pos2(left + column, bottom.max(top + 1.0)),
-                ),
-                0.0,
-                wave,
-            );
-        }
-    }
+    waves(
+        &painter,
+        rect,
+        drawn.lanes(audio, summary, frames, columns),
+        playing,
+    );
 
     for mark in &regions {
         // ⚠️ A picked hit is outlined in the body text color, not the accent: the accent
@@ -636,8 +615,55 @@ pub fn ui(
         egui::StrokeKind::Inside,
     );
 
-    // The times under the lane.
-    let (row, _) = ui.allocate_exact_size(egui::vec2(width, TICKS), egui::Sense::hover());
+    times(ui, rect, shown.clone(), rate);
+
+    if view.span.is_some() {
+        scroll(ui, view, total, rate);
+    }
+}
+
+/// Each channel's envelope in its own band of `rect`, about its zero line: in the accent
+/// while the file is sounding, and the body text color when it is not.
+pub(super) fn waves(painter: &egui::Painter, rect: egui::Rect, lanes: &[Lane], playing: bool) {
+    let visuals = painter.ctx().style().visuals.clone();
+    let wave = match playing {
+        true => app::accent(&visuals),
+        false => visuals.text_color(),
+    };
+    let band = rect.height() / lanes.len().max(1) as f32;
+    for (channel, lane) in lanes.iter().enumerate() {
+        let middle = rect.top() + band * (channel as f32 + 0.5);
+        painter.hline(
+            rect.x_range(),
+            middle,
+            egui::Stroke::new(1.0_f32, app::unlit(&visuals)),
+        );
+        if lane.is_empty() {
+            continue;
+        }
+        let column = (rect.width() / lane.len() as f32).max(1.0);
+        let half = band / 2.0 - 1.0;
+        for (i, (low, high)) in lane.iter().enumerate() {
+            let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
+            let top = middle - high.clamp(-1.0, 1.0) * half;
+            let bottom = middle - low.clamp(-1.0, 1.0) * half;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left, top),
+                    egui::pos2(left + column, bottom.max(top + 1.0)),
+                ),
+                0.0,
+                wave,
+            );
+        }
+    }
+}
+
+/// The row of times under a lane drawn in `rect` over `shown` frames at `rate`.
+pub(super) fn times(ui: &mut egui::Ui, rect: egui::Rect, shown: Range<f64>, rate: f64) {
+    let (row, _) = ui.allocate_exact_size(egui::vec2(rect.width(), TICKS), egui::Sense::hover());
+    let span = (shown.end - shown.start).max(1.0);
+    let x = |frame: f64| rect.left() + ((frame - shown.start) / span) as f32 * rect.width();
     let step = step(span / rate);
     let places = decimals(step);
     let mut tick = (shown.start / rate / step).ceil() * step;
@@ -647,13 +673,9 @@ pub fn ui(
             egui::Align2::CENTER_TOP,
             clock(tick, places),
             egui::FontId::proportional(SMALL_TEXT),
-            app::caption(&visuals),
+            app::caption(ui.visuals()),
         );
         tick += step;
-    }
-
-    if view.span.is_some() {
-        scroll(ui, view, total, rate);
     }
 }
 

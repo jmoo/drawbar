@@ -14,7 +14,7 @@ use nord_format::wav::{self, Audio, Encoding, Layout};
 
 use super::controls::Sets;
 use super::header::{Body, Cell};
-use super::{sample, take};
+use super::{hit, sample, take};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
@@ -216,6 +216,8 @@ pub struct State {
     read: Read,
     /// What the take's lane shows, kept across new bytes.
     pub view: take::View,
+    /// What the picked hit's lane shows, kept across new bytes.
+    pub close: hit::Close,
 }
 
 /// The notes of the original, each by its quietest and loudest integer sample, so the
@@ -290,6 +292,8 @@ struct Read {
     marked: Result<take::Marked, String>,
     summary: take::Summary,
     drawn: take::Drawn,
+    /// The envelopes last drawn on the hit's lane.
+    close: take::Drawn,
 }
 
 impl Read {
@@ -301,6 +305,7 @@ impl Read {
             source,
             marked: take::Marked::of(&entity.bytes),
             drawn: take::Drawn::default(),
+            close: take::Drawn::default(),
         }
     }
 }
@@ -373,6 +378,7 @@ impl State {
             notes,
             read,
             view: take::View::default(),
+            close: hit::Close::default(),
         }
     }
 
@@ -391,9 +397,12 @@ impl State {
                 self.read = Read::of(entity);
             }
             _ => {
-                let view = std::mem::take(&mut self.view);
+                let (view, close) = (
+                    std::mem::take(&mut self.view),
+                    std::mem::take(&mut self.close),
+                );
                 *self = State::new(entity);
-                self.view = view;
+                (self.view, self.close) = (view, close);
             }
         }
     }
@@ -435,15 +444,28 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     let mut audition = false;
     let read = &mut state.read;
     match &read.source {
-        Ok(audio) => take::ui(
-            ui,
-            audio,
-            &read.summary,
-            &mut read.drawn,
-            &read.marked,
-            &mut state.view,
-            playing,
-        ),
+        Ok(audio) => {
+            take::ui(
+                ui,
+                audio,
+                &read.summary,
+                &mut read.drawn,
+                &read.marked,
+                &mut state.view,
+                playing,
+            );
+            ui.add_space(10.0);
+            hit::ui(
+                ui,
+                audio,
+                &read.summary,
+                &mut read.close,
+                &read.marked,
+                state.view.picked,
+                &mut state.close,
+                playing,
+            );
+        }
         Err(why) => {
             ui.label(
                 egui::RichText::new(format!("This WAV does not read: {why}"))
