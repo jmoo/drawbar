@@ -234,6 +234,9 @@ pub fn apply(
 /// The path of the set that undoes the last edit.
 pub const UNDO: &str = "undo";
 
+/// The path of the set that makes again the edit undone last.
+pub const REDO: &str = "redo";
+
 /// The label of the button that undoes the last edit.
 pub const UNDO_LABEL: &str = "Undo";
 
@@ -245,6 +248,19 @@ pub struct Step {
     pub marks: Option<wav::Marks>,
     pub settings: Option<wav::Settings>,
     pub what: String,
+    /// When on the app's timeline the edit was made, undone or made again.
+    pub at: u64,
+}
+
+/// What an edit, an undo or a redo leaves for Undo and Redo.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stepped {
+    /// An edit, and what undoing it goes back to. It ends the redo.
+    Made(Step),
+    /// The last edit undone, and what redoing it goes back to.
+    Undone(Step),
+    /// The edit undone last made again, and what undoing it goes back to.
+    Redone(Step),
 }
 
 impl Step {
@@ -276,6 +292,16 @@ impl Step {
             marks: wav::read_marks(current).ok(),
             settings: wav::read_settings(current).ok(),
             what: said.join(", "),
+            at: crate::timeline::tick(),
+        }
+    }
+
+    /// `current`, which holds `gain`, as the step an undo or redo of `step` leaves to
+    /// go back to: the same edit, said the same way.
+    pub fn back(current: &[u8], gain: f64, step: &Step) -> Step {
+        Step {
+            what: step.what.clone(),
+            ..Step::before(current, gain, &[])
         }
     }
 }
@@ -364,6 +390,10 @@ pub struct State {
     made: Vec<(u64, f64)>,
     /// What each edit since the document opened undoes to, the last one last.
     history: Vec<Step>,
+    /// What each edit undone since the last one made redoes to, the one undone last last.
+    redo: Vec<Step>,
+    /// When on the app's timeline the last edit, not an undo or redo, was made.
+    changed: Option<u64>,
     notes: Notes,
     read: Read,
     /// What the take's lane shows, kept across new bytes.
@@ -542,6 +572,8 @@ impl State {
             original,
             made: vec![(entity.stamp, applied)],
             history: Vec::new(),
+            redo: Vec::new(),
+            changed: None,
             notes,
             read,
             view: take::View::default(),
@@ -591,12 +623,35 @@ impl State {
         self.history.last()
     }
 
-    /// Note an edit made, or the last one undone.
-    pub fn stepped(&mut self, step: Option<Step>) {
-        match step {
-            Some(step) => self.history.push(step),
-            None => {
+    /// What Redo makes again, where an edit was undone since the last one made.
+    pub fn last_redo(&self) -> Option<&Step> {
+        self.redo.last()
+    }
+
+    /// When the last edit not undone, and the last undo, were, on the app's timeline.
+    pub fn timeline(&self) -> crate::timeline::Held {
+        crate::timeline::Held {
+            made: self.history.last().map(|step| step.at),
+            undone: self.redo.last().map(|step| step.at),
+            changed: self.changed,
+        }
+    }
+
+    /// Note an edit made, undone or made again.
+    pub fn stepped(&mut self, stepped: Stepped) {
+        match stepped {
+            Stepped::Made(step) => {
+                self.changed = Some(step.at);
+                self.history.push(step);
+                self.redo.clear();
+            }
+            Stepped::Undone(back) => {
                 self.history.pop();
+                self.redo.push(back);
+            }
+            Stepped::Redone(back) => {
+                self.redo.pop();
+                self.history.push(back);
             }
         }
     }
@@ -651,7 +706,12 @@ impl State {
         };
         let clean = self.clean();
         let made = (self.read.stamp, hit, self.kind(), clean);
-        if self.audition.ready.as_ref().is_some_and(|(at, _)| *at == made) {
+        if self
+            .audition
+            .ready
+            .as_ref()
+            .is_some_and(|(at, _)| *at == made)
+        {
             return;
         }
         let sounding = match self.audition.cleaning(audio, clean) {

@@ -1835,7 +1835,7 @@ impl Store {
 
     /// Undo this session's last change not undone.
     pub fn undo(&mut self) {
-        let Some((change, _)) = self.history.done.last().filter(|_| self.undoes()) else {
+        let Some((change, ..)) = self.history.done.last().filter(|_| self.undoes()) else {
             return;
         };
         let doing = format!("Undoing {change}…");
@@ -1845,7 +1845,7 @@ impl Store {
 
     /// Redo the change undone last.
     pub fn redo(&mut self) {
-        let Some((change, _)) = self.history.undone.last().filter(|_| self.undoes()) else {
+        let Some((change, ..)) = self.history.undone.last().filter(|_| self.undoes()) else {
             return;
         };
         let doing = format!("Redoing {change}…");
@@ -1855,13 +1855,23 @@ impl Store {
 
     /// What Undo takes back now, as the Edit menu names it.
     pub fn undo_label(&self) -> Option<String> {
-        let (last, _) = self.history.done.last().filter(|_| self.undoes())?;
+        let (last, ..) = self.history.done.last().filter(|_| self.undoes())?;
         Some(format!("Undo {last}"))
+    }
+
+    /// When this session's last change not undone, and its last undo, were, on the
+    /// app's one timeline of Undo and Redo.
+    pub fn timeline(&self) -> crate::timeline::Held {
+        crate::timeline::Held {
+            made: self.history.done.last().map(|(.., at)| *at),
+            undone: self.history.undone.last().map(|(.., at)| *at),
+            changed: self.history.changed,
+        }
     }
 
     /// What Redo makes again now, as the Edit menu names it.
     pub fn redo_label(&self) -> Option<String> {
-        let (last, _) = self.history.undone.last().filter(|_| self.undoes())?;
+        let (last, ..) = self.history.undone.last().filter(|_| self.undoes())?;
         Some(format!("Redo {last}"))
     }
 
@@ -4336,11 +4346,18 @@ enum Step {
 /// or the redo reverses.
 #[derive(Default)]
 struct History {
-    done: Vec<(String, toshokan::EntryHash)>,
-    undone: Vec<(String, toshokan::EntryHash)>,
+    done: Vec<Logged>,
+    undone: Vec<Logged>,
+    /// When on the app's timeline the library last logged a change, not an undo or
+    /// redo, which ended any redo.
+    changed: Option<u64>,
     /// The step that failed partway and waits for the next write to finish it.
     waiting: Option<Step>,
 }
+
+/// A change this session can undo or redo: what it was, the entry that logged it, and
+/// when on the app's timeline it was made, undone or made again.
+type Logged = (String, toshokan::EntryHash, u64);
 
 impl History {
     /// Follow what became of the step that waited, which the change `step` finished
@@ -4366,19 +4383,24 @@ impl History {
     fn took(&mut self, step: Step, entry: toshokan::EntryHash) {
         match step {
             Step::Change(change) => {
-                self.done.push((change, entry));
+                let at = crate::timeline::tick();
+                self.done.push((change, entry, at));
                 self.undone.clear();
+                self.changed = Some(at);
             }
             // Logging any step ends the library's redo, as a change does.
-            Step::Lasting => self.undone.clear(),
+            Step::Lasting => {
+                self.undone.clear();
+                self.changed = Some(crate::timeline::tick());
+            }
             Step::Undo => {
-                if let Some((change, _)) = self.done.pop() {
-                    self.undone.push((change, entry));
+                if let Some((change, ..)) = self.done.pop() {
+                    self.undone.push((change, entry, crate::timeline::tick()));
                 }
             }
             Step::Redo => {
-                if let Some((change, _)) = self.undone.pop() {
-                    self.done.push((change, entry));
+                if let Some((change, ..)) = self.undone.pop() {
+                    self.done.push((change, entry, crate::timeline::tick()));
                 }
             }
         }
@@ -4392,20 +4414,20 @@ impl History {
             Step::Redo => (&mut self.undone, "cannot be made again"),
             Step::Change(_) | Step::Lasting => return None,
         };
-        let (change, _) = steps.pop()?;
+        let (change, ..) = steps.pop()?;
         Some(format!("{change} {cannot}"))
     }
 
     /// Let go of the steps whose undo or redo needs what `entries` displaced, and of
     /// every step behind them. Returns the latest change Undo no longer reaches.
     fn trim(&mut self, entries: &[toshokan::EntryHash]) -> Option<String> {
-        let cut = |steps: &mut Vec<(String, toshokan::EntryHash)>| {
+        let cut = |steps: &mut Vec<Logged>| {
             let at = steps
                 .iter()
-                .rposition(|(_, entry)| entries.contains(entry))?;
+                .rposition(|(_, entry, _)| entries.contains(entry))?;
             let kept = steps.split_off(at + 1);
             let gone = std::mem::replace(steps, kept);
-            gone.last().map(|(change, _)| change.clone())
+            gone.last().map(|(change, ..)| change.clone())
         };
         cut(&mut self.undone);
         cut(&mut self.done)
@@ -4896,10 +4918,10 @@ mod tests {
         history.took(Step::Change("Save “b”".to_string()), entry(1));
         history.waited(None, Waiting::This, Some(&Step::Undo));
         history.waited(Some(entry(2)), Waiting::Nothing, None);
-        let names = |steps: &[(String, toshokan::EntryHash)]| {
+        let names = |steps: &[Logged]| {
             steps
                 .iter()
-                .map(|(change, _)| change.clone())
+                .map(|(change, ..)| change.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(&history.done), ["Save “a”"]);

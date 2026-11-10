@@ -279,7 +279,7 @@ pub struct Document {
     /// The sounding zones, and the audio backend that plays them.
     player: crate::audio::Player,
     /// Edits the open document's cards in the dock asked for, applied with its own.
-    docked: Sets,
+    pub(crate) docked: Sets,
     /// The piano library's plan, the facts it is based on, and its decoded strokes.
     ///
     /// ⚠️ Not tied to one document. An apply runs on its own thread, and the acts it
@@ -905,6 +905,25 @@ impl Document {
         }
     }
 
+    /// When the open document's own last edit not undone, and its last undo, were, on
+    /// the app's timeline of Undo and Redo, with what Undo and Redo would name them.
+    pub fn timeline(&self) -> (crate::timeline::Held, Option<String>, Option<String>) {
+        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
+            return Default::default();
+        };
+        (
+            held.timeline(),
+            held.last_step().map(|step| format!("Undo {}", step.what)),
+            held.last_redo().map(|step| format!("Redo {}", step.what)),
+        )
+    }
+
+    /// Undo or redo the open document's own last edit, with this frame's edits.
+    pub fn step(&mut self, redo: bool) {
+        let path = if redo { wav::REDO } else { wav::UNDO };
+        self.docked.push((path.to_string(), String::new()));
+    }
+
     /// The open take's cards for the right dock: the picked sample heard as the
     /// instrument will play it. Nothing for any other document.
     pub fn take_cards(&mut self, ui: &mut egui::Ui, log: &mut Log) {
@@ -1299,8 +1318,8 @@ impl Document {
         };
         let (before, edited) = (entity.stamp, shape(entity));
         let mut gained = None;
-        // A WAV's edit to note, or its last one to forget once undone.
-        let mut stepped: Option<Option<wav::Step>> = None;
+        // A WAV's edit, undo or redo to note.
+        let mut stepped: Option<wav::Stepped> = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
             if let Err(why) = self.samples.take(id, file, index, &sets) {
                 log.error(why.clone());
@@ -1330,14 +1349,28 @@ impl Document {
                     .filter(|open| open.id == id)
                     .and_then(|open| open.wav.as_ref());
                 let original = held.map_or(&entity.bytes[..], wav::State::original);
-                let undo = sets.iter().any(|(path, _)| path == wav::UNDO);
-                match (undo, held.and_then(wav::State::last_step)) {
+                let asked = |name: &str| sets.iter().any(|(path, _)| path == name);
+                let (undo, redo) = (asked(wav::UNDO), asked(wav::REDO));
+                let applied = held.map_or(0.0, wav::State::applied);
+                let back = match (undo, redo) {
+                    (true, _) => held.and_then(wav::State::last_step),
+                    (_, true) => held.and_then(wav::State::last_redo),
+                    _ => None,
+                };
+                match (undo || redo, back) {
                     (true, Some(step)) => wav::restored(original, step).map(|out| {
                         gained = Some(step.gain);
-                        stepped = Some(None);
+                        let back = wav::Step::back(&entity.bytes, applied, step);
+                        stepped = Some(match undo {
+                            true => wav::Stepped::Undone(back),
+                            false => wav::Stepped::Redone(back),
+                        });
                         Some(out)
                     }),
-                    (true, None) => Err("there is no edit to undo".to_string()),
+                    (true, None) => Err(match undo {
+                        true => "there is no edit to undo".to_string(),
+                        false => "there is no edit to make again".to_string(),
+                    }),
                     (false, _) => wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
                         if let (Some(db), Some(Ok(Some(clipped)))) =
                             (db, held.zip(db).map(|(held, db)| held.clipping(db)))
@@ -1345,9 +1378,12 @@ impl Document {
                             log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
                         }
                         // A moved cut keeps the gain the bytes hold.
-                        let applied = held.map_or(0.0, wav::State::applied);
                         gained = db.or(Some(applied));
-                        stepped = Some(Some(wav::Step::before(&entity.bytes, applied, &sets)));
+                        stepped = Some(wav::Stepped::Made(wav::Step::before(
+                            &entity.bytes,
+                            applied,
+                            &sets,
+                        )));
                         Some(out)
                     }),
                 }
@@ -1376,7 +1412,11 @@ impl Document {
             if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
                 state.made(stamp, db);
                 // ⚠️ Only an edit that changed the bytes is one to undo.
-                if let Some(step) = stepped.filter(|step| step.is_none() || stamp != before) {
+                let undid = matches!(
+                    stepped,
+                    Some(wav::Stepped::Undone(_) | wav::Stepped::Redone(_))
+                );
+                if let Some(step) = stepped.filter(|_| undid || stamp != before) {
                     state.stepped(step);
                 }
             }
