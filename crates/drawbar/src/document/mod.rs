@@ -191,6 +191,8 @@ enum Asked {
     Root(piano::Ask),
     /// Play the open WAV, or stop it.
     Audition,
+    /// Play the open take's picked sample as the instrument will, as its controls ask.
+    Hear(audition::Ask),
     /// The header's Export, offered by a body with nothing to edit.
     Export,
     Open(crate::browser::Item),
@@ -534,6 +536,12 @@ impl Document {
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
                 Asked::Audition => self.audition(id, log),
+                Asked::Hear(ask) => {
+                    let player = &mut self.player;
+                    if let Some(held) = self.open.as_mut().and_then(|open| open.wav.as_mut()) {
+                        refused(audition::hear(ask, held, player, id), log, "sample");
+                    }
+                }
             }
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
@@ -926,37 +934,29 @@ impl Document {
 
     /// The open take's cards for the right dock: the picked sample heard as the
     /// instrument will play it. Nothing for any other document.
-    pub fn take_cards(&mut self, ui: &mut egui::Ui, log: &mut Log) {
-        let Some(id) = self.opened() else {
-            return;
-        };
-        let player = &mut self.player;
+    pub fn take_cards(&mut self, ui: &mut egui::Ui) {
         let Some(held) = self.open.as_mut().and_then(|open| open.wav.as_mut()) else {
             return;
         };
         if !held.marks_samples() {
             return;
         }
-        let Some(ask) = audition::card(ui, held, |zone| player.sounds((id, zone))) else {
-            return;
-        };
-        match ask {
-            // Edits of the take, which the document applies as it applies its own.
-            audition::Ask::Kind(kind) => self
-                .docked
-                .push((wav::KIND.to_string(), kind.word().to_string())),
-            audition::Ask::Clean(on) => self.docked.push((
-                wav::CLEAN.to_string(),
-                if on { "on" } else { "off" }.to_string(),
-            )),
-            _ => refused(audition::hear(ask, held, player, id), log, "sample"),
+        // An edit of the take, which the document applies as it applies its own.
+        if let Some(audition::Ask::Kind(kind)) = audition::card(ui, held) {
+            self.docked
+                .push((wav::KIND.to_string(), kind.word().to_string()));
         }
     }
 
     fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
-        let playing = self.player.sounds((id, 0));
+        let player = &self.player;
+        let playing = player.sounds((id, 0));
         let held = self.open.as_mut()?.wav.as_mut()?;
-        wav::ui(ui, held, playing, sets).then_some(Asked::Audition)
+        match wav::ui(ui, held, playing, |zone| player.sounds((id, zone)), sets) {
+            (true, _) => Some(Asked::Audition),
+            (false, Some(ask)) => Some(Asked::Hear(ask)),
+            (false, None) => None,
+        }
     }
 
     /// Play the open WAV through the app's player, or the hit picked in it, or stop it
@@ -1883,7 +1883,7 @@ mod tests {
             let ctx = self.ctx.clone();
             let output = testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    self.document.take_cards(ui, &mut self.log);
+                    self.document.take_cards(ui);
                 });
             });
             testing::painted(&output)
@@ -3698,12 +3698,11 @@ mod tests {
 
         let said = open.painted(Vec::new());
         open.frame(testing::click(
-            testing::where_(&said, take::PICKED).center(),
+            testing::where_(&said, take::ZOOM_IN).center(),
         ));
         let rate = 35_002.0;
-        let view = &open.state().wav.as_ref().unwrap().view;
-        // 20 s of regions: 3 s (15%) each side.
-        assert_eq!(view.shown(rate * 60.0), rate * 27.0..rate * 53.0);
+        let shown = open.state().wav.as_ref().unwrap().view.shown(rate * 60.0);
+        assert!(shown.end - shown.start < rate * 60.0, "zoomed in");
 
         open.state().wav.as_mut().unwrap().gain = 6.0;
         let said = open.painted(Vec::new());
@@ -3713,12 +3712,12 @@ mod tests {
         open.frame(Vec::new());
         let view = &open.state().wav.as_ref().unwrap().view;
         assert_eq!(view.picked, picked, "a gain keeps the pick");
-        assert_eq!(view.shown(rate * 60.0), rate * 27.0..rate * 53.0);
+        assert_eq!(view.shown(rate * 60.0), shown, "and the view");
     }
 
-    /// A take's dock holds the Audition card: until a sample is picked it asks for one;
-    /// then it offers the picked sample's audition, heard as the kind the card is set
-    /// to, kept across a gain. A WAV that marks no sample has no card.
+    /// A take's dock holds its Instrument card, the kind it is heard and built as, kept
+    /// across a gain; the picked sample's audition sits under it in the body. A WAV that
+    /// marks no sample has no card.
     #[test]
     fn the_dock_auditions_the_picked_sample_as_the_take_s_kind() {
         use nord_format::formats::npno::encode::Kind;
@@ -3759,7 +3758,7 @@ mod tests {
         let mut open = Open::file("Wurli take.wav", bytes);
         open.twice();
         let said = open.dock();
-        for shown in ["Audition", "Kind", "Grand", "(select from the WAV, above)"] {
+        for shown in [audition::INSTRUMENT, "Kind", "Grand"] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 
@@ -3771,15 +3770,19 @@ mod tests {
             .docked
             .push((wav::KIND.to_string(), Kind::Wurlitzer.word().to_string()));
         open.twice();
-        let said = open.dock();
+        assert!(open.dock().iter().any(|word| word == "Reed piano"));
+        let said = open.painted(Vec::new());
         for shown in [
-            "Reed piano",
+            wav::PLAY_HIT,
             audition::CLEAN_AUDIO,
             audition::PLAY_SAMPLE,
             audition::LOOP_WRAP,
             audition::RELEASE_ALONE,
         ] {
-            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+            assert!(
+                said.iter().any(|word| word.text == shown),
+                "{shown}: {said:?}"
+            );
         }
         assert!(
             open.entity().is_unsaved(),
@@ -3810,7 +3813,10 @@ mod tests {
         open.twice();
         assert!(!open.state().wav.as_ref().unwrap().clean());
         assert!(
-            !open.dock().iter().any(|word| word.starts_with("finding")),
+            !open
+                .painted(Vec::new())
+                .iter()
+                .any(|word| word.text.starts_with("finding")),
             "nothing to find for a take built as recorded"
         );
         let said = open.painted(Vec::new());

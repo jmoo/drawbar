@@ -344,16 +344,6 @@ impl View {
         let half = (shown.end - shown.start) * factor / 2.0;
         self.show(middle - half, middle + half, total, rate);
     }
-
-    /// Show the picked hit's regions, with a margin of a second or 15% each side.
-    fn fit(&mut self, marked: &Marked, total: f64, rate: f64) {
-        let Some(extent) = self.picked.and_then(|hit| marked.extent(hit)) else {
-            return;
-        };
-        let (from, to) = (f64::from(extent.start), f64::from(extent.end));
-        let margin = ((to - from) * 0.15).max(rate);
-        self.show(from - margin, to + margin, total, rate);
-    }
 }
 
 /// `m:ss`, or `m:ss.s` to `decimals`.
@@ -413,8 +403,7 @@ pub(super) fn legend(ui: &mut egui::Ui, fill: egui::Color32, edge: egui::Color32
 /// The labels of the lane's zoom buttons.
 pub const ZOOM_IN: &str = "Zoom in";
 pub const ZOOM_OUT: &str = "Zoom out";
-pub const PICKED: &str = "Selected";
-pub const WHOLE: &str = "Whole take";
+pub const WHOLE: &str = "Whole file";
 
 /// Draw the take's lane: its caption, legend and zoom, the waveform with the marks over
 /// it, the times under it, and a scroll bar while zoomed.
@@ -465,12 +454,6 @@ pub fn ui(
             .clicked()
         {
             view.zoom(2.0, total, rate);
-        }
-        if ui
-            .add_enabled(view.picked.is_some(), egui::Button::new(PICKED))
-            .clicked()
-        {
-            view.fit(marks, total, rate);
         }
         if ui
             .add_enabled(view.span.is_some(), egui::Button::new(WHOLE))
@@ -792,25 +775,6 @@ mod tests {
             view.span, None,
             "zoomed out past the take is the whole take"
         );
-    }
-
-    #[test]
-    fn selected_shows_the_picked_hit_with_a_margin() {
-        let (rate, total) = (1000.0, 100_000.0);
-        let marked = Marked {
-            regions: vec![
-                mark("060-b0-v22", 40_000..44_000),
-                mark("060-b2-v22", 44_000..50_000),
-            ],
-            loops: Vec::new(),
-        };
-        let mut view = View {
-            picked: Some((60, LayerTag::Value(22))),
-            ..View::default()
-        };
-        view.fit(&marked, total, rate);
-        // 10 s of regions: 15% is 1.5 s each side.
-        assert_eq!(view.shown(total), 38_500.0..51_500.0);
     }
 
     #[test]

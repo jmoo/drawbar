@@ -1422,7 +1422,7 @@ impl DrawbarApp {
                     &self.workspace,
                     &self.device,
                     &self.queue,
-                    |ui| self.document.take_cards(ui, &mut self.log),
+                    |ui| self.document.take_cards(ui),
                 ));
                 round_off(ui, rect);
             });
