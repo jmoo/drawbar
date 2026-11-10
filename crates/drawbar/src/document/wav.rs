@@ -143,18 +143,31 @@ pub fn apply(original: &[u8], sets: &[(String, String)]) -> Result<(Vec<u8>, f64
     Ok((out, db))
 }
 
-/// The identity cell a WAV puts on the header: the rate, channels, encoding and length
-/// its container declares, read without copying its samples.
-pub fn stated(entity: &LocalEntity) -> Option<Cell> {
+/// The identity cells a WAV puts on the header: the rate, channels, encoding and length
+/// its container declares, and what the take marks, read without copying its samples.
+pub fn stated(entity: &LocalEntity) -> Vec<Cell> {
     if Kind::of(entity) != Kind::Wav {
-        return None;
+        return Vec::new();
     }
-    let layout = wav::layout(&entity.bytes).ok()?;
-    Some(Cell {
-        label: "Audio",
-        body: Body::Read(facts(&layout)),
-        hint: "the rate, channels, sample format and length the file declares",
-    })
+    let Ok(layout) = wav::layout(&entity.bytes) else {
+        return Vec::new();
+    };
+    let take = match take::Marked::of(&entity.bytes) {
+        Ok(marked) => marked.stated(),
+        Err(_) => "its regions do not read".to_string(),
+    };
+    vec![
+        Cell {
+            label: "Audio",
+            body: Body::Read(facts(&layout)),
+            hint: "the rate, channels, sample format and length the file declares",
+        },
+        Cell {
+            label: "Take",
+            body: Body::Read(take),
+            hint: "the hits, regions and loops the file marks; a raw take, as recorded, has none",
+        },
+    ]
 }
 
 /// `44100 Hz · stereo · 24-bit · 1.500 s`.

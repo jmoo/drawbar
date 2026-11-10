@@ -67,8 +67,10 @@ offers neither.
 The waveform is the take's lane. It draws the regions and loops the file marks,
 read by their labels as `nord piano build` reads them: an attack such as
 `060-b0-v22` fills the lane and is named `C4 v22`, its release `060-b2-v22`
-fills the lower half after it, a dying attack's fade `060-b0-v22-fade` the lower
-half of its end, and a loop is a band along the top. A region labelled any other
+fills it after the attack, a loop fills it under the attack's name, and a dying
+attack's fade `060-b0-v22-fade` fills the lower half of its end. The header's
+**Take** says how many hits, regions and loops the file marks, or **raw: no
+regions** for a WAV as recorded. A picked hit is outlined in the text color. A region labelled any other
 way is drawn under its own label. Hover over a region for its label; click one to
 pick its hit. **Zoom in** and **Zoom out** halve and double the time shown, down
 to 3 seconds; drag the lane, or the scroll bar under it, to move along the take;
