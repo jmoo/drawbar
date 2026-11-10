@@ -14,7 +14,7 @@ use nord_format::wav::{self, Audio, Encoding, Layout};
 
 use super::controls::Sets;
 use super::header::{Body, Cell};
-use super::sample;
+use super::{sample, take};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
@@ -195,10 +195,9 @@ pub struct State {
     made: Vec<(u64, f64)>,
     notes: Notes,
     read: Read,
+    /// What the take's lane shows, kept across new bytes.
+    pub view: take::View,
 }
-
-/// One channel's envelope, as [`sample::channel_envelope`] takes it.
-type Lane = Vec<(f32, f32)>;
 
 /// The notes of the original, each by its quietest and loudest integer sample, so the
 /// notes a gain clips are counted before it is applied.
@@ -268,31 +267,22 @@ struct Read {
     stamp: u64,
     /// The audio as float, or why the bytes do not read.
     source: Result<Audio, String>,
-    /// Each channel's envelope, and the column count it was taken at.
-    lanes: Option<(usize, Vec<Lane>)>,
+    /// The regions and loops the file marks, or why they do not read.
+    marked: Result<take::Marked, String>,
+    summary: take::Summary,
+    drawn: take::Drawn,
 }
 
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
+        let source = wav::read(&entity.bytes).map_err(|e| e.to_string());
         Read {
             stamp: entity.stamp,
-            source: wav::read(&entity.bytes).map_err(|e| e.to_string()),
-            lanes: None,
+            summary: source.as_ref().map(take::Summary::of).unwrap_or_default(),
+            source,
+            marked: take::Marked::of(&entity.bytes),
+            drawn: take::Drawn::default(),
         }
-    }
-
-    /// Each channel's envelope across `columns`.
-    fn lanes(&mut self, columns: usize) -> Option<&[Lane]> {
-        let audio = self.source.as_ref().ok()?;
-        if self.lanes.as_ref().is_none_or(|(at, _)| *at != columns) {
-            let lanes = (0..usize::from(audio.channels))
-                .map(|channel| {
-                    sample::channel_envelope(&audio.samples, audio.channels, Some(channel), columns)
-                })
-                .collect();
-            self.lanes = Some((columns, lanes));
-        }
-        self.lanes.as_ref().map(|(_, lanes)| lanes.as_slice())
     }
 }
 
@@ -363,6 +353,7 @@ impl State {
             made: vec![(entity.stamp, applied)],
             notes,
             read,
+            view: take::View::default(),
         }
     }
 
@@ -380,7 +371,11 @@ impl State {
                 self.gain = total;
                 self.read = Read::of(entity);
             }
-            _ => *self = State::new(entity),
+            _ => {
+                let view = std::mem::take(&mut self.view);
+                *self = State::new(entity);
+                self.view = view;
+            }
         }
     }
 
@@ -419,21 +414,22 @@ impl State {
 /// to stop it where it is playing.
 pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) -> bool {
     let mut audition = false;
-    let columns = (ui.available_width() * ui.ctx().pixels_per_point()).round() as usize;
-    match state.read.lanes(columns) {
-        Some(lanes) => {
-            for lane in lanes {
-                sample::waveform(ui, lane, playing);
-                ui.add_space(2.0);
-            }
-        }
-        None => {
-            if let Err(why) = &state.read.source {
-                ui.label(
-                    egui::RichText::new(format!("This WAV does not read: {why}"))
-                        .color(app::bad(ui.visuals())),
-                );
-            }
+    let read = &mut state.read;
+    match &read.source {
+        Ok(audio) => take::ui(
+            ui,
+            audio,
+            &read.summary,
+            &mut read.drawn,
+            &read.marked,
+            &mut state.view,
+            playing,
+        ),
+        Err(why) => {
+            ui.label(
+                egui::RichText::new(format!("This WAV does not read: {why}"))
+                    .color(app::bad(ui.visuals())),
+            );
         }
     }
     if state.audio().is_some() {
