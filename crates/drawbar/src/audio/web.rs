@@ -26,6 +26,9 @@ pub struct Output {
 /// ⚠️ Dropping it stops it, as a desktop voice does.
 pub struct Voice {
     source: AudioBufferSourceNode,
+    /// The context's clock when the source started, to tell how far it has played.
+    context: AudioContext,
+    started: f64,
     /// Set by the source's own `ended` event, which the spec fires once.
     played_out: Rc<Cell<bool>>,
     /// ⚠️ Kept as long as the source that holds it: a closure dropped while the page
@@ -87,6 +90,8 @@ impl Output {
         source.start()?;
         Ok(Voice {
             source,
+            context: context.clone(),
+            started: context.current_time(),
             played_out,
             _watch: watch,
         })
@@ -96,6 +101,13 @@ impl Output {
 impl Voice {
     pub fn finished(&self) -> bool {
         self.played_out.get()
+    }
+
+    /// Seconds played since the source started. The buffer is declared at the codec's
+    /// rate and played faster or slower by the source's rate, so these are seconds at the
+    /// clock the desktop declares its buffer at.
+    pub fn played(&self) -> f64 {
+        (self.context.current_time() - self.started).max(0.0)
     }
 }
 

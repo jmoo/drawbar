@@ -64,21 +64,41 @@ WAV closed unsaved opens again on its gain, **Save** writes it into the file,
 which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
 
-The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many hits, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Selected** shows the picked hit, and **Whole take** the whole file.
+The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many samples, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Selected** shows the picked sample, and **Whole take** the whole file.
 
-Under the take, the picked hit is drawn close up, from its first cut to its last
+Under the take, the picked sample is drawn close up, from its first cut to its last
 with a margin: its attack, loop, release and fade, and a marker at each cut
 point (attack start and end, loop start and end, release start and end, and
-where a fade starts). **Play hit** plays the picked note as recorded, from its first cut to its last. Hover over a marker for its name and time. **Zoom in**
-and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole hit**
-the whole hit again; drag the lane to move along. Drag a marker to move its
+where a fade starts). **Play as recorded** plays the picked sample as the take holds it, from its first cut to its last, unshaped. Hover over a marker for its name and time. **Zoom in**
+and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole sample**
+the whole sample again; drag the lane to move along. Drag a marker to move its
 cut: both lanes follow it, and when you let go its region or loop is written to
-the file's marks, one edit a drag, with no sample changed. A marker stops at the
+the file's marks, one edit a drag, with the audio untouched. A marker stops at the
 cuts either side of it, so a loop stays inside its attack and a fade ends with
 it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
 them back, and a gain applied after them keeps them. **Undo**, beside the gain,
 takes back the last edit, a gain or a moved cut, one at a time back to the
 file as last saved; hover over it to see what it undoes.
+
+The right dock's **Audition** card plays the picked sample as the instrument
+will play it. **Kind** is the kind of instrument the take is heard and built as,
+one of those a piano library files itself under, grand until you choose. **Clean
+audio**, on unless you turn it off, cleans each sample of the take's hum and
+hiss as `nord piano build` cleans it; the take's noise is found once, which takes
+a few seconds on a long take, and the audition waits for it. Both are edits like
+a gain, kept in the WAV on **Save**, and the build follows them: a take with
+Clean audio off is built as recorded. Hold **Play sample** down as you would
+hold a key: the attack plays shaped as `nord piano build` shapes it, with its
+loop evened out and crossfaded, at the peak the build brings it to, fading from
+the start as a library of that kind fades, then round its loop, fading as that
+kind's loops fade. Let go, and it fades away as a key-up fades it, under its
+release, at the balance the build plays the release at; a key above the kind's
+damper rings on instead. **Loop wrap** plays from a second before the loop's end
+and round the loop, at one level, so the join is heard and not the fade; click
+it again to stop. **Release** plays the release alone. The fades are the ones a
+library built from rules states: the key-up fade is confirmed on the instrument,
+and each kind's rates are fitted to vendor libraries, so take them as close, not
+exact.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in

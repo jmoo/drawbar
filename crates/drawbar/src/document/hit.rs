@@ -321,7 +321,7 @@ impl Close {
 
 /// The label of the button that shows the loop, and of the one that shows the whole hit.
 pub const LOOP: &str = "Loop";
-pub const WHOLE: &str = "Whole hit";
+pub const WHOLE: &str = "Whole sample";
 
 /// Draw the picked hit's lane: its caption, legend and zoom, the waveform with its
 /// regions and cut points over it, and the times under it. Nothing where the take marks
@@ -354,9 +354,9 @@ pub fn ui(
     }
     let Some(hit) = picked else {
         ui.horizontal(|ui| {
-            ui.label(crate::panel::caps("Hit"));
+            ui.label(crate::panel::caps("Sample"));
             ui.label(
-                egui::RichText::new("pick a hit in the take")
+                egui::RichText::new("pick a sample in the take")
                     .size(take::LEGEND_TEXT)
                     .color(app::caption(ui.visuals())),
             );
@@ -370,7 +370,7 @@ pub fn ui(
     let shown = close.shown(&cuts, total, rate);
 
     ui.horizontal_wrapped(|ui| {
-        ui.label(crate::panel::caps("Hit"));
+        ui.label(crate::panel::caps("Sample"));
         ui.label(egui::RichText::new(&cuts.name).monospace());
         let places = take::decimals(take::step((shown.end - shown.start) / rate)) + 1;
         ui.label(

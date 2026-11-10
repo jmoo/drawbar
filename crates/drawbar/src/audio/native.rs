@@ -64,6 +64,11 @@ impl Voice {
     pub fn finished(&self) -> bool {
         self.0.empty()
     }
+
+    /// Seconds of the buffer played, at the clock it was declared at.
+    pub fn played(&self) -> f64 {
+        self.0.get_pos().as_secs_f64()
+    }
 }
 
 #[cfg(test)]
