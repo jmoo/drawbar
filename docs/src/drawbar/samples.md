@@ -78,7 +78,11 @@ cuts either side of it, so a loop stays inside its attack and a fade ends with
 it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
 them back, and a gain applied after them keeps them. **Undo**, beside the gain,
 takes back the last edit, a gain or a moved cut, one at a time back to the
-file as last saved; hover over it to see what it undoes.
+file as last saved; hover over it to see what it undoes. **Edit ▸ Undo** (⌘Z or
+Ctrl+Z) and **Edit ▸ Redo** (⇧⌘Z or Ctrl+Shift+Z) work on one timeline, as in any
+other app: Undo takes back the most recent change, whether it was to the library,
+such as a rename or a save, or to the open WAV, and Redo makes again the change
+undone last, until a new change is made. Typing in a box undoes its own text.
 
 The right dock's **Audition** card plays the picked sample as the instrument
 will play it. **Kind** is the kind of instrument the take is heard and built as,
