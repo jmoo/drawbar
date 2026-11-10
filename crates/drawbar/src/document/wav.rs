@@ -419,6 +419,26 @@ impl State {
         self.applied = total;
     }
 
+    /// What Play plays: the picked hit as recorded, from its first cut to its last, or
+    /// the whole file where none is picked.
+    pub fn heard(&self) -> Option<&[f32]> {
+        let audio = self.audio()?;
+        let channels = usize::from(audio.channels.max(1));
+        let len = audio.samples.len();
+        let span = self
+            .view
+            .picked
+            .zip(self.read.marked.as_ref().ok())
+            .and_then(|(hit, marked)| marked.extent(hit));
+        Some(match span {
+            Some(span) => {
+                let at = |frame: u32| (frame as usize * channels).min(len);
+                &audio.samples[at(span.start)..at(span.end)]
+            }
+            None => &audio.samples,
+        })
+    }
+
     /// The audio as float, whatever the file stores it as.
     pub fn audio(&self) -> Option<&Audio> {
         self.read.source.as_ref().ok()
@@ -476,9 +496,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     if state.audio().is_some() {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let (label, glyph) = match playing {
-                true => ("Stop", Glyph::X),
-                false => ("Play", Glyph::AudioLines),
+            let (label, glyph) = match (playing, state.view.picked.is_some()) {
+                (true, _) => ("Stop", Glyph::X),
+                (false, true) => (PLAY_HIT, Glyph::AudioLines),
+                (false, false) => ("Play", Glyph::AudioLines),
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
             ui.add_space(12.0);
@@ -487,6 +508,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     }
     audition
 }
+
+/// The label of Play while a hit is picked: it plays that hit.
+pub const PLAY_HIT: &str = "Play hit";
 
 /// The label of the button that applies the gain.
 pub const APPLY_GAIN: &str = "Apply gain";

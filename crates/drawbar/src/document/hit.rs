@@ -14,9 +14,8 @@ use crate::app;
 /// The shortest span the lane zooms to, in seconds.
 const NARROWEST: f64 = 0.05;
 
-/// The height of each channel's band in the lane, and the least height of the lane.
-const BAND: f32 = 100.0;
-const LEAST: f32 = 150.0;
+/// The height of the lane.
+const HEIGHT: f32 = 160.0;
 
 /// The width of a marker's line and the side of its handle.
 const LINE: f32 = 2.0;
@@ -269,9 +268,8 @@ pub fn ui(
 
     let shown = close.shown(&cuts, total, rate);
     let width = ui.available_width().max(64.0);
-    let height = (BAND * channels as f32).max(LEAST);
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let span = (shown.end - shown.start).max(1.0);
     let x = |frame: f64| rect.left() + ((frame - shown.start) / span) as f32 * rect.width();
     if response.dragged() && response.drag_delta().x != 0.0 {
@@ -319,10 +317,10 @@ pub fn ui(
 
     let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
     let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
-    take::waves(
+    take::level(
         &painter,
         rect,
-        drawn.lanes(audio, summary, frames, columns),
+        drawn.lane(audio, summary, frames, columns),
         playing,
     );
 

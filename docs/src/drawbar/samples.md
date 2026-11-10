@@ -52,7 +52,7 @@ encoder cannot reproduce stops the build with the reason.
 
 Drop WAVs on the window, or use **File ▸ Import…**, to copy them into your
 library, where they are listed beside your sounds. A WAV opens as a document of
-its own: the whole file's waveform, a band per channel, with its rate,
+its own: the whole file's level, with its rate,
 channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
 32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
 plays it. **Gain** is the file's total gain against the file as last saved:
@@ -64,22 +64,12 @@ WAV closed unsaved opens again on its gain, **Save** writes it into the file,
 which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
 
-The waveform is the take's lane. It draws the regions and loops the file marks,
-read by their labels as `nord piano build` reads them: an attack such as
-`060-b0-v22` fills the lane and is named `C4 v22`, its release `060-b2-v22`
-fills it after the attack, a loop fills it too, and a dying
-attack's fade `060-b0-v22-fade` fills the lower half of its end. The header's
-**Take** says how many hits, regions and loops the file marks, or **raw: no
-regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. A picked hit is outlined in the text color. A region labelled any other
-way is drawn under its own label. Hover over a region for its label; click one to
-pick its hit. **Zoom in** and **Zoom out** halve and double the time shown, down
-to 3 seconds; drag the lane, or the scroll bar under it, to move along the take;
-**Selected** shows the picked hit, and **Whole take** the whole file.
+The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many hits, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Selected** shows the picked hit, and **Whole take** the whole file.
 
 Under the take, the picked hit is drawn close up, from its first cut to its last
 with a margin: its attack, loop, release and fade, and a marker at each cut
 point (attack start and end, loop start and end, release start and end, and
-where a fade starts). Hover over a marker for its name and time. **Zoom in**
+where a fade starts). **Play hit** plays the picked note as recorded, from its first cut to its last. Hover over a marker for its name and time. **Zoom in**
 and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole hit**
 the whole hit again; drag the lane to move along. The markers show where the
 file cuts; they cannot be dragged yet.

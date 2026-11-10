@@ -19,9 +19,8 @@ use crate::app;
 /// The shortest span the lane zooms to, in seconds.
 const NARROWEST: f64 = 3.0;
 
-/// The height of each channel's band in the lane, and the least height of the lane.
-const BAND: f32 = 77.0;
-const LEAST: f32 = 77.0;
+/// The height of the lane.
+const HEIGHT: f32 = 100.0;
 
 /// The height of the row of times under the lane, and of the scroll bar.
 const TICKS: f32 = 14.0;
@@ -38,8 +37,8 @@ const BLOCK: usize = 256;
 /// The suffix a dying attack's fade region carries after its stroke's name.
 const FADE_SUFFIX: &str = "-fade";
 
-/// One channel's envelope: the lowest and highest level in each column.
-pub type Lane = Vec<(f32, f32)>;
+/// A lane's peak level in each column, from 0 up.
+pub type Lane = Vec<f32>;
 
 /// A hit: the root and layer its strokes are labelled with.
 pub type Hit = (u8, LayerTag);
@@ -67,6 +66,17 @@ pub struct Mark {
     /// What the lane writes in it: `C4 v22` on an attack, the label on a region that
     /// names no stroke, and nothing on a release or a fade, which sit under their attack.
     pub text: String,
+}
+
+/// A box the take's lane draws: a hit's regions together, or a region that names no
+/// stroke.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Boxed {
+    pub frames: Range<u32>,
+    pub hit: Option<Hit>,
+    pub text: String,
+    /// The labels of the regions inside, as the file holds them.
+    pub labels: Vec<String>,
 }
 
 /// The regions and loops a take's file marks.
@@ -162,6 +172,38 @@ impl Marked {
         )
     }
 
+    /// What the lane draws: a box around each hit's regions, named by its attack, and
+    /// one around each region that names no stroke, in take order.
+    pub fn boxes(&self) -> Vec<Boxed> {
+        let mut boxes: Vec<Boxed> = Vec::new();
+        for mark in &self.regions {
+            let held = mark
+                .hit
+                .and_then(|hit| boxes.iter_mut().find(|boxed| boxed.hit == Some(hit)));
+            match held {
+                Some(boxed) => {
+                    boxed.frames = boxed.frames.start.min(mark.frames.start)
+                        ..boxed.frames.end.max(mark.frames.end);
+                    boxed.labels.push(mark.label.clone());
+                    if boxed.text.is_empty() {
+                        boxed.text = mark.text.clone();
+                    }
+                }
+                None => boxes.push(Boxed {
+                    frames: mark.frames.clone(),
+                    hit: mark.hit,
+                    text: mark.text.clone(),
+                    labels: vec![mark.label.clone()],
+                }),
+            }
+        }
+        for boxed in boxes.iter_mut().filter(|boxed| boxed.text.is_empty()) {
+            boxed.text = boxed.labels[0].clone();
+        }
+        boxes.sort_by_key(|boxed| boxed.frames.start);
+        boxes
+    }
+
     /// The frames from the first of `hit`'s regions to the end of its last.
     pub(super) fn extent(&self, hit: Hit) -> Option<Range<u32>> {
         let mut spans = self
@@ -176,115 +218,89 @@ impl Marked {
     }
 }
 
-/// Each channel's lowest and highest level in every [`BLOCK`] frames of the take, read
-/// once, so a wide view draws from these and not from every sample.
+/// The take's peak level in every [`BLOCK`] frames, louder channel taken, read once, so a
+/// wide view draws from these and not from every sample.
 #[derive(Default)]
 pub struct Summary {
-    blocks: Vec<Lane>,
+    blocks: Vec<f32>,
+}
+
+/// The loudest of `samples`, as a level from 0 up.
+fn peak(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0, |peak: f32, s| peak.max(s.abs()))
 }
 
 impl Summary {
     pub fn of(audio: &Audio) -> Summary {
         let channels = usize::from(audio.channels.max(1));
-        let mut blocks = vec![Vec::new(); channels];
-        for frames in audio.samples.chunks(BLOCK * channels) {
-            for (channel, lane) in blocks.iter_mut().enumerate() {
-                let (low, high) = frames
-                    .iter()
-                    .skip(channel)
-                    .step_by(channels)
-                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &s| {
-                        (low.min(s), high.max(s))
-                    });
-                lane.push(match low <= high {
-                    true => (low, high),
-                    false => (0.0, 0.0),
-                });
-            }
+        Summary {
+            blocks: audio.samples.chunks(BLOCK * channels).map(peak).collect(),
         }
-        Summary { blocks }
     }
 }
 
-/// Every channel's envelope across `columns` over `frames` of the take, from the
-/// summary where a column spans a block or more, and from the samples where it does not.
-pub(super) fn envelopes(
+/// The take's peak level, louder channel taken, in each of `columns` over `frames`: from
+/// the summary where a column spans a block or more, and from the samples where it does
+/// not.
+///
+/// ⚠️ Mono, and the level only: a lane shows how loud the take is where, which is what a
+/// cut is placed by, at twice the height a wave drawn about its zero line would have.
+pub(super) fn levels(
     audio: &Audio,
     summary: &Summary,
     frames: Range<usize>,
     columns: usize,
-) -> Vec<Lane> {
+) -> Lane {
     let channels = usize::from(audio.channels.max(1));
     let total = audio.samples.len() / channels;
     let frames = frames.start.min(total)..frames.end.min(total);
     let len = frames.len();
     if columns == 0 || len == 0 {
-        return vec![Vec::new(); channels];
+        return Vec::new();
     }
     // ⚠️ In 64-bit: a long take times the column count overflows a 32-bit `usize`, and
     // wasm is a 32-bit target.
     let edge =
         |column: usize| frames.start + (column as u64 * len as u64 / columns as u64) as usize;
     let wide = len / columns >= BLOCK;
-    let fold = |levels: &mut dyn Iterator<Item = (f32, f32)>| {
-        let (low, high) = levels.fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), (l, h)| {
-            (low.min(l), high.max(h))
-        });
-        match low <= high {
-            true => (low, high),
-            false => (0.0, 0.0),
-        }
-    };
-    (0..channels)
-        .map(|channel| {
-            (0..columns)
-                .map(|column| {
-                    let from = edge(column);
-                    let to = edge(column + 1).max(from + 1).min(total);
-                    match wide {
-                        true => {
-                            let blocks = &summary.blocks[channel];
-                            let last = ((to - 1) / BLOCK).min(blocks.len().saturating_sub(1));
-                            fold(&mut blocks[from / BLOCK..=last].iter().copied())
-                        }
-                        false => fold(
-                            &mut audio.samples[from * channels..to * channels]
-                                .iter()
-                                .skip(channel)
-                                .step_by(channels)
-                                .map(|&s| (s, s)),
-                        ),
-                    }
-                })
-                .collect()
+    (0..columns)
+        .map(|column| {
+            let from = edge(column);
+            let to = edge(column + 1).max(from + 1).min(total);
+            match wide {
+                true => {
+                    let last = ((to - 1) / BLOCK).min(summary.blocks.len().saturating_sub(1));
+                    peak(&summary.blocks[from / BLOCK..=last])
+                }
+                false => peak(&audio.samples[from * channels..to * channels]),
+            }
         })
         .collect()
 }
 
-/// The envelopes last drawn, and the columns and frames they were taken over.
+/// The levels last drawn, and the columns and frames they were taken over.
 #[derive(Default)]
 pub struct Drawn {
     key: Option<(usize, Range<usize>)>,
-    lanes: Vec<Lane>,
+    lane: Lane,
 }
 
 impl Drawn {
-    pub(super) fn lanes(
+    pub(super) fn lane(
         &mut self,
         audio: &Audio,
         summary: &Summary,
         frames: Range<usize>,
         columns: usize,
-    ) -> &[Lane] {
+    ) -> &[f32] {
         let key = (columns, frames.clone());
         if self.key.as_ref() != Some(&key) {
-            self.lanes = envelopes(audio, summary, frames, columns);
+            self.lane = levels(audio, summary, frames, columns);
             self.key = Some(key);
         }
-        &self.lanes
+        &self.lane
     }
 }
-
 /// What the operator has asked of the lane: the frames in view and the hit picked. It
 /// belongs to the document, not to its bytes, so a gain keeps both.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -376,17 +392,6 @@ pub(super) fn ink(part: Part, visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// The lane's label for a part, in the legend.
-fn named(part: Part) -> &'static str {
-    match part {
-        Part::Attack => "attack",
-        Part::Resonance => "resonance",
-        Part::Release => "release",
-        Part::Fade => "fade out",
-        Part::Other => "other region",
-    }
-}
-
 /// A legend entry: a swatch and its word.
 pub(super) fn legend(ui: &mut egui::Ui, fill: egui::Color32, edge: egui::Color32, word: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(10.0), egui::Sense::hover());
@@ -422,6 +427,7 @@ pub fn ui(
     let total = (audio.samples.len() / channels) as f64;
     let none = Marked::default();
     let marks = marked.as_ref().unwrap_or(&none);
+    let boxes = marks.boxes();
     let shown = view.shown(total);
 
     ui.horizontal_wrapped(|ui| {
@@ -438,21 +444,14 @@ pub fn ui(
             .color(app::caption(ui.visuals())),
         );
         let visuals = ui.visuals().clone();
-        for part in [
-            Part::Attack,
-            Part::Resonance,
-            Part::Release,
-            Part::Fade,
-            Part::Other,
+        for (held, part, word) in [
+            (true, Part::Attack, "note"),
+            (false, Part::Other, "other region"),
         ] {
-            if marks.regions.iter().any(|mark| mark.part == part) {
+            if boxes.iter().any(|boxed| boxed.hit.is_some() == held) {
                 let edge = ink(part, &visuals);
-                legend(ui, edge.gamma_multiply(0.18), edge, named(part));
+                legend(ui, edge.gamma_multiply(0.18), edge, word);
             }
-        }
-        if !marks.loops.is_empty() {
-            let edge = app::accent(&visuals);
-            legend(ui, edge.gamma_multiply(0.18), edge, "loop");
         }
         if marked.as_ref().is_ok_and(|marks| marks.regions.is_empty()) {
             ui.label(
@@ -493,30 +492,16 @@ pub fn ui(
 
     let shown = view.shown(total);
     let width = ui.available_width().max(64.0);
-    let height = (BAND * channels as f32).max(LEAST);
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let span = (shown.end - shown.start).max(1.0);
     let x = |frame: f64| rect.left() + ((frame - shown.start) / span) as f32 * rect.width();
     let frame_at = |at: f32| shown.start + f64::from((at - rect.left()) / rect.width()) * span;
-
-    // The region under `at`: a lower-half one where `at` is in the lower half, as it is
-    // drawn over the attack there.
     let under = |at: egui::Pos2| {
         let frame = frame_at(at.x);
-        let lower = at.y > rect.center().y;
-        let holds = |mark: &&Mark| {
-            f64::from(mark.frames.start) <= frame && frame < f64::from(mark.frames.end)
-        };
-        let half = |mark: &&Mark| mark.part == Part::Fade;
-        let mut found = marks.regions.iter().filter(holds);
-        match lower {
-            true => found
-                .clone()
-                .find(half)
-                .or_else(|| found.find(|m| !half(m))),
-            false => found.find(|m| !half(m)),
-        }
+        boxes.iter().find(|boxed| {
+            f64::from(boxed.frames.start) <= frame && frame < f64::from(boxed.frames.end)
+        })
     };
     if response.dragged() && response.drag_delta().x != 0.0 {
         let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
@@ -526,87 +511,72 @@ pub fn ui(
         if let Some(hit) = response
             .interact_pointer_pos()
             .and_then(under)
-            .and_then(|m| m.hit)
+            .and_then(|boxed| boxed.hit)
         {
             view.picked = Some(hit);
         }
     }
-    if let Some(mark) = response.hover_pos().and_then(under) {
-        response.clone().on_hover_text_at_pointer(&mark.label);
+    if let Some(boxed) = response.hover_pos().and_then(under) {
+        response
+            .clone()
+            .on_hover_text_at_pointer(boxed.labels.join("\n"));
     }
 
     let visuals = ui.visuals().clone();
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
-    let in_view = |frames: &Range<u32>| {
-        f64::from(frames.end) > shown.start && f64::from(frames.start) < shown.end
-    };
-    let boxed = |mark: &Mark| {
-        let top = match mark.part {
-            Part::Fade => rect.center().y,
-            _ => rect.top(),
-        };
-        let left = x(f64::from(mark.frames.start));
-        let right = x(f64::from(mark.frames.end)).max(left + 2.0);
-        egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, rect.bottom()))
-    };
-    let picked = |mark: &Mark| mark.hit.is_some() && mark.hit == view.picked;
-    let regions: Vec<&Mark> = marks
-        .regions
+    let shown_boxes: Vec<&Boxed> = boxes
         .iter()
-        .filter(|m| in_view(&m.frames))
+        .filter(|boxed| {
+            f64::from(boxed.frames.end) > shown.start && f64::from(boxed.frames.start) < shown.end
+        })
         .collect();
-    for mark in &regions {
-        let fill = match picked(mark) {
-            true => ink(mark.part, &visuals).gamma_multiply(0.45),
-            false => ink(mark.part, &visuals).gamma_multiply(0.18),
-        };
-        painter.rect_filled(boxed(mark), 2.0, fill);
-    }
-    let accent = app::accent(&visuals);
-    for found in marks.loops.iter().filter(|frames| in_view(frames)) {
-        let left = x(f64::from(found.start));
-        let right = x(f64::from(found.end)).max(left + 2.0);
-        let band = egui::Rect::from_min_max(
+    let at = |boxed: &Boxed| {
+        let left = x(f64::from(boxed.frames.start));
+        let right = x(f64::from(boxed.frames.end)).max(left + 2.0);
+        egui::Rect::from_min_max(
             egui::pos2(left, rect.top()),
             egui::pos2(right, rect.bottom()),
-        );
-        painter.rect_filled(band, 0.0, accent.gamma_multiply(0.18));
-        painter.rect_stroke(
-            band,
-            0.0,
-            egui::Stroke::new(1.0_f32, accent),
-            egui::StrokeKind::Inside,
-        );
+        )
+    };
+    let picked = |boxed: &Boxed| boxed.hit.is_some() && boxed.hit == view.picked;
+    let part = |boxed: &Boxed| match boxed.hit {
+        Some(_) => Part::Attack,
+        None => Part::Other,
+    };
+    for boxed in &shown_boxes {
+        let fill = match picked(boxed) {
+            true => ink(part(boxed), &visuals).gamma_multiply(0.45),
+            false => ink(part(boxed), &visuals).gamma_multiply(0.18),
+        };
+        painter.rect_filled(at(boxed), 2.0, fill);
     }
 
     let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
     let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
-    waves(
+    level(
         &painter,
         rect,
-        drawn.lanes(audio, summary, frames, columns),
+        drawn.lane(audio, summary, frames, columns),
         playing,
     );
 
-    for mark in &regions {
+    for boxed in &shown_boxes {
         // ⚠️ A picked hit is outlined in the body text color, not the accent: the accent
         // is the loop's.
-        let edge = match picked(mark) {
+        let edge = match picked(boxed) {
             true => egui::Stroke::new(2.0_f32, visuals.text_color()),
-            false => egui::Stroke::new(1.0_f32, ink(mark.part, &visuals)),
+            false => egui::Stroke::new(1.0_f32, ink(part(boxed), &visuals)),
         };
-        let at = boxed(mark);
+        let at = at(boxed);
         painter.rect_stroke(at, 2.0, edge, egui::StrokeKind::Inside);
-        if !mark.text.is_empty() {
-            painter.with_clip_rect(at.intersect(rect)).text(
-                at.left_top() + egui::vec2(3.0, 2.0),
-                egui::Align2::LEFT_TOP,
-                &mark.text,
-                egui::FontId::monospace(SMALL_TEXT),
-                visuals.text_color(),
-            );
-        }
+        painter.with_clip_rect(at.intersect(rect)).text(
+            at.left_top() + egui::vec2(3.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            &boxed.text,
+            egui::FontId::monospace(SMALL_TEXT),
+            visuals.text_color(),
+        );
     }
     painter.rect_stroke(
         rect,
@@ -622,43 +592,38 @@ pub fn ui(
     }
 }
 
-/// Each channel's envelope in its own band of `rect`, about its zero line: in the accent
-/// while the file is sounding, and the body text color when it is not.
-pub(super) fn waves(painter: &egui::Painter, rect: egui::Rect, lanes: &[Lane], playing: bool) {
+/// The take's level across `rect`, rising from a baseline along its bottom: in the
+/// accent while the file is sounding, and the body text color when it is not.
+pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], playing: bool) {
     let visuals = painter.ctx().style().visuals.clone();
-    let wave = match playing {
+    let ink = match playing {
         true => app::accent(&visuals),
         false => visuals.text_color(),
     };
-    let band = rect.height() / lanes.len().max(1) as f32;
-    for (channel, lane) in lanes.iter().enumerate() {
-        let middle = rect.top() + band * (channel as f32 + 0.5);
-        painter.hline(
-            rect.x_range(),
-            middle,
-            egui::Stroke::new(1.0_f32, app::unlit(&visuals)),
+    let base = rect.bottom() - 1.0;
+    painter.hline(
+        rect.x_range(),
+        base,
+        egui::Stroke::new(1.0_f32, app::unlit(&visuals)),
+    );
+    if lane.is_empty() {
+        return;
+    }
+    let column = (rect.width() / lane.len() as f32).max(1.0);
+    let room = rect.height() - 2.0;
+    for (i, peak) in lane.iter().enumerate() {
+        let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
+        let top = base - peak.clamp(0.0, 1.0) * room;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(left, top.min(base - 1.0)),
+                egui::pos2(left + column, base),
+            ),
+            0.0,
+            ink,
         );
-        if lane.is_empty() {
-            continue;
-        }
-        let column = (rect.width() / lane.len() as f32).max(1.0);
-        let half = band / 2.0 - 1.0;
-        for (i, (low, high)) in lane.iter().enumerate() {
-            let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
-            let top = middle - high.clamp(-1.0, 1.0) * half;
-            let bottom = middle - low.clamp(-1.0, 1.0) * half;
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(left, top),
-                    egui::pos2(left + column, bottom.max(top + 1.0)),
-                ),
-                0.0,
-                wave,
-            );
-        }
     }
 }
-
 /// The row of times under a lane drawn in `rect` over `shown` frames at `rate`.
 pub(super) fn times(ui: &mut egui::Ui, rect: egui::Rect, shown: Range<f64>, rate: f64) {
     let (row, _) = ui.allocate_exact_size(egui::vec2(rect.width(), TICKS), egui::Sense::hover());
@@ -862,21 +827,62 @@ mod tests {
             channels: 2,
             samples,
         };
-        let summary = Summary::of(&audio);
         let frames = 0..BLOCK * 64;
         // 8 blocks a column: the summary's path.
-        let wide = envelopes(&audio, &summary, frames.clone(), 8);
-        for (channel, lane) in wide.iter().enumerate() {
-            let direct = envelopes(&audio, &Summary::default(), frames.clone(), BLOCK * 64);
-            for (column, levels) in lane.iter().enumerate() {
-                let span = &direct[channel][column * BLOCK * 8..(column + 1) * BLOCK * 8];
-                let low = span.iter().map(|l| l.0).fold(f32::INFINITY, f32::min);
-                let high = span.iter().map(|l| l.1).fold(f32::NEG_INFINITY, f32::max);
-                assert_eq!(*levels, (low, high), "channel {channel}, column {column}");
-            }
+        let wide = levels(&audio, &Summary::of(&audio), frames.clone(), 8);
+        let direct = levels(&audio, &Summary::default(), frames, BLOCK * 64);
+        for (column, level) in wide.iter().enumerate() {
+            let span = &direct[column * BLOCK * 8..(column + 1) * BLOCK * 8];
+            assert_eq!(
+                *level,
+                span.iter().copied().fold(0.0, f32::max),
+                "column {column}"
+            );
         }
     }
 
+    #[test]
+    fn a_lane_s_level_is_the_louder_channel_s_peak() {
+        let audio = Audio {
+            rate: 44_100,
+            channels: 2,
+            samples: vec![0.25, -0.5, -0.75, 0.125],
+        };
+        assert_eq!(levels(&audio, &Summary::default(), 0..2, 2), [0.5, 0.75]);
+    }
+
+    #[test]
+    fn the_lane_boxes_each_hit_s_regions_together() {
+        let marked = Marked {
+            regions: vec![
+                mark("060-b0-v22", 100..500),
+                mark("060-b2-v22", 495..700),
+                mark("intro", 0..50),
+                mark("067-b0-v00", 800..1200),
+                mark("067-b0-v00-fade", 1000..1200),
+            ],
+            loops: Vec::new(),
+        };
+        let boxes = marked.boxes();
+        let drawn: Vec<(Range<u32>, &str, usize)> = boxes
+            .iter()
+            .map(|boxed| {
+                (
+                    boxed.frames.clone(),
+                    boxed.text.as_str(),
+                    boxed.labels.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (0..50, "intro", 1),
+                (100..700, "C4 v22", 2),
+                (800..1200, "G4 v00", 2),
+            ]
+        );
+    }
     #[test]
     fn times_read_in_minutes_and_seconds_to_the_step() {
         assert_eq!(clock(522.282, 0), "8:42");
