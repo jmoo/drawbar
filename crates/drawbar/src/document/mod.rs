@@ -25,6 +25,7 @@ pub mod capability;
 pub mod controls;
 mod field;
 mod header;
+mod hit;
 pub mod keys;
 mod panel;
 pub(crate) mod piano;
@@ -3427,8 +3428,21 @@ mod tests {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 
+        assert!(
+            said.iter().any(|word| word == "pick a hit in the take"),
+            "{said:?}"
+        );
         let said = open.painted(Vec::new());
         open.frame(testing::click(testing::where_(&said, "G4 v00").center()));
+        let said = open.twice();
+        for shown in ["HIT", hit::WHOLE] {
+            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+        }
+        assert_eq!(
+            said.iter().filter(|word| *word == "G4 v00").count(),
+            2,
+            "named in the take and over the hit: {said:?}"
+        );
         let picked = open.state().wav.as_ref().unwrap().view.picked;
         assert_eq!(
             picked,
