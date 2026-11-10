@@ -37,6 +37,12 @@ pub fn is_wav(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE"
 }
 
+/// Whether these bytes mark a region labelled as a stroke: a take `nord piano prep` has
+/// cut, against one as recorded.
+pub fn is_take(bytes: &[u8]) -> bool {
+    take::Marked::of(bytes).is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
+}
+
 /// What `db` multiplies a sample by, where the control offers that gain.
 fn factor(db: f64) -> Result<f64, String> {
     match GAINS.contains(&db) {
@@ -828,6 +834,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stated(&six), "44100 Hz · 6 channels · 24-bit · 0.000 s");
+    }
+
+    #[test]
+    fn a_wav_is_a_take_once_it_marks_a_stroke_region() {
+        let raw = mono(&[0; 1000]);
+        let marked = |label: &str| {
+            let region = wav::Region {
+                start: 0,
+                frames: 500,
+                label: label.into(),
+            };
+            let marks = wav::Marks {
+                regions: vec![region],
+                loops: Vec::new(),
+            };
+            wav::with_marks(&raw, &marks).unwrap()
+        };
+        assert!(!is_take(&raw), "as recorded");
+        assert!(!is_take(&marked("intro")), "a region that names no stroke");
+        assert!(is_take(&marked("060-b0-v22")));
+        assert_eq!(
+            crate::strings::kind_word(Kind::Wav, Some(crate::browser::Qualifier::Take)),
+            "take WAV"
+        );
     }
 
     #[test]
