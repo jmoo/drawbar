@@ -114,6 +114,16 @@ impl Player {
         Ok(())
     }
 
+    /// How far the pointer's voice on `zone` has played, in seconds of its samples at the
+    /// rate they were started at, or none where it is not sounding.
+    pub fn played(&self, zone: Zone) -> Option<f64> {
+        self.voices
+            .held
+            .iter()
+            .find(|held| held.finger == Finger::Pointer && held.zone == zone)
+            .map(|held| held.voice.played())
+    }
+
     /// Stop every voice sounding `zone`.
     pub fn silence(&mut self, zone: Zone) {
         self.voices.silence(zone);

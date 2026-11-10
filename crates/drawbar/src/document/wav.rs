@@ -14,11 +14,12 @@ use nord_format::wav::{self, Audio, Encoding, Layout};
 
 use super::controls::Sets;
 use super::header::{Body, Cell};
-use super::{hit, sample, take};
+use super::{audition, hit, sample, take};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
 use crate::workspace::{Bytes, LocalEntity};
+use nord_format::formats::npno::encode;
 
 /// The extension a WAV carries, and the tag it is kept under.
 pub const EXTENSION: &str = "wav";
@@ -34,6 +35,13 @@ pub const CUT: &str = "cut/";
 pub fn cut_path(label: &str, cut: hit::Cut) -> String {
     format!("{CUT}{label}/{}", cut.slug())
 }
+
+/// The path of the kind of instrument a take is heard and built as, by the name
+/// `nord piano build --kind` takes: `wurlitzer`.
+pub const KIND: &str = "kind";
+
+/// The path of whether the build cleans a take: `on` or `off`.
+pub const CLEAN: &str = "clean";
 
 /// The gains the control offers, in dB.
 const GAINS: RangeInclusive<f64> = -24.0..=24.0;
@@ -135,8 +143,9 @@ fn gain_in_place(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
 
 /// `current` with `sets` applied, and the gain in dB where one was set.
 ///
-/// A gain is applied to `original`, and `current`'s marks carried over where they differ
-/// from its own. A moved cut moves it in `current`'s marks, and changes no sample.
+/// A gain is applied to `original`, and `current`'s marks and settings carried over where
+/// they differ from its own. A moved cut moves it in `current`'s marks, and a kind or a
+/// clean is written to its settings; neither changes the audio.
 ///
 /// ⚠️ A gain is a total, never a step: each one is applied to `original`, so a second
 /// gain replaces the first instead of stacking on it, and nothing the first clipped or
@@ -150,7 +159,23 @@ pub fn apply(
     let layout = wav::layout(original).map_err(error)?;
     let mut total = None;
     let mut marks: Option<wav::Marks> = None;
+    let mut settings = wav::read_settings(current).map_err(error)?;
     for (path, value) in sets {
+        if path == KIND {
+            if encode::Kind::from_word(value).is_none() {
+                return Err(format!("{KIND}: {value} is no kind of instrument"));
+            }
+            settings.kind = Some(value.clone());
+            continue;
+        }
+        if path == CLEAN {
+            settings.clean = Some(match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(format!("{CLEAN}: {value} is not on or off")),
+            });
+            continue;
+        }
         if path == GAIN {
             let db: f64 = value
                 .trim()
@@ -164,11 +189,13 @@ pub fn apply(
             .strip_prefix(CUT)
             .and_then(|rest| rest.rsplit_once('/'))
         else {
-            return Err(format!("{path}: a WAV's edits are its {GAIN} and its cuts"));
+            return Err(format!(
+                "{path}: a WAV's edits are its {GAIN}, its cuts, its {KIND} and {CLEAN}"
+            ));
         };
         let (Some(hit), Some(cut)) = (take::mark(label, 0..0).hit, hit::Cut::from_slug(slug))
         else {
-            return Err(format!("{path}: names no cut of a hit"));
+            return Err(format!("{path}: names no cut of a sample"));
         };
         let frame: u32 = value
             .trim()
@@ -198,6 +225,9 @@ pub fn apply(
     if let Some(marks) = &marks {
         out = wav::with_marks(&out, marks).map_err(error)?;
     }
+    if wav::read_settings(&out).ok().as_ref() != Some(&settings) {
+        out = wav::with_settings(&out, &settings).map_err(error)?;
+    }
     Ok((out, total))
 }
 
@@ -207,12 +237,13 @@ pub const UNDO: &str = "undo";
 /// The label of the button that undoes the last edit.
 pub const UNDO_LABEL: &str = "Undo";
 
-/// What an edit undoes to: the gain and the marks the bytes held before it, and what it
-/// was, for the Undo button to name.
+/// What an edit undoes to: the gain, the marks and the settings the bytes held before
+/// it, and what it was, for the Undo button to name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
     pub gain: f64,
     pub marks: Option<wav::Marks>,
+    pub settings: Option<wav::Settings>,
     pub what: String,
 }
 
@@ -227,6 +258,13 @@ impl Step {
                     let cut = hit::Cut::from_slug(slug).map_or(slug, |cut| cut.name());
                     format!("{} {cut}", take::mark(label, 0..0).text)
                 }
+                None if path == KIND => format!(
+                    "kind {}",
+                    encode::Kind::from_word(value).map_or(value.clone(), |kind| {
+                        super::piano::kind_name(kind.code())
+                    })
+                ),
+                None if path == CLEAN => format!("clean audio {value}"),
                 None => match value.trim().parse::<f64>() {
                     Ok(db) => format!("gain {db:+.1} dB"),
                     Err(_) => format!("gain {value}"),
@@ -236,22 +274,28 @@ impl Step {
         Step {
             gain,
             marks: wav::read_marks(current).ok(),
+            settings: wav::read_settings(current).ok(),
             what: said.join(", "),
         }
     }
 }
 
-/// `original` at a total gain of `gain`, marking `marks` where they differ from its own:
-/// the bytes an edit was made on, made again.
+/// `original` at a total gain of `gain`, marking `marks` and stating `settings` where
+/// they differ from its own: the bytes an edit was made on, made again.
 pub fn restored(original: &[u8], step: &Step) -> Result<Vec<u8>, String> {
     let sets = [(GAIN.to_string(), format!("{:.1}", step.gain))];
-    let (out, _) = apply(original, original, &sets)?;
-    match &step.marks {
-        Some(marks) if wav::read_marks(original).ok().as_ref() != Some(marks) => {
-            wav::with_marks(&out, marks).map_err(|e| e.to_string())
+    let (mut out, _) = apply(original, original, &sets)?;
+    if let Some(marks) = &step.marks {
+        if wav::read_marks(original).ok().as_ref() != Some(marks) {
+            out = wav::with_marks(&out, marks).map_err(|e| e.to_string())?;
         }
-        _ => Ok(out),
     }
+    if let Some(settings) = &step.settings {
+        if wav::read_settings(&out).ok().as_ref() != Some(settings) {
+            out = wav::with_settings(&out, settings).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out)
 }
 
 /// The identity cells a WAV puts on the header: the rate, channels, encoding and length
@@ -271,12 +315,13 @@ pub fn stated(entity: &LocalEntity) -> Vec<Cell> {
         Cell {
             label: "Audio",
             body: Body::Read(facts(&layout)),
-            hint: "the rate, channels, sample format and length the file declares",
+            hint: "the rate, channels, bit depth and length the file declares",
         },
         Cell {
             label: "Take",
             body: Body::Read(take),
-            hint: "the hits, regions and loops the file marks; a raw take, as recorded, has none",
+            hint:
+                "the samples, regions and loops the file marks; a raw take, as recorded, has none",
         },
     ]
 }
@@ -325,6 +370,8 @@ pub struct State {
     pub view: take::View,
     /// What the picked hit's lane shows, kept across new bytes.
     pub close: hit::Close,
+    /// What the take is heard as, kept across new bytes.
+    pub audition: audition::Audition,
 }
 
 /// The notes of the original, each by its quietest and loudest integer sample, so the
@@ -399,6 +446,9 @@ struct Read {
     /// or why they do not read.
     marks: Result<wav::Marks, String>,
     marked: Result<take::Marked, String>,
+    /// What the take states about its build, nothing where it states nothing or its
+    /// settings do not read.
+    settings: wav::Settings,
     summary: take::Summary,
     drawn: take::Drawn,
     /// The envelopes last drawn on the hit's lane.
@@ -418,6 +468,7 @@ impl Read {
                 .map(take::Marked::from_marks)
                 .map_err(Clone::clone),
             marks,
+            settings: wav::read_settings(&entity.bytes).unwrap_or_default(),
             drawn: take::Drawn::default(),
             close: take::Drawn::default(),
         }
@@ -495,6 +546,7 @@ impl State {
             read,
             view: take::View::default(),
             close: hit::Close::default(),
+            audition: audition::Audition::default(),
         }
     }
 
@@ -513,12 +565,13 @@ impl State {
                 self.read = Read::of(entity);
             }
             _ => {
-                let (view, close) = (
+                let (view, close, audition) = (
                     std::mem::take(&mut self.view),
                     std::mem::take(&mut self.close),
+                    std::mem::take(&mut self.audition),
                 );
                 *self = State::new(entity);
-                (self.view, self.close) = (view, close);
+                (self.view, self.close, self.audition) = (view, close, audition);
             }
         }
     }
@@ -573,6 +626,73 @@ impl State {
             }
             None => &audio.samples,
         })
+    }
+
+    /// The picked sample's cuts, where one is picked in marks that read.
+    pub fn cuts(&self) -> Option<hit::Cuts> {
+        let marked = self.read.marked.as_ref().ok()?;
+        Some(hit::Cuts::of(marked, self.view.picked?))
+    }
+
+    /// Start finding the take's noise where it is cleaned, or take it once found.
+    pub fn follow_noise(&mut self, ctx: &egui::Context) {
+        let clean = self.clean();
+        if let Ok(audio) = &self.read.source {
+            self.audition.follow(audio, clean, ctx);
+        }
+    }
+
+    /// Make the picked sample ready to play, again only where the bytes, the pick, the
+    /// kind or the cleaning changed, so a key is heard as soon as it goes down. Nothing
+    /// while the take's noise is still being found.
+    pub fn prepare(&mut self) {
+        let (Some(hit), Ok(audio)) = (self.view.picked, &self.read.source) else {
+            return;
+        };
+        let clean = self.clean();
+        let made = (self.read.stamp, hit, self.kind(), clean);
+        if self.audition.ready.as_ref().is_some_and(|(at, _)| *at == made) {
+            return;
+        }
+        let sounding = match self.audition.cleaning(audio, clean) {
+            audition::Cleaning::Off => self.sounding(None),
+            audition::Cleaning::Ready(noise) => self.sounding(noise),
+            audition::Cleaning::Finding => return,
+        };
+        self.audition.ready = Some((made, sounding));
+    }
+
+    /// The kind of instrument the take states it is, grand where it states none.
+    pub fn kind(&self) -> encode::Kind {
+        self.read
+            .settings
+            .kind
+            .as_deref()
+            .and_then(encode::Kind::from_word)
+            .unwrap_or_default()
+    }
+
+    /// Whether the take is cleaned of its hum and hiss, as it is unless it says not.
+    pub fn clean(&self) -> bool {
+        self.read.settings.clean.unwrap_or(true)
+    }
+
+    /// The picked sample as the instrument will play it, heard as the take's kind, and
+    /// cleaned of `noise` where it is given.
+    ///
+    /// ⚠️ Shapes the sample's audio: run when it is asked to play, not per frame.
+    pub fn sounding(&self, noise: Option<&nord_format::take::clean::Noise>) -> Option<audition::Sounding> {
+        let (cuts, audio, root) = (self.cuts()?, self.audio()?, self.view.picked?.0);
+        let rules = audition::Sounding::rules(self.kind());
+        audition::Sounding::of(audio, &cuts, root, &rules, noise)
+    }
+
+    /// Whether the file marks samples, so the take's cards show.
+    pub fn marks_samples(&self) -> bool {
+        self.read
+            .marked
+            .as_ref()
+            .is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
     }
 
     /// The audio as float, whatever the file stores it as.
@@ -680,8 +800,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     audition
 }
 
-/// The label of Play while a hit is picked: it plays that hit.
-pub const PLAY_HIT: &str = "Play hit";
+/// The label of Play while a sample is picked: it plays that sample as the take holds it,
+/// from its first cut to its last, unshaped.
+pub const PLAY_HIT: &str = "Play as recorded";
 
 /// The label of the button that applies the gain.
 pub const APPLY_GAIN: &str = "Apply gain";
