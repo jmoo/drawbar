@@ -855,8 +855,8 @@ mod tests {
         assert!(!is_take(&marked("intro")), "a region that names no stroke");
         assert!(is_take(&marked("060-b0-v22")));
         assert_eq!(
-            crate::strings::kind_word(Kind::Wav, Some(crate::browser::Qualifier::Take)),
-            "take WAV"
+            crate::strings::kind_word(Kind::Wav, Some(crate::browser::Qualifier::Processed)),
+            "WAV (processed)"
         );
     }
 

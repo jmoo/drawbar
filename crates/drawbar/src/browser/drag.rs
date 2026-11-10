@@ -282,7 +282,7 @@ pub enum Qualifier {
     Generation(&'static str),
     /// A WAV that marks a stroke region, as `nord piano prep` writes: a take ready to
     /// build, against one as recorded.
-    Take,
+    Processed,
 }
 
 impl Qualifier {
@@ -290,7 +290,7 @@ impl Qualifier {
         match self {
             Qualifier::Family(family) => family.label(),
             Qualifier::Generation(generation) => generation,
-            Qualifier::Take => "take",
+            Qualifier::Processed => "processed",
         }
     }
 }
@@ -323,7 +323,7 @@ pub fn qualifier(
     instrument: Option<Family>,
 ) -> Option<Qualifier> {
     if Kind::of(entity) == Kind::Wav {
-        return crate::document::wav::is_take(&entity.bytes).then_some(Qualifier::Take);
+        return crate::document::wav::is_take(&entity.bytes).then_some(Qualifier::Processed);
     }
     if let Some(generation) = entity.generation() {
         return (kept.generations.len() > 1).then_some(Qualifier::Generation(generation));

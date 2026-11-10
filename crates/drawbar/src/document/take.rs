@@ -2,7 +2,7 @@
 //! marks drawn over it, zoomed and panned in time, and the hit a click picks.
 //!
 //! A region is read by its label, as `nord piano build` reads it: an attack `060-b0-v22`
-//! and its release `060-b2-v22` fill the lane, a loop fills it under the attack's label,
+//! and its release `060-b2-v22` fill the lane, a loop fills it too,
 //! and a dying attack's fade `060-b0-v22-fade` fills the lower half of the attack's end. A region labelled otherwise is
 //! drawn by its label, so nothing the file marks is hidden.
 
@@ -22,9 +22,6 @@ const NARROWEST: f64 = 3.0;
 /// The height of each channel's band in the lane, and the least height of the lane.
 const BAND: f32 = 110.0;
 const LEAST: f32 = 110.0;
-
-/// The room a loop leaves at the top of the lane, so the label of its attack shows.
-const LABEL_ROW: f32 = 14.0;
 
 /// The height of the row of times under the lane, and of the scroll bar.
 const TICKS: f32 = 14.0;
@@ -566,7 +563,7 @@ pub fn ui(
         let left = x(f64::from(found.start));
         let right = x(f64::from(found.end)).max(left + 2.0);
         let band = egui::Rect::from_min_max(
-            egui::pos2(left, rect.top() + LABEL_ROW),
+            egui::pos2(left, rect.top()),
             egui::pos2(right, rect.bottom()),
         );
         painter.rect_filled(band, 0.0, accent.gamma_multiply(0.18));
