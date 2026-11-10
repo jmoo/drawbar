@@ -433,7 +433,8 @@ pub fn card(
         }
         let Some(cuts) = cuts.filter(|cuts| cuts.attack.is_some()) else {
             ui.label(
-                egui::RichText::new("pick a sample in the take").color(app::caption(ui.visuals())),
+                egui::RichText::new("(select from the WAV, above)")
+                    .color(app::caption(ui.visuals())),
             );
             return;
         };

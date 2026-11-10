@@ -356,7 +356,7 @@ pub fn ui(
         ui.horizontal(|ui| {
             ui.label(crate::panel::caps("Sample"));
             ui.label(
-                egui::RichText::new("pick a sample in the take")
+                egui::RichText::new("(select from the WAV, above)")
                     .size(take::LEGEND_TEXT)
                     .color(app::caption(ui.visuals())),
             );
