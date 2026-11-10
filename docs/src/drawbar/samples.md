@@ -55,7 +55,7 @@ library, where they are listed beside your sounds. A WAV opens as a document of
 its own: the whole file's level, with its rate,
 channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
 32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
-plays it. **Gain** is the file's total gain against the file as last saved:
+plays it. **Gain**, over the take, is the file's total gain against the file as last saved:
 **Apply gain** sets it, so 10 dB and then 12 dB is 12 dB in all, and 0 dB
 gives the saved file back. The line beside it first says how many of the
 file's notes that gain would clip. The file keeps its own format: a 24-bit WAV
@@ -71,8 +71,12 @@ with a margin: its attack, loop, release and fade, and a marker at each cut
 point (attack start and end, loop start and end, release start and end, and
 where a fade starts). **Play hit** plays the picked note as recorded, from its first cut to its last. Hover over a marker for its name and time. **Zoom in**
 and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole hit**
-the whole hit again; drag the lane to move along. The markers show where the
-file cuts; they cannot be dragged yet.
+the whole hit again; drag the lane to move along. Drag a marker to move its
+cut: both lanes follow it, and when you let go its region or loop is written to
+the file's marks, one edit a drag, with no sample changed. A marker stops at the
+cuts either side of it, so a loop stays inside its attack and a fade ends with
+it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
+them back, and a gain applied after them keeps them.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in

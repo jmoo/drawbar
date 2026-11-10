@@ -135,7 +135,12 @@ impl Marked {
     /// The marks of `bytes`, or why they do not read.
     pub fn of(bytes: &[u8]) -> Result<Marked, String> {
         let marks = wav::read_marks(bytes).map_err(|e| e.to_string())?;
-        Ok(Marked {
+        Ok(Marked::from_marks(&marks))
+    }
+
+    /// `marks` as the lanes draw them.
+    pub fn from_marks(marks: &wav::Marks) -> Marked {
+        Marked {
             regions: marks
                 .regions
                 .iter()
@@ -149,7 +154,7 @@ impl Marked {
                 .iter()
                 .map(|found| found.start..found.end.saturating_add(1))
                 .collect(),
-        })
+        }
     }
 
     /// What the take holds, for the header: its hits, regions and loops, or that it is
