@@ -3287,6 +3287,7 @@ mod tests {
             "Gain",
             wav::APPLY_GAIN,
             "44100 Hz · mono · 16-bit · 1.000 s",
+            "raw: no regions",
         ] {
             assert!(
                 said.iter().any(|word| word == offered),
@@ -3414,7 +3415,15 @@ mod tests {
         let bytes = prep::with_marks(&bytes, &marks).unwrap();
         let mut open = Open::file("Wurli take.wav", bytes);
         let said = open.twice();
-        for shown in ["TAKE", "C4 v22", "G4 v00", "attack", "release", take::WHOLE] {
+        for shown in [
+            "TAKE",
+            "C4 v22",
+            "G4 v00",
+            "attack",
+            "release",
+            take::WHOLE,
+            "2 hits · 3 regions · 0 loops",
+        ] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 

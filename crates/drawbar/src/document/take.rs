@@ -2,8 +2,8 @@
 //! marks drawn over it, zoomed and panned in time, and the hit a click picks.
 //!
 //! A region is read by its label, as `nord piano build` reads it: an attack `060-b0-v22`
-//! fills the lane, its release `060-b2-v22` the lower half, and a dying attack's fade
-//! `060-b0-v22-fade` the lower half of the attack's end. A region labelled otherwise is
+//! and its release `060-b2-v22` fill the lane, a loop fills it under the attack's label,
+//! and a dying attack's fade `060-b0-v22-fade` fills the lower half of the attack's end. A region labelled otherwise is
 //! drawn by its label, so nothing the file marks is hidden.
 
 use std::ops::Range;
@@ -20,8 +20,11 @@ use crate::app;
 const NARROWEST: f64 = 3.0;
 
 /// The height of each channel's band in the lane, and the least height of the lane.
-const BAND: f32 = 44.0;
-const LEAST: f32 = 72.0;
+const BAND: f32 = 110.0;
+const LEAST: f32 = 110.0;
+
+/// The room a loop leaves at the top of the lane, so the label of its attack shows.
+const LABEL_ROW: f32 = 14.0;
 
 /// The height of the row of times under the lane, and of the scroll bar.
 const TICKS: f32 = 14.0;
@@ -140,6 +143,26 @@ impl Marked {
                 .map(|found| found.start..found.end.saturating_add(1))
                 .collect(),
         })
+    }
+
+    /// What the take holds, for the header: its hits, regions and loops, or that it is
+    /// raw, as recorded, with none.
+    pub fn stated(&self) -> String {
+        if self.regions.is_empty() && self.loops.is_empty() {
+            return "raw: no regions".to_string();
+        }
+        let hits: std::collections::BTreeSet<Hit> =
+            self.regions.iter().filter_map(|mark| mark.hit).collect();
+        let counted = |n: usize, one: &str| match n {
+            1 => format!("1 {one}"),
+            _ => format!("{n} {one}s"),
+        };
+        format!(
+            "{} · {} · {}",
+            counted(hits.len(), "hit"),
+            counted(self.regions.len(), "region"),
+            counted(self.loops.len(), "loop")
+        )
     }
 
     /// The frames from the first of `hit`'s regions to the end of its last.
@@ -427,7 +450,7 @@ pub fn ui(
         }
         if !marks.loops.is_empty() {
             let edge = app::accent(&visuals);
-            legend(ui, edge.gamma_multiply(0.3), edge, "loop");
+            legend(ui, edge.gamma_multiply(0.18), edge, "loop");
         }
         if marked.as_ref().is_ok_and(|marks| marks.regions.is_empty()) {
             ui.label(
@@ -483,7 +506,7 @@ pub fn ui(
         let holds = |mark: &&Mark| {
             f64::from(mark.frames.start) <= frame && frame < f64::from(mark.frames.end)
         };
-        let half = |mark: &&Mark| matches!(mark.part, Part::Release | Part::Fade);
+        let half = |mark: &&Mark| mark.part == Part::Fade;
         let mut found = marks.regions.iter().filter(holds);
         match lower {
             true => found
@@ -518,7 +541,7 @@ pub fn ui(
     };
     let boxed = |mark: &Mark| {
         let top = match mark.part {
-            Part::Release | Part::Fade => rect.center().y,
+            Part::Fade => rect.center().y,
             _ => rect.top(),
         };
         let left = x(f64::from(mark.frames.start));
@@ -533,7 +556,7 @@ pub fn ui(
         .collect();
     for mark in &regions {
         let fill = match picked(mark) {
-            true => visuals.selection.bg_fill,
+            true => ink(mark.part, &visuals).gamma_multiply(0.45),
             false => ink(mark.part, &visuals).gamma_multiply(0.18),
         };
         painter.rect_filled(boxed(mark), 2.0, fill);
@@ -543,10 +566,10 @@ pub fn ui(
         let left = x(f64::from(found.start));
         let right = x(f64::from(found.end)).max(left + 2.0);
         let band = egui::Rect::from_min_max(
-            egui::pos2(left, rect.top()),
-            egui::pos2(right, rect.top() + 12.0),
+            egui::pos2(left, rect.top() + LABEL_ROW),
+            egui::pos2(right, rect.bottom()),
         );
-        painter.rect_filled(band, 0.0, accent.gamma_multiply(0.3));
+        painter.rect_filled(band, 0.0, accent.gamma_multiply(0.18));
         painter.rect_stroke(
             band,
             0.0,
@@ -591,17 +614,14 @@ pub fn ui(
     }
 
     for mark in &regions {
+        // ⚠️ A picked hit is outlined in the body text color, not the accent: the accent
+        // is the loop's.
         let edge = match picked(mark) {
-            true => accent,
-            false => ink(mark.part, &visuals),
+            true => egui::Stroke::new(2.0_f32, visuals.text_color()),
+            false => egui::Stroke::new(1.0_f32, ink(mark.part, &visuals)),
         };
         let at = boxed(mark);
-        painter.rect_stroke(
-            at,
-            2.0,
-            egui::Stroke::new(1.0_f32, edge),
-            egui::StrokeKind::Inside,
-        );
+        painter.rect_stroke(at, 2.0, edge, egui::StrokeKind::Inside);
         if !mark.text.is_empty() {
             painter.with_clip_rect(at.intersect(rect)).text(
                 at.left_top() + egui::vec2(3.0, 2.0),
