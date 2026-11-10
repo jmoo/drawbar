@@ -1691,6 +1691,16 @@ pub fn read_cell(ui: &mut egui::Ui, label: &str, value: &str, note: &str) {
 
 /// One outlined action of an open row, its glyph painted in `mark`.
 pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, mark: egui::Color32) -> bool {
+    action_response(ui, label, glyph, mark).clicked()
+}
+
+/// [`action`], answering with the button's response, for a button held down.
+pub fn action_response(
+    ui: &mut egui::Ui,
+    label: &str,
+    glyph: Glyph,
+    mark: egui::Color32,
+) -> egui::Response {
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let ink = visuals.weak_text_color();
@@ -1729,7 +1739,7 @@ pub fn action(ui: &mut egui::Ui, label: &str, glyph: Glyph, mark: egui::Color32)
         word,
         ink,
     );
-    response.clicked()
+    response
 }
 
 /// What the document knows about one zone's audio while it draws the zone.

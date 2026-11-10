@@ -777,8 +777,15 @@ impl State {
 /// it where the bytes read,
 /// and why not where they do not. `true` once the operator has asked to play the file, or
 /// to stop it where it is playing.
-pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) -> bool {
+pub fn ui(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    playing: bool,
+    sounds: impl Fn(usize) -> bool,
+    sets: &mut Sets,
+) -> (bool, Option<audition::Ask>) {
     let mut audition = false;
+    let mut asked = None;
     // ⚠️ The gain sits over the take, not by Play: it is applied to the whole file, never
     // to the picked hit alone.
     if state.audio().is_some() {
@@ -855,9 +862,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
                 (false, false) => ("Play", Glyph::AudioLines),
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
+            if state.marks_samples() {
+                asked = audition::controls(ui, state, sounds);
+            }
         });
     }
-    audition
+    if let Some(audition::Ask::Clean(on)) = asked {
+        sets.push((CLEAN.to_string(), if on { "on" } else { "off" }.to_string()));
+    }
+    (audition, asked)
 }
 
 /// The label of Play while a sample is picked: it plays that sample as the take holds it,
