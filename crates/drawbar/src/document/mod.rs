@@ -32,6 +32,7 @@ mod project;
 pub(crate) mod sample;
 mod setlist;
 mod table;
+mod take;
 pub(crate) mod text;
 mod verbatim;
 pub(crate) mod wav;
@@ -3384,6 +3385,65 @@ mod tests {
         assert_eq!(held.audio().map(|audio| audio.samples.len()), Some(44_100));
         assert_eq!(held.gain, 0.0, "reverted to the original");
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
+    }
+
+    /// A take's regions are drawn on its lane by note and layer; a click on one picks its
+    /// hit, which Selected zooms to and a gain keeps.
+    #[test]
+    fn a_take_shows_its_regions_and_a_click_picks_a_hit() {
+        use nord_format::wav as prep;
+        let audio = prep::Audio {
+            rate: 35_002,
+            channels: 2,
+            samples: vec![0.1; 2 * 35_002 * 60],
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let region = |start: u32, frames: u32, label: &str| prep::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = prep::Marks {
+            regions: vec![
+                region(35_002 * 10, 35_002 * 15, "060-b0-v22"),
+                region(35_002 * 25, 35_002 / 2, "060-b2-v22"),
+                region(35_002 * 30, 35_002 * 20, "067-b0-v00"),
+            ],
+            loops: Vec::new(),
+        };
+        let bytes = prep::with_marks(&bytes, &marks).unwrap();
+        let mut open = Open::file("Wurli take.wav", bytes);
+        let said = open.twice();
+        for shown in ["TAKE", "C4 v22", "G4 v00", "attack", "release", take::WHOLE] {
+            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+        }
+
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(testing::where_(&said, "G4 v00").center()));
+        let picked = open.state().wav.as_ref().unwrap().view.picked;
+        assert_eq!(
+            picked,
+            Some((67, nord_format::formats::npno::encode::LayerTag::Value(0)))
+        );
+
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, take::PICKED).center(),
+        ));
+        let rate = 35_002.0;
+        let view = &open.state().wav.as_ref().unwrap().view;
+        // 20 s of regions: 3 s (15%) each side.
+        assert_eq!(view.shown(rate * 60.0), rate * 27.0..rate * 53.0);
+
+        open.state().wav.as_mut().unwrap().gain = 6.0;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        open.frame(Vec::new());
+        let view = &open.state().wav.as_ref().unwrap().view;
+        assert_eq!(view.picked, picked, "a gain keeps the pick");
+        assert_eq!(view.shown(rate * 60.0), rate * 27.0..rate * 53.0);
     }
 
     #[test]

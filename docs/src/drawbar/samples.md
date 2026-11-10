@@ -52,7 +52,7 @@ encoder cannot reproduce stops the build with the reason.
 
 Drop WAVs on the window, or use **File ▸ Import…**, to copy them into your
 library, where they are listed beside your sounds. A WAV opens as a document of
-its own: the whole file's waveform, one lane per channel, with its rate,
+its own: the whole file's waveform, a band per channel, with its rate,
 channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
 32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
 plays it. **Gain** is the file's total gain against the file as last saved:
@@ -63,6 +63,16 @@ stays 24-bit, and a float one never clips. A gain is an edit like any other: a
 WAV closed unsaved opens again on its gain, **Save** writes it into the file,
 which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
+
+The waveform is the take's lane. It draws the regions and loops the file marks,
+read by their labels as `nord piano build` reads them: an attack such as
+`060-b0-v22` fills the lane and is named `C4 v22`, its release `060-b2-v22`
+fills the lower half after it, a dying attack's fade `060-b0-v22-fade` the lower
+half of its end, and a loop is a band along the top. A region labelled any other
+way is drawn under its own label. Hover over a region for its label; click one to
+pick its hit. **Zoom in** and **Zoom out** halve and double the time shown, down
+to 3 seconds; drag the lane, or the scroll bar under it, to move along the take;
+**Selected** shows the picked hit, and **Whole take** the whole file.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in
