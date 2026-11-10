@@ -706,7 +706,7 @@ impl DrawbarApp {
                 folders.all_files = !folders.all_files;
             }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
-            Command::Revert => acts.extend(active.map(Act::Revert)),
+            Command::Revert => acts.extend(active.map(Act::AskRevert)),
             Command::Export => acts.extend(self.exports()),
             Command::CloseTab => acts.push(Act::CloseTab),
             Command::Quit => acts.push(Act::Quit),

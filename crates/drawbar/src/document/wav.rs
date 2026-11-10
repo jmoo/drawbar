@@ -201,6 +201,59 @@ pub fn apply(
     Ok((out, total))
 }
 
+/// The path of the set that undoes the last edit.
+pub const UNDO: &str = "undo";
+
+/// The label of the button that undoes the last edit.
+pub const UNDO_LABEL: &str = "Undo";
+
+/// What an edit undoes to: the gain and the marks the bytes held before it, and what it
+/// was, for the Undo button to name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub gain: f64,
+    pub marks: Option<wav::Marks>,
+    pub what: String,
+}
+
+impl Step {
+    /// What `sets` undo to on `current`, which holds `gain` against the original.
+    pub fn before(current: &[u8], gain: f64, sets: &[(String, String)]) -> Step {
+        let said: Vec<String> = sets
+            .iter()
+            .map(|(path, value)| match path.strip_prefix(CUT) {
+                Some(rest) => {
+                    let (label, slug) = rest.rsplit_once('/').unwrap_or((rest, ""));
+                    let cut = hit::Cut::from_slug(slug).map_or(slug, |cut| cut.name());
+                    format!("{} {cut}", take::mark(label, 0..0).text)
+                }
+                None => match value.trim().parse::<f64>() {
+                    Ok(db) => format!("gain {db:+.1} dB"),
+                    Err(_) => format!("gain {value}"),
+                },
+            })
+            .collect();
+        Step {
+            gain,
+            marks: wav::read_marks(current).ok(),
+            what: said.join(", "),
+        }
+    }
+}
+
+/// `original` at a total gain of `gain`, marking `marks` where they differ from its own:
+/// the bytes an edit was made on, made again.
+pub fn restored(original: &[u8], step: &Step) -> Result<Vec<u8>, String> {
+    let sets = [(GAIN.to_string(), format!("{:.1}", step.gain))];
+    let (out, _) = apply(original, original, &sets)?;
+    match &step.marks {
+        Some(marks) if wav::read_marks(original).ok().as_ref() != Some(marks) => {
+            wav::with_marks(&out, marks).map_err(|e| e.to_string())
+        }
+        _ => Ok(out),
+    }
+}
+
 /// The identity cells a WAV puts on the header: the rate, channels, encoding and length
 /// its container declares, and what the take marks, read without copying its samples.
 pub fn stated(entity: &LocalEntity) -> Vec<Cell> {
@@ -264,6 +317,8 @@ pub struct State {
     /// The stamps of the bytes made here from `original`, and the gain each holds, so a
     /// revert to one of them shows its gain again.
     made: Vec<(u64, f64)>,
+    /// What each edit since the document opened undoes to, the last one last.
+    history: Vec<Step>,
     notes: Notes,
     read: Read,
     /// What the take's lane shows, kept across new bytes.
@@ -435,6 +490,7 @@ impl State {
             applied,
             original,
             made: vec![(entity.stamp, applied)],
+            history: Vec::new(),
             notes,
             read,
             view: take::View::default(),
@@ -475,6 +531,21 @@ impl State {
     /// The total gain the bytes hold against the original.
     pub fn applied(&self) -> f64 {
         self.applied
+    }
+
+    /// What the last edit undoes to, where there is one.
+    pub fn last_step(&self) -> Option<&Step> {
+        self.history.last()
+    }
+
+    /// Note an edit made, or the last one undone.
+    pub fn stepped(&mut self, step: Option<Step>) {
+        match step {
+            Some(step) => self.history.push(step),
+            None => {
+                self.history.pop();
+            }
+        }
     }
 
     /// Note that the bytes stamped `stamp` hold `total` against the original.
@@ -531,7 +602,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
     // ⚠️ The gain sits over the take, not by Play: it is applied to the whole file, never
     // to the picked hit alone.
     if state.audio().is_some() {
-        ui.horizontal(|ui| gain(ui, state, sets));
+        ui.horizontal(|ui| {
+            gain(ui, state, sets);
+            ui.add_space(12.0);
+            let last = state.last_step().map(|step| step.what.clone());
+            let undo = ui.add_enabled(last.is_some(), egui::Button::new(UNDO_LABEL));
+            if let Some(what) = last {
+                if undo.on_hover_text(format!("Undo {what}")).clicked() {
+                    sets.push((UNDO.to_string(), String::new()));
+                }
+            }
+        });
         ui.add_space(6.0);
     }
     let read = &mut state.read;
