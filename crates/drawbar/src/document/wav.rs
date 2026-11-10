@@ -23,8 +23,7 @@ use crate::workspace::{Bytes, LocalEntity};
 /// The extension a WAV carries, and the tag it is kept under.
 pub const EXTENSION: &str = "wav";
 
-/// The path of a WAV's one edit: its total gain in dB against the bytes the document
-/// started from.
+/// The path of a WAV's one edit: its total gain in dB against the file as last saved.
 pub const GAIN: &str = "gain";
 
 /// The gains the control offers, in dB.
@@ -179,12 +178,17 @@ fn facts(layout: &Layout) -> String {
 
 /// What a WAV's document keeps between frames: the gain asked for, the bytes every gain
 /// is applied to, and a read of the bytes it is open on.
+///
+/// Nothing here outlives the document: what the working copy holds against the saved
+/// file is worked out again from the two whenever the document opens, so a WAV closed
+/// unsaved, or kept unsaved across a restart, opens on its gain.
 pub struct State {
     /// The total gain asked for against `original`, in dB to one decimal.
     pub gain: f64,
     /// The total gain the bytes hold against `original`.
     applied: f64,
-    /// The bytes the document was opened on, or that last came to it from elsewhere.
+    /// The file as last saved, which Revert goes back to; or, where those bytes cannot
+    /// be had or the working copy is not a gain of them, the working copy itself.
     original: Bytes,
     /// The stamps of the bytes made here from `original`, and the gain each holds, so a
     /// revert to one of them shows its gain again.
@@ -292,38 +296,91 @@ impl Read {
     }
 }
 
+/// The file `entity` was last saved as, where it is not the working copy: held, or read
+/// back from its file. `None` where neither has it.
+///
+/// ⚠️ Reading it back reads the whole file, on this thread.
+fn saved(entity: &LocalEntity) -> Option<Bytes> {
+    let held = entity.saved.bytes();
+    if !held.is_empty() {
+        return Some(held.clone());
+    }
+    let file = entity.saved.file()?;
+    file.read(0..file.len).ok().map(Bytes::from)
+}
+
+/// The gain in dB, to the control's step, that makes `edited` of `original`, where one
+/// does.
+///
+/// Measured on the loudest sample the gain left unclipped, then proved: the original at
+/// that gain must be the edited bytes exactly, so an edit that is not a gain, or a gain
+/// off the control's steps, is never taken for one.
+fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> {
+    let ((was, before), (now, after)) = (original, edited);
+    if before.samples.len() != after.samples.len() {
+        return None;
+    }
+    let (from, to) = before
+        .samples
+        .iter()
+        .zip(&after.samples)
+        .filter(|(_, to)| to.abs() < 0.99)
+        .max_by(|(a, _), (b, _)| a.abs().total_cmp(&b.abs()))?;
+    let ratio = f64::from(*to) / f64::from(*from);
+    if ratio.is_nan() || ratio <= 0.0 {
+        return None;
+    }
+    let db = (20.0 * ratio.log10() * 10.0).round() / 10.0;
+    let (made, _) = apply(was, &[(GAIN.to_string(), format!("{db:.1}"))]).ok()?;
+    (made == now).then_some(db)
+}
+
 impl State {
-    /// ⚠️ Finds the notes of the whole file, so it runs when the bytes come from
-    /// elsewhere and never per frame.
+    /// ⚠️ Reads the working copy and, where it is unsaved, the saved file, and finds the
+    /// notes of the whole file, so it runs when the bytes come from elsewhere and never
+    /// per frame.
     pub fn new(entity: &LocalEntity) -> State {
         let read = Read::of(entity);
-        let notes = match &read.source {
-            Ok(audio) => Notes::of(&entity.bytes, audio),
-            Err(_) => Notes::default(),
+        let mut original = (entity.bytes.clone(), 0.0);
+        let mut heard = None;
+        if let (true, Some(saved), Ok(now)) = (entity.is_unsaved(), saved(entity), &read.source) {
+            if let Ok(before) = wav::read(&saved) {
+                if let Some(db) = held_gain((&saved, &before), (&entity.bytes, now)) {
+                    heard = Some(before);
+                    original = (saved, db);
+                }
+            }
+        }
+        let (original, applied) = original;
+        let notes = match (&heard, &read.source) {
+            (Some(audio), _) | (None, Ok(audio)) => Notes::of(&original, audio),
+            (None, Err(_)) => Notes::default(),
         };
         State {
-            gain: 0.0,
-            applied: 0.0,
-            original: entity.bytes.clone(),
-            made: vec![(entity.stamp, 0.0)],
+            gain: applied,
+            applied,
+            original,
+            made: vec![(entity.stamp, applied)],
             notes,
             read,
         }
     }
 
     /// Read the bytes again where they are no longer the ones read. Bytes this document
-    /// made keep the original and show their gain; any others become the original.
+    /// made keep the original and show their gain. Any others, and saved bytes, which
+    /// the next gain starts from, open the document again.
     pub fn follow(&mut self, entity: &LocalEntity) {
-        if self.read.stamp == entity.stamp {
+        let saved = self.applied != 0.0 && !entity.is_unsaved();
+        if self.read.stamp == entity.stamp && !saved {
             return;
         }
         match self.made.iter().find(|(stamp, _)| *stamp == entity.stamp) {
-            Some(&(_, total)) => {
+            Some(&(_, total)) if !saved => {
                 self.applied = total;
                 self.gain = total;
                 self.read = Read::of(entity);
             }
-            None => *self = State::new(entity),
+            _ => *self = State::new(entity),
         }
     }
 
@@ -466,13 +523,25 @@ mod tests {
         gain_in_place(&mut data, layout.format.encoding, factor(db).unwrap())
     }
 
-    /// The document's state on `bytes`, as it opens on them.
-    fn opened(bytes: &[u8]) -> State {
+    /// A library holding `bytes` as a saved WAV, and its id.
+    fn library(bytes: &[u8]) -> (crate::workspace::Workspace, u64) {
         let mut log = crate::log::Log::default();
         let mut workspace = crate::workspace::Workspace::new(crate::testing::context());
         let origin = crate::workspace::Origin::Fresh;
         let id = workspace.ingest("hit.wav".into(), origin, bytes.to_vec(), &mut log);
+        (workspace, id)
+    }
+
+    /// The document's state on `bytes`, as it opens on them.
+    fn opened(bytes: &[u8]) -> State {
+        let (workspace, id) = library(bytes);
         State::new(workspace.get(id).unwrap())
+    }
+
+    /// Put `bytes` in the working copy of `id`, unsaved.
+    fn edited(workspace: &mut crate::workspace::Workspace, id: u64, bytes: Vec<u8>) {
+        workspace.replace_bytes(id, bytes, &mut crate::log::Log::default());
+        assert!(workspace.get(id).unwrap().is_unsaved());
     }
 
     /// A 16-bit take of decaying 440 Hz notes, one every 2 s from 0.5 s, peaking at each
@@ -661,6 +730,56 @@ mod tests {
             }
             assert_eq!(state.notes.clipped(factor(db).unwrap()), clipped, "{db} dB");
         }
+    }
+
+    #[test]
+    fn a_wav_closed_with_an_unsaved_gain_opens_on_that_gain() {
+        let saved = take(&[0.9, 0.3, 0.05]);
+        let (mut workspace, id) = library(&saved);
+        for db in ["4.0", "-7.5", "12.0"] {
+            edited(&mut workspace, id, gained(&saved, db).unwrap());
+            let state = State::new(workspace.get(id).unwrap());
+            assert_eq!(state.gain, db.parse::<f64>().unwrap(), "{db}");
+            assert!(
+                state.original() == &saved[..],
+                "{db}: gains start from the saved file"
+            );
+            assert_eq!(
+                state.clipping(state.gain),
+                opened(&saved).clipping(state.gain),
+                "{db}"
+            );
+        }
+        let state = State::new(workspace.get(id).unwrap());
+        assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 notes clip".into())));
+    }
+
+    #[test]
+    fn a_working_copy_that_is_no_gain_of_the_saved_file_is_its_own_original() {
+        let saved = take(&[0.9, 0.3, 0.05]);
+        let (mut workspace, id) = library(&saved);
+        let other = take(&[0.5, 0.5, 0.5]);
+        edited(&mut workspace, id, other.clone());
+        let state = State::new(workspace.get(id).unwrap());
+        assert_eq!(state.gain, 0.0);
+        assert!(state.original() == &other[..]);
+    }
+
+    #[test]
+    fn saving_a_gain_makes_the_saved_file_the_new_original() {
+        let saved = take(&[0.9, 0.3, 0.05]);
+        let (mut workspace, id) = library(&saved);
+        let mut state = State::new(workspace.get(id).unwrap());
+        let (out, db) = apply(state.original(), &[(GAIN.to_string(), "6.0".into())]).unwrap();
+        edited(&mut workspace, id, out.clone());
+        state.made(workspace.get(id).unwrap().stamp, db);
+        state.follow(workspace.get(id).unwrap());
+        assert_eq!(state.gain, 6.0);
+
+        workspace.mark_saved(id);
+        state.follow(workspace.get(id).unwrap());
+        assert_eq!(state.gain, 0.0);
+        assert!(state.original() == &out[..]);
     }
 
     #[test]
