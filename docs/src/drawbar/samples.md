@@ -55,11 +55,13 @@ library, where they are listed beside your sounds. A WAV opens as a document of
 its own: the whole file's waveform, one lane per channel, with its rate,
 channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
 32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
-plays it. **Gain** with **Apply gain** scales every sample by that gain, and
-the line beside it first says how many samples would clip. The file keeps its
-own format: a 24-bit WAV stays 24-bit, and a float one never clips. A gain is
-an edit like any other: **Save** writes it into the file and **Revert** takes
-it back. A WAV drawbar cannot read, such as a compressed one, says why and
+plays it. **Gain** is the file's total gain against the file as last saved:
+**Apply gain** sets it, so 10 dB and then 12 dB is 12 dB in all, and 0 dB
+gives the saved file back. The line beside it first says how many of the
+file's notes that gain would clip. The file keeps its own format: a 24-bit WAV
+stays 24-bit, and a float one never clips. A gain is an edit like any other: a
+WAV closed unsaved opens again on its gain, **Save** writes it into the file,
+which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
