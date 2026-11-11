@@ -1299,23 +1299,24 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         return;
     }
     let name = browser.folders.free(&dir, &entity.name, workspace);
+    let origin = entity.origin.clone();
     // One resting in its file is copied by the library, with the edit held of it.
     if let Some(copy) = workspace.copy_of(id) {
-        let (origin, len) = (entity.origin.clone(), entity.size());
+        let len = entity.size();
         workspace.arrive(dir.join(&name), origin, copy, len);
-        return workspace.revert(id, log);
+    } else {
+        let mine = match entity.whole() {
+            Ok(mine) => mine.into_owned(),
+            Err(e) => {
+                log.error(format!("{}: {e}", entity.name));
+                return log.trouble(format!("“{}” could not be read.", entity.name));
+            }
+        };
+        let copy = workspace.ingest(name.clone(), origin, mine, log);
+        workspace.place(copy, dir.join(&name));
     }
-    let mine = match entity.whole() {
-        Ok(mine) => mine.into_owned(),
-        Err(e) => {
-            log.error(format!("{}: {e}", entity.name));
-            return log.trouble(format!("“{}” could not be read.", entity.name));
-        }
-    };
-    let origin = entity.origin.clone();
-    let copy = workspace.ingest(name.clone(), origin, mine, log);
-    workspace.place(copy, dir.join(&name));
-    workspace.revert(id, log);
+    workspace.drop_edits(id);
+    log.say(format!("Your edits are kept as “{name}”."));
 }
 
 fn new_folder(browser: &mut Browser, workspace: &Workspace, parent: Option<u64>) {

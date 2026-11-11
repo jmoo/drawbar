@@ -447,6 +447,14 @@ impl Store {
         }
     }
 
+    /// What a message calls the library: by its folder's name where one was picked.
+    fn called(&self) -> String {
+        match &self.name {
+            Some(name) => format!("The library “{name}”"),
+            None => "This computer's library".to_string(),
+        }
+    }
+
     /// The folder the library is.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn root(&self) -> &std::path::Path {
@@ -1543,8 +1551,8 @@ impl Store {
             Event::Opened(Err(why)) => {
                 log.error(format!("opening the library: {why}"));
                 log.trouble(format!(
-                    "This computer's library could not be opened ({why}). Nothing you \
-                     make here is kept."
+                    "{} could not be opened ({why}). Nothing you make here is kept.",
+                    self.called()
                 ));
                 self.phase = Phase::Failed(why);
             }
@@ -1783,8 +1791,8 @@ impl Store {
             }
             Event::ReadOnly(why) if self.open() => {
                 log.trouble(format!(
-                    "This computer's library is read-only now: {why}. Unsaved edits are \
-                     still kept."
+                    "{} is read-only now: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 self.phase = Phase::Unfinished(why);
                 self.turned_read_only = true;
@@ -2074,15 +2082,15 @@ impl Store {
             Ok(()) => Phase::Open,
             Err(Unwritable::ReadOnly(why)) => {
                 log.trouble(format!(
-                    "This computer's library opened read-only: {why}. Unsaved edits are \
-                     still kept."
+                    "{} opened read-only: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 Phase::ReadOnly(why)
             }
             Err(Unwritable::Unfinished(why)) => {
                 log.trouble(format!(
-                    "This computer's library opened read-only: {why}. Unsaved edits are \
-                     still kept."
+                    "{} opened read-only: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 Phase::Unfinished(why)
             }
@@ -2894,7 +2902,7 @@ impl Store {
                 Some(Rescue {
                     slot: Rescue::slot_of(&name),
                     name,
-                    broken: nord_usb::block_on(super::unwhole(file)),
+                    broken: nord_usb::block_on(super::broken(file)),
                     at: path,
                 })
             })
@@ -3318,8 +3326,8 @@ impl Store {
             if self.shelved.values().any(|at| *at == rescue.at) {
                 continue;
             }
-            match (&rescue.broken, self.open()) {
-                (None, true) => self.keep_rescue(rescue, workspace, browser, log),
+            match (rescue.broken, self.open()) {
+                (false, true) => self.keep_rescue(rescue, workspace, browser, log),
                 _ => browser.ask_rescue(rescue),
             }
         }
