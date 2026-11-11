@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
-version = "0.10.0"
+version = "0.11.0"
 
 # The browser suite the Nix build runs headless in Chromium and Firefox.
 [package.metadata.nix]
@@ -33,7 +33,7 @@ egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
 # Hack alone, for the monospace family. eframe's `default_fonts` would add it with
 # Ubuntu Light and two emoji faces; `app::fonts` names the faces it wants instead.
 epaint_default_fonts = "0.32"
-nord-format = { path = "../nord-format", version = "0.8.0", features = [
+nord-format = { path = "../nord-format", version = "0.9.0", features = [
   "bundle",
 ] }
 # `file-handle-inner`: a picked file is copied into the library from its path, or from
@@ -57,7 +57,7 @@ unicode-normalization = "0.1"
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
 # need a `.npno` and nothing else in the workspace builds one without a template.
-nord-format = { path = "../nord-format", version = "0.8.0", features = [
+nord-format = { path = "../nord-format", version = "0.9.0", features = [
   "synthetic",
 ] }
 # Read drawbar's own source, to find every character its text needs a glyph for.
@@ -74,7 +74,7 @@ wasm-bindgen-test = "0.3"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # MIDI input only. drawbar opens no output port.
 midir = "0.11"
-nord-usb = { path = "../nord-usb", version = "0.8.0", features = [
+nord-usb = { path = "../nord-usb", version = "0.9.0", features = [
   "blocking",
   "nusb",
 ] }
@@ -207,6 +207,6 @@ web-sys = { version = "0.3", features = [
   "WorkerType",
   "WritableStream",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.8.0", default-features = false, features = [
+nord-usb = { path = "../nord-usb", version = "0.9.0", default-features = false, features = [
   "web",
 ] }

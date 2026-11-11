@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.8.0"
+version = "0.9.0"
 
 [[bin]]
 name = "nord"
@@ -30,10 +30,10 @@ clap = { version = "4", features = ["derive"] }
 # off because the password, editor and fuzzy prompts are unused.
 dialoguer = { version = "0.12", default-features = false }
 # `bundle` lets `nord inspect` read ZIP bundles and backups.
-nord-format = { path = "../nord-format", version = "0.8.0", features = [
+nord-format = { path = "../nord-format", version = "0.9.0", features = [
   "bundle",
 ] }
-nord-usb = { path = "../nord-usb", version = "0.8.0", features = [
+nord-usb = { path = "../nord-usb", version = "0.9.0", features = [
   "blocking",
   "replay",
 ] }
