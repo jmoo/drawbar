@@ -68,6 +68,14 @@ impl Kind {
             Kind::Feedback => "What would make drawbar better for you?",
         }
     }
+
+    /// Whether the sheet opens with every attachment checked.
+    fn attaches(self) -> bool {
+        match self {
+            Kind::Problem => true,
+            Kind::Feedback => false,
+        }
+    }
 }
 
 /// Where the send is.
@@ -111,6 +119,9 @@ pub struct Report {
     with_faults: bool,
     with_build: bool,
     with_log: bool,
+    /// Whether the reader has changed an attachment, after which a change of kind leaves
+    /// them as they are.
+    handpicked: bool,
     /// What went wrong recently and what this build is, read when the sheet opens.
     faults: Vec<String>,
     build: String,
@@ -136,9 +147,10 @@ impl Report {
             kind,
             text: String::new(),
             contact: String::new(),
-            with_faults: true,
-            with_build: true,
-            with_log: false,
+            with_faults: kind.attaches(),
+            with_build: kind.attaches(),
+            with_log: kind.attaches(),
+            handpicked: false,
             faults: telemetry::recent(),
             build: build_lines(device, workspace, store),
             frozen: None,
@@ -243,6 +255,24 @@ impl Report {
         };
     }
 
+    fn attachments(&mut self) -> [&mut bool; 3] {
+        [
+            &mut self.with_faults,
+            &mut self.with_build,
+            &mut self.with_log,
+        ]
+    }
+
+    /// Turn to `kind`, taking its attachments unless the reader has picked them.
+    fn turn(&mut self, kind: Kind) {
+        self.kind = kind;
+        if !self.handpicked {
+            self.attachments()
+                .into_iter()
+                .for_each(|on| *on = kind.attaches());
+        }
+    }
+
     fn busy(&self) -> bool {
         matches!(self.state, State::Sending { .. } | State::Waiting { .. })
     }
@@ -289,12 +319,14 @@ impl Report {
     }
 
     fn form(&mut self, ui: &mut egui::Ui, log: &Log) {
+        let mut kind = self.kind;
         ui.add_enabled_ui(!self.busy(), |ui| {
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.kind, Kind::Problem, "Report a problem");
-                ui.radio_value(&mut self.kind, Kind::Feedback, "Send feedback");
+                ui.radio_value(&mut kind, Kind::Problem, "Report a problem");
+                ui.radio_value(&mut kind, Kind::Feedback, "Send feedback");
             });
         });
+        self.turn(kind);
         ui.add_space(sheet::GAP * 2.0);
         ui.add_enabled_ui(!self.busy(), |ui| {
             ui.add(
@@ -316,15 +348,18 @@ impl Report {
                 0 => "Recent errors (none)".to_string(),
                 n => format!("Recent errors ({n})"),
             };
-            ui.checkbox(&mut self.with_faults, faults);
-            ui.checkbox(&mut self.with_build, "This build and the instrument");
-            ui.checkbox(
-                &mut self.with_log,
-                format!(
-                    "The activity log's last {} entries, which name your files",
-                    ENTRIES
-                ),
-            );
+            let picked = ui.checkbox(&mut self.with_faults, faults).changed()
+                | ui.checkbox(&mut self.with_build, "This build and the instrument")
+                    .changed()
+                | ui.checkbox(
+                    &mut self.with_log,
+                    format!(
+                        "The activity log's last {} entries, which name your files",
+                        ENTRIES
+                    ),
+                )
+                .changed();
+            self.handpicked |= picked;
         });
         egui::CollapsingHeader::new("What will be sent")
             .id_salt("report-preview")
@@ -662,11 +697,60 @@ mod tests {
             with_faults: true,
             with_build: true,
             with_log: true,
+            handpicked: false,
             faults: vec!["put: transport".to_string()],
             build: "Version: 0.10.0\n".to_string(),
             frozen: None,
             state,
         }
+    }
+
+    #[test]
+    fn a_problem_opens_with_every_attachment_checked_and_feedback_with_none() {
+        let ctx = testing::context();
+        let device = Device::new(ctx.clone());
+        let workspace = Workspace::new(ctx);
+        let checked = |mut report: Report| report.attachments().map(|on| *on);
+        assert_eq!(
+            checked(Report::problem(&device, &workspace, None)),
+            [true; 3]
+        );
+        assert_eq!(
+            checked(Report::feedback(&device, &workspace, None)),
+            [false; 3]
+        );
+    }
+
+    #[test]
+    fn switching_kind_takes_its_attachments_until_one_is_changed() {
+        let ctx = testing::context();
+        egui_extras::install_image_loaders(&ctx);
+        let log = Log::default();
+        let mut report = report(State::Drafting);
+        report.text = "Thanks.".to_string();
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 800.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::Modal::new(egui::Id::new("report"))
+                    .frame(sheet::frame(&ctx.style().visuals))
+                    .show(ctx, |ui| report.show(ui, &log));
+            });
+            testing::painted(&output)
+        };
+        frame(Vec::new());
+        let mut click = |label: &str| {
+            let at = testing::where_(&frame(Vec::new()), label).center();
+            frame(testing::click(at));
+        };
+        click("Send feedback");
+        click("This build and the instrument");
+        click("This build and the instrument");
+        click("Report a problem");
+        assert_eq!(
+            report.attachments().map(|on| *on),
+            [false; 3],
+            "feedback unchecked every attachment, and once one is changed they stay"
+        );
     }
 
     /// The shell refuses a smaller screen than this, so a long message scrolls and the
