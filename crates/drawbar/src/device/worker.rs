@@ -422,7 +422,7 @@ async fn back_up<T: Transport>(
 ) -> Result<Kept, String> {
     let at = info.location;
     let mut kept = scratch
-        .create(&envelope::rescue_name_for(at, &info.format))
+        .create(&envelope::rescue_name_for(info))
         .await
         .map_err(|e| unkeepable(&e))?;
     let read: Result<(), Error> = async {
@@ -2140,8 +2140,11 @@ mod wire_tests {
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
-        assert_eq!(handed_on(&said), [dir.at("nord-rescued-1-4.ne5p")]);
-        assert_eq!(dir.names(""), ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(
+            handed_on(&said),
+            [dir.at("nord-rescued-1-4 (Squabble B).ne5p")]
+        );
+        assert_eq!(dir.names(""), ["nord-rescued-1-4 (Squabble B).ne5p"]);
         assert_eq!(
             failures(&said).len(),
             1,
@@ -2185,7 +2188,7 @@ mod wire_tests {
 
         let held = device.at_delete.clone().expect("a delete was sent");
         let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(names, ["nord-rescued-1-4 (Squabble B).ne5p"]);
         let (len, format) = device.occupant;
         let occupant = envelope::wrap(format, at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
         assert!(held[0].1 == occupant, "the file is the occupant's");
@@ -2219,11 +2222,11 @@ mod wire_tests {
 
         assert_eq!(device.at_reads.len(), 4, "a read of four chunks");
         for names in &device.at_reads {
-            assert_eq!(names, &["nord-rescued-1-4.ne5p.partial"]);
+            assert_eq!(names, &["nord-rescued-1-4 (Squabble B).ne5p.partial"]);
         }
         let held = device.at_delete.clone().expect("a delete was sent");
         let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["nord-rescued-1-4.ne5p"]);
+        assert_eq!(names, ["nord-rescued-1-4 (Squabble B).ne5p"]);
         let occupant = envelope::wrap("ne5p", at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
         assert!(held[0].1 == occupant, "the file is the occupant's, whole");
     }
@@ -2307,7 +2310,10 @@ mod wire_tests {
         assert!(flow == Flow::Lost, "the instrument stopped answering");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
-        assert_eq!(handed_on(&said), [dir.at("nord-rescued-1-4.ne5p")]);
+        assert_eq!(
+            handed_on(&said),
+            [dir.at("nord-rescued-1-4 (Squabble B).ne5p")]
+        );
         let failed = failures(&said);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("may have been deleted"), "{}", failed[0]);
@@ -3338,10 +3344,10 @@ mod wire_tests {
         );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
-        let kept = dir.at("nord-rescued-1-1.npno");
-        assert_eq!(dir.names(""), ["nord-rescued-1-1.npno"]);
+        let kept = dir.at("nord-rescued-1-1 (Grand).npno");
+        assert_eq!(dir.names(""), ["nord-rescued-1-1 (Grand).npno"]);
         assert!(
-            dir.read("nord-rescued-1-1.npno") == occupant_file(at, len),
+            dir.read("nord-rescued-1-1 (Grand).npno") == occupant_file(at, len),
             "the kept file is the occupant's"
         );
         let said: Vec<DeviceEvent> = events.try_iter().collect();

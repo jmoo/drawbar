@@ -42,7 +42,7 @@ proceed? [y/N]
 `move` reports a swap rather than an overwrite, because the instrument exchanges
 the two slots and nothing is lost. It also lists the songs that point at the
 program, since the instrument updates them to follow it. `put` names the slot
-after the file.
+after the file, or after the old sound when the file is one `nord` saved.
 
 `--yes` skips the question. Without a terminal to ask on, the command stops
 with `refusing to proceed without --yes`. There is no `--force`, and nothing
@@ -52,13 +52,23 @@ skips the read.
 
 The instrument does not overwrite an occupied slot in place, so a `put` into one
 deletes the old sound first. `nord` first saves the old sound in the working
-directory as a file such as `nord-rescued-7-50.ne5p`, and puts it back if the
-write fails. The file is deleted once the slot holds what it should. If the
-write and the put-back both fail, or `nord` is stopped partway, the file stays,
-and `put` takes it straight back. Live slots and settings are the exception: the
-instrument overwrites those in place.
+directory as a file such as `nord-rescued-7-50 (Grand).ne5p`, and puts it back
+if the write fails. The file is deleted once the slot holds what it should. Live
+slots and settings are the exception: the instrument overwrites those in place.
 
-While the old sound is read, its file is named `nord-rescued-7-50.ne5p.partial`.
+If the write and the put-back both fail, or `nord` is stopped partway, the file
+stays, and `put` takes it straight back under the sound's own name:
+
+```sh
+nord program put "nord-rescued-7-50 (Grand).ne5p" 7:50
+```
+
+A name with a character other than a letter, a digit, a space or one of
+`-_.,'&+!` is left out of the file's name, and `put` then leaves the slot
+unnamed.
+
+While the old sound is read, its file is named
+`nord-rescued-7-50 (Grand).ne5p.partial`.
 It takes its own name only once it is complete, and the slot is not touched
 before then. A `.partial` file left by a stopped `nord` can be deleted, and the
 next rescue of that slot replaces it.

@@ -386,7 +386,7 @@ impl Found {
 /// what the slot held, so nothing sweeps it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Rescue {
-    /// Its file's name: [`nord_usb::envelope::rescue_name`], numbered where taken.
+    /// Its file's name: [`nord_usb::envelope::rescue_name_for`], numbered where taken.
     pub name: String,
     /// The slot it came off, as its name says.
     pub slot: Option<nord_usb::Location>,
@@ -411,16 +411,6 @@ async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<Str
 }
 
 impl Rescue {
-    /// The slot a rescue named `name` came off: [`nord_usb::envelope::rescue_name`] numbers
-    /// its bank and slot from one.
-    pub fn slot_of(name: &str) -> Option<nord_usb::Location> {
-        let rest = name.strip_prefix(nord_usb::envelope::RESCUED)?;
-        let (bank, rest) = rest.split_once('-')?;
-        let slot: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        let (bank, slot) = (bank.parse().ok()?, slot.parse().ok()?);
-        (bank >= 1 && slot >= 1).then(|| nord_usb::Location::from_user(bank, slot))
-    }
-
     /// Whether the system's file manager can show it: only on the desktop.
     pub fn shows(&self) -> bool {
         cfg!(not(target_arch = "wasm32"))

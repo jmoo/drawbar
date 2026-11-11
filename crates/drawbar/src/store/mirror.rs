@@ -2892,7 +2892,7 @@ impl Store {
                 }
                 let file = std::fs::File::open(&path).and_then(nord_usb::envelope::Positional::new);
                 Some(Rescue {
-                    slot: Rescue::slot_of(&name),
+                    slot: nord_usb::envelope::Rescued::parse(&name).map(|rescued| rescued.at),
                     name,
                     broken: nord_usb::block_on(super::unwhole(file)),
                     at: path,

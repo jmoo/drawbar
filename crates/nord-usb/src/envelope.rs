@@ -5,7 +5,7 @@
 //! header. The container codec and checksum live in `nord_format::cbin`.
 
 use crate::error::{Error, Result};
-use crate::wire::Location;
+use crate::wire::{Location, ProgramInfo};
 use nord_format::cbin::{self, Cbin, Generation, Header, RawBody, Verifier};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -48,17 +48,72 @@ fn tag_text(tag: &[u8]) -> Option<String> {
         .then(|| String::from_utf8_lossy(tag).into_owned())
 }
 
-/// Filename for the bytes rescued from a slot: the location as the instrument labels
-/// it, and the object's own format tag, or `bin` without one, so the file can be
-/// written straight back. The checksum is not verified.
-pub fn rescue_name(at: Location, backup: &[u8]) -> String {
-    rescued(at, unchecked_tag(backup).as_deref())
+/// Filename for the bytes rescued from the slot `info` describes, named before any of
+/// them are read: [`RESCUED`], the location as the instrument labels it, the occupant's
+/// name in parentheses, and its format tag, or `bin` without one, so the file can be
+/// written straight back under its own name, as `nord-rescued-7-50 (Grand).ne5p`.
+///
+/// The name is left out unless every character is a letter, a digit, a space or one of
+/// `-_.,'&+!`, and it is at most 160 bytes, so every supported system can hold the file
+/// and [`Rescued::parse`] reads back exactly the name it holds.
+pub fn rescue_name_for(info: &ProgramInfo) -> String {
+    let name = &info.name;
+    let named = match name.is_empty() || name.len() > LONGEST_NAME || !name.chars().all(plain) {
+        true => String::new(),
+        false => format!(" ({name})"),
+    };
+    let format = tag_text(info.format.as_bytes());
+    format!(
+        "{RESCUED}{}-{}{named}.{}",
+        info.location.user_bank(),
+        info.location.user_slot(),
+        format.as_deref().unwrap_or("bin")
+    )
 }
 
-/// [`rescue_name`] for a slot whose object the device reported as `format`, before any
-/// of its bytes are read.
-pub fn rescue_name_for(at: Location, format: &str) -> String {
-    rescued(at, tag_text(format.as_bytes()).as_deref())
+/// The longest occupant's name, in bytes, a rescue's file name carries. It
+/// leaves room under the 255 bytes of a file name for the rest of it, a number that makes
+/// it free, and [`PARTIAL`].
+const LONGEST_NAME: usize = 160;
+
+/// What a rescue's file name says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rescued {
+    /// The slot it came off.
+    pub at: Location,
+    /// What the slot was called, empty where its file name carries no name.
+    pub name: String,
+}
+
+impl Rescued {
+    /// What `file_name` says, where it is a rescue's as [`rescue_name_for`] names one.
+    /// Whatever follows the location or the parenthesized name, such as a number that made
+    /// the name free, is ignored.
+    pub fn parse(file_name: &str) -> Option<Rescued> {
+        let rest = file_name.strip_prefix(RESCUED)?;
+        let (bank, rest) = rest.split_once('-')?;
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let (slot, rest) = rest.split_at(digits);
+        let (bank, slot): (u32, u32) = (bank.parse().ok()?, slot.parse().ok()?);
+        if bank == 0 || slot == 0 {
+            return None;
+        }
+        let name = rest
+            .strip_prefix(" (")
+            .and_then(|rest| rest.split_once(')'))
+            .map_or_else(String::new, |(name, _)| name.to_string());
+        Some(Rescued {
+            at: Location::from_user(bank, slot),
+            name,
+        })
+    }
+}
+
+/// Whether a rescue's file name can carry a slot name holding `c`.
+fn plain(c: char) -> bool {
+    c.is_alphanumeric() || " -_.,'&+!".contains(c)
 }
 
 /// Every rescued file's name starts with this.
@@ -71,15 +126,6 @@ pub const PARTIAL: &str = ".partial";
 /// Whether `name` is a rescue's, written whole: a file that may be a slot's only copy.
 pub fn is_rescue(name: &str) -> bool {
     name.starts_with(RESCUED) && !name.ends_with(PARTIAL)
-}
-
-fn rescued(at: Location, format: Option<&str>) -> String {
-    format!(
-        "{RESCUED}{}-{}.{}",
-        at.user_bank(),
-        at.user_slot(),
-        format.unwrap_or("bin")
-    )
 }
 
 /// Wrap a wire body in a `CBIN` header, producing the bytes of a `.ne5p`-style file.
@@ -474,11 +520,109 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
+    fn occupant(at: Location, format: &str, name: &str) -> ProgramInfo {
+        ProgramInfo {
+            location: at,
+            body_len: 1,
+            format: format.into(),
+            version: 4,
+            crc32: None,
+            modified: None,
+            name: name.into(),
+        }
+    }
+
+    /// A rescue file is the last copy of an object that no longer exists on the
+    /// instrument, so its name must say where it came from, what it is, and what the
+    /// slot was called.
     #[test]
-    fn a_rescue_named_before_its_read_takes_the_reported_tag() {
-        let at = Location { bank: 0, slot: 0 };
-        assert_eq!(rescue_name_for(at, "npno"), "nord-rescued-1-1.npno");
-        assert_eq!(rescue_name_for(at, "nsp\0"), "nord-rescued-1-1.bin");
+    fn a_rescue_is_named_for_its_slot_its_occupant_and_its_format() {
+        let at = Location { bank: 6, slot: 49 };
+        let named = |format, name| rescue_name_for(&occupant(at, format, name));
+        assert_eq!(named("ne5p", "Grand"), "nord-rescued-7-50 (Grand).ne5p");
+        assert_eq!(named("ne5t", "Gig"), "nord-rescued-7-50 (Gig).ne5t");
+        assert_eq!(named("npno", ""), "nord-rescued-7-50.npno");
+        assert_eq!(named("nsp\0", "Pad"), "nord-rescued-7-50 (Pad).bin");
+    }
+
+    /// `put` restores the slot's name from its rescue, so a name the file carries is
+    /// read back exactly.
+    #[test]
+    fn a_rescue_names_its_slot_and_occupant_back_exactly() {
+        let at = Location::from_user(3, 12);
+        for name in [
+            "",
+            "Grand",
+            "Royal Grand 3D YaS6 XL 5.4",
+            "Café",
+            "CON",
+            " . ",
+        ] {
+            let file = rescue_name_for(&occupant(at, "ne5p", name));
+            let back = Rescued::parse(&file);
+            assert_eq!(
+                back,
+                Some(Rescued {
+                    at,
+                    name: name.into()
+                }),
+                "{file:?}"
+            );
+        }
+    }
+
+    /// A name a file name could not hold on every system, or that would not read back
+    /// as written, is left out, as an empty one is.
+    #[test]
+    fn a_name_with_a_character_that_is_not_plain_is_left_out() {
+        let at = Location::from_user(3, 12);
+        for name in [
+            "A/B: mix?",
+            "C:\\new <\"x\"> |*",
+            "100% (live)",
+            "tab\there",
+        ] {
+            let file = rescue_name_for(&occupant(at, "ne5p", name));
+            assert_eq!(file, "nord-rescued-3-12.ne5p", "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_file_name_is_left_out() {
+        let at = Location::from_user(1, 1);
+        let name = "a".repeat(LONGEST_NAME + 1);
+        let file = rescue_name_for(&occupant(at, "ne5p", &name));
+        assert_eq!(file, "nord-rescued-1-1.ne5p");
+        let fits = "a".repeat(LONGEST_NAME);
+        let file = rescue_name_for(&occupant(at, "ne5p", &fits));
+        assert!(file.len() + "-100".len() + PARTIAL.len() <= 255, "{file}");
+        assert_eq!(Rescued::parse(&file).map(|r| r.name), Some(fits));
+    }
+
+    /// A copy numbered to make its name free, by `nord` or by a library, still says
+    /// where it came from.
+    #[test]
+    fn a_numbered_rescue_still_names_its_slot_and_occupant() {
+        let rescued = |name: &str| Rescued::parse(name).map(|r| (r.at, r.name));
+        let at = Location::from_user(1, 4);
+        let grand = Some((at, "Grand".to_string()));
+        assert_eq!(rescued("nord-rescued-1-4 (Grand)-2.npno"), grand);
+        assert_eq!(rescued("nord-rescued-1-4 (Grand) 2.npno"), grand);
+        assert_eq!(
+            rescued("nord-rescued-1-4 2.npno"),
+            Some((at, String::new()))
+        );
+        assert_eq!(
+            rescued("nord-rescued-1-4-2.npno"),
+            Some((at, String::new()))
+        );
+        assert_eq!(
+            rescued("nord-rescued-3-12.ne5p"),
+            Some((Location::from_user(3, 12), String::new()))
+        );
+        assert_eq!(rescued("nord-rescued-0-4.npno"), None);
+        assert_eq!(rescued("nord-rescued-notes.npno"), None);
+        assert_eq!(rescued("Grand.npno"), None);
     }
 
     #[test]
@@ -492,42 +636,16 @@ mod tests {
         );
     }
 
-    /// A rescue file is the last copy of an object that no longer exists on the
-    /// instrument, so its name must say where it came from and what it is.
-    #[test]
-    fn a_rescued_slot_is_named_for_its_location_and_format() {
-        // A minimal CBIN: magic, header type, tag. The checksum is left wrong, because
-        // naming must not depend on the backup being intact.
-        let mut file = vec![0u8; 45];
-        file[0..4].copy_from_slice(b"CBIN");
-        file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        file[8..12].copy_from_slice(b"ne5p");
-        let at = Location { bank: 6, slot: 49 };
-        assert_eq!(rescue_name(at, &file), "nord-rescued-7-50.ne5p");
-    }
-
-    /// A set list must not land with a program's extension.
-    #[test]
-    fn a_rescued_slot_takes_its_format_tag_from_the_bytes() {
-        let mut file = vec![0u8; 45];
-        file[8..12].copy_from_slice(b"ne5t");
-        let at = Location { bank: 0, slot: 3 };
-        assert_eq!(rescue_name(at, &file), "nord-rescued-1-4.ne5t");
-    }
-
     #[test]
     fn a_rescue_still_being_written_is_not_a_rescue() {
-        let name = rescue_name_for(Location::from_user(1, 159), "nsmp");
+        let name = rescue_name_for(&occupant(Location::from_user(1, 159), "nsmp", "Pad"));
         assert!(is_rescue(&name), "{name}");
         assert!(!is_rescue(&format!("{name}{PARTIAL}")), "{name}{PARTIAL}");
         assert!(!is_rescue("fetched-0-158.nsmp"));
     }
 
-    /// Bytes that do not parse are still the only copy, so they must still get a name.
     #[test]
-    fn unparseable_bytes_are_rescued_as_bin() {
-        let at = Location { bank: 0, slot: 0 };
-        assert_eq!(rescue_name(at, b"nonsense"), "nord-rescued-1-1.bin");
+    fn a_tag_is_four_letters_or_digits() {
         let mut short = vec![0u8; 12];
         short[8..12].copy_from_slice(b"ne5\0");
         assert_eq!(unchecked_tag(&short), None, "a NUL is not part of a tag");

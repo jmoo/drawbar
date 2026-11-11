@@ -859,7 +859,7 @@ pub fn put(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let (mut file, stem, stamp) = open_put(&path)?;
+    let (mut file, name, stamp) = open_put(&path)?;
     send(
         ui,
         &mut file,
@@ -867,14 +867,17 @@ pub fn put(
         class,
         confirmed,
         &path.display().to_string(),
-        Some(&stem),
+        Some(&name),
         stamp,
     )
 }
 
 /// The file a `put` sends, checked whole against its checksum, read a transfer chunk at a
-/// time, before anything touches the device. With it, the name the slot takes from the
-/// file's stem, and the file's modification time, as Nord Sound Manager sends.
+/// time, before anything touches the device. With it, the name the slot takes, and the
+/// file's modification time, as Nord Sound Manager sends.
+///
+/// The name is the one a [rescue](envelope::Rescued) carries, where the file is one, so a
+/// slot put back takes its own name again; any other file names the slot by its stem.
 fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u32>), String> {
     let at_path = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut file = std::fs::File::open(path)
@@ -884,17 +887,14 @@ fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u3
         nord_usb::Error::Io(e) => at_path(e),
         e => e.to_string(),
     })?;
-    // The write carries the slot's name, and the file has none, so the stem supplies it.
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty() && !s.starts_with('.'))
-        .ok_or_else(|| {
-            format!(
-                "{}: the slot takes its name from the file's stem, and this file has none",
-                path.display()
-            )
-        })?;
+    let rescued = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(envelope::Rescued::parse);
+    let name = match rescued {
+        Some(rescued) => rescued.name,
+        None => stem_of(path)?,
+    };
     let stamp = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -907,7 +907,20 @@ fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u3
                 path.display()
             )
         })?;
-    Ok((file, stem, stamp))
+    Ok((file, name, stamp))
+}
+
+/// The name a file that holds none gives the slot it is written to: its stem.
+fn stem_of(path: &Path) -> Result<String, String> {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with('.'))
+        .ok_or_else(|| {
+            format!(
+                "{}: the slot takes its name from the file's stem, and this file has none",
+                path.display()
+            )
+        })
 }
 
 /// Send an already validated file into a slot, describing the target first, reading it a
@@ -1215,7 +1228,7 @@ fn rescue_file(
     if !dir.exists() {
         return Err("the folder does not exist".into());
     }
-    fresh(dir, &envelope::rescue_name_for(info.location, &info.format))
+    fresh(dir, &envelope::rescue_name_for(info))
 }
 
 /// Read the occupant of `info.location` so it can be put back, into `file`, a new file
@@ -2492,6 +2505,8 @@ mod tests {
         const GEOMETRY: &str = include_str!("../../nord-usb/tests/scripts/device/geometry.script");
         pub(super) const AT: Location = Location { bank: 6, slot: 9 };
         const NAME: &str = "prog-8-14";
+        /// The rescue of the recorded occupant, which is also called `prog-8-14`.
+        pub(super) const RESCUE: &str = "nord-rescued-7-10 (prog-8-14).ne5p";
         pub(super) const STAMP: u32 = 0x6a89_f433;
 
         /// The recorded transactions a put runs through: geometry, check-address, info,
@@ -2587,10 +2602,10 @@ mod tests {
             let err = send_over(steps, &dir).unwrap_err();
             assert!(err.contains("restoring failed as well"), "{err}");
             assert!(err.contains("were saved to"), "{err}");
-            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+            assert_eq!(rescued(&dir), [RESCUE]);
             // The error says to send it back with `put`, which reads it this way before
             // touching the instrument.
-            let saved = std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap();
+            let saved = std::fs::read(dir.join(RESCUE)).unwrap();
             assert!(nord_usb::envelope::unwrap(&saved).is_ok());
         }
 
@@ -2608,7 +2623,7 @@ mod tests {
             let err = send_over(steps, &dir).unwrap_err();
             assert!(err.contains("may have been deleted"), "{err}");
             assert!(err.contains("were saved to"), "{err}");
-            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
+            assert_eq!(rescued(&dir), [RESCUE]);
         }
 
         /// The replay, recording what `dir` holds the first time `watch` is sent, or
@@ -2694,7 +2709,7 @@ mod tests {
                 .clone()
                 .expect("the DELETE was sent");
             let names: Vec<_> = seen.iter().map(|(name, _)| name.as_str()).collect();
-            assert_eq!(names, ["nord-rescued-7-10.ne5p"]);
+            assert_eq!(names, [RESCUE]);
             let (_, kept) = &seen[0];
             assert!(nord_usb::envelope::unwrap(kept).is_ok(), "a whole file");
             assert_eq!(rescued(&dir), Vec::<String>::new(), "let go once written");
@@ -2706,7 +2721,7 @@ mod tests {
         #[test]
         fn the_occupant_is_read_under_a_partial_name() {
             let dir = crate::edit::tests::scratch("send-partial");
-            std::fs::write(dir.join("nord-rescued-7-10.ne5p.partial"), b"stale").unwrap();
+            std::fs::write(dir.join(format!("{RESCUE}{}", envelope::PARTIAL)), b"stale").unwrap();
             let put = recorded();
             let begin_read = put[3][7].frame().expect("the BEGIN_READ").to_vec();
             let mut device = Device::new(Watched {
@@ -2736,7 +2751,7 @@ mod tests {
                 .clone()
                 .expect("the BEGIN_READ was sent");
             let names: Vec<_> = seen.iter().map(|(name, _)| name.as_str()).collect();
-            assert_eq!(names, ["nord-rescued-7-10.ne5p.partial"]);
+            assert_eq!(names, [format!("{RESCUE}{}", envelope::PARTIAL)]);
             assert!(!envelope::is_rescue(names[0]));
         }
 
@@ -3137,6 +3152,25 @@ mod tests {
             assert_eq!(rescued(&dir), Vec::<String>::new());
         }
 
+        /// A rescue names the slot it is put into as the slot was named, and one that
+        /// carries no name leaves it unnamed.
+        #[test]
+        fn a_rescue_put_back_names_its_slot_as_it_was_named() {
+            let dir = crate::edit::tests::scratch("put-rescue-name");
+            let file = envelope::wrap("ne5p", AT, 4, &body(10)).unwrap();
+            for (rescue, slot) in [
+                ("nord-rescued-7-10 (Bass 2.0).ne5p", "Bass 2.0"),
+                ("nord-rescued-7-10 (Grand)-2.ne5p", "Grand"),
+                ("nord-rescued-7-10.ne5p", ""),
+                ("Grand Piano.ne5p", "Grand Piano"),
+            ] {
+                let path = dir.join(rescue);
+                std::fs::write(&path, &file).unwrap();
+                let (_, name, _) = open_put(&path).expect("an intact file opens");
+                assert_eq!(name, slot, "{rescue}");
+            }
+        }
+
         /// A damaged file is refused before the device is opened, by its path.
         #[test]
         fn a_damaged_file_is_refused_before_the_put_begins() {
@@ -3193,12 +3227,15 @@ mod tests {
             assert!(err.contains("restoring failed as well"), "{err}");
             assert!(err.contains("were saved to"), "{err}");
             assert!(exhausted);
-            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p"]);
-            let saved = std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap();
+            let rescue = "nord-rescued-7-10 (Big).ne5p";
+            assert_eq!(rescued(&dir), [rescue]);
+            let saved = std::fs::read(dir.join(rescue)).unwrap();
             assert!(
                 saved == envelope::wrap("ne5p", AT, 4, &occupant).unwrap(),
                 "the rescue is the occupant's file"
             );
+            let (_, name, _) = open_put(&dir.join(rescue)).expect("the rescue opens");
+            assert_eq!(name, "Big", "put back, the slot takes the occupant's name");
         }
 
         /// A `get` into a file writes the file as the read arrives, and the file is the
