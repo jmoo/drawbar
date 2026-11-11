@@ -571,8 +571,22 @@ pub fn ui(
     }
 }
 
-/// The take's level across `rect`, rising from a baseline along its bottom: in the
-/// accent while the file is sounding, and the body text color when it is not.
+/// How far under full scale a lane shows, in dB: the baseline. Drawn in proportion to the
+/// samples, a release 30 dB down filled a few pixels and could not be seen.
+const FLOOR_DB: f32 = 60.0;
+
+/// The height a peak of `peak` of full scale stands to, of a lane's room: in decibels
+/// over [`FLOOR_DB`] under full scale.
+fn height(peak: f32) -> f32 {
+    match peak > 0.0 {
+        true => ((20.0 * peak.log10() + FLOOR_DB) / FLOOR_DB).clamp(0.0, 1.0),
+        false => 0.0,
+    }
+}
+
+/// The take's level across `rect`, rising from a baseline along its bottom on a decibel
+/// scale: in the accent while the file is sounding, and the body text color when it is
+/// not.
 pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], playing: bool) {
     let visuals = painter.ctx().style().visuals.clone();
     let ink = match playing {
@@ -592,7 +606,7 @@ pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], pla
     let room = rect.height() - 2.0;
     for (i, peak) in lane.iter().enumerate() {
         let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
-        let top = base - peak.clamp(0.0, 1.0) * room;
+        let top = base - height(*peak) * room;
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(left, top.min(base - 1.0)),
@@ -799,6 +813,18 @@ mod tests {
                 "column {column}"
             );
         }
+    }
+
+    #[test]
+    fn a_lane_stands_in_decibels_over_its_floor() {
+        assert_eq!(height(1.0), 1.0);
+        assert!(
+            (height(10f32.powf(-30.0 / 20.0)) - 0.5).abs() < 1e-4,
+            "30 dB down is half"
+        );
+        assert_eq!(height(1e-4), 0.0, "80 dB down is under the floor");
+        assert_eq!(height(0.0), 0.0);
+        assert_eq!(height(2.0), 1.0, "over full scale stops at the top");
     }
 
     #[test]
