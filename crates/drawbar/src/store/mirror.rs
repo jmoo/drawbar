@@ -2315,11 +2315,19 @@ impl Store {
         if let Some(unlisted) = unlisted {
             let unlisted: BTreeSet<LibPath> = unlisted.into_iter().collect();
             const SHOWN: usize = 3;
-            let new: Vec<&LibPath> = unlisted.difference(&browser.folders.unwalked).collect();
-            if !new.is_empty() {
+            let mut unread: Vec<&LibPath> = Vec::new();
+            for path in unlisted.difference(&browser.folders.unwalked) {
+                match names::refused_here(path.as_str()) {
+                    Some(refused) => {
+                        log.trouble(format!("drawbar could not read “{path}”: {refused}."))
+                    }
+                    None => unread.push(path),
+                }
+            }
+            if !unread.is_empty() {
                 log.trouble(format!(
                     "drawbar could not read {}, so what is in it is not shown.",
-                    crate::strings::quoted_some(&new, SHOWN)
+                    crate::strings::quoted_some(&unread, SHOWN)
                 ));
             }
             browser.folders.unwalked = unlisted;

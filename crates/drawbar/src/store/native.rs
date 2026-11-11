@@ -421,21 +421,15 @@ struct Disk {
 /// ⚠️ A folder made a link between this look and the call that follows is still
 /// followed. Only another program on this computer can do that, while drawbar works.
 pub(super) fn locate(root: &Path, path: &str) -> io::Result<PathBuf> {
+    // ⚠️ A `:` names a drive or a stream and a `\` separates folders, so either can
+    // reach outside the library.
+    if let Some(refused) = names::refused_here(path) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, refused));
+    }
     let mut at = root.to_path_buf();
     let mut parts = path.split('/').filter(|part| !part.is_empty()).peekable();
     let mut looking = true;
     while let Some(part) = parts.next() {
-        // ⚠️ A `:` names a drive or a stream and a `\` separates folders, so either
-        // can reach outside the library.
-        if let Some(why) = cfg!(windows)
-            .then(|| names::windows_refusal(part))
-            .flatten()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{part:?} is not a name Windows holds, since {why}"),
-            ));
-        }
         at.push(part);
         if !looking || parts.peek().is_none() {
             continue;

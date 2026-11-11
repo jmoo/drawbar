@@ -4950,6 +4950,43 @@ fn a_folder_that_cannot_be_read_is_reported_and_the_rest_opens() {
     assert!(session.bench.browser.folders.unwalked.is_empty());
 }
 
+/// A folder or file made elsewhere whose name ends in a dot or a space is refused by name
+/// on Windows, which drops that end and would open another entry.
+#[cfg(windows)]
+#[test]
+fn a_name_windows_drops_the_end_of_is_refused_by_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let exact = |name: &str| std::path::PathBuf::from(format!(r"\\?\{}\{name}", root.0.display()));
+    for dir in ["dotdir.", "spacedir "] {
+        fs::create_dir(exact(dir)).unwrap();
+        fs::write(exact(&format!(r"{dir}\inside.ne5p")), &program).unwrap();
+    }
+    for file in ["outside.ne5p", "tdot.ne5p.", "tspace.ne5p "] {
+        fs::write(exact(file), &program).unwrap();
+    }
+    let session = Session::listed(&root);
+    let listed: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|e| &e.name[..])
+        .collect();
+    assert_eq!(listed, ["outside.ne5p"]);
+    let folders = &session.bench.browser.folders;
+    let unwalked: Vec<&str> = folders.unwalked.iter().map(LibPath::as_str).collect();
+    assert_eq!(unwalked, ["dotdir.", "spacedir "]);
+    for (dir, why) in [("dotdir.", "a dot"), ("spacedir ", "a space")] {
+        let said = format!(
+            "drawbar could not read “{dir}”: {dir:?} is not a name Windows holds, since it ends \
+             with {why}, which Windows drops."
+        );
+        assert_eq!(session.said(&said), 1, "{said}");
+    }
+    let hidden: Vec<&str> = folders.others.iter().map(LibPath::as_str).collect();
+    assert_eq!(hidden, ["tdot.ne5p.", "tspace.ne5p "]);
+}
+
 /// A tagged file changed since and that drawbar may not read is reported and left out,
 /// and the rest of the library opens; once it can be read, a rescan lists it.
 #[cfg(unix)]

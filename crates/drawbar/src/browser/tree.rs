@@ -1069,9 +1069,11 @@ impl Browser {
                 ..Cells::default()
             },
         );
+        let why = crate::store::names::refused_here(path.as_str())
+            .unwrap_or_else(|| "drawbar does not open this kind of file".into());
         drawn
             .response
-            .on_hover_text("Hidden: drawbar does not open this kind of file.")
+            .on_hover_text(format!("Hidden: {why}."))
             .context_menu(|ui| {
                 if ui.button("Delete…").clicked() {
                     self.ask_delete(path.leaf(), Act::DeleteHidden(path.clone()));
@@ -2057,6 +2059,44 @@ mod tests {
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_hidden_file_windows_cannot_open_says_why_on_hover() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        browser.folders.others = vec![LibPath::root().join("tdot.ne5p.")];
+        browser.folders.all_files = true;
+        let run = |browser: &mut Browser, events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 600.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+            testing::painted(&output)
+        };
+
+        let row = testing::where_(&run(&mut browser, Vec::new()), "tdot.ne5p.").center();
+        run(&mut browser, vec![egui::Event::PointerMoved(row)]);
+        for _ in 0..60 {
+            run(&mut browser, Vec::new());
+        }
+        let said: Vec<String> = run(&mut browser, Vec::new())
+            .into_iter()
+            .map(|word| word.text)
+            .collect();
+        let why = r#"Hidden: "tdot.ne5p." is not a name Windows holds, since it ends with a dot, which Windows drops."#;
+        assert!(said.iter().any(|word| word == why), "{said:?}");
     }
 
     #[test]
