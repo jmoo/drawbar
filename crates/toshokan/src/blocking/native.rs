@@ -20,7 +20,8 @@ use crate::path::RelPath;
 /// out, and naming one fails, as does any request on a path through a directory
 /// that is a link. Each root's capabilities are read, without writing, from its
 /// volume's file system, as the Backends section of `spec/protocol.md` lists. On
-/// Windows, names containing `\` or `:` are refused. A create or rename through a
+/// Windows, a name containing `\` or `:`, which Windows reads as a path, or ending in
+/// a dot or a space, which Windows drops, is refused. A create or rename through a
 /// file fails as [`IoError::NotDirectory`] everywhere; other requests there fail
 /// as [`IoError::NotFound`] on Windows. The local root's directory, and those it
 /// is in, are made where missing at its first change or lock.
@@ -96,10 +97,10 @@ impl Native {
     }
 
     fn stat(&self, root: Root, path: &RelPath) -> Result<Option<Meta>, IoError> {
-        // `full` refuses only a name Windows reads as a path, which no file there has.
-        let Ok(full) = self.full(root, path) else {
+        if path.components().any(reads_as_path) {
             return Ok(None);
-        };
+        }
+        let full = self.full(root, path)?;
         let found = match path.is_root() {
             true => fs::metadata(&full),
             false => fs::symlink_metadata(&full),
@@ -641,19 +642,23 @@ fn done(_: ()) -> Reply {
     Reply::Done
 }
 
-#[cfg(windows)]
+/// Whether Windows reads `name` as a path, which no entry listed there is named.
+fn reads_as_path(name: &str) -> bool {
+    cfg!(windows) && name.contains(['\\', ':'])
+}
+
 fn check_native_name(name: &str) -> Result<(), IoError> {
-    match name.contains(['\\', ':']) {
-        true => Err(IoError::Other(
+    if reads_as_path(name) {
+        return Err(IoError::Other(
             "a name contains `\\` or `:`, which Windows reads as a path".into(),
+        ));
+    }
+    match cfg!(windows) && name.ends_with(['.', ' ']) {
+        true => Err(IoError::Other(
+            "a name ends with a dot or a space, which Windows drops".into(),
         )),
         false => Ok(()),
     }
-}
-
-#[cfg(not(windows))]
-fn check_native_name(_: &str) -> Result<(), IoError> {
-    Ok(())
 }
 
 fn convert(metadata: &fs::Metadata) -> Result<Meta, IoError> {
@@ -1089,6 +1094,86 @@ mod tests {
             assert!(
                 matches!(create, Err(IoError::Other(_))),
                 "{name}: {create:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_windows_drops_the_end_of_is_listed_and_never_opened_as_another() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let dir = std::env::temp_dir().join(format!("toshokan-trailing-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let wide = volume::verbatim(&dir).unwrap();
+        let exact = PathBuf::from(std::ffi::OsString::from_wide(&wide[..wide.len() - 1]));
+        for name in ["dotdir", "dotdir.", "spacedir "] {
+            fs::create_dir(exact.join(name)).unwrap();
+            fs::write(exact.join(name).join("inside.npno"), name).unwrap();
+        }
+        for name in ["tdot.npno", "tdot.npno.", "tspace.npno "] {
+            fs::write(exact.join(name), name).unwrap();
+        }
+        let mut native = Native::new(&dir, &dir);
+        let listed = native.perform(Io::ListStat {
+            root: Root::Folder,
+            dir: RelPath::ROOT,
+        });
+        let Ok(Reply::ListedStat(listed)) = listed else {
+            panic!("{listed:?}");
+        };
+        let listed: Vec<(&str, Kind)> =
+            listed.iter().map(|(n, meta)| (&n[..], meta.kind)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("dotdir", Kind::Directory),
+                ("dotdir.", Kind::Directory),
+                ("spacedir ", Kind::Directory),
+                ("tdot.npno", Kind::File),
+                ("tdot.npno.", Kind::File),
+                ("tspace.npno ", Kind::File),
+            ]
+        );
+        for name in ["dotdir.", "spacedir "] {
+            let dir = RelPath::new(name).unwrap();
+            let inside = native.perform(Io::ListStat {
+                root: Root::Folder,
+                dir,
+            });
+            assert!(
+                matches!(inside, Err(IoError::Other(_))),
+                "{name:?}: {inside:?}"
+            );
+        }
+        for name in ["tdot.npno.", "tspace.npno "] {
+            let path = RelPath::new(name).unwrap();
+            let stat = native.perform(Io::Stat {
+                root: Root::Folder,
+                path: path.clone(),
+            });
+            assert!(matches!(stat, Err(IoError::Other(_))), "{name:?}: {stat:?}");
+            let read = native.perform(Io::Read {
+                root: Root::Folder,
+                path: path.clone(),
+                range: Range { offset: 0, len: 64 },
+            });
+            assert!(matches!(read, Err(IoError::Other(_))), "{name:?}: {read:?}");
+            let remove = native.perform(Io::Remove {
+                root: Root::Folder,
+                path,
+            });
+            assert!(
+                matches!(remove, Err(IoError::Other(_))),
+                "{name:?}: {remove:?}"
+            );
+        }
+        for name in ["tdot.npno", "tdot.npno.", "tspace.npno "] {
+            assert_eq!(
+                fs::read(exact.join(name)).unwrap(),
+                name.as_bytes(),
+                "{name:?}"
             );
         }
         let _ = fs::remove_dir_all(&dir);
