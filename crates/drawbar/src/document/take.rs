@@ -87,8 +87,13 @@ pub struct Marked {
     pub loops: Vec<Range<u32>>,
 }
 
+/// `C4 v22`: a sample as the lane names it.
+pub(super) fn named(hit: Hit) -> String {
+    format!("{} {}", note::name(hit.0), layer(hit.1))
+}
+
 /// `v22` or `l01`, as the label writes the layer.
-fn layer(tag: LayerTag) -> String {
+pub(super) fn layer(tag: LayerTag) -> String {
     match tag {
         LayerTag::Value(value) => format!("v{value:02}"),
         LayerTag::Index(index) => format!("l{index:02}"),
@@ -319,6 +324,9 @@ pub struct View {
     span: Option<Range<f64>>,
     /// The hit picked, by a click on one of its regions.
     pub picked: Option<Hit>,
+    /// The frame clicked where no sample is, which the close lane shows and a sample is
+    /// added at; none while a sample is picked.
+    pub place: Option<u32>,
     /// Where on the scroll bar's thumb it was grabbed, in frames from its start.
     grab: Option<f64>,
     /// How much deeper than [`SPAN_DB`] the lane's scale reaches, in steps.
@@ -369,6 +377,7 @@ impl View {
     /// view, centred, where the lane is zoomed and it is not all shown.
     pub fn pick(&mut self, hit: Hit, marked: &Marked, total: f64, rate: f64) {
         self.picked = Some(hit);
+        self.place = None;
         let (Some(frames), Some(shown)) = (marked.extent(hit), self.span.clone()) else {
             return;
         };
@@ -530,12 +539,14 @@ pub fn ui(
         view.show(shown.start + shift, shown.end + shift, total, rate);
     }
     if response.clicked() {
-        if let Some(hit) = response
-            .interact_pointer_pos()
-            .and_then(under)
-            .and_then(|boxed| boxed.hit)
-        {
-            view.picked = Some(hit);
+        if let Some(at) = response.interact_pointer_pos() {
+            match under(at).and_then(|boxed| boxed.hit) {
+                Some(hit) => (view.picked, view.place) = (Some(hit), None),
+                None => {
+                    let frame = frame_at(at.x).clamp(0.0, (total - 1.0).max(0.0));
+                    (view.picked, view.place) = (None, Some(frame as u32));
+                }
+            }
         }
     }
     if let Some(boxed) = response.hover_pos().and_then(under) {
@@ -601,6 +612,16 @@ pub fn ui(
             egui::FontId::monospace(SMALL_TEXT),
             visuals.text_color(),
         );
+    }
+    if let Some(place) = view.place {
+        let at = x(f64::from(place));
+        if rect.x_range().contains(at) {
+            painter.vline(
+                at,
+                rect.y_range(),
+                egui::Stroke::new(2.0_f32, visuals.text_color()),
+            );
+        }
     }
     painter.rect_stroke(
         rect,

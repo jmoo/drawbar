@@ -326,12 +326,157 @@ impl Close {
 pub const LOOP: &str = "Loop";
 pub const WHOLE: &str = "Whole sample";
 
-/// Draw the picked hit's lane: its caption, legend and zoom, the waveform with its
-/// regions and cut points over it, and the times under it. Nothing where the take marks
-/// no regions; a prompt where it does and none is picked.
+/// A part of a sample the close lane's Add and Delete menus add or delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// A whole sample: its attack, and on adding, a key-off.
+    Note,
+    Loop,
+    KeyOff,
+}
+
+/// What the close lane's Add and Delete menus asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wanted {
+    Add(Piece),
+    Delete(Piece),
+}
+
+/// The labels of the close lane's menus and their items.
+pub const ADD: &str = "Add";
+pub const DELETE: &str = "Delete";
+pub const NOTE: &str = "Note";
+pub const LOOP_ITEM: &str = "Loop";
+pub const KEY_OFF: &str = "Key-off";
+
+/// What Add ▸ Note says, on hover, while a sample is picked.
+const NOTE_WHERE: &str = "Click where the take marks no sample to add one there";
+
+/// How much of the take the close lane shows about a place: from before it to after,
+/// in seconds.
+const PLACE_BEFORE: f64 = 0.5;
+const PLACE_AFTER: f64 = 6.0;
+
+/// The Add and Delete menus, for the sample `cuts` describes, or for a place where none
+/// is picked.
+fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, wanted: &mut Option<Wanted>) {
+    let attack = cuts.is_some_and(|cuts| cuts.attack.is_some());
+    let looped = cuts.is_some_and(|cuts| cuts.looped.is_some());
+    let release = cuts.is_some_and(|cuts| cuts.release.is_some());
+    let picked = cuts.is_some();
+    let items = |ui: &mut egui::Ui,
+                 items: [(&str, Piece, bool); 3],
+                 made: fn(Piece) -> Wanted,
+                 wanted: &mut Option<Wanted>| {
+        for (word, piece, there) in items {
+            let item = ui.add_enabled(there, egui::Button::new(word));
+            let item = match (piece, picked, made(piece)) {
+                (Piece::Note, true, Wanted::Add(_)) => item.on_disabled_hover_text(NOTE_WHERE),
+                _ => item,
+            };
+            if item.clicked() {
+                *wanted = Some(made(piece));
+                ui.close();
+            }
+        }
+    };
+    crate::menu::button(ui, ADD, |ui| {
+        items(
+            ui,
+            [
+                (NOTE, Piece::Note, !picked),
+                (LOOP_ITEM, Piece::Loop, attack && !looped),
+                (KEY_OFF, Piece::KeyOff, attack && !release),
+            ],
+            Wanted::Add,
+            wanted,
+        );
+    });
+    ui.add_enabled_ui(picked, |ui| {
+        crate::menu::button(ui, DELETE, |ui| {
+            items(
+                ui,
+                [
+                    (NOTE, Piece::Note, attack),
+                    (LOOP_ITEM, Piece::Loop, looped),
+                    (KEY_OFF, Piece::KeyOff, release),
+                ],
+                Wanted::Delete,
+                wanted,
+            );
+        });
+    });
+}
+
+/// The close lane about a place clicked where no sample is: the take from
+/// [`PLACE_BEFORE`] before it to [`PLACE_AFTER`] after, the place marked, and the menus
+/// to add a sample there.
+#[allow(clippy::too_many_arguments)]
+fn placed(
+    ui: &mut egui::Ui,
+    audio: &Audio,
+    summary: &Summary,
+    drawn: &mut Drawn,
+    place: u32,
+    close: &mut Close,
+    playing: bool,
+    wanted: &mut Option<Wanted>,
+) {
+    let rate = f64::from(audio.rate.max(1));
+    let channels = usize::from(audio.channels.max(1));
+    let total = (audio.samples.len() / channels) as f64;
+    let at = f64::from(place);
+    let shown = (at - PLACE_BEFORE * rate).max(0.0)..(at + PLACE_AFTER * rate).min(total);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::panel::caps("Sample"));
+        ui.label(
+            egui::RichText::new(format!(
+                "none at {}: Add ▸ Note marks one",
+                take::clock(at / rate, 2)
+            ))
+            .size(take::LEGEND_TEXT)
+            .color(app::caption(ui.visuals())),
+        );
+        ui.add_space(8.0);
+        menus(ui, None, wanted);
+    });
+    let width = take::lane_width(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals().clone();
+    let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
+    let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
+    take::level(
+        &painter,
+        rect,
+        drawn.lane(audio, summary, frames, columns),
+        summary.loudest(),
+        take::span_db(close.depth),
+        playing,
+    );
+    let span = (shown.end - shown.start).max(1.0);
+    painter.vline(
+        rect.left() + ((at - shown.start) / span) as f32 * rect.width(),
+        rect.y_range(),
+        egui::Stroke::new(2.0_f32, visuals.text_color()),
+    );
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    take::depth(ui, rect, &mut close.depth);
+    take::times(ui, rect, shown, rate);
+}
+
+/// Draw the picked hit's lane: its caption, legend, zoom and menus, the waveform with
+/// its regions and cut points over it, and the times under it. Where none is picked, the
+/// take about the place clicked, or a prompt where the take marks samples and none is
+/// clicked.
 ///
 /// `marked` holds the cut being dragged where it is now. The cut and the frame it was let
-/// go at, once a drag ends.
+/// go at, once a drag ends, and what the menus asked.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
@@ -340,15 +485,14 @@ pub fn ui(
     drawn: &mut Drawn,
     marked: &Result<Marked, String>,
     picked: Option<Hit>,
+    place: Option<u32>,
     close: &mut Close,
     playing: bool,
-) -> Option<(Cut, u32)> {
+) -> (Option<(Cut, u32)>, Option<Wanted>) {
+    let mut wanted = None;
     let Ok(marks) = marked else {
-        return None;
+        return (None, None);
     };
-    if marks.regions.is_empty() {
-        return None;
-    }
     if close.hit != picked {
         *close = Close {
             hit: picked,
@@ -357,15 +501,30 @@ pub fn ui(
         };
     }
     let Some(hit) = picked else {
-        ui.horizontal(|ui| {
-            ui.label(crate::panel::caps("Sample"));
-            ui.label(
-                egui::RichText::new("(select from the WAV, above)")
-                    .size(take::LEGEND_TEXT)
-                    .color(app::caption(ui.visuals())),
-            );
-        });
-        return None;
+        match place {
+            Some(place) => placed(
+                ui,
+                audio,
+                summary,
+                drawn,
+                place,
+                close,
+                playing,
+                &mut wanted,
+            ),
+            None if marks.regions.is_empty() => {}
+            None => {
+                ui.horizontal(|ui| {
+                    ui.label(crate::panel::caps("Sample"));
+                    ui.label(
+                        egui::RichText::new("(select from the WAV, above)")
+                            .size(take::LEGEND_TEXT)
+                            .color(app::caption(ui.visuals())),
+                    );
+                });
+            }
+        }
+        return (None, wanted);
     };
     let rate = f64::from(audio.rate.max(1));
     let channels = usize::from(audio.channels.max(1));
@@ -419,6 +578,8 @@ pub fn ui(
         {
             close.span = None;
         }
+        ui.add_space(8.0);
+        menus(ui, Some(&cuts), &mut wanted);
     });
 
     let shown = close.shown(&cuts, total, rate);
@@ -543,7 +704,7 @@ pub fn ui(
     );
     take::depth(ui, rect, &mut close.depth);
     take::times(ui, rect, shown, rate);
-    dropped
+    (dropped, wanted)
 }
 
 #[cfg(test)]

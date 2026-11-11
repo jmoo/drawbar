@@ -20,6 +20,7 @@ use crate::strings;
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
+mod adding;
 mod advanced;
 mod audition;
 pub mod capability;
