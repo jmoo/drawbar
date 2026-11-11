@@ -6,12 +6,12 @@
 browser it opens by itself after an update. On the desktop it opens the release
 page.
 
-**Help ▸ Welcome** shows what works today, instrument by instrument, three
-places to start (connect an instrument, open files, or start with a demo) and
-the trademark disclaimer. With an instrument attached, the first card names it
-and opens the Keyboard tab. In the browser it opens by itself the first time you
-run drawbar there. [What is supported](../getting-started/support.md) covers the
-same claims in more detail.
+**Help ▸ Welcome** shows three places to start (connect an instrument, import
+files, or start with a demo), a reminder to keep your own backups, and the
+trademark disclaimer. With an instrument attached, the first card names it and
+opens the Keyboard tab. In the browser it opens by itself the first time you run
+drawbar there. [What is supported](../getting-started/support.md) says what works
+with each instrument.
 
 **Help ▸ Report a problem** and **Help ▸ Send feedback** open a form that
 sends what you write straight to drawbar's developer. You choose what to attach, and

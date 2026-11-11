@@ -8,11 +8,10 @@
 
 use eframe::egui;
 
-use crate::app::{accent, bold, caption, good, unlit, warn};
+use crate::app::{accent, bold, good, warn};
 use crate::browser::Act;
 use crate::device::{Device, NO_USB};
 use crate::icon::{sized, Glyph};
-use crate::panel::caps;
 use crate::sheet::{self, GAP};
 use crate::tabs::Spot;
 
@@ -29,7 +28,7 @@ pub use web::Splash;
 pub(crate) use crate::sheet::VERSION;
 
 /// The widest each sheet may be.
-const WELCOME_WIDTH: f32 = 940.0;
+const WELCOME_WIDTH: f32 = 720.0;
 const NEWS_WIDTH: f32 = 700.0;
 
 /// The height a sheet reserves for its foot, so a short window scrolls the middle and
@@ -69,116 +68,6 @@ pub enum Wanted {
     /// Close, record this version, and run this.
     Act(Act),
 }
-
-/// How far one column's claim holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mark {
-    Yes,
-    /// Partly implemented, or implemented but not confirmed on an instrument.
-    Partly,
-    No,
-}
-
-/// One column of a [`Row`], with the hover text that states its claim.
-pub struct Claim {
-    pub mark: Mark,
-    pub hint: &'static str,
-}
-
-const fn claim(mark: Mark, hint: &'static str) -> Claim {
-    Claim { mark, hint }
-}
-
-/// One row of [`SUPPORT`]: the files, the four columns, and a one-sentence note.
-pub struct Row {
-    pub instrument: &'static str,
-    pub kinds: &'static str,
-    /// In the order of [`COLUMNS`].
-    pub marks: [Claim; 4],
-    pub note: &'static str,
-}
-
-/// The columns [`Row::marks`] answers.
-pub const COLUMNS: [&str; 4] = ["Read", "Edit", "Send", "Tested"];
-
-/// What works today. Every claim here must match `docs/src/getting-started/support.md`,
-/// which gives the detail.
-pub const SUPPORT: &[Row] = &[
-    Row {
-        instrument: "Nord Electro 5",
-        kinds: "programs · live · settings · set lists",
-        marks: [
-            claim(
-                Mark::Yes,
-                "Views programs, live slots, set lists and settings",
-            ),
-            claim(
-                Mark::Yes,
-                "Edits programs, live slots, set lists and settings",
-            ),
-            claim(
-                Mark::Yes,
-                "Transfers from macOS, Linux and the browser. Nothing has been written \
-                 from Windows",
-            ),
-            claim(Mark::Yes, "Tested on an Electro 5"),
-        ],
-        note: "Tested on an Electro 5 from macOS, Linux and the browser. Nothing has \
-               been written from Windows.",
-    },
-    Row {
-        instrument: "Piano and sample files",
-        kinds: "npno · nsmp · nsmp3 · nsmp4",
-        marks: [
-            claim(Mark::Yes, "Decodes all four"),
-            claim(
-                Mark::Yes,
-                "Samples: edit, encode, audition. Pianos: trim, split, rename, retune, \
-                 remap, build from WAVs",
-            ),
-            claim(Mark::Yes, "Transfers to an Electro 5"),
-            claim(
-                Mark::Partly,
-                "Samples encoded as v3 or v4, and pianos renamed, retuned, remapped or \
-                 narrowed, have not been played",
-            ),
-        ],
-        note: "Sample files encoded as v3 or v4, and pianos that were renamed, retuned, \
-               remapped or narrowed, have not been played on an instrument.",
-    },
-    Row {
-        instrument: "Nord Stage 2 · 3 · 4",
-        kinds: "programs · live · presets",
-        marks: [
-            claim(Mark::Yes, "Views programs, live slots and presets"),
-            claim(Mark::Yes, "Edits programs, live slots and presets"),
-            claim(
-                Mark::No,
-                "A Stage 4 has connected, but no file has been read from it or written to it",
-            ),
-            claim(Mark::No, "Not tested on an instrument"),
-        ],
-        note: "Not tested on an instrument.",
-    },
-    Row {
-        instrument: "Every other Nord",
-        kinds: "any file it recognizes",
-        marks: [
-            claim(
-                Mark::Partly,
-                "Recognized and kept byte for byte, without decoding what is inside",
-            ),
-            claim(Mark::No, "drawbar does not decode files from these models"),
-            claim(
-                Mark::No,
-                "No other instrument has been connected, so USB support cannot be \
-                 guaranteed",
-            ),
-            claim(Mark::No, "Not tested on an instrument"),
-        ],
-        note: "Recognized and kept byte for byte, without editing.",
-    },
-];
 
 /// The risk box: a bold lead, then the rest.
 const RISK_LEAD: &str = "Keep your own backups.";
@@ -270,42 +159,19 @@ pub fn welcome(ctx: &egui::Context, usb: Usb) -> Option<Wanted> {
 
 fn welcome_body(ui: &mut egui::Ui, usb: Usb) -> Option<Wanted> {
     ui.set_width(sheet::width(ui.ctx(), WELCOME_WIDTH));
-    let mut wanted = None;
-    // The start cards stay under the scrolling middle, so a short window scrolls the
-    // support table and never hides the choices. Their height is last frame's; when it
-    // changes, the frame is discarded and redrawn.
-    let pinned = ui.id().with("start block");
-    let below: f32 = ui.data(|data| data.get_temp(pinned)).unwrap_or(0.0);
-    egui::ScrollArea::vertical()
-        .id_salt("welcome")
-        .max_height(sheet::middle(ui.ctx(), AROUND + below, FEWEST))
-        .show(ui, |ui| {
-            ui.add_space(GAP * 4.5);
-            sheet::section(ui, |ui| {
-                sheet::masthead(ui);
-                ui.add_space(GAP * 3.5);
-                risk(ui);
-                sheet::heading(ui, "What works today", None);
-                support(ui);
-                ui.add_space(GAP * 2.0);
-                legend(ui);
-            });
-        });
-    let top = ui.cursor().top();
-    sheet::section(ui, |ui| {
-        sheet::heading(ui, "Start here", None);
-        wanted = starts(ui, usb);
+    ui.add_space(GAP * 4.5);
+    let mut wanted = sheet::section(ui, |ui| {
+        sheet::masthead(ui);
+        ui.add_space(GAP * 5.0);
+        let wanted = starts(ui, usb);
+        risk(ui);
+        wanted
     });
-    let height = ui.cursor().top() - top;
-    if height != below {
-        ui.data_mut(|data| data.insert_temp(pinned, height));
-        ui.ctx().request_discard("start block");
-    }
     sheet::foot(
         ui,
         |ui| sheet::disclaimer(ui, DISMISS),
         |ui| {
-            let done = sheet::primary(ui, Some(Glyph::Check), "I understand")
+            let done = sheet::primary(ui, None, "Continue")
                 .on_hover_text("Help ▸ Welcome shows this again")
                 .clicked();
             if done && wanted.is_none() {
@@ -319,11 +185,10 @@ fn welcome_body(ui: &mut egui::Ui, usb: Usb) -> Option<Wanted> {
     }
 }
 
-/// The alpha warning above the support table.
+/// The alpha warning under the start cards.
 fn risk(ui: &mut egui::Ui) {
     let tint = warn(ui.visuals());
     let ink = ui.visuals().strong_text_color();
-    let faint = ui.visuals().faint_bg_color;
     let mut job = egui::text::LayoutJob::default();
     for (text, family) in [
         (RISK_LEAD, bold()),
@@ -339,112 +204,14 @@ fn risk(ui: &mut egui::Ui) {
             },
         );
     }
-    egui::Frame::new()
-        .fill(faint)
-        .stroke(egui::Stroke::new(1.0_f32, tint))
-        .corner_radius(egui::CornerRadius::same(2))
-        .inner_margin(egui::Margin::symmetric(12, 9))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                ui.add_space(-2.0);
-                ui.add(sized(Glyph::TriangleAlert, 14.0, tint));
-                ui.add(egui::Label::new(job).wrap());
-            });
-        });
+    ui.horizontal_top(|ui| {
+        ui.add(sized(Glyph::TriangleAlert, 14.0, tint));
+        ui.add(egui::Label::new(job).wrap());
+    });
 }
 
-/// A cell's padding from the table's edge, and the gap between two columns.
-const CELL: f32 = 12.0;
-const COLGAP: f32 = 10.0;
-
-/// The width of the Read, Edit and Send columns, and of the wider Tested column.
-const DOT: f32 = 52.0;
-const TESTED: f32 = 82.0;
-
-/// The diameter of a mark.
-const MARK: f32 = 9.0;
-
-/// The narrowest either prose column gets, whatever the window width.
+/// The narrowest a prose column gets, whatever the window width.
 const LEAST_PROSE: f32 = 88.0;
-
-/// The widths of the instrument and note columns, sharing what the fixed columns leave.
-fn prose(full: f32) -> (f32, f32) {
-    let fixed = DOT * 3.0 + TESTED + COLGAP * 5.0 + CELL * 2.0;
-    let free = (full - fixed).max(2.0 * LEAST_PROSE);
-    (free * 1.5 / 3.2, free * 1.7 / 3.2)
-}
-
-/// [`SUPPORT`] as a table: a head, then one row per line of it, hairlines between.
-fn support(ui: &mut egui::Ui) {
-    let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
-    let faint = ui.visuals().faint_bg_color;
-    egui::Frame::new()
-        .stroke(hairline)
-        .corner_radius(egui::CornerRadius::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let widths = prose(ui.available_width());
-            egui::Frame::new()
-                .fill(faint)
-                .inner_margin(egui::Margin::symmetric(CELL as i8, 5))
-                .show(ui, |ui| head(ui, widths));
-            for row in SUPPORT {
-                rule(ui, hairline);
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(CELL as i8, 7))
-                    .show(ui, |ui| support_row(ui, widths, row));
-            }
-        });
-}
-
-/// The column heads, uppercased.
-fn head(ui: &mut egui::Ui, widths: (f32, f32)) {
-    let ink = caption(ui.visuals());
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = COLGAP;
-        cell(ui, widths.0, down(), |ui| {
-            ui.label(caps("Instrument").color(ink));
-        });
-        for (column, width) in COLUMNS.iter().zip([DOT, DOT, DOT, TESTED]) {
-            cell(ui, width, middle(), |ui| {
-                ui.label(caps(column).color(ink));
-            });
-        }
-        cell(ui, widths.1, down(), |ui| {
-            ui.label(caps("What that means").color(ink));
-        });
-    });
-}
-
-fn support_row(ui: &mut egui::Ui, widths: (f32, f32), row: &Row) {
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = COLGAP;
-        cell(ui, widths.0, down(), |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(
-                egui::Label::new(egui::RichText::new(row.instrument).strong().size(12.0)).wrap(),
-            );
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(row.kinds)
-                        .font(egui::FontId::monospace(10.0))
-                        .weak(),
-                )
-                .wrap(),
-            );
-        });
-        for (claim, width) in row.marks.iter().zip([DOT, DOT, DOT, TESTED]) {
-            cell(ui, width, middle(), |ui| {
-                ui.add_space(3.0);
-                mark(ui, claim.mark).on_hover_text(claim.hint);
-            });
-        }
-        cell(ui, widths.1, down(), |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(row.note).size(11.0)).wrap());
-        });
-    });
-}
 
 /// A hairline across a boxed list, where the next row is about to start.
 fn rule(ui: &mut egui::Ui, hairline: egui::Stroke) {
@@ -465,45 +232,6 @@ fn cell(ui: &mut egui::Ui, width: f32, layout: egui::Layout, add: impl FnOnce(&m
 /// A left-aligned column.
 fn down() -> egui::Layout {
     egui::Layout::top_down(egui::Align::LEFT)
-}
-
-/// A centered column, for a single mark.
-fn middle() -> egui::Layout {
-    egui::Layout::top_down(egui::Align::Center)
-}
-
-/// Yes and partly are filled dots; no is an empty ring.
-fn mark(ui: &mut egui::Ui, mark: Mark) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(MARK), egui::Sense::hover());
-    let (fill, ring) = match mark {
-        Mark::Yes => (good(ui.visuals()), egui::Stroke::NONE),
-        Mark::Partly => (warn(ui.visuals()), egui::Stroke::NONE),
-        Mark::No => (
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.0_f32, unlit(ui.visuals())),
-        ),
-    };
-    ui.painter()
-        .circle(rect.center(), MARK / 2.0 - 0.5, fill, ring);
-    response
-}
-
-/// What the three marks mean, under the table that uses them.
-fn legend(ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 16.0;
-        for (shown, label) in [
-            (Mark::Yes, "yes"),
-            (Mark::Partly, "partly, or not confirmed"),
-            (Mark::No, "no"),
-        ] {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                mark(ui, shown);
-                ui.label(egui::RichText::new(label).size(10.5).weak());
-            });
-        }
-    });
 }
 
 /// A start card's least width, the gap between two cards, and the padding inside one.
@@ -1155,26 +883,9 @@ mod tests {
         );
     }
 
-    /// A mark without hover text makes a claim nobody can check.
-    #[test]
-    fn every_supported_row_says_what_each_mark_claims() {
-        assert!(!SUPPORT.is_empty());
-        for row in SUPPORT {
-            assert!(!row.note.is_empty(), "{}: no note", row.instrument);
-            assert!(!row.kinds.is_empty(), "{}: no kinds", row.instrument);
-            for (claim, column) in row.marks.iter().zip(COLUMNS) {
-                assert!(
-                    !claim.hint.is_empty(),
-                    "{} has no hover text under {column}",
-                    row.instrument
-                );
-            }
-        }
-    }
-
     /// The shell refuses a smaller screen than this, so both sheets must fit in it with
     /// their dismiss button on screen, and the welcome with its warning and every start
-    /// card too: the support table scrolls instead.
+    /// card too.
     #[test]
     fn the_welcome_sheet_keeps_its_button_and_its_choices_on_the_smallest_screen() {
         let ctx = headless();
@@ -1191,7 +902,7 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
         let risk = format!("{RISK_LEAD}{RISK_REST}");
         let starts = STARTS.map(|start| start.card(Usb::Ready).label);
-        for label in ["I understand", risk.as_str()].into_iter().chain(starts) {
+        for label in ["Continue", risk.as_str()].into_iter().chain(starts) {
             let drawn = box_of(&said, label)
                 .unwrap_or_else(|| panic!("{label} was never painted: {said:?}"));
             assert!(
