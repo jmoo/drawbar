@@ -71,7 +71,7 @@ async fn read_one(
 ) -> Result<Found, Failure> {
     let io = |e: io::Error| match e.kind() {
         io::ErrorKind::NotFound => Failure::Moved,
-        _ => Failure::Io(e.to_string()),
+        _ => Failure::Io(super::storage::said(&e)),
     };
     let stat = fs.stat(path.as_str()).await.map_err(io)?;
     let stat = stat.ok_or(Failure::Moved)?;
@@ -114,7 +114,7 @@ pub async fn rest_landed(fs: &impl Fs, event: Event) -> Event {
 }
 
 async fn rested(fs: &impl Fs, found: Result<Found, Failure>) -> Result<Found, Failure> {
-    let io = |e: io::Error| Failure::Io(e.to_string());
+    let io = |e: io::Error| Failure::Io(super::storage::said(&e));
     let mut found = found?;
     found.file = fs.rest(found.path.as_str(), None).await.map_err(io)?;
     if found.file.is_some() {
@@ -226,5 +226,30 @@ mod tests {
             })
             .collect();
         assert_eq!(what, [(0, "resting"), (1, "whole"), (2, "refused")]);
+    }
+
+    /// Storage the system will not let drawbar into.
+    struct Locked;
+
+    impl Fs for Locked {
+        async fn read(&self, _: &str) -> io::Result<Vec<u8>> {
+            Err(io::Error::from_raw_os_error(13))
+        }
+        async fn stat(&self, _: &str) -> io::Result<Option<Stat>> {
+            Err(io::Error::from_raw_os_error(13))
+        }
+        async fn rest(&self, _: &str, _: Option<Fingerprint>) -> io::Result<Option<Arc<OnDisk>>> {
+            Err(io::Error::from_raw_os_error(13))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_system_will_not_open_says_so_in_toshokans_words() {
+        let read = now(read_all(&Locked, vec![(0, path("Grand.ne5p"), None)], 25));
+        let [(0, Err(Failure::Io(why)))] = &read[..] else {
+            panic!("refused: {read:?}");
+        };
+        assert_eq!(*why, toshokan::IoError::Denied.to_string());
     }
 }

@@ -976,6 +976,10 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
              cannot be sent back."
         )
     );
+    let logged = second.bench.log.iter().any(|entry| {
+        entry.level == crate::log::Level::Error && entry.text.starts_with("nord-rescued-1-4.npno: ")
+    });
+    assert!(logged, "the activity log says why it does not read");
     assert_eq!(answers, ["Later", "Show the file", "Discard"]);
     second.choose("Discard");
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());

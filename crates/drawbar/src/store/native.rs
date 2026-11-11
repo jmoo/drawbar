@@ -94,8 +94,13 @@ pub fn openable(root: &Path, default: Option<&Path>) -> Result<(), String> {
         return Ok(());
     }
     if default == Some(root) && !root.exists() {
-        return fs::create_dir_all(root)
-            .map_err(|e| format!("{} could not be made: {e}", root.display()));
+        return fs::create_dir_all(root).map_err(|e| {
+            format!(
+                "{} could not be made: {}",
+                root.display(),
+                super::storage::said(&e)
+            )
+        });
     }
     Err(format!(
         "{} is not a folder drawbar can open as the library.",

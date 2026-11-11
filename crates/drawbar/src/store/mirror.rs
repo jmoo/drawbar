@@ -2902,7 +2902,7 @@ impl Store {
                 Some(Rescue {
                     slot: Rescue::slot_of(&name),
                     name,
-                    broken: nord_usb::block_on(super::broken(file)),
+                    broken: nord_usb::block_on(super::unwhole(file)),
                     at: path,
                 })
             })
@@ -3326,9 +3326,13 @@ impl Store {
             if self.shelved.values().any(|at| *at == rescue.at) {
                 continue;
             }
-            match (rescue.broken, self.open()) {
-                (false, true) => self.keep_rescue(rescue, workspace, browser, log),
-                _ => browser.ask_rescue(rescue),
+            match (&rescue.broken, self.open()) {
+                (None, true) => self.keep_rescue(rescue, workspace, browser, log),
+                (None, false) => browser.ask_rescue(rescue),
+                (Some(why), _) => {
+                    log.error(format!("{}: {why}", rescue.name));
+                    browser.ask_rescue(rescue);
+                }
             }
         }
     }
@@ -4590,7 +4594,10 @@ fn discard_rescue(rescue: Rescue, log: &mut Log) {
     let name = rescue.name;
     match std::fs::remove_file(&rescue.at) {
         Ok(()) => log.say(format!("Discarded “{name}”.")),
-        Err(e) => log.trouble(format!("“{name}” could not be deleted: {e}.")),
+        Err(e) => log.trouble(format!(
+            "“{name}” could not be deleted: {}.",
+            super::storage::said(&e)
+        )),
     }
 }
 

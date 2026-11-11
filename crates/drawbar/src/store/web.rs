@@ -700,7 +700,7 @@ async fn rescue(
     Some(Rescue {
         slot: Rescue::slot_of(&name),
         at: format!("{at}/{name}").into(),
-        broken: super::broken(source).await,
+        broken: super::unwhole(source).await,
         file,
         name,
     })
