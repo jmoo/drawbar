@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# nix-deps: cargo curl gh git jq
-# Publish untagged manifest versions in dependency order, then create releases.
+# nix-deps: cargo coreutils curl gh git jq nix
+# Publish untagged manifest versions in dependency order, then create releases
+# and attach their Windows builds.
 
 usage() {
   echo "usage: $0 [--dry-run]" >&2
@@ -66,11 +67,57 @@ if ((${#under_bumped[@]})); then
   exit 1
 fi
 
+# A release this run makes, or one made at this commit by an earlier run of it.
+# Anything older keeps the assets it has; this commit did not build them.
+released_here() {
+  local ref="refs/tags/$1"
+  ! git -C "$repo" rev-parse -q --verify "$ref" >/dev/null ||
+    [[ "$(git -C "$repo" rev-parse "$ref^{commit}")" == "$sha" ]]
+}
+
+# The Windows build a crate's release carries: a cross package and its executable.
+declare -A windows_build=(["drawbar"]=drawbar-windows/drawbar.exe ["nord-cli"]=nord-cli-windows/nord.exe)
+
+# Built before anything is published, so a build that fails releases nothing.
+declare -A windows_asset=()
+for crate in "${publish_order[@]}"; do
+  [[ -v "windows_build[$crate]" ]] || continue
+  version="$(crate_version "$crate")"
+  released_here "$crate-v$version" || continue
+  build=${windows_build[$crate]}
+  asset="$tmp/$(basename "$build" .exe)-$version-x86_64-windows.exe"
+  windows_asset[$crate]=$asset
+  ((dry_run)) && continue
+  out="$(nix build --no-link --print-out-paths "$repo#${build%%/*}")"
+  cp "$out/${build#*/}" "$asset"
+done
+
+# Uploads only an asset the release lacks or holds different bytes for, so a
+# rerun converges.
+attach_windows_build() {
+  local crate=$1 tag=$2 asset name digest
+  [[ -v "windows_asset[$crate]" ]] || return 0
+  asset=${windows_asset[$crate]}
+  name="$(basename "$asset")"
+  if ((dry_run)); then
+    echo "$tag: would attach $name"
+    return
+  fi
+  digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
+  if [[ "$(gh release view "$tag" --repo "$repo_url" --json assets \
+    --jq ".assets[] | select(.name == \"$name\") | .digest")" == "$digest" ]]; then
+    echo "$tag: already carries $name"
+  else
+    gh release upload "$tag" "$asset" --repo "$repo_url" --clobber
+  fi
+}
+
 for crate in "${publish_order[@]}"; do
   version="$(crate_version "$crate")"
   tag="$crate-v$version"
   if git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
     echo "$tag: already released"
+    attach_windows_build "$crate" "$tag"
     continue
   fi
   previous="$(latest_tag "$crate")"
@@ -90,4 +137,5 @@ for crate in "${publish_order[@]}"; do
   else
     gh release create "$tag" --repo "$repo_url" --target "$sha" --title "$tag" --notes-file "$tmp/notes.md"
   fi
+  attach_windows_build "$crate" "$tag"
 done
