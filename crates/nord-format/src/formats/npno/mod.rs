@@ -1141,8 +1141,8 @@ impl<'a> Library<'a> {
     /// Vendor libraries name the sampled instrument here, such as "200A" or "Baldwin".
     /// Inferred from specimens; not confirmed on hardware.
     ///
-    /// The instrument's Info page shows it on a line of its own under the name.
-    /// Confirmed on hardware.
+    /// A Stage 4's Info page shows it on a line of its own under the name. Confirmed on
+    /// hardware.
     pub fn description(&self) -> Option<String> {
         self.split_field(TextField::DESCRIPTION)
     }
@@ -1172,8 +1172,8 @@ impl<'a> Library<'a> {
     /// Replace the variant, the text after [`NAME_SEPARATOR`], leaving both names alone.
     /// A variant holding the separator is refused.
     ///
-    /// The instrument shows only the variant's last word, as the library's size, and
-    /// lists `Sml`, `Med`, `Lrg` and `XL` as S, M, L and XL. Confirmed on hardware.
+    /// A Stage 4 shows only the variant's last word, as the library's size, and lists
+    /// `Sml`, `Med`, `Lrg` and `XL` as S, M, L and XL. Confirmed on hardware.
     pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
         check_half("variant", variant)?;
         let field = TextField::COMBINED.read(&self.prefix);

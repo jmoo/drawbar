@@ -98,8 +98,8 @@ pub struct EditArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Replace the variant: the text after the `#`, whose last word the instrument
-    /// shows as the library's size. It cannot contain a `#`.
+    /// Replace the variant: the text after the `#`, whose last word is the library's
+    /// size. It cannot contain a `#`.
     #[arg(long)]
     pub variant: Option<String>,
 
@@ -212,7 +212,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub name: String,
 
-    /// The half after the `#`, whose last word the instrument shows as the size.
+    /// The half after the `#`, whose last word is the library's size.
     #[arg(long, default_value = "")]
     pub variant: String,
 

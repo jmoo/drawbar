@@ -111,7 +111,7 @@ const WIDTHS: usize = MAX_WIDTH as usize + 1;
 pub struct Options {
     /// The half of the `Name#Variant` field before the separator.
     pub name: String,
-    /// The half after it, whose last word the instrument shows as the library's size.
+    /// The half after it, whose last word a Stage 4 shows as the library's size.
     /// Confirmed on hardware. A [`Version::V6`] library states it as its description
     /// too, so a template's description is not carried over.
     pub variant: String,
