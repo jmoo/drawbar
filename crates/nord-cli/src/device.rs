@@ -1253,7 +1253,7 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 /// A free name for a rescue in `dir`: `name`, or `name` with a number before its extension
 /// where a file already has that name, so an earlier rescue is never written over. It
 /// comes with a new file at its [partial](envelope::PARTIAL) name, to be renamed to it
-/// once whole.
+/// once whole. A partial file already there is one a stopped run left, and is replaced.
 fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, std::fs::File), String> {
     let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
     for n in 1..=100 {
@@ -1269,16 +1269,19 @@ fn fresh(dir: &Path, name: &str) -> Result<(PathBuf, PathBuf, std::fs::File), St
         let mut partial = path.clone().into_os_string();
         partial.push(envelope::PARTIAL);
         let partial = PathBuf::from(partial);
-        match std::fs::File::options()
+        let at = |e: std::io::Error| format!("{}: {e}", partial.display());
+        match std::fs::remove_file(&partial) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(at(e)),
+        }
+        let file = std::fs::File::options()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&partial)
-        {
-            Ok(file) => return Ok((path, partial, file)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.to_string()),
-        }
+            .map_err(at)?;
+        return Ok((path, partial, file));
     }
     Err(format!("a hundred rescues named {name} are already there"))
 }
@@ -2640,10 +2643,12 @@ mod tests {
         }
 
         /// A process that dies while the occupant is read back leaves a file that is not
-        /// whole, and the slot as it was. That file must not look like a rescue.
+        /// whole, and the slot as it was. That file must not look like a rescue, and the
+        /// next read takes its name.
         #[test]
         fn the_occupant_is_read_under_a_partial_name() {
             let dir = crate::edit::tests::scratch("send-partial");
+            std::fs::write(dir.join("nord-rescued-7-10.ne5p.partial"), b"stale").unwrap();
             let put = recorded();
             let begin_read = put[3][7].frame().expect("the BEGIN_READ").to_vec();
             let mut device = Device::new(Watched {
@@ -3165,6 +3170,19 @@ mod tests {
                 std::fs::read(dir.join("nord-rescued-7-10.ne5p")).unwrap(),
                 b"earlier"
             );
+        }
+
+        /// A partial file is never a slot's only copy, so one a stopped run left gives
+        /// up its name and its bytes to the next rescue.
+        #[test]
+        fn a_backup_replaces_a_partial_one_a_stopped_run_left() {
+            let dir = crate::edit::tests::scratch("put-kept-stale");
+            std::fs::write(dir.join("nord-rescued-7-10.ne5p.partial"), b"stale").unwrap();
+            let (path, partial, _) = fresh(&dir, "nord-rescued-7-10.ne5p").unwrap();
+            assert_eq!(path, dir.join("nord-rescued-7-10.ne5p"));
+            assert_eq!(partial, dir.join("nord-rescued-7-10.ne5p.partial"));
+            assert_eq!(std::fs::read(&partial).unwrap(), b"", "a new, empty file");
+            assert_eq!(rescued(&dir), ["nord-rescued-7-10.ne5p.partial"]);
         }
     }
 

@@ -60,7 +60,8 @@ instrument overwrites those in place.
 
 While the old sound is read, its file is named `nord-rescued-7-50.ne5p.partial`.
 It takes its own name only once it is complete, and the slot is not touched
-before then. A `.partial` file left by a stopped `nord` can be deleted.
+before then. A `.partial` file left by a stopped `nord` can be deleted, and the
+next rescue of that slot replaces it.
 
 `--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
 folder. Without a folder it can write to, `nord` leaves the slot alone.
