@@ -16,7 +16,7 @@ use nord_format::formats::npno::encode::{self, Kind, Rules};
 use nord_format::formats::npno::{Bank, Version};
 use nord_format::formats::nsmp::codec;
 use nord_format::take::clean::{self, Noise};
-use nord_format::take::layers::{self, TAKE_PEAK_DB};
+use nord_format::take::layers;
 use nord_format::take::sustain;
 use nord_format::wav::{Audio, Loop, Play};
 
@@ -25,7 +25,6 @@ use super::wav;
 use crate::app;
 use crate::audio::{Finger, Player};
 use crate::icon::Glyph;
-use crate::inspector::{card as dock_card, Head};
 use crate::work;
 
 /// The zones of a WAV document the audition plays on: the held key, the loop's wrap and
@@ -54,10 +53,17 @@ const WRAP_LEAD: f64 = 1.0;
 /// instrument makes the dynamics from velocity in ways not measured; kept whole, soft
 /// layers were too quiet to judge, and brought all to one level, they sounded as loud
 /// as the hardest.
+///
+/// The loudest layer plays at its recorded level, as Play original plays it.
 const LAYER_GAP_KEPT: f64 = 0.5;
 
 /// How long [`Sounding::wrap`] cycles the loop for, in seconds.
 const WRAP_MOST: f64 = 30.0;
+
+/// How far ahead of where the player has got a key-up starts, in seconds: past what the
+/// mixer has already taken, so the key-up joins the held sound at one sample, with
+/// nothing played twice. Heard as a click before.
+const SPLICE_LEAD: f64 = 0.02;
 
 /// The longest press of Play sample that is a click, in seconds: let go sooner, the
 /// key is held on through the whole sample, as [`Sounding::tapped`] says.
@@ -117,9 +123,9 @@ impl Sounding {
     /// The sample `cuts` marks in `audio`, recorded at `root`, cleaned of `noise` where it
     /// is given, as a library of `rules` plays it, or none where it has no attack.
     ///
-    /// Its root's loudest layer, whose recorded peak is `loudest`, plays at the peak the
-    /// build brings every region to, and a softer one [`LAYER_GAP_KEPT`] of its recorded
-    /// gap under that: easy to hear, and still softer.
+    /// Its root's loudest layer, whose recorded peak is `loudest`, plays at its recorded
+    /// level, and a softer one [`LAYER_GAP_KEPT`] of its recorded gap under that: easy to
+    /// hear, and still softer.
     pub fn of(
         audio: &Audio,
         cuts: &Cuts,
@@ -144,7 +150,7 @@ impl Sounding {
             true => {
                 let own = 20.0 * f64::from(peak).log10();
                 let gap = (20.0 * f64::from(loudest.max(peak)).log10() - own).max(0.0);
-                TAKE_PEAK_DB - LAYER_GAP_KEPT * gap - own
+                (1.0 - LAYER_GAP_KEPT) * gap
             }
             false => 0.0,
         };
@@ -314,9 +320,6 @@ pub struct Audition {
     held: Option<(Sounding, Vec<f32>)>,
     /// Whether Play sample is held down.
     pressed: bool,
-    /// Where a click lets the key go, in frames of what is held, once it has played that
-    /// far.
-    up_at: Option<usize>,
     /// Whether a control was pressed while the take's noise is still being found, so
     /// the wait is said.
     waiting: bool,
@@ -410,14 +413,10 @@ pub enum Ask {
     /// Play sample came up: the key is let go, or, after a click, held on through the
     /// whole sample.
     LetGo,
-    /// A clicked sample has played through: the key goes up.
-    Up,
     /// Start or stop the loop's wrap.
     Wrap,
     /// Start or stop the release alone.
     Release,
-    /// Hear and build the take as this kind of instrument.
-    Kind(Kind),
     /// Clean the take of its hum and hiss, or build it as recorded.
     Clean(bool),
 }
@@ -425,39 +424,23 @@ pub enum Ask {
 /// The label of the clean toggle.
 pub const CLEAN_AUDIO: &str = "Clean audio";
 
-/// The take's card for the right dock: the category of instrument it is heard and built
-/// as, whose defaults the build applies.
-pub fn card(ui: &mut egui::Ui, state: &wav::State) -> Option<Ask> {
-    let mut asked = None;
-    let kind = state.kind();
-    dock_card(ui, Head::fixed(Glyph::Piano, INSTRUMENT), |ui| {
-        ui.horizontal(|ui| {
-            ui.label(CATEGORY);
-            let mut chosen = kind;
-            egui::ComboBox::from_id_salt("take-kind")
-                .selected_text(super::piano::kind_name(kind.code()))
-                .show_ui(ui, |ui| {
-                    for each in Kind::ALL {
-                        ui.selectable_value(
-                            &mut chosen,
-                            each,
-                            super::piano::kind_name(each.code()),
-                        );
-                    }
-                });
-            if chosen != kind {
-                asked = Some(Ask::Kind(chosen));
-            }
-        });
-    });
-    asked
-}
-
 /// The label of the category picker.
 pub const CATEGORY: &str = "Category";
 
-/// The title of the take's card in the right dock.
-pub const INSTRUMENT: &str = "Instrument";
+/// The category picker: the category the take is heard and built as, `kind`, whose
+/// defaults the build applies. The one the operator picks, where it differs.
+pub fn category(ui: &mut egui::Ui, kind: Kind) -> Option<Kind> {
+    ui.label(CATEGORY);
+    let mut chosen = kind;
+    egui::ComboBox::from_id_salt("take-category")
+        .selected_text(super::piano::kind_name(kind.code()))
+        .show_ui(ui, |ui| {
+            for each in Kind::ALL {
+                ui.selectable_value(&mut chosen, each, super::piano::kind_name(each.code()));
+            }
+        });
+    (chosen != kind).then_some(chosen)
+}
 
 /// The picked sample's controls, under it beside Play original: the sample played as
 /// the instrument will play it, and whether the take is cleaned. Nothing where no
@@ -495,18 +478,6 @@ pub fn controls(
         // Let go is seen on the next frame: without one, the key-up waits for the
         // pointer to move.
         ui.ctx().request_repaint();
-    }
-    if let Some((up, rate)) = audition.up_at.zip(
-        audition
-            .held
-            .as_ref()
-            .map(|(sounding, _)| f64::from(sounding.rate)),
-    ) {
-        match played(HELD) {
-            Some(seconds) if seconds * rate >= up as f64 => asked = Some(Ask::Up),
-            Some(_) => ui.ctx().request_repaint(),
-            None => audition.up_at = None,
-        }
     }
     let rect = play.rect;
     play.on_hover_text(PLAY_SAMPLE_HINT);
@@ -580,13 +551,12 @@ fn clock(sounding: &Sounding) -> f32 {
 pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> Result<(), String> {
     let sounding = |state: &wav::State| state.audition.ready.as_ref()?.1.clone();
     match ask {
-        Ask::Kind(_) | Ask::Clean(_) => {}
+        Ask::Clean(_) => {}
         Ask::Hold => {
             let Some(sounding) = sounding(state) else {
                 return Ok(());
             };
             state.audition.pressed = true;
-            state.audition.up_at = None;
             let held = sounding.held();
             player.strike(
                 Finger::Pointer,
@@ -597,42 +567,55 @@ pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> R
             )?;
             state.audition.held = Some((sounding, held));
         }
-        Ask::LetGo | Ask::Up => {
+        Ask::LetGo => {
             state.audition.pressed = false;
-            let played = player.played((id, HELD));
-            if ask == Ask::LetGo && played.is_some_and(|seconds| seconds < TAP_MOST) {
-                // A click: the key stays down through the whole sample, then goes up.
-                state.audition.up_at = state.audition.held.as_ref().map(|(s, _)| s.tapped());
-                return Ok(());
-            }
-            state.audition.up_at = None;
             let Some((sounding, held)) = state.audition.held.take() else {
                 return Ok(());
             };
-            let frame = match played {
-                Some(seconds) => (seconds * f64::from(sounding.rate)) as usize,
-                // A held attack that does not loop may have played out.
-                None => held.len() / usize::from(sounding.channels),
+            let rate = f64::from(sounding.rate);
+            let Some(seconds) = player.played((id, HELD)) else {
+                // A held attack that does not loop has played out: its release is left.
+                if let Some(release) = sounding.release() {
+                    player.strike(
+                        Finger::Pointer,
+                        (id, HELD),
+                        release,
+                        sounding.channels,
+                        clock(&sounding),
+                    )?;
+                }
+                return Ok(());
             };
-            let after = sounding.let_go(&held, frame);
-            match after.is_empty() {
-                true => player.silence((id, HELD)),
-                false => player.strike(
+            let now = (seconds * rate) as usize;
+            let up = match seconds < TAP_MOST {
+                // A click: the key stays down through the whole sample, then goes up.
+                true => sounding.tapped().max(now),
+                false => now + (SPLICE_LEAD * rate) as usize,
+            };
+            let after = sounding.let_go(&held, up);
+            if after.is_empty() {
+                return Ok(());
+            }
+            let spliced = player.splice(
+                (id, HELD),
+                up as f64 / rate,
+                &after,
+                sounding.channels,
+                clock(&sounding),
+            )?;
+            if !spliced {
+                player.strike(
                     Finger::Pointer,
                     (id, HELD),
                     &after,
                     sounding.channels,
                     clock(&sounding),
-                )?,
+                )?;
             }
         }
         Ask::Wrap | Ask::Release => {
             // The pointer's voice is the held key's too: this one takes its place.
-            (
-                state.audition.held,
-                state.audition.pressed,
-                state.audition.up_at,
-            ) = (None, false, None);
+            (state.audition.held, state.audition.pressed) = (None, false);
             let zone = match ask {
                 Ask::Wrap => WRAP,
                 _ => RELEASE,
@@ -704,13 +687,13 @@ mod tests {
     }
 
     #[test]
-    fn a_held_sample_plays_at_the_build_s_peak_and_fades_along_its_loop() {
+    fn a_note_s_loudest_layer_plays_as_recorded_and_fades_along_its_loop() {
         let (audio, cuts) = take();
         let rules = Sounding::rules(encode::Kind::Wurlitzer);
         let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, 0.0).unwrap();
         let held = sounding.held();
         let second = RATE as usize;
-        assert!((db(peak(&held[..second / 10])) - TAKE_PEAK_DB).abs() < 0.1);
+        assert!((db(peak(&held[..second / 10])) - db(0.5)).abs() < 0.1);
         assert!(held.len() > 4 * second, "the loop plays on past the attack");
         let at = |s: usize| db(peak(&held[s * second..s * second + second / 10]));
         let fell = at(3) - at(4);
@@ -777,7 +760,7 @@ mod tests {
             .is_none());
     }
 
-    /// A layer recorded 12 dB under its root's loudest plays 6 dB under the build's peak.
+    /// A layer recorded 12 dB under its root's loudest plays 6 dB under it.
     #[test]
     fn a_softer_layer_keeps_half_its_gap_to_the_loudest() {
         let (audio, cuts) = take();
@@ -786,7 +769,7 @@ mod tests {
         let sounding = Sounding::of(&audio, &cuts, 60, &rules, None, louder).unwrap();
         let held = sounding.held();
         let start = db(peak(&held[..RATE as usize / 10]));
-        assert!((start - (TAKE_PEAK_DB - 6.0)).abs() < 0.1, "{start}");
+        assert!((start - (db(louder) - 6.0)).abs() < 0.1, "{start}");
     }
 
     /// A click holds the key through the attack and once round the loop; without a

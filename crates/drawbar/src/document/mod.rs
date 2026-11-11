@@ -932,22 +932,6 @@ impl Document {
         self.docked.push((path.to_string(), String::new()));
     }
 
-    /// The open take's cards for the right dock: the picked sample heard as the
-    /// instrument will play it. Nothing for any other document.
-    pub fn take_cards(&mut self, ui: &mut egui::Ui) {
-        let Some(held) = self.open.as_mut().and_then(|open| open.wav.as_mut()) else {
-            return;
-        };
-        if !held.marks_samples() {
-            return;
-        }
-        // An edit of the take, which the document applies as it applies its own.
-        if let Some(audition::Ask::Kind(kind)) = audition::card(ui, held) {
-            self.docked
-                .push((wav::KIND.to_string(), kind.word().to_string()));
-        }
-    }
-
     fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
         let player = &self.player;
         let playing = player.sounds((id, 0));
@@ -1876,17 +1860,9 @@ mod tests {
             self.frame(Vec::new())
         }
 
-        /// One frame of the document's own cards in the right dock, and every word it put
-        /// on screen.
-        fn dock(&mut self) -> Vec<String> {
-            let input = testing::screen(egui::vec2(self.width, SCREEN.y), Vec::new());
-            let ctx = self.ctx.clone();
-            let output = testing::run(&ctx, input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    self.document.take_cards(ui);
-                });
-            });
-            testing::painted(&output)
+        /// Every word one frame of the document puts on screen.
+        fn words(&mut self) -> Vec<String> {
+            self.painted(Vec::new())
                 .into_iter()
                 .map(|word| word.text)
                 .collect()
@@ -3715,9 +3691,9 @@ mod tests {
         assert_eq!(view.shown(rate * 60.0), shown, "and the view");
     }
 
-    /// A take's dock holds its Instrument card, the kind it is heard and built as, kept
-    /// across a gain; the picked sample's audition sits under it in the body. A WAV that
-    /// marks no sample has no card.
+    /// A take shows its category, the kind it is heard and built as, kept across a gain,
+    /// and the picked sample's audition under it. A WAV that marks no sample shows no
+    /// category.
     #[test]
     fn the_dock_auditions_the_picked_sample_as_the_take_s_kind() {
         use nord_format::formats::npno::encode::Kind;
@@ -3733,7 +3709,7 @@ mod tests {
         let raw = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
         let mut plain = Open::file("Raw take.wav", raw.clone());
         plain.twice();
-        assert!(!plain.dock().iter().any(|word| word == "Audition"));
+        assert!(!plain.words().iter().any(|word| word == audition::CATEGORY));
 
         let marks = prep::Marks {
             regions: vec![
@@ -3757,8 +3733,8 @@ mod tests {
         let bytes = prep::with_marks(&raw, &marks).unwrap();
         let mut open = Open::file("Wurli take.wav", bytes);
         open.twice();
-        let said = open.dock();
-        for shown in [audition::INSTRUMENT, audition::CATEGORY, "Grand"] {
+        let said = open.words();
+        for shown in [audition::CATEGORY, "Grand"] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
 
@@ -3770,7 +3746,7 @@ mod tests {
             .docked
             .push((wav::KIND.to_string(), Kind::Wurlitzer.word().to_string()));
         open.twice();
-        assert!(open.dock().iter().any(|word| word == "Reed piano"));
+        assert!(open.words().iter().any(|word| word == "Reed piano"));
         let said = open.painted(Vec::new());
         for shown in [
             wav::PLAY_HIT,
@@ -3834,7 +3810,7 @@ mod tests {
             testing::where_(&said, wav::APPLY_GAIN).center(),
         ));
         open.twice();
-        let said = open.dock();
+        let said = open.words();
         assert!(
             said.iter().any(|word| word == "Reed piano"),
             "a gain keeps the kind: {said:?}"

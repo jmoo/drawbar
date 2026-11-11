@@ -818,6 +818,12 @@ pub fn ui(
                     sets.push((UNDO.to_string(), String::new()));
                 }
             }
+            if state.marks_samples() {
+                ui.add_space(12.0);
+                if let Some(kind) = audition::category(ui, state.kind()) {
+                    sets.push((KIND.to_string(), kind.word().to_string()));
+                }
+            }
         });
         ui.add_space(6.0);
     }
