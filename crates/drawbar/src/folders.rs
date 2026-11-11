@@ -119,7 +119,7 @@ struct Census {
     /// How many files drawbar opens each folder holds, everywhere below it. The root's
     /// count, under `None`, is the whole library's.
     counts: BTreeMap<Option<u64>, usize>,
-    /// The ids of the assets directly in each folder, in path order.
+    /// The ids of the assets directly in each folder, in [`shown`] order.
     members: BTreeMap<Option<u64>, Vec<u64>>,
 }
 
@@ -134,15 +134,24 @@ impl Census {
             ..Census::default()
         };
         let mut listed: Vec<&LocalEntity> = workspace.listed().collect();
-        listed.sort_by(|a, b| {
-            let unplaced = a.path.is_none().cmp(&b.path.is_none());
-            unplaced.then_with(|| a.path.cmp(&b.path))
+        listed.sort_by_cached_key(|entity| {
+            let placed = entity.path.as_ref().map(shown);
+            (
+                placed.is_none(),
+                placed,
+                names::key(&entity.name),
+                entity.id,
+            )
         });
         for entity in listed {
             let parent = entity.path.as_ref().map(LibPath::parent);
             let holder = parent.as_ref().and_then(|dir| ids.get(dir).copied());
             census.members.entry(holder).or_default().push(entity.id);
-            if !crate::store::opens(&entity.name) {
+            let opens = match &entity.path {
+                Some(path) => crate::store::opens(path.leaf()),
+                None => crate::store::opens(&crate::workspace::library_filename(entity)),
+            };
+            if !opens {
                 continue;
             }
             *census.counts.entry(None).or_default() += 1;
@@ -158,12 +167,18 @@ impl Census {
     }
 }
 
+/// The order the tree lists the library in, which is the table's: by name ignoring case,
+/// then by path, so that names differing only in case keep one order.
+pub(crate) fn shown(path: &LibPath) -> (String, LibPath) {
+    (names::key(path.as_str()), path.clone())
+}
+
 /// What [`Folders::shape`] returns.
 pub(crate) type Shape = (u64, [usize; 3], bool);
 
 #[derive(Default)]
 pub struct Folders {
-    /// In path order, so parents come before their children.
+    /// In [`shown`] order, so parents come before their children.
     list: Vec<Folder>,
     /// Bumped by every change to `list`.
     generation: u64,
@@ -267,7 +282,7 @@ impl Folders {
             .collect()
     }
 
-    /// The assets directly in `folder`, in path order. An asset with no file yet is in
+    /// The assets directly in `folder`, in [`shown`] order. An asset with no file yet is in
     /// the root, after those with one.
     pub(crate) fn members<'a>(
         &self,
@@ -376,7 +391,7 @@ impl Folders {
         }
         let id = self.next_id();
         self.list.push(Folder { id, path });
-        self.list.sort_by(|a, b| a.path.cmp(&b.path));
+        self.list.sort_by_cached_key(|folder| shown(&folder.path));
         self.generation += 1;
         id
     }
@@ -539,7 +554,7 @@ impl Folders {
                 folder.path = moved;
             }
         }
-        self.list.sort_by(|a, b| a.path.cmp(&b.path));
+        self.list.sort_by_cached_key(|folder| shown(&folder.path));
         self.generation += 1;
         for lost in &mut self.lost {
             if let Some(moved) = lost.path.moved(from, to) {
@@ -676,7 +691,7 @@ pub(crate) fn place_new(workspace: &mut Workspace, folders: &Folders) {
 mod tests {
     use super::*;
     use crate::log::Log;
-    use crate::workspace::Fresh;
+    use crate::workspace::{Fresh, Origin};
 
     fn workspace() -> (Workspace, Log) {
         (
@@ -796,6 +811,58 @@ mod tests {
         assert_eq!(count("Pianos/Old"), 1);
         assert_eq!(count("Pianos/Empty"), 0);
         assert_eq!(folders.count(None, &workspace), 3, "the whole library");
+    }
+
+    /// A sound kept without a file yet is listed under its slot's name, which has no
+    /// extension, and counted as the file it will be.
+    #[test]
+    fn a_sound_with_no_file_yet_counts_toward_the_library() {
+        let (mut workspace, mut log) = workspace();
+        let folders = Folders::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = workspace.ingest("Africa Split".into(), Origin::Fresh, bytes, &mut log);
+
+        let members: Vec<u64> = folders
+            .members(None, &workspace)
+            .iter()
+            .map(|entity| entity.id)
+            .collect();
+        assert_eq!(members, vec![id]);
+        assert_eq!(folders.count(None, &workspace), 1);
+    }
+
+    /// The tree lists folders and files as the table does, ignoring case, and names that
+    /// differ only in case keep one order.
+    #[test]
+    fn the_tree_lists_names_ignoring_case() {
+        let (mut workspace, mut log) = workspace();
+        let mut folders = Folders::default();
+        folders.sync(
+            &["beta", "alpha", "Beta", "alpha/Zed", "alpha/yak"]
+                .map(|dir| LibPath::parse(dir).unwrap()),
+        );
+        for path in ["cherry.ne5p", "Banana.ne5p", "apple.ne5p", "banana.ne5p"] {
+            let id = workspace.create(Fresh::Program, &mut log).unwrap();
+            workspace.place(id, LibPath::parse(path).unwrap());
+        }
+
+        let names = |ids: Vec<u64>| -> Vec<&str> {
+            ids.iter()
+                .map(|id| folders.get(*id).unwrap().path.as_str())
+                .collect()
+        };
+        assert_eq!(names(folders.children(None)), ["alpha", "Beta", "beta"]);
+        let alpha = folders.id_of(&LibPath::parse("alpha").unwrap());
+        assert_eq!(names(folders.children(alpha)), ["alpha/yak", "alpha/Zed"]);
+        let files: Vec<&str> = folders
+            .members(None, &workspace)
+            .iter()
+            .map(|entity| entity.name.as_str())
+            .collect();
+        assert_eq!(
+            files,
+            ["apple.ne5p", "Banana.ne5p", "banana.ne5p", "cherry.ne5p"]
+        );
     }
 
     /// The counts and the members are taken once for each change to where the assets

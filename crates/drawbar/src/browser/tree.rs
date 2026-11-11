@@ -343,7 +343,8 @@ impl Rows {
 /// The folders inside each folder, and the files drawbar does not open in each, gathered
 /// in one pass for a pass over the library's lines.
 struct Beside<'a> {
-    /// In path order, under the folder they are in, or `None` for the root.
+    /// In [`crate::folders::shown`] order, under the folder they are in, or `None` for the
+    /// root.
     children: BTreeMap<Option<u64>, Vec<&'a Folder>>,
     /// While hidden files are shown, indices into [`Folders::others`], under the folder
     /// they are in.
@@ -369,11 +370,13 @@ impl<'a> Beside<'a> {
             };
             children.entry(holder).or_default().push(folder);
         }
-        let others = folders
+        let mut others: Vec<(usize, &LibPath)> = folders
             .others
             .iter()
             .enumerate()
-            .filter(|_| folders.all_files);
+            .filter(|_| folders.all_files)
+            .collect();
+        others.sort_by_cached_key(|(_, path)| crate::folders::shown(path));
         let mut strangers: BTreeMap<LibPath, Vec<usize>> = BTreeMap::new();
         for (index, path) in others {
             strangers.entry(path.parent()).or_default().push(index);
@@ -2057,6 +2060,23 @@ mod tests {
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+    }
+
+    #[test]
+    fn hidden_files_are_listed_ignoring_case() {
+        let mut folders = crate::folders::Folders::default();
+        folders.all_files = true;
+        folders.others = ["Notes.pdf", "cover.jpg", "Art.png"]
+            .map(|name| LibPath::root().join(name))
+            .to_vec();
+
+        let beside = Beside::of(&folders);
+        let listed: Vec<&str> = beside
+            .strangers(&LibPath::root())
+            .iter()
+            .map(|&index| folders.others[index].leaf())
+            .collect();
+        assert_eq!(listed, ["Art.png", "cover.jpg", "Notes.pdf"]);
     }
 
     #[test]
