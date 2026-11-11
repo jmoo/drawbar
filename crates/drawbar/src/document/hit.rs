@@ -9,6 +9,7 @@
 use std::ops::{Range, RangeInclusive};
 
 use eframe::egui;
+use nord_format::formats::npno::encode::LayerTag;
 use nord_format::wav::{self, Audio};
 
 use super::take::{self, Drawn, Hit, Marked, Part, Summary};
@@ -271,12 +272,19 @@ pub struct Close {
     span: Option<Range<f64>>,
     /// The cut being dragged, and the frame it is at.
     dragging: Option<(Cut, u32)>,
-    /// How much deeper than the take lane's usual scale the lane reaches, in steps; kept
-    /// from one hit to the next.
+    /// How far from linear toward log the lane's scale is drawn, in steps; kept from one
+    /// hit to the next.
     depth: i8,
+    /// The name being typed in the name box, while it is.
+    naming: Option<String>,
 }
 
 impl Close {
+    /// Follow the picked hit to `hit`, its new name, keeping the view.
+    pub fn renamed(&mut self, hit: Hit) {
+        (self.hit, self.naming) = (Some(hit), None);
+    }
+
     /// The cut being dragged on `hit`, and the frame it is at.
     pub fn dragging(&self, hit: Option<Hit>) -> Option<(Cut, u32)> {
         self.dragging.filter(|_| hit.is_some() && hit == self.hit)
@@ -341,6 +349,32 @@ pub enum Wanted {
     Add(Piece),
     Delete(Piece),
     Undo,
+    /// Rename the picked sample to this note and layer.
+    Rename(Hit),
+}
+
+/// What the name box says, on hover.
+pub const RENAME_HINT: &str = "Rename the sample: its note and layer, such as C4 v22";
+
+/// The sample `text` names, as the name box reads it: a note and a layer, `C4 v22` or
+/// `C4 l01`.
+pub fn named(text: &str) -> Result<Hit, String> {
+    let bad = || "write a note and a layer, such as C4 v22".to_string();
+    let mut words = text.split_whitespace();
+    let (Some(root), Some(tag)) = (words.next(), words.next()) else {
+        return Err(bad());
+    };
+    let root = nord_format::note::parse(root).map_err(|_| bad())?;
+    let tag = match (tag.get(..1), tag.get(1..).map(str::parse::<u8>)) {
+        (Some("v" | "V"), Some(Ok(value))) => LayerTag::Value(value),
+        (Some("l" | "L"), Some(Ok(index))) => LayerTag::Index(index),
+        _ => return Err(bad()),
+    };
+    let hit = (root, tag);
+    match take::mark(&super::adding::attack_label(hit), 0..0).hit == Some(hit) {
+        true => Ok(hit),
+        false => Err(bad()),
+    }
 }
 
 /// Undo, at the far right of the row it ends, naming on hover the edit it takes back,
@@ -541,7 +575,38 @@ pub fn ui(
 
     ui.horizontal_wrapped(|ui| {
         ui.label(crate::panel::caps("Sample"));
-        ui.label(egui::RichText::new(&cuts.name).monospace());
+        // The name box: the sample is renamed when it is left, unless by Escape.
+        let mut text = close.naming.clone().unwrap_or_else(|| cuts.name.clone());
+        let read = named(&text).and_then(|to| {
+            let taken = to != hit && marks.regions.iter().any(|mark| mark.hit == Some(to));
+            match taken {
+                true => Err(format!("the take already marks {}", take::named(to))),
+                false => Ok(to),
+            }
+        });
+        let mut edit = egui::TextEdit::singleline(&mut text)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(72.0);
+        if read.is_err() {
+            edit = edit.text_color(app::bad(ui.visuals()));
+        }
+        let response = ui.add(edit);
+        let response = match &read {
+            Ok(_) => response.on_hover_text(RENAME_HINT),
+            Err(why) => response.on_hover_text(why),
+        };
+        if response.has_focus() {
+            close.naming = Some(text);
+        }
+        if response.lost_focus() {
+            let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if let (false, Ok(to)) = (escaped, read) {
+                if to != hit {
+                    wanted = Some(Wanted::Rename(to));
+                }
+            }
+            close.naming = None;
+        }
         let places = take::decimals(take::step((shown.end - shown.start) / rate)) + 1;
         ui.label(
             egui::RichText::new(format!(

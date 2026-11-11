@@ -43,6 +43,49 @@ pub const LOOPED: &str = "loop/";
 /// piece after it: `note`, `loop` or `key-off`.
 pub const DELETED: &str = "delete/";
 
+/// The path prefix of a set that renames the sample whose attack it names to the sample
+/// whose attack label its value is, every region of it.
+pub const RENAMED: &str = "rename/";
+
+/// `marks` with every region of the sample whose attack is `label` renamed to the sample
+/// whose attack label is `to`.
+fn renamed(marks: &wav::Marks, path: &str, label: &str, to: &str) -> Result<wav::Marks, String> {
+    let from = take::mark(label, 0..0)
+        .hit
+        .ok_or_else(|| format!("{path}: names no sample"))?;
+    let to = take::mark(to, 0..0)
+        .hit
+        .ok_or_else(|| format!("{path}: {to} names no sample"))?;
+    let mut out = marks.clone();
+    if from == to {
+        return Ok(out);
+    }
+    if out
+        .regions
+        .iter()
+        .any(|region| take::mark(&region.label, 0..0).hit == Some(to))
+    {
+        return Err(format!(
+            "{path}: the take already marks {}",
+            take::named(to)
+        ));
+    }
+    for region in &mut out.regions {
+        let mark = take::mark(&region.label, 0..0);
+        if mark.hit != Some(from) {
+            continue;
+        }
+        region.label = match mark.part {
+            take::Part::Attack => adding::attack_label(to),
+            take::Part::Resonance => format!("{:03}-b1-{}", to.0, take::layer(to.1)),
+            take::Part::Release => adding::release_label(to),
+            take::Part::Fade => format!("{}{}", adding::attack_label(to), take::FADE_SUFFIX),
+            take::Part::Other => continue,
+        };
+    }
+    Ok(out)
+}
+
 /// The word a [`DELETED`] path names `piece` by.
 fn piece_slug(piece: hit::Piece) -> &'static str {
     match piece {
@@ -72,8 +115,15 @@ fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
 }
 
 /// What a set that adds or deletes a region or a loop says, for Undo to name it.
-fn said_piece(path: &str) -> Option<String> {
+fn said_piece(path: &str, value: &str) -> Option<String> {
     let name = |label: &str| take::mark(label, 0..0).hit.map(take::named);
+    if let Some(label) = path.strip_prefix(RENAMED) {
+        return Some(format!(
+            "rename {} to {}",
+            name(label).unwrap_or(label.to_string()),
+            name(value).unwrap_or(value.to_string())
+        ));
+    }
     if let Some(label) = path.strip_prefix(ADDED) {
         let mark = take::mark(label, 0..0);
         return Some(match (mark.hit, mark.part) {
@@ -99,6 +149,9 @@ fn said_piece(path: &str) -> Option<String> {
 /// `marks` with the add or delete `path` with `value` made, or none where `path` is not
 /// one.
 fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Marks, String>> {
+    if let Some(label) = path.strip_prefix(RENAMED) {
+        return Some(renamed(marks, path, label, value));
+    }
     let mut out = marks.clone();
     if let Some(label) = path.strip_prefix(ADDED) {
         return Some(frames_in(path, value).and_then(|span| {
@@ -327,7 +380,9 @@ pub fn apply(
         }
         let held = match marks.take() {
             Some(held) => Some(held),
-            None if said_piece(path).is_some() => Some(wav::read_marks(current).map_err(error)?),
+            None if said_piece(path, value).is_some() => {
+                Some(wav::read_marks(current).map_err(error)?)
+            }
             None => None,
         };
         if let Some(held) = &held {
@@ -421,7 +476,9 @@ impl Step {
         let said: Vec<String> = sets
             .iter()
             .map(|(path, value)| match path.strip_prefix(CUT) {
-                _ if said_piece(path).is_some() => said_piece(path).unwrap_or_default(),
+                _ if said_piece(path, value).is_some() => {
+                    said_piece(path, value).unwrap_or_default()
+                }
                 Some(rest) => {
                     let (label, slug) = rest.rsplit_once('/').unwrap_or((rest, ""));
                     let cut = hit::Cut::from_slug(slug).map_or(slug, |cut| cut.name());
@@ -1010,7 +1067,14 @@ pub fn ui(
                 &mut state.close,
                 last.as_deref(),
             );
-            if wanted == Some(hit::Wanted::Undo) {
+            if let (Some(hit::Wanted::Rename(to)), Some(from), Ok(held)) =
+                (wanted, picked, &read.marked)
+            {
+                let from = hit::Cuts::of(held, from);
+                sets.push((format!("{RENAMED}{}", from.label), adding::attack_label(to)));
+                state.view.picked = Some(to);
+                state.close.renamed(to);
+            } else if wanted == Some(hit::Wanted::Undo) {
                 sets.push((UNDO.to_string(), String::new()));
             } else if let (Some(wanted), Ok(held)) = (wanted, &read.marked) {
                 pieces(wanted, audio, held, &mut state.view, sets);
@@ -1087,7 +1151,7 @@ fn pieces(
             format!("{LOOPED}{}", cuts.label),
             span_value(&adding::default_loop(&attack, audio.rate)),
         )),
-        Wanted::Add(Piece::Note) | Wanted::Undo => {}
+        Wanted::Add(Piece::Note) | Wanted::Undo | Wanted::Rename(_) => {}
         Wanted::Delete(piece) => {
             sets.push((
                 format!("{DELETED}{}/{}", cuts.label, piece_slug(piece)),
@@ -1580,6 +1644,40 @@ mod tests {
             Step::before(&out, 0.0, &[delete("note"), delete("key-off")]).what,
             "delete A4 v22, delete A4 v22 key-off"
         );
+    }
+
+    /// A rename relabels every region of the sample, keeps its loop, and refuses a name
+    /// the take marks already.
+    #[test]
+    fn a_sample_is_renamed_every_region_of_it() {
+        let bytes = marked_take(&[0.9, 0.3]);
+        let rename = |to: &str| [(format!("{RENAMED}069-b0-v22"), to.to_string())];
+        let (out, _) = apply(&bytes, &bytes, &rename("071-b0-v30")).unwrap();
+        let marks = wav::read_marks(&out).unwrap();
+        let labels: Vec<&str> = marks
+            .regions
+            .iter()
+            .map(|region| region.label.as_str())
+            .collect();
+        assert_eq!(labels, ["071-b0-v30", "071-b2-v30"]);
+        assert_eq!(marks.loops.len(), 1);
+        assert_eq!(
+            Step::before(&bytes, 0.0, &rename("071-b0-v30")).what,
+            "rename A4 v22 to B4 v30"
+        );
+        let added = [(format!("{ADDED}071-b0-v30"), "60000..70000".to_string())];
+        let (both, _) = apply(&bytes, &bytes, &added).unwrap();
+        assert!(apply(&both, &both, &rename("071-b0-v30")).is_err());
+
+        assert_eq!(
+            hit::named("B4 v30"),
+            Ok((71, nord_format::formats::npno::encode::LayerTag::Value(30)))
+        );
+        assert_eq!(
+            hit::named("c4 l01"),
+            Ok((60, nord_format::formats::npno::encode::LayerTag::Index(1)))
+        );
+        assert!(hit::named("B4").is_err() && hit::named("H4 v30").is_err());
     }
 
     #[test]

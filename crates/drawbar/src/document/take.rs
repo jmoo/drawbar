@@ -35,7 +35,7 @@ pub(super) const LEGEND_TEXT: f32 = 11.0;
 const BLOCK: usize = 256;
 
 /// The suffix a dying attack's fade region carries after its stroke's name.
-const FADE_SUFFIX: &str = "-fade";
+pub(super) const FADE_SUFFIX: &str = "-fade";
 
 /// A lane's peak level in each column, from 0 up.
 pub type Lane = Vec<f32>;
