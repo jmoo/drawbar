@@ -991,8 +991,8 @@ impl Browser {
         if rescue.shows() {
             others.push(("Show the file", act(Rescuing::Show)));
         }
-        let ask = match rescue.broken {
-            false => Ask {
+        let ask = match &rescue.broken {
+            None => Ask {
                 title: format!("A write to the instrument left “{}”", rescue.name),
                 note: Some(
                     "It may be the only copy of what that slot held. It stays on this \
@@ -1005,7 +1005,7 @@ impl Browser {
                 cancel: "Later",
                 strong: Answer::Cancel,
             },
-            true => Ask {
+            Some(_) => Ask {
                 title: format!(
                     "A write to the instrument left “{}”, which does not read",
                     rescue.name

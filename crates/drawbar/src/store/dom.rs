@@ -9,13 +9,13 @@ pub(super) fn failure(name: &str, message: &str) -> io::Error {
         "NotFoundError" => io::ErrorKind::NotFound,
         "QuotaExceededError" => io::ErrorKind::StorageFull,
         "NotSupportedError" => io::ErrorKind::Unsupported,
-        "NotAllowedError" => io::ErrorKind::PermissionDenied,
+        "NotAllowedError" | "NoModificationAllowedError" => io::ErrorKind::PermissionDenied,
         _ => io::ErrorKind::Other,
     };
-    match name {
-        "" | "Error" => io::Error::new(kind, message.to_string()),
-        _ => io::Error::new(kind, format!("{name}: {message}")),
-    }
+    super::storage::plain(kind, || match name {
+        "" | "Error" => message.to_string(),
+        _ => format!("{name}: {message}"),
+    })
 }
 
 #[cfg(test)]
@@ -29,6 +29,10 @@ mod tests {
         assert_eq!(kind("QuotaExceededError"), io::ErrorKind::StorageFull);
         assert_eq!(kind("NotSupportedError"), io::ErrorKind::Unsupported);
         assert_eq!(kind("NotAllowedError"), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            kind("NoModificationAllowedError"),
+            io::ErrorKind::PermissionDenied
+        );
         assert_eq!(kind("InvalidStateError"), io::ErrorKind::Other);
         let refused = failure("NotSupportedError", "The implementation did not support");
         assert_eq!(
@@ -36,5 +40,16 @@ mod tests {
             "NotSupportedError: The implementation did not support"
         );
         assert_eq!(failure("Error", "plain").to_string(), "plain");
+    }
+
+    #[test]
+    fn a_browser_that_will_not_write_says_so_in_toshokans_words() {
+        let denied = toshokan::IoError::Denied.to_string();
+        for name in ["NotAllowedError", "NoModificationAllowedError"] {
+            let said = failure(name, "An attempt was made to write").to_string();
+            assert_eq!(said, denied, "{name}");
+        }
+        let full = failure("QuotaExceededError", "The quota has been exceeded");
+        assert_eq!(full.to_string(), toshokan::IoError::NoSpace.to_string());
     }
 }
