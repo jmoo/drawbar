@@ -64,14 +64,14 @@ WAV closed unsaved opens again on its gain, **Save** writes it into the file,
 which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
 
-The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline 60 dB under full scale, in decibels, so quiet releases show. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many samples, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Whole file** shows the whole file again.
+The waveform is the take's lane: its level, the louder channel at each point, rising in decibels from a baseline 72 dB under the take's loudest point, so quiet releases show, with a line every 12 dB of full scale. The small **+** and **−** at the lane's top right draw the scale deeper, to 96 or 120 dB, so the quiet end stands taller, or shallower, to 48 dB: the scale changes, not the gain, and the lines say where each level is. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many samples, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Whole file** shows the whole file again.
 
 Under the take, the picked sample is drawn close up, from its first cut to its last
 with a margin: its attack, loop, release and fade, and a marker at each cut
 point (attack start and end, loop start and end, release start and end, and
 where a fade starts). **Play original** plays the picked sample as the take holds it, from its first cut to its last, unshaped. Hover over a marker for its name and time. **Zoom in**
 and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole sample**
-the whole sample again; drag the lane to move along. Drag a marker to move its
+the whole sample again; drag the lane to move along. Its **+** and **−** set its scale as the take's do. The small **←** and **→** at the far right of the row under it pick the sample before and after it in the take, bringing it into view. Drag a marker to move its
 cut: both lanes follow it, and when you let go its region or loop is written to
 the file's marks, one edit a drag, with the audio untouched. A marker stops at the
 cuts either side of it, so a loop stays inside its attack and a fade ends with

@@ -889,6 +889,7 @@ pub fn ui(
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
             if state.marks_samples() {
                 asked = audition::controls(ui, state, played);
+                steps(ui, state);
             }
         });
     }
@@ -896,6 +897,44 @@ pub fn ui(
         sets.push((CLEAN.to_string(), if on { "on" } else { "off" }.to_string()));
     }
     (audition, asked)
+}
+
+/// What the arrow that picks the sample before the picked one says, on hover.
+pub const BEFORE: &str = "Previous sample";
+
+/// What the arrow that picks the sample after the picked one says, on hover.
+pub const AFTER: &str = "Next sample";
+
+/// The small arrows at the far right of the row under the picked sample, which pick the
+/// sample before and after it in the take.
+fn steps(ui: &mut egui::Ui, state: &mut State) {
+    let Some((total, rate)) = state.audio().map(|audio| {
+        let channels = usize::from(audio.channels.max(1));
+        (
+            (audio.samples.len() / channels) as f64,
+            f64::from(audio.rate.max(1)),
+        )
+    }) else {
+        return;
+    };
+    let Ok(marked) = &state.read.marked else {
+        return;
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // ⚠️ Right to left: the later arrow is added first.
+        for (word, hint, forward) in [("→", AFTER, true), ("←", BEFORE, false)] {
+            let next = state.view.beside(marked, forward);
+            if ui
+                .add_enabled(next.is_some(), egui::Button::new(word).small())
+                .on_hover_text(hint)
+                .clicked()
+            {
+                if let Some(hit) = next {
+                    state.view.pick(hit, marked, total, rate);
+                }
+            }
+        }
+    });
 }
 
 /// The label of Play while a sample is picked: it plays that sample as the take holds it,
