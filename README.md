@@ -32,6 +32,8 @@ nix run github:jmoo/drawbar#drawbar              # the desktop app
 nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 ```
 
+Windows builds of both are attached to their [releases](https://github.com/jmoo/drawbar/releases).
+
 The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
