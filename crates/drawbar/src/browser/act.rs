@@ -3822,6 +3822,30 @@ mod tests {
         assert_eq!(dot(&bench), None);
     }
 
+    #[test]
+    fn a_rescued_sample_is_queued_for_the_slot_it_was_rescued_from() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", "", ""]);
+        let home = Location::from_user(1, 3);
+        let id = bench.workspace.ingest(
+            "drawbar-pad.nsmp".into(),
+            Origin::Rescued { at: home },
+            crate::testing::sample_bytes(),
+            &mut bench.log,
+        );
+
+        assert_eq!(
+            bound_for(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue
+            ),
+            Bound::At(class, home)
+        );
+    }
+
     /// The instrument keeps one sample of each name, so a sample whose name a slot
     /// already has stands for that slot and is queued to replace it. Sent to any other
     /// slot it is refused before it reaches the queue, as the instrument would refuse it.
