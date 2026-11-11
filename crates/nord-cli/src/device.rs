@@ -99,15 +99,7 @@ pub enum Source {
 
 pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     let (report, classes) = match source {
-        Source::Usb => {
-            let mut device = open_usb()?;
-            let classes = read_geometry(&mut device)?.classes().clone();
-            let report = transact(&mut device, "device status", |d| {
-                nord_usb::block_on(op::inventory(d.transport(), &classes))
-            })
-            .map_err(described)?;
-            (report, classes)
-        }
+        Source::Usb => inventory(&mut open_usb()?)?,
         Source::Replay(path) => {
             let text =
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -141,6 +133,35 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
         print_table(ui, &report);
     }
     Ok(())
+}
+
+/// Every class's counters, with the partition table that places each class.
+fn inventory<T: Transport + Recorded>(
+    device: &mut Device<T>,
+) -> Result<(Vec<Status>, nord_usb::Classes), String> {
+    let classes = read_geometry(device)?.classes().clone();
+    let report = transact(device, "device status", |d| {
+        nord_usb::block_on(op::inventory(d.transport(), &classes))
+    })
+    .map_err(refused_session)?;
+    Ok((report, classes))
+}
+
+/// [`described`] for the inventory walk, which skips a class whose open or `STATUS` is
+/// refused: a status that reaches here refused the `HELLO` or the closing exchanges.
+///
+/// After an interrupted write, `device status` failed with status 0x1, and
+/// `nord device recover` cleared it. Confirmed on hardware; which exchange was refused
+/// was not recorded.
+fn refused_session(e: nord_usb::Error) -> String {
+    match e {
+        nord_usb::Error::DeviceStatus(_) => format!(
+            "the instrument refused to open or close a session, as it does while it still \
+             holds a session from an interrupted run; run `nord device recover`, then try \
+             again ({e})"
+        ),
+        other => described(other),
+    }
 }
 
 /// Report the attached instrument itself, not what it stores.
@@ -2222,6 +2243,38 @@ mod tests {
             described(nord_usb::Error::DeviceStatus(0x5)),
             "device reported status 0x5"
         );
+    }
+
+    /// The status 0x1 that `device status` met after an interrupted write, here as a
+    /// refused `HELLO`.
+    #[test]
+    fn a_refused_session_in_the_status_walk_names_the_recovery() {
+        use nord_usb::transport::{ReplayTransport, Script, Step};
+        use nord_usb::wire::Message;
+
+        let steps = |text| Script::parse(text).expect("a script parses").steps();
+        let mut hello = steps(include_str!(
+            "../../nord-usb/tests/scripts/session/refused_hello.script"
+        ));
+        let Step::In(frame) = &mut hello[1] else {
+            panic!("the HELLO's reply is second");
+        };
+        let mut reply = Message::decode_response(frame).expect("the reply");
+        reply.args[..4].copy_from_slice(&0x1u32.to_be_bytes());
+        *frame = reply.encode();
+        let geometry = steps(include_str!(
+            "../../nord-usb/tests/scripts/device/geometry.script"
+        ));
+        let mut device = Device::new(ReplayTransport::new([geometry, hello].concat()));
+
+        let said = inventory(&mut device).expect_err("the walk was refused");
+        assert_eq!(
+            said,
+            "the instrument refused to open or close a session, as it does while it still \
+             holds a session from an interrupted run; run `nord device recover`, then try \
+             again (device reported status 0x1)"
+        );
+        assert!(device.transport().is_exhausted(), "the GOODBYE was sent");
     }
 
     #[test]
