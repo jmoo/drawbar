@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # nix-deps: cargo git jq
-# scripts/bump.bash against throwaway workspaces, one per scenario.
+# scripts/bump.bash and the release notes against throwaway workspaces, one per
+# scenario.
 set -euo pipefail
 
 scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -169,4 +170,29 @@ fi
 grep -q 'app depends by path on private, which is never published' refused.txt ||
   fail "the refusal must name app and private: $(cat refused.txt)"
 
-echo 'ok: bumps converge, catch up hand edits, propagate dependency requirements, and refuse an unplaceable crate'
+# A release note replaces the description, `none` leaves out a commit that breaks
+# nothing, and a breaking item leads its section.
+scenario release_notes
+change() {
+  echo "// $1" >>crates/app/src/lib.rs
+  git add crates
+  git commit -q --cleanup=verbatim -m "$1" ${2:+-m "$2"}
+}
+change 'fix(app): return the corrected value' $'Some detail.\r\nRelease-note: Values read correctly again.\r'
+change 'refactor(app): tidy the internals' 'Release-note: none'
+change 'refactor(app)!: rename the public API' 'Release-note: none'
+change 'feat(app)!: replace the layout'
+change 'chore: format'
+written=$(source scripts/lib.bash && commits_for app app-v0.1.0 | notes app-v0.1.1 app-v0.1.0)
+expected='### Features
+- ⚠️ **app:** replace the layout
+
+### Bug fixes
+- **app:** Values read correctly again.
+
+### Other changes
+- ⚠️ **app:** rename the public API
+- format'
+[[ $written == "$expected" ]] || fail "release notes:"$'\n'"$written"$'\n'"expected:"$'\n'"$expected"
+
+echo 'ok: bumps converge, catch up hand edits, propagate dependency requirements, refuse an unplaceable crate, and write release notes'

@@ -333,6 +333,12 @@ Allowed types are `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
 `build`, `ci`, `chore`, `revert`. The scope is usually a crate name. `!` before
 the colon, or a `BREAKING CHANGE:` footer, marks a breaking change.
 
+Release notes, including drawbar's What changed sheet, list each commit by its
+description. In a `feat`, `fix`, or `perf` title, describe what a user notices,
+not how the code changed. A `Release-note:` line in the PR description replaces
+the description, and the squash commit carries it. `Release-note: none` leaves
+out a commit that breaks nothing. The sheet shows only `feat`, `fix`, and `perf`.
+
 Each crate's version lives only in its `Cargo.toml`. `scripts/bump.bash` derives
 release levels from Conventional Commits since the crate's last release tag:
 breaking changes bump major (minor for a 0.x crate), `feat` bumps minor, and

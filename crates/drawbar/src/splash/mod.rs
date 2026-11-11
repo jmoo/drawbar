@@ -384,85 +384,74 @@ pub enum Notes {
     Unavailable,
 }
 
-/// The kind of change a release-notes heading introduces.
+/// The kind of change a release-notes heading introduces. The sheet shows only these:
+/// `scripts/release.bash` files work a user does not see under `Other changes`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Change<'a> {
-    Breaking,
+pub enum Change {
     New,
     Fixed,
     Faster,
-    Other,
-    /// A heading `scripts/release.bash` does not write, shown as written.
-    Unknown(&'a str),
 }
 
-impl<'a> Change<'a> {
-    pub fn read(heading: &'a str) -> Change<'a> {
+impl Change {
+    /// The change a heading introduces, or `None` for a section the sheet leaves out.
+    pub fn read(heading: &str) -> Option<Change> {
         match heading.trim() {
-            "\u{26a0}\u{fe0f} Breaking changes" => Change::Breaking,
-            "Features" => Change::New,
-            "Bug fixes" => Change::Fixed,
-            "Performance" => Change::Faster,
-            "Other changes" => Change::Other,
-            heading => Change::Unknown(heading),
+            "Features" => Some(Change::New),
+            "Bug fixes" => Some(Change::Fixed),
+            "Performance" => Some(Change::Faster),
+            _ => None,
         }
     }
 
     /// What the sheet calls this section.
-    pub fn title(self) -> &'a str {
+    pub fn title(self) -> &'static str {
         match self {
-            Change::Breaking => "Breaking",
             Change::New => "New",
             Change::Fixed => "Fixed",
             Change::Faster => "Faster",
-            Change::Other => "Other",
-            Change::Unknown(heading) => heading,
         }
     }
 
-    /// The glyph and color every row of this section wears.
-    fn badge(self, visuals: &egui::Visuals) -> (Glyph, egui::Color32) {
+    /// The glyph every row of this section wears, unless it is breaking.
+    fn glyph(self) -> Glyph {
         match self {
-            Change::Breaking => (Glyph::TriangleAlert, warn(visuals)),
-            Change::New => (Glyph::Sparkles, good(visuals)),
-            Change::Fixed => (Glyph::Wrench, good(visuals)),
-            Change::Faster => (Glyph::Gauge, good(visuals)),
-            Change::Other => (Glyph::CircleDot, good(visuals)),
-            Change::Unknown(_) => (Glyph::CircleDot, visuals.weak_text_color()),
+            Change::New => Glyph::Sparkles,
+            Change::Fixed => Glyph::Wrench,
+            Change::Faster => Glyph::Gauge,
         }
     }
 }
 
-/// One heading of the notes and the lines beneath it; `None` before the first heading.
+/// One heading of the notes and the items beneath it.
 struct Section<'a> {
-    change: Option<Change<'a>>,
-    lines: Vec<Line<'a>>,
+    change: Change,
+    items: Vec<Item<'a>>,
 }
 
-/// The body grouped under its headings, in the order it was written.
+/// The sections the sheet shows, in the order the body gives them.
 fn sections(body: &str) -> Vec<Section<'_>> {
-    let mut sections = vec![Section {
-        change: None,
-        lines: Vec::new(),
-    }];
+    let mut read: Vec<(Option<Change>, Vec<Item<'_>>)> = vec![(None, Vec::new())];
     for line in body.lines().map(classify) {
         match line {
-            Line::Heading(heading) => sections.push(Section {
-                change: Some(Change::read(heading)),
-                lines: Vec::new(),
-            }),
-            // The compare link goes in the foot, and a blank line is only Markdown
-            // spacing.
-            Line::Changelog(_) | Line::Blank => {}
-            line => {
-                if let Some(section) = sections.last_mut() {
-                    section.lines.push(line);
+            Line::Heading(heading) => read.push((Change::read(heading), Vec::new())),
+            Line::Item(item) => {
+                if let Some((_, items)) = read.last_mut() {
+                    items.push(item);
                 }
             }
+            Line::Blank | Line::Changelog(_) | Line::Text(_) => {}
         }
     }
-    sections.retain(|section| !section.lines.is_empty());
-    sections
+    read.into_iter()
+        .filter(|(_, items)| !items.is_empty())
+        .filter_map(|(change, items)| {
+            Some(Section {
+                change: change?,
+                items,
+            })
+        })
+        .collect()
 }
 
 /// The compare link a release body ends with.
@@ -473,21 +462,20 @@ fn changelog(body: &str) -> Option<&str> {
     })
 }
 
-/// The change count shown beside a section's title. `None` for a section with no items.
-fn tally(count: usize, breaking: bool) -> Option<String> {
+/// The change count shown beside a section's title.
+fn tally(count: usize) -> String {
     const WORDS: [&str; 9] = [
         "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
     ];
 
-    let many = WORDS
-        .get(count.checked_sub(1)?)
+    let many = count
+        .checked_sub(1)
+        .and_then(|at| WORDS.get(at))
         .map_or_else(|| count.to_string(), |word| (*word).to_owned());
-    Some(match (count == 1, breaking) {
-        (true, false) => format!("{many} change"),
-        (false, false) => format!("{many} changes"),
-        (true, true) => format!("{many} change that needs your attention"),
-        (false, true) => format!("{many} changes that need your attention"),
-    })
+    match count {
+        1 => format!("{many} change"),
+        _ => format!("{many} changes"),
+    }
 }
 
 /// The change list. Returns whether the reader is done with it.
@@ -563,11 +551,16 @@ fn notes_body(ui: &mut egui::Ui, notes: &Notes) {
             });
         }
         Notes::Read { body, .. } => {
+            let sections = sections(body);
+            if sections.is_empty() {
+                ui.add_space(GAP * 3.0);
+                ui.label(egui::RichText::new(QUIET_RELEASE).weak());
+            }
             let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
-            for section in sections(body) {
-                section_head(ui, section.change, &section.lines);
-                for line in section.lines {
-                    change_row(ui, section.change, line);
+            for section in sections {
+                section_head(ui, &section);
+                for item in section.items {
+                    change_row(ui, section.change, item);
                     rule(ui, hairline);
                 }
             }
@@ -582,98 +575,46 @@ fn notes_body(ui: &mut egui::Ui, notes: &Notes) {
     }
 }
 
-fn section_head(ui: &mut egui::Ui, change: Option<Change<'_>>, lines: &[Line<'_>]) {
-    let breaking = change == Some(Change::Breaking);
-    let ink = match breaking {
-        true => warn(ui.visuals()),
-        false => ui.visuals().strong_text_color(),
-    };
-    let count = lines
-        .iter()
-        .filter(|line| matches!(line, Line::Item { .. }))
-        .count();
+/// What the sheet says for a release with nothing under the headings it shows.
+const QUIET_RELEASE: &str = "Behind-the-scenes changes only.";
+
+fn section_head(ui: &mut egui::Ui, section: &Section<'_>) {
     ui.add_space(GAP * 4.0);
     ui.horizontal(|ui| {
-        if let Some(change) = change {
-            ui.label(
-                egui::RichText::new(change.title())
-                    .font(egui::FontId::new(12.0, bold()))
-                    .color(ink),
-            );
-        }
-        if let Some(tally) = tally(count, breaking) {
-            ui.label(egui::RichText::new(tally).size(10.5).weak());
-        }
+        ui.label(
+            egui::RichText::new(section.change.title())
+                .font(egui::FontId::new(12.0, bold()))
+                .color(ui.visuals().strong_text_color()),
+        );
+        ui.label(
+            egui::RichText::new(tally(section.items.len()))
+                .size(10.5)
+                .weak(),
+        );
     });
     ui.add_space(GAP * 1.5);
 }
 
-/// The width of the column holding an item's pull request and commit.
-const REF: f32 = 88.0;
-
-/// The width of the column holding its glyph.
+/// The width of the column holding an item's glyph.
 const BADGE: f32 = 14.0;
 
-fn change_row(ui: &mut egui::Ui, change: Option<Change<'_>>, line: Line<'_>) {
-    let (scope, text, commit) = match line {
-        Line::Item {
-            scope,
-            text,
-            commit,
-        } => (scope, text, commit),
-        Line::Text(text) => (None, text, None),
-        Line::Blank | Line::Heading(_) | Line::Changelog(_) => return,
+fn change_row(ui: &mut egui::Ui, change: Change, item: Item<'_>) {
+    let (glyph, tint) = match item.breaking {
+        true => (Glyph::TriangleAlert, warn(ui.visuals())),
+        false => (change.glyph(), good(ui.visuals())),
     };
-    let (glyph, tint) = match change {
-        Some(change) => change.badge(ui.visuals()),
-        None => (Glyph::CircleDot, ui.visuals().weak_text_color()),
-    };
-    let (text, pr) = split_pr(text);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 9.0;
         cell(ui, BADGE, down(), |ui| {
             ui.add_space(2.0);
             ui.add(sized(glyph, 12.0, tint));
         });
-        let rest = (ui.available_width() - REF - 9.0).max(LEAST_PROSE);
+        let rest = ui.available_width().max(LEAST_PROSE);
         cell(ui, rest, down(), |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.add(egui::Label::new(egui::RichText::new(text).size(11.5)).wrap());
-            if let Some(scope) = scope {
-                ui.add(egui::Label::new(egui::RichText::new(scope).size(10.5).weak()).wrap());
-            }
+            ui.add(egui::Label::new(egui::RichText::new(item.text).size(11.5)).wrap());
         });
-        cell(
-            ui,
-            REF,
-            egui::Layout::right_to_left(egui::Align::TOP),
-            |ui| reference(ui, pr, commit),
-        );
     });
     ui.add_space(GAP);
-}
-
-/// `#NN · sha`, the sha linking to its commit. Laid out right to left, so the column
-/// stays flush right however much of it there is.
-fn reference(ui: &mut egui::Ui, pr: Option<&str>, commit: Option<Commit<'_>>) {
-    let mono = egui::FontId::monospace(10.0);
-    ui.spacing_mut().item_spacing.x = 4.0;
-    if let Some(commit) = commit {
-        ui.add(
-            egui::Hyperlink::from_label_and_url(
-                egui::RichText::new(commit.sha).font(mono.clone()).weak(),
-                commit.url,
-            )
-            .open_in_new_tab(true),
-        );
-    }
-    if let Some(pr) = pr {
-        let said = match commit.is_some() {
-            true => format!("{pr} ·"),
-            false => pr.to_owned(),
-        };
-        ui.label(egui::RichText::new(said).font(mono).weak());
-    }
 }
 
 /// One line of the release notes, classified for drawing.
@@ -682,22 +623,20 @@ pub enum Line<'a> {
     Blank,
     /// `### Features`
     Heading(&'a str),
-    /// `- **scope:** description ([sha](url))`, either half of which may be absent.
-    Item {
-        scope: Option<&'a str>,
-        text: &'a str,
-        commit: Option<Commit<'a>>,
-    },
+    /// `- ⚠️ **scope:** description (#NN) ([sha](url))`, every part but the
+    /// description optional.
+    Item(Item<'a>),
     /// `**Full changelog**: <url>`
     Changelog(&'a str),
     Text(&'a str),
 }
 
-/// The commit an item is credited to.
+/// One change, as a reader sees it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Commit<'a> {
-    pub sha: &'a str,
-    pub url: &'a str,
+pub struct Item<'a> {
+    /// The commit changes how something already worked.
+    pub breaking: bool,
+    pub text: &'a str,
 }
 
 /// Read one line of a release body.
@@ -717,14 +656,16 @@ pub fn classify(line: &str) -> Line<'_> {
     let Some(item) = line.strip_prefix("- ") else {
         return Line::Text(line);
     };
-    let (item, commit) = split_commit(item);
-    let (scope, text) = split_scope(item);
-    Line::Item {
-        scope,
-        text,
-        commit,
-    }
+    let (breaking, item) = match item.strip_prefix(BREAKING) {
+        Some(item) => (true, item),
+        None => (false, item),
+    };
+    let text = without_pr(without_scope(without_commit(item)));
+    Line::Item(Item { breaking, text })
 }
+
+/// The mark `scripts/release.bash` puts before a breaking item.
+const BREAKING: &str = "\u{26a0}\u{fe0f} ";
 
 /// `url`, when it is `https`. Only these are offered as links: the body is fetched text,
 /// and `scripts/release.bash` writes only https URLs.
@@ -734,42 +675,36 @@ fn https(url: &str) -> Option<&str> {
         .then_some(url)
 }
 
-/// The trailing `([sha](url))`, and the item with it taken off.
-fn split_commit(item: &str) -> (&str, Option<Commit<'_>>) {
-    fn commit(item: &str) -> Option<(&str, Commit<'_>)> {
-        const OPEN: &str = " ([";
-        let at = item.rfind(OPEN)?;
-        let inner = item[at + OPEN.len()..].strip_suffix("))")?;
-        let (sha, url) = inner.split_once("](").filter(|(sha, _)| !sha.is_empty())?;
-        let url = https(url)?;
-        Some((&item[..at], Commit { sha, url }))
-    }
-    commit(item).map_or((item, None), |(item, commit)| (item, Some(commit)))
+/// The item without the `([sha](url))` it ends with.
+fn without_commit(item: &str) -> &str {
+    let commit = item.strip_suffix("))").and_then(|rest| {
+        let at = rest.rfind(" ([")?;
+        rest[at..].contains("](").then(|| &rest[..at])
+    });
+    commit.unwrap_or(item)
 }
 
-/// The `(#NN)` a squashed pull request leaves at the end of a subject, and the text
-/// without it. A `#NN` anywhere else is part of what the item says.
-pub fn split_pr(text: &str) -> (&str, Option<&str>) {
-    fn pr(text: &str) -> Option<(&str, &str)> {
-        const OPEN: &str = " (#";
-        let rest = text.strip_suffix(')')?;
+/// The text without the `(#NN)` a squashed pull request leaves at its end. A `#NN`
+/// anywhere else is part of what the item says.
+fn without_pr(text: &str) -> &str {
+    const OPEN: &str = " (#";
+    let pr = text.strip_suffix(')').and_then(|rest| {
         let at = rest.rfind(OPEN)?;
         let number = &rest[at + OPEN.len()..];
-        // Keep the `#`, as GitHub writes the reference.
         (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| (&rest[..at], &rest[at + OPEN.len() - 1..]))
-    }
-    pr(text).map_or((text, None), |(text, pr)| (text, Some(pr)))
+            .then(|| &rest[..at])
+    });
+    pr.unwrap_or(text)
 }
 
-/// The `**scope:**` an item may open with, and the description after it.
-fn split_scope(item: &str) -> (Option<&str>, &str) {
+/// The description after the `**scope:**` an item may open with.
+fn without_scope(item: &str) -> &str {
     // A description of its own can hold `:** `; a scope never holds a star.
     let scope = item
         .strip_prefix("**")
         .and_then(|rest| rest.split_once(":** "))
         .filter(|(scope, _)| !scope.contains('*'));
-    scope.map_or((None, item), |(scope, text)| (Some(scope), text))
+    scope.map_or(item, |(_, text)| text)
 }
 
 #[cfg(test)]
@@ -777,15 +712,19 @@ mod tests {
     use super::*;
     use crate::testing::{self, Word};
 
-    /// The head of the `drawbar-v0.5.0` release body, as `gh release view` returns it.
+    /// Part of `drawbar-v0.10.0`'s commits, as `scripts/release.bash` writes them.
     const RELEASED: &str = "\
-### ⚠️ Breaking changes
-- **nord-cli:** ship the v2 sample encoder unflagged and gate v3/v4 as unverified (#83) ([163abc4](https://github.com/jmoo/drawbar/commit/163abc4e00b0b088fca9a1212fd26faf4cb11770))
-
 ### Features
-- name every write drawbar sends, and read settings from nord-cli (#71) ([3029a35](https://github.com/jmoo/drawbar/commit/3029a35ff1b0f812ccb21cb1a86fbaf0ae5e0256))
+- ⚠️ **drawbar:** drawbar ui v3 + per-platform style and behavior (#147) ([80f5e95](https://github.com/jmoo/drawbar/commit/80f5e955a5b5a7fd9e0f7bb0f087548129e359c7))
+- **drawbar:** offer Load on instrument in a linked document's header (#124) ([8b70284](https://github.com/jmoo/drawbar/commit/8b7028422b9e0dae4ca0c26e2624203bbd8571ca))
 
-**Full changelog**: https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0";
+### Bug fixes
+- **drawbar:** refuse a queue drag the attached instrument does not take (#138) ([1d56f76](https://github.com/jmoo/drawbar/commit/1d56f76de008711998b5c2e80b7ab5d60360b7b6))
+
+### Other changes
+- ⚠️ simplify code across the workspace (#136) ([ec10e2c](https://github.com/jmoo/drawbar/commit/ec10e2c3b9ea76bb8d6bca4e6c1c46283a51e423))
+
+**Full changelog**: https://github.com/jmoo/drawbar/compare/drawbar-v0.9.1...drawbar-v0.10.0";
 
     fn headless() -> egui::Context {
         let ctx = testing::context();
@@ -819,68 +758,86 @@ mod tests {
     #[test]
     fn a_squashed_pull_request_number_leaves_the_text_and_a_mention_of_one_stays_in_it() {
         assert_eq!(
-            split_pr("ship the v2 sample encoder (#83)"),
-            ("ship the v2 sample encoder", Some("#83"))
+            without_pr("ship the v2 sample encoder (#83)"),
+            "ship the v2 sample encoder"
         );
         assert_eq!(
-            split_pr("ship the v2 sample encoder"),
-            ("ship the v2 sample encoder", None)
+            without_pr("undo the truncation #12 introduced"),
+            "undo the truncation #12 introduced"
         );
         assert_eq!(
-            split_pr("undo the truncation #12 introduced"),
-            ("undo the truncation #12 introduced", None)
-        );
-        assert_eq!(
-            split_pr("a trailer with no number (#)"),
-            ("a trailer with no number (#)", None)
+            without_pr("a trailer with no number (#)"),
+            "a trailer with no number (#)"
         );
     }
 
     #[test]
-    fn every_heading_the_release_script_writes_has_a_name_and_an_unknown_one_keeps_its_own() {
+    fn the_sheet_shows_features_fixes_and_speedups_and_no_other_heading() {
         for (heading, title) in [
-            ("\u{26a0}\u{fe0f} Breaking changes", "Breaking"),
             ("Features", "New"),
             ("Bug fixes", "Fixed"),
             ("Performance", "Faster"),
-            ("Other changes", "Other"),
         ] {
-            assert_eq!(Change::read(heading).title(), title, "### {heading}");
+            assert_eq!(
+                Change::read(heading).map(Change::title),
+                Some(title),
+                "### {heading}"
+            );
         }
-        let odd = "Acknowledgements";
-        assert_eq!(Change::read(odd), Change::Unknown(odd));
-        assert_eq!(Change::read(odd).title(), odd);
+        for heading in [
+            "Other changes",
+            "\u{26a0}\u{fe0f} Breaking changes",
+            "Acknowledgements",
+        ] {
+            assert_eq!(Change::read(heading), None, "### {heading}");
+        }
     }
 
     #[test]
-    fn a_section_says_how_many_changes_it_holds_and_breaking_says_what_that_asks_of_you() {
-        let said = |count, breaking| tally(count, breaking).unwrap_or_default();
-        assert_eq!(said(1, false), "one change");
-        assert_eq!(said(3, false), "three changes");
-        assert_eq!(said(12, false), "12 changes");
-        assert_eq!(said(3, true), "three changes that need your attention");
-        assert_eq!(said(1, true), "one change that needs your attention");
+    fn a_section_says_how_many_changes_it_holds() {
+        assert_eq!(tally(1), "one change");
+        assert_eq!(tally(3), "three changes");
+        assert_eq!(tally(12), "12 changes");
     }
 
     #[test]
-    fn a_section_of_prose_alone_has_no_tally() {
-        assert_eq!(tally(0, false), None);
-        assert_eq!(tally(0, true), None);
-    }
-
-    #[test]
-    fn the_notes_group_under_their_headings_and_the_compare_link_is_left_for_the_foot() {
-        let read = sections(RELEASED);
-        let named: Vec<&str> = read
-            .iter()
-            .map(|section| section.change.map_or("", Change::title))
+    fn only_what_a_user_notices_reaches_the_sheet_and_the_compare_link_is_left_for_the_foot() {
+        let read: Vec<(&str, Vec<Item<'_>>)> = sections(RELEASED)
+            .into_iter()
+            .map(|section| (section.change.title(), section.items))
             .collect();
-        assert_eq!(named, vec!["Breaking", "New"]);
-        assert!(read.iter().all(|section| section.lines.len() == 1));
+        let item = |breaking, text| Item { breaking, text };
+        assert_eq!(
+            read,
+            vec![
+                (
+                    "New",
+                    vec![
+                        item(true, "drawbar ui v3 + per-platform style and behavior"),
+                        item(
+                            false,
+                            "offer Load on instrument in a linked document's header"
+                        ),
+                    ]
+                ),
+                (
+                    "Fixed",
+                    vec![item(
+                        false,
+                        "refuse a queue drag the attached instrument does not take"
+                    )]
+                ),
+            ]
+        );
         assert_eq!(
             changelog(RELEASED),
-            Some("https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0")
+            Some("https://github.com/jmoo/drawbar/compare/drawbar-v0.9.1...drawbar-v0.10.0")
         );
+    }
+
+    #[test]
+    fn items_before_any_heading_are_left_out() {
+        assert!(sections("- a line with no heading\n### Features\n").is_empty());
     }
 
     /// The shell refuses a smaller screen than this, so both sheets must fit in it with
@@ -934,7 +891,28 @@ mod tests {
             screen.contains_rect(button.expand(6.0)),
             "the button is off a {size:?} screen: {button:?}"
         );
-        assert!(box_of(&said, "Breaking").is_some(), "{said:?}");
+        assert!(box_of(&said, "New").is_some(), "{said:?}");
+        assert!(
+            box_of(&said, "simplify code across the workspace").is_none(),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_release_with_nothing_a_user_notices_says_so() {
+        let ctx = headless();
+        let notes = Notes::Read {
+            body: "### Other changes\n- simplify code across the workspace\n".to_owned(),
+            page: "https://github.com/jmoo/drawbar/releases".to_owned(),
+        };
+        let size = egui::vec2(1200.0, 900.0);
+        let _ = drawn_at(&ctx, size, |ctx| {
+            news(ctx, &notes);
+        });
+        let said = drawn_at(&ctx, size, |ctx| {
+            news(ctx, &notes);
+        });
+        assert!(box_of(&said, QUIET_RELEASE).is_some(), "{said:?}");
     }
 
     #[test]
@@ -1071,24 +1049,21 @@ mod tests {
     fn an_unscoped_item_keeps_its_whole_description() {
         assert_eq!(
             classify("- say what changed"),
-            Line::Item {
-                scope: None,
+            Line::Item(Item {
+                breaking: false,
                 text: "say what changed",
-                commit: None,
-            }
+            })
         );
     }
 
     #[test]
-    fn a_commit_link_that_is_not_https_stays_in_the_text() {
-        let line = "- fixed it ([abc1234](javascript:alert(1)))";
+    fn a_breaking_mark_scope_pull_request_and_commit_leave_only_the_description() {
         assert_eq!(
-            classify(line),
-            Line::Item {
-                scope: None,
-                text: "fixed it ([abc1234](javascript:alert(1)))",
-                commit: None,
-            }
+            classify("- \u{26a0}\u{fe0f} **drawbar:** say what changed (#12) ([abc1234](https://example.com/c))"),
+            Line::Item(Item {
+                breaking: true,
+                text: "say what changed",
+            })
         );
     }
 
@@ -1107,38 +1082,5 @@ mod tests {
             Line::Text("  Ordinary prose.")
         );
         assert_eq!(classify("   "), Line::Blank);
-    }
-
-    #[test]
-    fn every_line_of_a_published_release_body_is_recognized() {
-        let read: Vec<Line<'_>> = RELEASED.lines().map(classify).collect();
-        assert_eq!(
-            read,
-            vec![
-                Line::Heading("⚠️ Breaking changes"),
-                Line::Item {
-                    scope: Some("nord-cli"),
-                    text: "ship the v2 sample encoder unflagged and gate v3/v4 as unverified (#83)",
-                    commit: Some(Commit {
-                        sha: "163abc4",
-                        url: "https://github.com/jmoo/drawbar/commit/163abc4e00b0b088fca9a1212fd26faf4cb11770",
-                    }),
-                },
-                Line::Blank,
-                Line::Heading("Features"),
-                Line::Item {
-                    scope: None,
-                    text: "name every write drawbar sends, and read settings from nord-cli (#71)",
-                    commit: Some(Commit {
-                        sha: "3029a35",
-                        url: "https://github.com/jmoo/drawbar/commit/3029a35ff1b0f812ccb21cb1a86fbaf0ae5e0256",
-                    }),
-                },
-                Line::Blank,
-                Line::Changelog(
-                    "https://github.com/jmoo/drawbar/compare/drawbar-v0.4.0...drawbar-v0.5.0"
-                ),
-            ]
-        );
     }
 }

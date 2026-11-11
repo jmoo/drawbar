@@ -9,7 +9,6 @@ repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 workspace="$repo/crates"
 
 meta="$(cargo metadata --manifest-path "$workspace/Cargo.toml" --no-deps --format-version 1)"
-# shellcheck disable=SC2034 # release.bash
 repo_url="$(jq -r '.packages[0].repository // empty' <<<"$meta")"
 
 # Publishable crates, normal and build dependencies before dependents; cargo drops
@@ -55,10 +54,11 @@ dependents_of() {
 latest_tag() { git -C "$repo" tag --list "$1-v*" --sort=-v:refname | head -n1; }
 
 # Conventional commits touching `$1` since `$2` through `$3` (HEAD by default).
-# Output: sha, type, breaking flag, scope, description; unmatched subjects are `other`.
+# Output: sha, type, breaking flag, scope, description, release note; unmatched
+# subjects are `other`. The note is the last `Release-note:` line of the body.
 conventional='^([a-z]+)(\(([^)]+)\))?(!)?:[[:space:]]+(.*)$'
 commits_for() {
-  local crate=$1 since=${2:-} until=${3:-HEAD} range
+  local crate=$1 since=${2:-} until=${3:-HEAD} range note
   range="${since:+$since..}$until"
   git -C "$repo" log --format='%H%x1f%s%x1f%b%x1e' "$range" -- "$(crate_dir "$crate")" |
     while IFS=$'\x1f' read -r -d $'\x1e' sha subject body; do
@@ -71,8 +71,47 @@ commits_for() {
         description=${BASH_REMATCH[5]}
       fi
       grep -Eq '^BREAKING[ -]CHANGE:' <<<"$body" && breaking=1
-      printf '%s\t%s\t%s\t%s\t%s\n' "$sha" "$type" "$breaking" "$scope" "$description"
+      # A body written on github.com ends its lines in CRLF.
+      note="$(tr -d '\r' <<<"$body" | sed -n 's/^Release-note:[[:space:]]*//p' | tail -n1 | tr '\t' ' ')"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sha" "$type" "$breaking" "$scope" "$description" "$note"
     done
+}
+
+# Release notes for the crate, from commits_for output on stdin. A release note
+# replaces the subject's description, and `Release-note: none` leaves a commit out
+# unless it is breaking. Breaking items lead their section, marked ⚠️.
+notes() {
+  local tag=$1 previous=$2
+  awk -F'\t' -v url="$repo_url" '
+    function item(    s) {
+      s = "- " ($3 == 1 ? "⚠️ " : "") ($4 != "" ? "**" $4 ":** " : "") ($6 != "" ? $6 : $5)
+      if (url != "") s = s " ([" substr($1, 1, 7) "](" url "/commit/" $1 "))"
+      return s "\n"
+    }
+    tolower($6) == "none" { if ($3 != 1) next; $6 = "" }
+    {
+      section = ($2 == "feat" || $2 == "fix" || $2 == "perf") ? $2 : "other"
+      if ($3 == 1) breaking[section] = breaking[section] item()
+      else rest[section] = rest[section] item()
+    }
+    END {
+      split("feat fix perf other", order, " ")
+      heading["feat"] = "Features"
+      heading["fix"] = "Bug fixes"
+      heading["perf"] = "Performance"
+      heading["other"] = "Other changes"
+      for (i = 1; i <= 4; i++) {
+        s = order[i]
+        if (breaking[s] rest[s] != "") print "### " heading[s] "\n" breaking[s] rest[s]
+      }
+    }'
+  if [[ -n $repo_url ]]; then
+    if [[ -n $previous ]]; then
+      echo "**Full changelog**: $repo_url/compare/$previous...$tag"
+    else
+      echo "**Full changelog**: $repo_url/commits/$tag"
+    fi
+  fi
 }
 
 # major | minor | patch | none, from commits_for output on stdin.
