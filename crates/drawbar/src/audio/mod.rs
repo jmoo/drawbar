@@ -124,6 +124,31 @@ impl Player {
             .map(|held| held.voice.played())
     }
 
+    /// Play `samples` on the pointer's voice on `zone` from `at` seconds of it on, in
+    /// place of what it holds from there, at its clock and channels, without a break.
+    /// False where no such voice sounds.
+    pub fn splice<S: Sample>(
+        &mut self,
+        zone: Zone,
+        at: f64,
+        samples: &[S],
+        channels: u16,
+        rate: f32,
+    ) -> Result<bool, String> {
+        let held = self
+            .voices
+            .held
+            .iter_mut()
+            .find(|held| held.finger == Finger::Pointer && held.zone == zone);
+        match held {
+            Some(held) => held
+                .voice
+                .splice(at, samples, channels, rate)
+                .map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     /// Stop every voice sounding `zone`.
     pub fn silence(&mut self, zone: Zone) {
         self.voices.silence(zone);
