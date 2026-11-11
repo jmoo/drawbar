@@ -242,6 +242,11 @@ impl Summary {
             blocks: audio.samples.chunks(BLOCK * channels).map(peak).collect(),
         }
     }
+
+    /// The take's loudest peak, which tops its lanes.
+    pub fn loudest(&self) -> f32 {
+        self.blocks.iter().copied().fold(0.0, f32::max)
+    }
 }
 
 /// The take's peak level, louder channel taken, in each of `columns` over `frames`: from
@@ -316,6 +321,8 @@ pub struct View {
     pub picked: Option<Hit>,
     /// Where on the scroll bar's thumb it was grabbed, in frames from its start.
     grab: Option<f64>,
+    /// How much deeper than [`SPAN_DB`] the lane's scale reaches, in steps.
+    pub depth: i8,
 }
 
 impl View {
@@ -335,6 +342,42 @@ impl View {
                 Some(from..from + span)
             }
         };
+    }
+
+    /// The sample after the one picked in `marked`, in take order, or before it where
+    /// not `forward`: the first or the last where none is picked, and none past either
+    /// end.
+    pub fn beside(&self, marked: &Marked, forward: bool) -> Option<Hit> {
+        let mut hits: Vec<Hit> = marked
+            .boxes()
+            .iter()
+            .filter_map(|boxed| boxed.hit)
+            .collect();
+        if !forward {
+            hits.reverse();
+        }
+        match self.picked {
+            None => hits.first().copied(),
+            Some(picked) => hits
+                .iter()
+                .position(|hit| *hit == picked)
+                .and_then(|at| hits.get(at + 1).copied()),
+        }
+    }
+
+    /// Pick `hit` of `marked`, in a take of `total` frames at `rate`, and bring it into
+    /// view, centred, where the lane is zoomed and it is not all shown.
+    pub fn pick(&mut self, hit: Hit, marked: &Marked, total: f64, rate: f64) {
+        self.picked = Some(hit);
+        let (Some(frames), Some(shown)) = (marked.extent(hit), self.span.clone()) else {
+            return;
+        };
+        let (start, end) = (f64::from(frames.start), f64::from(frames.end));
+        if start < shown.start || end > shown.end {
+            let half = (shown.end - shown.start) / 2.0;
+            let middle = (start + end) / 2.0;
+            self.show(middle - half, middle + half, total, rate);
+        }
     }
 
     /// Show `factor` times the span in view, about its middle.
@@ -537,6 +580,8 @@ pub fn ui(
         &painter,
         rect,
         drawn.lane(audio, summary, frames, columns),
+        summary.loudest(),
+        span_db(view.depth),
         playing,
     );
 
@@ -563,6 +608,7 @@ pub fn ui(
         egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
         egui::StrokeKind::Inside,
     );
+    depth(ui, rect, &mut view.depth);
 
     times(ui, rect, shown.clone(), rate);
 
@@ -571,23 +617,84 @@ pub fn ui(
     }
 }
 
-/// How far under full scale a lane shows, in dB: the baseline. Drawn in proportion to the
-/// samples, a release 30 dB down filled a few pixels and could not be seen.
-const FLOOR_DB: f32 = 60.0;
+/// How far under the take's loudest peak a lane shows, in dB: the baseline, as the
+/// mock-up draws it. A release is some 30 dB under its attack, and the take's quiet
+/// gaps some 60: under a 60 dB floor from full scale, releases filled a few pixels.
+const SPAN_DB: f32 = 72.0;
 
-/// The height a peak of `peak` of full scale stands to, of a lane's room: in decibels
-/// over [`FLOOR_DB`] under full scale.
-fn height(peak: f32) -> f32 {
-    match peak > 0.0 {
-        true => ((20.0 * peak.log10() + FLOOR_DB) / FLOOR_DB).clamp(0.0, 1.0),
+/// How much one step of a lane's + and − deepens or shallows its scale, in dB.
+const DEPTH_STEP_DB: f32 = 24.0;
+
+/// The steps a lane's scale may be drawn at, from [`SPAN_DB`]: 48 to 120 dB.
+const DEPTHS: std::ops::RangeInclusive<i8> = -1..=2;
+
+/// What + says, on hover.
+pub const DEEPER: &str =
+    "Draw the scale deeper, so quiet sound stands taller: the scale, not the gain";
+
+/// What − says, on hover.
+pub const SHALLOWER: &str = "Draw the scale shallower: the scale, not the gain";
+
+/// The decibels a lane drawn `depth` steps deep shows under the take's loudest peak.
+pub(super) fn span_db(depth: i8) -> f32 {
+    SPAN_DB + DEPTH_STEP_DB * f32::from(depth)
+}
+
+/// The height a peak of `peak` of full scale stands to, of a lane's room, in a take whose
+/// loudest peak is `loudest`: in decibels over `span` dB under that.
+fn height(peak: f32, loudest: f32, span: f32) -> f32 {
+    match peak > 0.0 && loudest > 0.0 {
+        true => ((20.0 * (peak / loudest).log10() + span) / span).clamp(0.0, 1.0),
         false => 0.0,
     }
 }
 
+/// The small + and − at the top right of a lane drawn in `rect`, which draw its scale
+/// deeper and shallower, and the scale it is drawn at under them.
+pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
+    let size = egui::Vec2::splat(18.0);
+    let left = rect.right() - 4.0 - size.x;
+    for (row, (word, hint, by)) in [("+", DEEPER, 1), ("−", SHALLOWER, -1)]
+        .into_iter()
+        .enumerate()
+    {
+        let at = egui::Rect::from_min_size(
+            egui::pos2(left, rect.top() + 4.0 + row as f32 * (size.y + 2.0)),
+            size,
+        );
+        let next = *depth + by;
+        let pressed = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                ui.add_enabled(DEPTHS.contains(&next), egui::Button::new(word).small())
+                    .on_hover_text(hint)
+                    .clicked()
+            })
+            .inner;
+        if pressed {
+            *depth = next;
+        }
+    }
+    ui.painter().text(
+        egui::pos2(rect.right() - 4.0, rect.top() + 6.0 + 2.0 * (size.y + 2.0)),
+        egui::Align2::RIGHT_TOP,
+        format!("{:.0} dB", span_db(*depth)),
+        egui::FontId::proportional(LEGEND_TEXT),
+        app::caption(ui.visuals()),
+    );
+}
+
 /// The take's level across `rect`, rising from a baseline along its bottom on a decibel
-/// scale: in the accent while the file is sounding, and the body text color when it is
-/// not.
-pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], playing: bool) {
+/// scale `span` dB deep, topped by the take's `loudest` peak, with a line at every 12 or
+/// 24 dB of full scale, named, so a deeper scale is not taken for a gain: in the accent
+/// while the file is sounding, and the body text color when it is not.
+pub(super) fn level(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    lane: &[f32],
+    loudest: f32,
+    span: f32,
+    playing: bool,
+) {
     let visuals = painter.ctx().style().visuals.clone();
     let ink = match playing {
         true => app::accent(&visuals),
@@ -606,7 +713,7 @@ pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], pla
     let room = rect.height() - 2.0;
     for (i, peak) in lane.iter().enumerate() {
         let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
-        let top = base - height(*peak) * room;
+        let top = base - height(*peak, loudest, span) * room;
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(left, top.min(base - 1.0)),
@@ -615,6 +722,32 @@ pub(super) fn level(painter: &egui::Painter, rect: egui::Rect, lane: &[f32], pla
             0.0,
             ink,
         );
+    }
+    if loudest <= 0.0 {
+        return;
+    }
+    let top_db = 20.0 * loudest.log10();
+    let step = match span <= SPAN_DB {
+        true => 12.0,
+        false => 24.0,
+    };
+    let caption = app::caption(&visuals);
+    let mut line = (top_db / step).floor() * step;
+    while line > top_db - span {
+        let y = base - (line - top_db + span) / span * room;
+        painter.hline(
+            rect.x_range(),
+            y,
+            egui::Stroke::new(1.0_f32, caption.gamma_multiply(0.35)),
+        );
+        painter.text(
+            egui::pos2(rect.left() + 3.0, y - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{line:.0} dB"),
+            egui::FontId::proportional(LEGEND_TEXT),
+            caption,
+        );
+        line -= step;
     }
 }
 /// The row of times under a lane drawn in `rect` over `shown` frames at `rate`.
@@ -816,15 +949,28 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_stands_in_decibels_over_its_floor() {
-        assert_eq!(height(1.0), 1.0);
+    fn a_lane_stands_in_decibels_under_the_take_s_loudest() {
+        let loudest = 0.5;
+        let down = |db: f32| loudest * 10f32.powf(-db / 20.0);
+        let span = span_db(0);
+        assert_eq!(height(loudest, loudest, span), 1.0);
         assert!(
-            (height(10f32.powf(-30.0 / 20.0)) - 0.5).abs() < 1e-4,
-            "30 dB down is half"
+            (height(down(36.0), loudest, span) - 0.5).abs() < 1e-4,
+            "36 dB down is half"
         );
-        assert_eq!(height(1e-4), 0.0, "80 dB down is under the floor");
-        assert_eq!(height(0.0), 0.0);
-        assert_eq!(height(2.0), 1.0, "over full scale stops at the top");
+        assert_eq!(
+            height(down(80.0), loudest, span),
+            0.0,
+            "80 dB down is under the floor"
+        );
+        assert_eq!(height(0.0, loudest, span), 0.0);
+        assert_eq!(height(0.5, 0.0, span), 0.0, "a silent take draws nothing");
+        let deeper = span_db(1);
+        assert_eq!(deeper, 96.0);
+        assert!(
+            (height(down(48.0), loudest, deeper) - 0.5).abs() < 1e-4,
+            "deeper, 48 dB down is half"
+        );
     }
 
     #[test]
@@ -869,6 +1015,41 @@ mod tests {
             ]
         );
     }
+    /// The arrows step through the samples in take order, past regions that name none,
+    /// and bring a sample out of view into it.
+    #[test]
+    fn the_arrows_pick_the_samples_either_side_and_follow_them() {
+        let marked = Marked {
+            regions: vec![
+                mark("intro", 0..50),
+                mark("060-b0-v22", 100..500),
+                mark("067-b0-v00", 300_000..301_000),
+            ],
+            loops: Vec::new(),
+        };
+        let (total, rate) = (400_000.0, 44_100.0);
+        let mut view = View::default();
+        let first = view.beside(&marked, true).unwrap();
+        let last = view.beside(&marked, false).unwrap();
+        assert_ne!(first, last, "none picked: → the first, ← the last");
+        view.show(0.0, 150_000.0, total, rate);
+        view.pick(first, &marked, total, rate);
+        assert_eq!(view.span, Some(0.0..150_000.0), "in view: the lane stays");
+        assert_eq!(
+            view.beside(&marked, false),
+            None,
+            "nothing before the first"
+        );
+        let second = view.beside(&marked, true).unwrap();
+        view.pick(second, &marked, total, rate);
+        let shown = view.shown(total);
+        assert!(
+            shown.start <= 300_000.0 && 301_000.0 <= shown.end,
+            "{shown:?}"
+        );
+        assert_eq!(view.beside(&marked, true), None, "nothing after the last");
+    }
+
     #[test]
     fn times_read_in_minutes_and_seconds_to_the_step() {
         assert_eq!(clock(522.282, 0), "8:42");

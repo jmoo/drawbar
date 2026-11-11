@@ -271,6 +271,9 @@ pub struct Close {
     span: Option<Range<f64>>,
     /// The cut being dragged, and the frame it is at.
     dragging: Option<(Cut, u32)>,
+    /// How much deeper than the take lane's usual scale the lane reaches, in steps; kept
+    /// from one hit to the next.
+    depth: i8,
 }
 
 impl Close {
@@ -349,6 +352,7 @@ pub fn ui(
     if close.hit != picked {
         *close = Close {
             hit: picked,
+            depth: close.depth,
             ..Close::default()
         };
     }
@@ -506,6 +510,8 @@ pub fn ui(
         &painter,
         rect,
         drawn.lane(audio, summary, frames, columns),
+        summary.loudest(),
+        take::span_db(close.depth),
         playing,
     );
 
@@ -535,6 +541,7 @@ pub fn ui(
         egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
         egui::StrokeKind::Inside,
     );
+    take::depth(ui, rect, &mut close.depth);
     take::times(ui, rect, shown, rate);
     dropped
 }
