@@ -1300,8 +1300,8 @@ impl Browser {
 
     /// The menu a row offers, in the tree or in the library table.
     ///
-    /// A row inside a checked set of several offers what the Selection card offers,
-    /// because the menu acts on the whole set.
+    /// A row inside a checked set of several offers what the Selection card offers, and
+    /// Tag, because the menu acts on the whole set.
     ///
     /// Folders and tags appear only in the tree, so the rows that draw them build their
     /// menus.
@@ -1317,9 +1317,11 @@ impl Browser {
         self.aim(item);
         let checked: Vec<Item> = self.selection.items().collect();
         if checked.len() > 1 && self.selection.holds(item) {
-            for action in Bulk::ALL {
+            for action in [Bulk::Queue, Bulk::Copy, Bulk::Export, Bulk::Bundle] {
                 self.bulk_item(ui, action, &checked, workspace, &device.state, acts);
             }
+            self.tag_menu(ui, &self.selection.locals(), acts);
+            self.bulk_item(ui, Bulk::Delete, &checked, workspace, &device.state, acts);
             return;
         }
         match item {
@@ -1341,7 +1343,6 @@ impl Browser {
             return;
         };
         let item = Item::Local(id);
-        let picked = self.selection.locals();
         offer(ui, "Open", None, Act::Open(item), acts);
         self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
         offer(ui, "Export…", None, Act::Export(id), acts);
@@ -1352,7 +1353,7 @@ impl Browser {
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(entity), acts);
-        menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
+        self.tag_menu(ui, &self.selection.locals(), acts);
         ui.separator();
         if ui.button("Delete…").clicked() {
             self.ask_delete(&entity.name, Act::Remove(id));
@@ -1385,11 +1386,19 @@ impl Browser {
         });
     }
 
+    /// Tag, opening [`Self::tag_items`] for `picked`, or disabled when nothing picked is
+    /// on this computer.
+    fn tag_menu(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
+        if picked.is_empty() {
+            ui.add_enabled(false, egui::Button::new("Tag"))
+                .on_disabled_hover_text("nothing checked is on this computer");
+            return;
+        }
+        menu::button(ui, "Tag", |ui| self.tag_items(ui, picked, acts));
+    }
+
     /// Every tag, checked where it is on everything selected, then New tag.
-    ///
-    /// Only the items, so the row's menu and the Selection card can each give them their
-    /// own label.
-    pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
+    fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         for tag in self.tags.all() {
             let on = self.tags.on_all(picked, tag.id);
             if marked(ui, &tag.name, on) {

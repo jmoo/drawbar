@@ -197,10 +197,7 @@ pub struct Offer {
 
 impl Offer {
     pub fn of(action: Bulk, checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Offer {
-        let wanted = match action {
-            Bulk::Tag => !checked.iter().all(|item| item.local().is_none()),
-            _ => !bulk(action, checked, state).is_empty(),
-        };
+        let wanted = !bulk(action, checked, state).is_empty();
         // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
         // this computer, where another instrument's file is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
@@ -1087,24 +1084,6 @@ impl Browser {
         state: &DeviceState,
         acts: &mut Vec<Act>,
     ) {
-        if action == Bulk::Tag {
-            // ⚠️ Drawn in `ui` itself, not a scope: a scope is a region of its own, and a
-            // button in it cannot move to the next row of a wrapping layout.
-            match offer.live {
-                false => {
-                    ui.add_enabled(false, egui::Button::new(action.label()))
-                        .on_disabled_hover_text(action.nothing());
-                }
-                true => {
-                    crate::menu::button(ui, action.label(), |ui| {
-                        let locals: Vec<u64> =
-                            checked.iter().copied().filter_map(Item::local).collect();
-                        self.tag_items(ui, &locals, acts)
-                    });
-                }
-            }
-            return;
-        }
         let mut button = ui
             .add_enabled(offer.live, egui::Button::new(&offer.label))
             .on_disabled_hover_text(&offer.dead);
