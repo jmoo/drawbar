@@ -111,9 +111,9 @@ const WIDTHS: usize = MAX_WIDTH as usize + 1;
 pub struct Options {
     /// The half of the `Name#Variant` field before the separator.
     pub name: String,
-    /// The half after it, where vendor libraries record the voicing and the size. A
-    /// [`Version::V6`] library states it as its voicing too, so a template's voicing is
-    /// not carried over.
+    /// The half after it, whose last word the instrument shows as the library's size.
+    /// Confirmed on hardware. A [`Version::V6`] library states it as its description
+    /// too, so a template's description is not carried over.
     pub variant: String,
 }
 
@@ -587,7 +587,7 @@ pub fn build(
     };
     library.set_name_and_variant(&options.name, &options.variant)?;
     if version == Version::V6 {
-        library.set_voicing(&options.variant)?;
+        library.set_description(&options.variant)?;
     }
 
     let mut order: Vec<&Recording> = recordings.iter().collect();
@@ -2336,7 +2336,7 @@ mod tests {
         donor.takes = vec![take(60, Bank::Attack, 0, 1).silent()];
         let piano = donor.piano();
         let mut template = piano.library().unwrap();
-        template.set_voicing("Suitcase").unwrap();
+        template.set_description("Suitcase").unwrap();
         let short = tone(6_000, 300.0, 1);
         let built = build(
             &Donor::Template(&template),
@@ -2351,9 +2351,9 @@ mod tests {
         .unwrap();
         assert_eq!(built.version(), Version::V6);
         assert_eq!(
-            built.voicing().as_deref(),
+            built.description().as_deref(),
             Some("Soft"),
-            "the template's voicing stays"
+            "the variant replaces the template's description"
         );
         let stated: Vec<(u8, i16, u8)> = built
             .strokes()

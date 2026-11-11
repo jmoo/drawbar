@@ -16,7 +16,7 @@
 //! | `0x04` | u16 stream version, `0x450` or `0x464`: the [`Version`] |
 //! | `0x06` | u32, unique per file; meaning unknown |
 //! | `0x1c` | `Name#Variant`, NUL-padded to 32 bytes |
-//! | `0x3c` | the bare name, and at `0x5c` the voicing ([`Version::V6`] only) |
+//! | `0x3c` | the bare name, and at `0x5c` the description ([`Version::V6`] only) |
 //! | `0x8c` | 128-entry key map: the root note that plays each key, `0xFF` uncovered |
 //! | `0x18c` | 128-entry per-key fine tune, one of ten per-note tables from `0x10c` |
 //! | `0x61c` | u16 stream version, echoed |
@@ -93,8 +93,8 @@ pub const KNOWN_VERSIONS: &[u32] = &[Version::V5.stream() as u32, Version::V6.st
 pub enum Version {
     /// Stream `0x450`.
     V5,
-    /// Stream `0x464`, which adds the long name and the voicing and states velocity on a
-    /// finer scale.
+    /// Stream `0x464`, which adds the long name and the description and states velocity
+    /// on a finer scale.
     #[default]
     V6,
 }
@@ -121,7 +121,7 @@ impl Version {
         }
     }
 
-    /// Whether the prefix carries the long name at `0x3c` and the voicing at `0x5c`.
+    /// Whether the prefix carries the long name at `0x3c` and the description at `0x5c`.
     fn split_name(self) -> bool {
         self == Version::V6
     }
@@ -386,8 +386,8 @@ impl TextField {
         at: 0x3c,
         len: 0x20,
     };
-    /// The voicing, present only on [`Version::V6`] streams.
-    const VOICING: TextField = TextField {
+    /// The description, present only on [`Version::V6`] streams.
+    const DESCRIPTION: TextField = TextField {
         at: 0x5c,
         len: 0x20,
     };
@@ -1127,19 +1127,24 @@ impl<'a> Library<'a> {
         self.prefix[KIND_AT] = kind.code();
     }
 
-    /// The long name at `0x3c` and the voicing at `0x5c`, which only [`Version::V6`]
+    /// The long name at `0x3c` and the description at `0x5c`, which only [`Version::V6`]
     /// libraries carry. Both are `None` on [`Version::V5`].
     ///
     /// They are separate fields, not a split of `Name#Variant`: a library can
-    /// spell the long name differently from the name before the `#`, and the voicing
+    /// spell the long name differently from the name before the `#`, and the description
     /// holds neither the padding nor the size suffix the variant does. Inferred from
     /// specimens; not confirmed on hardware.
     pub fn long_name(&self) -> Option<String> {
         self.split_field(TextField::LONG_NAME)
     }
 
-    pub fn voicing(&self) -> Option<String> {
-        self.split_field(TextField::VOICING)
+    /// Vendor libraries name the sampled instrument here, such as "200A" or "Baldwin".
+    /// Inferred from specimens; not confirmed on hardware.
+    ///
+    /// The instrument's Info page shows it on a line of its own under the name.
+    /// Confirmed on hardware.
+    pub fn description(&self) -> Option<String> {
+        self.split_field(TextField::DESCRIPTION)
     }
 
     fn split_field(&self, field: TextField) -> Option<String> {
@@ -1164,9 +1169,11 @@ impl<'a> Library<'a> {
         self.set_name_and_variant(name, &variant)
     }
 
-    /// Replace the variant, leaving both names alone. The variant is the text after
-    /// [`NAME_SEPARATOR`], where vendor libraries record the voicing and the library's
-    /// size. A variant holding the separator is refused.
+    /// Replace the variant, the text after [`NAME_SEPARATOR`], leaving both names alone.
+    /// A variant holding the separator is refused.
+    ///
+    /// The instrument shows only the variant's last word, as the library's size, and
+    /// lists `Sml`, `Med`, `Lrg` and `XL` as S, M, L and XL. Confirmed on hardware.
     pub fn set_variant(&mut self, variant: &str) -> Result<(), Error> {
         check_half("variant", variant)?;
         let field = TextField::COMBINED.read(&self.prefix);
@@ -1196,17 +1203,16 @@ impl<'a> Library<'a> {
         Ok(())
     }
 
-    /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
-    pub fn set_voicing(&mut self, voicing: &str) -> Result<(), Error> {
+    /// Replace the description at `0x5c`. Refused on a stream with no such field.
+    pub fn set_description(&mut self, description: &str) -> Result<(), Error> {
         if !self.version().split_name() {
             return Err(ParseError::AssertFail(format!(
-                "a {} library carries no voicing field; the variant after the \
-                 {NAME_SEPARATOR:?} is where it records one",
+                "a {} library carries no description field",
                 self.version()
             ))
             .into());
         }
-        TextField::VOICING.write(&mut self.prefix, voicing)
+        TextField::DESCRIPTION.write(&mut self.prefix, description)
     }
 
     /// Route `key` to `root`, or to nothing when `root` is `None`.
@@ -1949,31 +1955,31 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_carries_the_long_name_with_it_and_leaves_the_voicing_alone() {
+    fn a_rename_carries_the_long_name_with_it_and_leaves_the_description_alone() {
         let mut build = Build::new();
         build.version = Version::V6.stream();
         let piano = build.piano();
         let mut library = piano.library().unwrap();
-        library.set_voicing("Nordiska").unwrap();
+        library.set_description("Nordiska").unwrap();
         library.set_name("Renamed").unwrap();
         library.set_variant("Nordiska  Sml").unwrap();
         assert_eq!(library.name(), ("Renamed".into(), "Nordiska  Sml".into()));
         assert_eq!(library.long_name().as_deref(), Some("Renamed"));
         assert_eq!(
-            library.voicing().as_deref(),
+            library.description().as_deref(),
             Some("Nordiska"),
-            "the voicing is a separate field from the variant"
+            "the description is a separate field from the variant"
         );
     }
 
     #[test]
-    fn the_older_stream_has_no_long_name_or_voicing_to_read_or_write() {
+    fn the_older_stream_has_no_long_name_or_description_to_read_or_write() {
         let piano = Build::new().piano();
         let mut library = piano.library().unwrap();
         assert_eq!(library.stream_version(), 0x450);
         assert_eq!(library.long_name(), None);
-        assert_eq!(library.voicing(), None);
-        assert!(library.set_voicing("Nordiska").is_err());
+        assert_eq!(library.description(), None);
+        assert!(library.set_description("Nordiska").is_err());
     }
 
     #[test]

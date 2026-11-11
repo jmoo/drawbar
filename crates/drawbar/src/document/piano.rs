@@ -50,8 +50,8 @@ fn piano(entity: &Entity) -> Option<&npno::Piano> {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub name: String,
-    /// The text after the `#`, where the vendor records the voicing and the library's
-    /// size. Empty where the field carries none.
+    /// The text after the `#`, whose last word the instrument shows as the library's
+    /// size. Confirmed on hardware. Empty where the field carries none.
     pub variant: String,
 }
 
