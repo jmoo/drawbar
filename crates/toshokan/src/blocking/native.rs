@@ -1176,7 +1176,7 @@ mod tests {
                 "{name:?}"
             );
         }
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&exact);
     }
 
     #[cfg(windows)]
