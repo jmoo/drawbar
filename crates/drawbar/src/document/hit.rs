@@ -334,6 +334,39 @@ impl Close {
 pub const LOOP: &str = "Loop";
 pub const WHOLE: &str = "Whole sample";
 
+/// How far a dragged loop cut looks for a zero crossing to snap to, in seconds: a
+/// period of the lowest piano note.
+const SNAP: f64 = 0.04;
+
+/// Where a loop's `cut` dragged to `frame` snaps to: the nearest frame within [`SNAP`]
+/// and `room` where the take rises through zero, the loop's first frame for its start
+/// and the frame after its last for its end, so the join is smooth. `frame` where there
+/// is none, or for any other cut. Alt held drops it where it is.
+pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) -> u32 {
+    let after = match cut {
+        Cut::LoopStart => 0,
+        Cut::LoopEnd => 1,
+        _ => return frame,
+    };
+    let channels = usize::from(audio.channels.max(1));
+    let total = audio.samples.len() / channels;
+    let level = |at: usize| -> f32 {
+        audio.samples[at * channels..(at + 1) * channels]
+            .iter()
+            .sum()
+    };
+    let rises = |at: u32| {
+        let at = at as usize + after;
+        at >= 1 && at < total && level(at - 1) < 0.0 && level(at) >= 0.0
+    };
+    let reach = (SNAP * f64::from(audio.rate.max(1))) as u32;
+    (0..=reach)
+        .flat_map(|off| [frame.checked_sub(off), frame.checked_add(off)])
+        .flatten()
+        .find(|at| room.contains(at) && rises(*at))
+        .unwrap_or(frame)
+}
+
 /// A part of a sample the close lane's Add and Delete menus add or delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piece {
@@ -696,6 +729,10 @@ pub fn ui(
                 if let Some(room) = cuts.room(cut, frames) {
                     let frame = frame_at(pointer.x).round().max(0.0) as u32;
                     let frame = frame.max(*room.start()).min(*room.end());
+                    let frame = match ui.input(|input| input.modifiers.alt) {
+                        true => frame,
+                        false => snapped(audio, cut, frame, &room),
+                    };
                     close.dragging = Some((cut, frame));
                 }
             }
@@ -785,6 +822,29 @@ pub fn ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dragged loop cut snaps to where the take rises through zero: its start onto
+    /// the rise, its end onto the frame before it; any other cut stays put.
+    #[test]
+    fn a_loop_cut_snaps_to_a_rising_zero_crossing() {
+        // A 100 Hz square at 1000 frames a second: rises at 10, 20, 30...
+        let audio = Audio {
+            rate: 1000,
+            channels: 1,
+            samples: (0..100)
+                .map(|i| if i % 10 < 5 { 0.5 } else { -0.5 })
+                .collect(),
+        };
+        let room = 0..=99;
+        assert_eq!(snapped(&audio, Cut::LoopStart, 22, &room), 20);
+        assert_eq!(snapped(&audio, Cut::LoopEnd, 22, &room), 19);
+        assert_eq!(snapped(&audio, Cut::AttackEnd, 22, &room), 22);
+        assert_eq!(
+            snapped(&audio, Cut::LoopStart, 22, &(21..=29)),
+            22,
+            "none in room"
+        );
+    }
     use nord_format::formats::npno::encode::LayerTag;
 
     fn marked() -> Marked {
