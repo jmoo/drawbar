@@ -608,6 +608,7 @@ impl Decoded {
         let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
         {
             Ok(entity) => (Some(Box::new(entity)), None),
+            Err(_) if bytes.is_empty() => (None, Some("it is empty".to_string())),
             Err(e) => (None, Some(failed_decode(&e))),
         };
         let verify = match &entity {
@@ -626,8 +627,9 @@ impl Decoded {
     }
 }
 
-/// Why bytes did not decode, in words that read after the file's name: plain words for a
-/// file that ends early or is of no known format, and nord-format's own for anything else.
+/// Why bytes that are not empty did not decode, in words that read after the file's name:
+/// plain words for a file that ends early or is of no known format, and nord-format's own
+/// for anything else.
 fn failed_decode(e: &nord_format::error::Error) -> String {
     use nord_format::error::{Error, ParseError};
     const CUT_OFF: &str = "it is shorter than a Nord file should be, so it may be cut off";
@@ -3350,14 +3352,24 @@ impl Workspace {
         });
     }
 
+    /// [`Workspace::drop_edits`], and say so where it changed anything.
+    pub fn revert(&mut self, id: u64, log: &mut Log) {
+        if !self.drop_edits(id) {
+            return;
+        }
+        if let Some(entity) = self.get(id) {
+            log.say(format!("“{}” is back as it was last saved.", entity.name));
+        }
+    }
+
     /// Restore the bytes this asset was last saved as, and drop any pending edit an
-    /// editor held of it.
+    /// editor held of it. Returns whether that changed anything.
     ///
     /// ⚠️ A pending edit has not reached the bytes, so restoring them changes nothing.
     /// Reverting a piano library's plan only clears the flag.
-    pub fn revert(&mut self, id: u64, log: &mut Log) {
+    pub fn drop_edits(&mut self, id: u64) -> bool {
         let Some(entity) = self.get(id) else {
-            return;
+            return false;
         };
         let (resting, file, stamp) = (
             entity.rests().is_some(),
@@ -3378,12 +3390,7 @@ impl Workspace {
             (false, None, Some(saved)) => self.respell(id, saved).is_some(),
             _ => false,
         };
-        if !restored && !dropped {
-            return;
-        }
-        if let Some(entity) = self.get(id) {
-            log.say(format!("“{}” is back as it was last saved.", entity.name));
-        }
+        restored || dropped
     }
 
     /// Record whether an editor holds an edit of this asset that its bytes do not, and
@@ -4965,6 +4972,15 @@ mod tests {
                 whole.len()
             );
         }
+    }
+
+    #[test]
+    fn an_empty_file_is_reported_as_empty() {
+        let said = imported("empty.ne5p", Vec::new());
+        assert!(
+            said.iter().any(|text| text == "empty.ne5p: it is empty"),
+            "{said:?}"
+        );
     }
 
     #[test]

@@ -396,18 +396,17 @@ pub struct Rescue {
     /// The file, as the browser gives it.
     #[cfg(target_arch = "wasm32")]
     pub file: web_sys::File,
-    /// Why it does not read as one whole Nord file, where it does not. It is then no copy
-    /// of what the slot held, and is offered only to be discarded.
-    pub broken: Option<String>,
+    /// It does not read as one whole Nord file. It is then no copy of what the slot held,
+    /// and is offered only to be discarded.
+    pub broken: bool,
 }
 
-/// Why `file` does not read as one whole Nord file, where it does not.
-async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<String> {
-    let verified = match file {
-        Ok(mut file) => nord_usb::envelope::verify(&mut file).await.map(drop),
-        Err(e) => Err(e.into()),
-    };
-    verified.err().map(|e| e.to_string())
+/// Whether `file` does not read as one whole Nord file.
+async fn broken(file: std::io::Result<impl nord_usb::FileSource>) -> bool {
+    match file {
+        Ok(mut file) => nord_usb::envelope::verify(&mut file).await.is_err(),
+        Err(_) => true,
+    }
 }
 
 impl Rescue {
