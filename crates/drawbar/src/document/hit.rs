@@ -422,7 +422,7 @@ pub fn ui(
     });
 
     let shown = close.shown(&cuts, total, rate);
-    let width = ui.available_width().max(64.0);
+    let width = take::lane_width(ui);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let span = (shown.end - shown.start).max(1.0);

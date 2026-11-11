@@ -513,7 +513,7 @@ pub fn ui(
     }
 
     let shown = view.shown(total);
-    let width = ui.available_width().max(64.0);
+    let width = lane_width(ui);
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let span = (shown.end - shown.start).max(1.0);
@@ -649,19 +649,25 @@ fn height(peak: f32, loudest: f32, span: f32) -> f32 {
     }
 }
 
-/// The small + and − at the top right of a lane drawn in `rect`, which draw its scale
-/// deeper and shallower, and the scale it is drawn at under them.
+/// The width of the strip right of a lane that holds its + and −.
+pub(super) const GUTTER: f32 = 26.0;
+
+/// The width a lane is drawn at in `ui`, leaving its [`GUTTER`].
+pub(super) fn lane_width(ui: &egui::Ui) -> f32 {
+    (ui.available_width() - GUTTER).max(64.0)
+}
+
+/// The + at the top and − at the bottom of the strip right of a lane drawn in `rect`,
+/// marking the top and foot of its scale, which draw it deeper and shallower, and the
+/// scale it is drawn at between them.
 pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
     let size = egui::Vec2::splat(18.0);
-    let left = rect.right() - 4.0 - size.x;
-    for (row, (word, hint, by)) in [("+", DEEPER, 1), ("−", SHALLOWER, -1)]
-        .into_iter()
-        .enumerate()
-    {
-        let at = egui::Rect::from_min_size(
-            egui::pos2(left, rect.top() + 4.0 + row as f32 * (size.y + 2.0)),
-            size,
-        );
+    let left = rect.right() + (GUTTER - size.x) / 2.0;
+    for (top, word, hint, by) in [
+        (rect.top(), "+", DEEPER, 1),
+        (rect.bottom() - size.y, "−", SHALLOWER, -1),
+    ] {
+        let at = egui::Rect::from_min_size(egui::pos2(left, top), size);
         let next = *depth + by;
         let pressed = ui
             .scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
@@ -675,9 +681,9 @@ pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
         }
     }
     ui.painter().text(
-        egui::pos2(rect.right() - 4.0, rect.top() + 6.0 + 2.0 * (size.y + 2.0)),
-        egui::Align2::RIGHT_TOP,
-        format!("{:.0} dB", span_db(*depth)),
+        egui::pos2(rect.right() + GUTTER / 2.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        format!("{:.0}\ndB", span_db(*depth)),
         egui::FontId::proportional(LEGEND_TEXT),
         app::caption(ui.visuals()),
     );
@@ -772,7 +778,7 @@ pub(super) fn times(ui: &mut egui::Ui, rect: egui::Rect, shown: Range<f64>, rate
 
 /// The scroll bar under a zoomed lane: drag its thumb, or click beside it to page.
 fn scroll(ui: &mut egui::Ui, view: &mut View, total: f64, rate: f64) {
-    let width = ui.available_width().max(64.0);
+    let width = lane_width(ui);
     let (bar, response) =
         ui.allocate_exact_size(egui::vec2(width, SCROLL), egui::Sense::click_and_drag());
     let shown = view.shown(total);
