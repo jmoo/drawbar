@@ -14,7 +14,7 @@ use nord_format::wav::{self, Audio, Encoding, Layout};
 
 use super::controls::Sets;
 use super::header::{Body, Cell};
-use super::{audition, hit, sample, take};
+use super::{adding, audition, hit, sample, take};
 use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
@@ -30,6 +30,146 @@ pub const GAIN: &str = "gain";
 /// The start of the path of a moved cut, `cut/060-b0-v22/attack-end`: the hit by its
 /// attack's label, then the cut. Its value is the frame the cut moves to.
 pub const CUT: &str = "cut/";
+
+/// The path prefix of a set that adds the region it names, over the frames its value
+/// gives as `start..end`.
+pub const ADDED: &str = "add/";
+
+/// The path prefix of a set that adds a loop, over the frames its value gives as
+/// `start..end`, to the attack region it names.
+pub const LOOPED: &str = "loop/";
+
+/// The path prefix of a set that deletes, from the sample whose attack it names, the
+/// piece after it: `note`, `loop` or `key-off`.
+pub const DELETED: &str = "delete/";
+
+/// The word a [`DELETED`] path names `piece` by.
+fn piece_slug(piece: hit::Piece) -> &'static str {
+    match piece {
+        hit::Piece::Note => "note",
+        hit::Piece::Loop => "loop",
+        hit::Piece::KeyOff => "key-off",
+    }
+}
+
+/// `start..end`, as an add's value gives frames.
+fn span_value(span: &Range<u32>) -> String {
+    format!("{}..{}", span.start, span.end)
+}
+
+/// The frames `value` gives for the add `path`, of at least one frame.
+fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
+    let bad = || format!("{path}: {value} is not frames as start..end");
+    let (start, end) = value.trim().split_once("..").ok_or_else(bad)?;
+    let (start, end): (u32, u32) = (
+        start.parse().map_err(|_| bad())?,
+        end.parse().map_err(|_| bad())?,
+    );
+    match start < end {
+        true => Ok(start..end),
+        false => Err(bad()),
+    }
+}
+
+/// What a set that adds or deletes a region or a loop says, for Undo to name it.
+fn said_piece(path: &str) -> Option<String> {
+    let name = |label: &str| take::mark(label, 0..0).hit.map(take::named);
+    if let Some(label) = path.strip_prefix(ADDED) {
+        let mark = take::mark(label, 0..0);
+        return Some(match (mark.hit, mark.part) {
+            (Some(hit), take::Part::Release) => format!("add {} key-off", take::named(hit)),
+            (Some(hit), _) => format!("add {}", take::named(hit)),
+            (None, _) => format!("add {label}"),
+        });
+    }
+    if let Some(label) = path.strip_prefix(LOOPED) {
+        return Some(format!(
+            "add {} loop",
+            name(label).unwrap_or(label.to_string())
+        ));
+    }
+    let (label, piece) = path.strip_prefix(DELETED)?.rsplit_once('/')?;
+    let name = name(label).unwrap_or(label.to_string());
+    Some(match piece {
+        "note" => format!("delete {name}"),
+        piece => format!("delete {name} {piece}"),
+    })
+}
+
+/// `marks` with the add or delete `path` with `value` made, or none where `path` is not
+/// one.
+fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Marks, String>> {
+    let mut out = marks.clone();
+    if let Some(label) = path.strip_prefix(ADDED) {
+        return Some(frames_in(path, value).and_then(|span| {
+            if out.regions.iter().any(|region| region.label == label) {
+                return Err(format!("{path}: the take already marks {label}"));
+            }
+            out.regions.push(wav::Region {
+                start: span.start,
+                frames: span.end - span.start,
+                label: label.to_string(),
+            });
+            Ok(out)
+        }));
+    }
+    if let Some(label) = path.strip_prefix(LOOPED) {
+        return Some(frames_in(path, value).and_then(|span| {
+            let region = out
+                .regions
+                .iter()
+                .find(|region| region.label == label)
+                .ok_or_else(|| format!("{path}: the take marks no {label}"))?;
+            let end = u64::from(region.start) + u64::from(region.frames);
+            if span.start < region.start || u64::from(span.end) > end || span.len() < 2 {
+                return Err(format!("{path}: a loop lies inside {label}"));
+            }
+            // ⚠️ A loop's end is its last frame, not the one after.
+            out.loops.push(wav::Loop {
+                start: span.start,
+                end: span.end - 1,
+                play: wav::Play::Forward,
+            });
+            Ok(out)
+        }));
+    }
+    let rest = path.strip_prefix(DELETED)?;
+    let mut deleted = || {
+        let (label, piece) = rest
+            .rsplit_once('/')
+            .ok_or_else(|| format!("{path}: names no piece of a sample"))?;
+        let hit = take::mark(label, 0..0)
+            .hit
+            .ok_or_else(|| format!("{path}: names no sample"))?;
+        let cuts = hit::Cuts::of(&take::Marked::from_marks(marks), hit);
+        let inside = |found: &wav::Loop| {
+            cuts.attack
+                .as_ref()
+                .is_some_and(|attack| found.start >= attack.start && found.end < attack.end)
+        };
+        let of = |region: &wav::Region, part: Option<take::Part>| {
+            let mark = take::mark(&region.label, 0..0);
+            mark.hit == Some(hit) && part.is_none_or(|part| mark.part == part)
+        };
+        match piece {
+            "note" => {
+                out.regions.retain(|region| !of(region, None));
+                out.loops.retain(|found| !inside(found));
+            }
+            "loop" => out.loops.retain(|found| !inside(found)),
+            "key-off" => out
+                .regions
+                .retain(|region| !of(region, Some(take::Part::Release))),
+            _ => {
+                return Err(format!(
+                    "{path}: {piece} is not a note, a loop or a key-off"
+                ))
+            }
+        }
+        Ok(out.clone())
+    };
+    Some(deleted())
+}
 
 /// The path that moves `cut` of the hit whose attack is labelled `label`.
 pub fn cut_path(label: &str, cut: hit::Cut) -> String {
@@ -185,6 +325,18 @@ pub fn apply(
             total = Some(db);
             continue;
         }
+        let held = match marks.take() {
+            Some(held) => Some(held),
+            None if said_piece(path).is_some() => Some(wav::read_marks(current).map_err(error)?),
+            None => None,
+        };
+        if let Some(held) = &held {
+            if let Some(made) = pieced(held, path, value) {
+                marks = Some(made?);
+                continue;
+            }
+        }
+        marks = held;
         let Some((label, slug)) = path
             .strip_prefix(CUT)
             .and_then(|rest| rest.rsplit_once('/'))
@@ -269,6 +421,7 @@ impl Step {
         let said: Vec<String> = sets
             .iter()
             .map(|(path, value)| match path.strip_prefix(CUT) {
+                _ if said_piece(path).is_some() => said_piece(path).unwrap_or_default(),
                 Some(rest) => {
                     let (label, slug) = rest.rsplit_once('/').unwrap_or((rest, ""));
                     let cut = hit::Cut::from_slug(slug).map_or(slug, |cut| cut.name());
@@ -831,6 +984,7 @@ pub fn ui(
     match &read.source {
         Ok(audio) => {
             let picked = state.view.picked;
+            let place = state.view.place;
             // Both lanes draw a dragged cut where it is now; the file moves it when the
             // drag ends.
             let frames = (audio.samples.len() / usize::from(audio.channels.max(1))) as u32;
@@ -853,16 +1007,20 @@ pub fn ui(
                 playing,
             );
             ui.add_space(10.0);
-            let dropped = hit::ui(
+            let (dropped, wanted) = hit::ui(
                 ui,
                 audio,
                 &read.summary,
                 &mut read.close,
                 marked,
                 picked,
+                place,
                 &mut state.close,
                 playing,
             );
+            if let (Some(wanted), Ok(held)) = (wanted, &read.marked) {
+                pieces(wanted, audio, held, &mut state.view, sets);
+            }
             if let (Some((cut, frame)), Some(hit), Ok(held)) = (dropped, picked, &read.marked) {
                 let cuts = hit::Cuts::of(held, hit);
                 let was = cuts.points().into_iter().find(|(each, _)| *each == cut);
@@ -897,6 +1055,55 @@ pub fn ui(
         sets.push((CLEAN.to_string(), if on { "on" } else { "off" }.to_string()));
     }
     (audition, asked)
+}
+
+/// The sets that do what the close lane's menus asked of the picked sample, or of the
+/// place clicked: a sample added there is picked, and a sample deleted leaves its place.
+fn pieces(
+    wanted: hit::Wanted,
+    audio: &Audio,
+    marked: &take::Marked,
+    view: &mut take::View,
+    sets: &mut Sets,
+) {
+    use hit::{Piece, Wanted};
+    if let (Wanted::Add(Piece::Note), Some(place)) = (wanted, view.place) {
+        let added = adding::sample(audio, marked, place);
+        sets.push((format!("{ADDED}{}", added.label), span_value(&added.attack)));
+        sets.push((
+            format!("{ADDED}{}", adding::release_label(added.hit)),
+            span_value(&added.release),
+        ));
+        (view.picked, view.place) = (Some(added.hit), None);
+        return;
+    }
+    let Some(hit) = view.picked else {
+        return;
+    };
+    let cuts = hit::Cuts::of(marked, hit);
+    let Some(attack) = cuts.attack.clone() else {
+        return;
+    };
+    match wanted {
+        Wanted::Add(Piece::KeyOff) => sets.push((
+            format!("{ADDED}{}", adding::release_label(hit)),
+            span_value(&adding::key_off(audio, attack.start, attack.end)),
+        )),
+        Wanted::Add(Piece::Loop) => sets.push((
+            format!("{LOOPED}{}", cuts.label),
+            span_value(&adding::default_loop(&attack, audio.rate)),
+        )),
+        Wanted::Add(Piece::Note) => {}
+        Wanted::Delete(piece) => {
+            sets.push((
+                format!("{DELETED}{}/{}", cuts.label, piece_slug(piece)),
+                String::new(),
+            ));
+            if piece == Piece::Note {
+                (view.picked, view.place) = (None, Some(attack.start));
+            }
+        }
+    }
 }
 
 /// What the arrow that picks the sample before the picked one says, on hover.
@@ -1328,6 +1535,57 @@ mod tests {
         );
         let none = (format!("{CUT}070-b0-v22/attack-end"), "100".to_string());
         assert!(apply(&bytes, &bytes, &[none]).is_err(), "no such hit");
+    }
+
+    /// A sample, key-off and loop are added and deleted in the marks, the audio
+    /// untouched, and each is named for Undo.
+    #[test]
+    fn pieces_are_added_and_deleted_in_the_marks() {
+        let bytes = marked_take(&[0.9, 0.3]);
+        let set = |path: String, value: &str| (path, value.to_string());
+        let sets = [
+            set(format!("{ADDED}071-b0-v00"), "60000..70000"),
+            set(format!("{ADDED}071-b2-v00"), "70000..72000"),
+            set(format!("{LOOPED}071-b0-v00"), "64000..65000"),
+        ];
+        let (out, _) = apply(&bytes, &bytes, &sets).unwrap();
+        let marks = wav::read_marks(&out).unwrap();
+        assert_eq!(marks.regions.len(), 4);
+        assert!(marks
+            .loops
+            .iter()
+            .any(|found| (found.start, found.end) == (64_000, 64_999)));
+        let data = wav::layout(&bytes).unwrap().data;
+        assert!(out[wav::layout(&out).unwrap().data] == bytes[data]);
+        let step = Step::before(&bytes, 0.0, &sets);
+        assert_eq!(step.what, "add B4 v00, add B4 v00 key-off, add B4 v00 loop");
+
+        let twice = apply(&out, &out, &[set(format!("{ADDED}071-b0-v00"), "1..2")]);
+        assert!(twice.is_err(), "a label the take marks already");
+        let outside = apply(&out, &out, &[set(format!("{LOOPED}069-b0-v22"), "10..20")]);
+        assert!(outside.is_err(), "a loop outside its attack");
+
+        let delete = |piece: &str| set(format!("{DELETED}069-b0-v22/{piece}"), "");
+        let (keyless, _) = apply(&out, &out, &[delete("key-off")]).unwrap();
+        let marks = wav::read_marks(&keyless).unwrap();
+        assert!(!marks
+            .regions
+            .iter()
+            .any(|region| region.label == "069-b2-v22"));
+        assert_eq!(marks.loops.len(), 2);
+        let (loopless, _) = apply(&out, &out, &[delete("loop")]).unwrap();
+        assert_eq!(wav::read_marks(&loopless).unwrap().loops.len(), 1);
+        let (gone, _) = apply(&out, &out, &[delete("note")]).unwrap();
+        let marks = wav::read_marks(&gone).unwrap();
+        assert!(marks
+            .regions
+            .iter()
+            .all(|region| !region.label.starts_with("069")));
+        assert_eq!(marks.loops.len(), 1, "the other sample's loop stays");
+        assert_eq!(
+            Step::before(&out, 0.0, &[delete("note"), delete("key-off")]).what,
+            "delete A4 v22, delete A4 v22 key-off"
+        );
     }
 
     #[test]
