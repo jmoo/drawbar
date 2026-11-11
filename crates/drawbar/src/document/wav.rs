@@ -963,14 +963,6 @@ pub fn ui(
     if state.audio().is_some() {
         ui.horizontal(|ui| {
             gain(ui, state, sets);
-            ui.add_space(12.0);
-            let last = state.last_step().map(|step| step.what.clone());
-            let undo = ui.add_enabled(last.is_some(), egui::Button::new(UNDO_LABEL));
-            if let Some(what) = last {
-                if undo.on_hover_text(format!("Undo {what}")).clicked() {
-                    sets.push((UNDO.to_string(), String::new()));
-                }
-            }
             if state.marks_samples() {
                 ui.add_space(12.0);
                 if let Some(kind) = audition::category(ui, state.kind()) {
@@ -980,6 +972,7 @@ pub fn ui(
         });
         ui.add_space(6.0);
     }
+    let last = state.last_step().map(|step| step.what.clone());
     let read = &mut state.read;
     match &read.source {
         Ok(audio) => {
@@ -1004,7 +997,6 @@ pub fn ui(
                 &mut read.drawn,
                 marked,
                 &mut state.view,
-                playing,
             );
             ui.add_space(10.0);
             let (dropped, wanted) = hit::ui(
@@ -1016,9 +1008,11 @@ pub fn ui(
                 picked,
                 place,
                 &mut state.close,
-                playing,
+                last.as_deref(),
             );
-            if let (Some(wanted), Ok(held)) = (wanted, &read.marked) {
+            if wanted == Some(hit::Wanted::Undo) {
+                sets.push((UNDO.to_string(), String::new()));
+            } else if let (Some(wanted), Ok(held)) = (wanted, &read.marked) {
                 pieces(wanted, audio, held, &mut state.view, sets);
             }
             if let (Some((cut, frame)), Some(hit), Ok(held)) = (dropped, picked, &read.marked) {
@@ -1093,7 +1087,7 @@ fn pieces(
             format!("{LOOPED}{}", cuts.label),
             span_value(&adding::default_loop(&attack, audio.rate)),
         )),
-        Wanted::Add(Piece::Note) => {}
+        Wanted::Add(Piece::Note) | Wanted::Undo => {}
         Wanted::Delete(piece) => {
             sets.push((
                 format!("{DELETED}{}/{}", cuts.label, piece_slug(piece)),

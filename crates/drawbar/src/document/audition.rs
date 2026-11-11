@@ -413,6 +413,8 @@ pub enum Ask {
     /// Play sample came up: the key is let go, or, after a click, held on through the
     /// whole sample.
     LetGo,
+    /// Stop the sample a click of Play sample is playing.
+    Stop,
     /// Start or stop the loop's wrap.
     Wrap,
     /// Start or stop the release alone.
@@ -461,15 +463,23 @@ pub fn controls(
     let audition = &mut state.audition;
     audition.waiting &= finding;
     let accent = app::accent(ui.visuals());
-    let play = super::sample::action_response(ui, PLAY_SAMPLE, Glyph::Piano, accent);
+    // Sounding with the key up: a click's whole sample, or a key-off. Play sample stops
+    // it, as Play original and Loop wrap stop theirs.
+    let sounding = !audition.pressed && played(HELD).is_some();
+    let (label, glyph) = match sounding {
+        true => ("Stop", Glyph::X),
+        false => (PLAY_SAMPLE, Glyph::Piano),
+    };
+    let play = super::sample::action_response(ui, label, glyph, accent);
     // ⚠️ The press and let-go are the pointer's own, not the button's: egui stops
     // counting a press held past its click time as on the button, and that let the key
     // go after a second and struck it again.
     let (struck, down) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
     if struck && play.contains_pointer() {
-        match finding {
-            true => audition.waiting = true,
-            false => asked = Some(Ask::Hold),
+        match (sounding, finding) {
+            (true, _) => asked = Some(Ask::Stop),
+            (false, true) => audition.waiting = true,
+            (false, false) => asked = Some(Ask::Hold),
         }
     } else if audition.pressed && !down {
         asked = Some(Ask::LetGo);
@@ -552,6 +562,10 @@ pub fn hear(ask: Ask, state: &mut wav::State, player: &mut Player, id: u64) -> R
     let sounding = |state: &wav::State| state.audition.ready.as_ref()?.1.clone();
     match ask {
         Ask::Clean(_) => {}
+        Ask::Stop => {
+            (state.audition.held, state.audition.pressed) = (None, false);
+            player.silence((id, HELD));
+        }
         Ask::Hold => {
             let Some(sounding) = sounding(state) else {
                 return Ok(());

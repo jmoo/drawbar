@@ -64,7 +64,7 @@ WAV closed unsaved opens again on its gain, **Save** writes it into the file,
 which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
 offers neither.
 
-The waveform is the take's lane: its level, the louder channel at each point, rising in decibels from a baseline 72 dB under the take's loudest point, so quiet releases show, with a line every 12 dB of full scale. The small **+** and **−** right of the lane, at the top and foot of its scale, draw the scale deeper, to 96 or 120 dB, so the quiet end stands taller, or shallower, to 48 dB: the scale changes, not the gain, and the lines say where each level is. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many samples, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. Click where no box is, such as on a hit the file does not mark, and a line marks the place: the lane under the take shows from half a second before it to six seconds after, for **Add ▸ Note**. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Whole file** shows the whole file again.
+The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline to the take's loudest point, drawn linear at first, so each sample's shape shows as it decays, with lines at levels of full scale every 6 dB where they have room. The small **+** and **−** right of the lane, at the top and foot of its scale, bend the scale step by step toward log, up to five steps, so quiet sound such as a key-off stands taller, and back toward linear; the strip between them says **lin** or the step. The scale changes, not the gain, and the lines say where each level is. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labelled any other way is boxed under its own label. The header's **Take** says how many samples, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. Click where no box is, such as on a hit the file does not mark, and a line marks the place: the lane under the take shows from half a second before it to six seconds after, for **Add ▸ Note**. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Whole file** shows the whole file again.
 
 Under the take, the picked sample is drawn close up, from its first cut to its last
 with a margin: its attack, loop, release and fade, and a marker at each cut
@@ -78,8 +78,8 @@ cut: both lanes follow it, and when you let go its region or loop is written to
 the file's marks, one edit a drag, with the audio untouched. A marker stops at the
 cuts either side of it, so a loop stays inside its attack and a fade ends with
 it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
-them back, and a gain applied after them keeps them. **Undo**, beside the gain,
-takes back the last edit, a gain or a moved cut, one at a time back to the
+them back, and a gain applied after them keeps them. **Undo**, at the right end of the row of
+zoom, **Add** and **Delete** over the picked sample, takes back the last edit, a gain or a moved cut, one at a time back to the
 file as last saved; hover over it to see what it undoes. **Edit ▸ Undo** (⌘Z or
 Ctrl+Z) and **Edit ▸ Redo** (⇧⌘Z or Ctrl+Shift+Z) work on one timeline, as in any
 other app: Undo takes back the most recent change, whether it was to the library,
@@ -96,7 +96,7 @@ the take's noise is found once, from when the take opens, which takes a few
 seconds on a long take, and a control pressed before then says to wait. Both
 are edits like a gain, kept in the WAV on **Save**, and the build follows them:
 a take with Clean audio off is built as recorded. Click **Play sample** to hear
-the whole sample: the attack, once round its loop, then the key-off. Hold it
+the whole sample, and click it again, as **Stop**, to stop it: the attack, once round its loop, then the key-off. Hold it
 down as you would hold a key: the attack plays shaped as `nord piano build`
 shapes it, with its loop evened out and crossfaded, the note's loudest layer at
 its recorded level, as Play original plays it, and a softer layer half its

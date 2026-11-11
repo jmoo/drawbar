@@ -329,7 +329,7 @@ pub struct View {
     pub place: Option<u32>,
     /// Where on the scroll bar's thumb it was grabbed, in frames from its start.
     grab: Option<f64>,
-    /// How much deeper than [`SPAN_DB`] the lane's scale reaches, in steps.
+    /// How far from linear toward log the lane's scale is drawn, in steps.
     pub depth: i8,
 }
 
@@ -466,7 +466,6 @@ pub fn ui(
     drawn: &mut Drawn,
     marked: &Result<Marked, String>,
     view: &mut View,
-    playing: bool,
 ) {
     let rate = f64::from(audio.rate.max(1));
     let channels = usize::from(audio.channels.max(1));
@@ -592,8 +591,7 @@ pub fn ui(
         rect,
         drawn.lane(audio, summary, frames, columns),
         summary.loudest(),
-        span_db(view.depth),
-        playing,
+        view.depth,
     );
 
     for boxed in &shown_boxes {
@@ -638,35 +636,36 @@ pub fn ui(
     }
 }
 
-/// How far under the take's loudest peak a lane shows, in dB: the baseline, as the
-/// mock-up draws it. A release is some 30 dB under its attack, and the take's quiet
-/// gaps some 60: under a 60 dB floor from full scale, releases filled a few pixels.
-const SPAN_DB: f32 = 72.0;
-
-/// How much one step of a lane's + and − deepens or shallows its scale, in dB.
-const DEPTH_STEP_DB: f32 = 24.0;
-
-/// The steps a lane's scale may be drawn at, from [`SPAN_DB`]: 48 to 120 dB.
-const DEPTHS: std::ops::RangeInclusive<i8> = -1..=2;
+/// How hard each step of a lane's scale bends a level toward log: none, so the first
+/// step is linear and shows a sample's shape as it decays, then each step ten times
+/// more, so quiet sound such as a key-off stands taller. At the last, a level 90 dB
+/// under the take's loudest still stands a twentieth of the lane.
+const CURVES: [f32; 6] = [0.0, 1e1, 1e2, 1e3, 1e4, 1e5];
 
 /// What + says, on hover.
 pub const DEEPER: &str =
-    "Draw the scale deeper, so quiet sound stands taller: the scale, not the gain";
+    "Draw the scale more log, so quiet sound stands taller: the scale, not the gain";
 
 /// What − says, on hover.
-pub const SHALLOWER: &str = "Draw the scale shallower: the scale, not the gain";
+pub const SHALLOWER: &str = "Draw the scale more linear: the scale, not the gain";
 
-/// The decibels a lane drawn `depth` steps deep shows under the take's loudest peak.
-pub(super) fn span_db(depth: i8) -> f32 {
-    SPAN_DB + DEPTH_STEP_DB * f32::from(depth)
+/// The curve a lane drawn `depth` steps from linear bends levels by.
+fn curve(depth: i8) -> f32 {
+    CURVES[usize::try_from(depth).unwrap_or(0).min(CURVES.len() - 1)]
 }
 
 /// The height a peak of `peak` of full scale stands to, of a lane's room, in a take whose
-/// loudest peak is `loudest`: in decibels over `span` dB under that.
-fn height(peak: f32, loudest: f32, span: f32) -> f32 {
-    match peak > 0.0 && loudest > 0.0 {
-        true => ((20.0 * (peak / loudest).log10() + span) / span).clamp(0.0, 1.0),
-        false => 0.0,
+/// loudest peak is `loudest`, drawn `depth` steps from linear: `ln(1 + c·a) / ln(1 + c)`
+/// of the level `a` against the loudest, so linear at a curve `c` of none and nearer log
+/// as it grows.
+fn height(peak: f32, loudest: f32, depth: i8) -> f32 {
+    if peak <= 0.0 || loudest <= 0.0 {
+        return 0.0;
+    }
+    let level = (peak / loudest).clamp(0.0, 1.0);
+    match curve(depth) {
+        0.0 => level,
+        c => (c * level).ln_1p() / c.ln_1p(),
     }
 }
 
@@ -679,8 +678,8 @@ pub(super) fn lane_width(ui: &egui::Ui) -> f32 {
 }
 
 /// The + at the top and − at the bottom of the strip right of a lane drawn in `rect`,
-/// marking the top and foot of its scale, which draw it deeper and shallower, and the
-/// scale it is drawn at between them.
+/// marking the top and foot of its scale, which draw it more log and more linear, and
+/// the scale it is drawn at between them.
 pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
     let size = egui::Vec2::splat(18.0);
     let left = rect.right() + (GUTTER - size.x) / 2.0;
@@ -692,7 +691,8 @@ pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
         let next = *depth + by;
         let pressed = ui
             .scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-                ui.add_enabled(DEPTHS.contains(&next), egui::Button::new(word).small())
+                let there = (0..CURVES.len() as i8).contains(&next);
+                ui.add_enabled(there, egui::Button::new(word).small())
                     .on_hover_text(hint)
                     .clicked()
             })
@@ -704,29 +704,31 @@ pub(super) fn depth(ui: &mut egui::Ui, rect: egui::Rect, depth: &mut i8) {
     ui.painter().text(
         egui::pos2(rect.right() + GUTTER / 2.0, rect.center().y),
         egui::Align2::CENTER_CENTER,
-        format!("{:.0}\ndB", span_db(*depth)),
+        match *depth {
+            0 => "lin".to_string(),
+            steps => format!("log\n{steps}"),
+        },
         egui::FontId::proportional(LEGEND_TEXT),
         app::caption(ui.visuals()),
     );
 }
 
-/// The take's level across `rect`, rising from a baseline along its bottom on a decibel
-/// scale `span` dB deep, topped by the take's `loudest` peak, with a line at every 12 or
-/// 24 dB of full scale, named, so a deeper scale is not taken for a gain: in the accent
-/// while the file is sounding, and the body text color when it is not.
+/// The least room between two of a lane's named levels, in points.
+const LINES_APART: f32 = 14.0;
+
+/// The take's level across `rect` in the body text color, rising from a baseline along
+/// its bottom on a scale `depth` steps from linear, topped by the take's `loudest` peak,
+/// with a line at levels of full scale every 6 dB, as many as have room, named, so a
+/// scale more log is not taken for a gain.
 pub(super) fn level(
     painter: &egui::Painter,
     rect: egui::Rect,
     lane: &[f32],
     loudest: f32,
-    span: f32,
-    playing: bool,
+    depth: i8,
 ) {
     let visuals = painter.ctx().style().visuals.clone();
-    let ink = match playing {
-        true => app::accent(&visuals),
-        false => visuals.text_color(),
-    };
+    let ink = visuals.text_color();
     let base = rect.bottom() - 1.0;
     painter.hline(
         rect.x_range(),
@@ -740,7 +742,7 @@ pub(super) fn level(
     let room = rect.height() - 2.0;
     for (i, peak) in lane.iter().enumerate() {
         let left = rect.left() + rect.width() * i as f32 / lane.len() as f32;
-        let top = base - height(*peak, loudest, span) * room;
+        let top = base - height(*peak, loudest, depth) * room;
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(left, top.min(base - 1.0)),
@@ -754,14 +756,19 @@ pub(super) fn level(
         return;
     }
     let top_db = 20.0 * loudest.log10();
-    let step = match span <= SPAN_DB {
-        true => 12.0,
-        false => 24.0,
-    };
     let caption = app::caption(&visuals);
-    let mut line = (top_db / step).floor() * step;
-    while line > top_db - span {
-        let y = base - (line - top_db + span) / span * room;
+    let mut line = (top_db / 6.0).floor() * 6.0;
+    let mut last = rect.top() + LEGEND_TEXT - LINES_APART;
+    while line > top_db - 140.0 {
+        let y = base - height(10f32.powf(line / 20.0), loudest, depth) * room;
+        line -= 6.0;
+        if y - last < LINES_APART {
+            continue;
+        }
+        if base - y < LINES_APART {
+            break;
+        }
+        last = y;
         painter.hline(
             rect.x_range(),
             y,
@@ -770,11 +777,10 @@ pub(super) fn level(
         painter.text(
             egui::pos2(rect.left() + 3.0, y - 1.0),
             egui::Align2::LEFT_BOTTOM,
-            format!("{line:.0} dB"),
+            format!("{:.0} dB", line + 6.0),
             egui::FontId::proportional(LEGEND_TEXT),
             caption,
         );
-        line -= step;
     }
 }
 /// The row of times under a lane drawn in `rect` over `shown` frames at `rate`.
@@ -976,28 +982,28 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_stands_in_decibels_under_the_take_s_loudest() {
+    fn a_lane_starts_linear_and_bends_toward_log() {
         let loudest = 0.5;
         let down = |db: f32| loudest * 10f32.powf(-db / 20.0);
-        let span = span_db(0);
-        assert_eq!(height(loudest, loudest, span), 1.0);
+        assert_eq!(height(loudest, loudest, 0), 1.0);
         assert!(
-            (height(down(36.0), loudest, span) - 0.5).abs() < 1e-4,
-            "36 dB down is half"
+            (height(loudest / 2.0, loudest, 0) - 0.5).abs() < 1e-6,
+            "linear: half the level stands half"
         );
-        assert_eq!(
-            height(down(80.0), loudest, span),
-            0.0,
-            "80 dB down is under the floor"
-        );
-        assert_eq!(height(0.0, loudest, span), 0.0);
-        assert_eq!(height(0.5, 0.0, span), 0.0, "a silent take draws nothing");
-        let deeper = span_db(1);
-        assert_eq!(deeper, 96.0);
+        assert_eq!(height(0.0, loudest, 3), 0.0);
+        assert_eq!(height(0.5, 0.0, 3), 0.0, "a silent take draws nothing");
+        let key_off = down(60.0);
+        let heights: Vec<f32> = (0..CURVES.len() as i8)
+            .map(|depth| height(key_off, loudest, depth))
+            .collect();
         assert!(
-            (height(down(48.0), loudest, deeper) - 0.5).abs() < 1e-4,
-            "deeper, 48 dB down is half"
+            heights.windows(2).all(|pair| pair[1] > pair[0]),
+            "each step stands quiet sound taller: {heights:?}"
         );
+        assert!(heights[0] < 0.01 && heights[5] > 0.35, "{heights:?}");
+        for depth in 0..CURVES.len() as i8 {
+            assert_eq!(height(loudest, loudest, depth), 1.0, "the loudest tops it");
+        }
     }
 
     #[test]
