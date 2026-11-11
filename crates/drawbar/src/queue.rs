@@ -1393,7 +1393,7 @@ fn destination(
     let room = (screen.bottom() - box_.bottom()).max(box_.top() - screen.top()) - MENU_FOOT;
     // ⚠️ A menu closes on any click, and switching banks is a click. The picker stays
     // open until a cell is picked or a click lands outside it.
-    egui::Popup::menu(&chip)
+    let shown = egui::Popup::menu(&chip)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(crate::keyboard::grid_width(PICKER_COLUMNS) + ui.spacing().menu_margin.sum().x)
         .show(|ui| {
@@ -1406,6 +1406,12 @@ fn destination(
                 ui.close();
             }
         });
+    // ⚠️ egui stacks areas of one order by the last one clicked and remembers it, so a
+    // picker opened from a sheet would open behind it after a click in the sheet.
+    let parent = ui.layer_id();
+    if let Some(shown) = shown.filter(|shown| shown.response.layer_id.order == parent.order) {
+        ui.ctx().set_sublayer(parent, shown.response.layer_id);
+    }
     box_.left() - GAP
 }
 
@@ -2792,6 +2798,95 @@ mod tests {
         assert!(
             rect_of(salt(held).with(("slot", 7_u32, 0_u32))).is_some(),
             "and it is showing bank 8"
+        );
+    }
+
+    /// egui raises a clicked area above its peers and remembers that order, so a click in
+    /// a sheet could leave a picker it opens underneath it.
+    #[test]
+    fn the_picker_opens_above_its_sheet_after_a_click_in_the_sheet() {
+        let Bench {
+            ctx,
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let class = ObjectClass::Program;
+        device.pretend_scanned(class, 7, &["Africa Split", "", ""]);
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
+        let mut queue = Queue::default();
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            id,
+            class,
+            at(1),
+        );
+        let held = queue.entry(id).expect("it is waiting");
+
+        let chip_id = std::cell::Cell::new(egui::Id::NULL);
+        let draw = |events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 600.0), events);
+            testing::run(&ctx, input, |ctx| {
+                egui::Modal::new(egui::Id::new("sheet")).show(ctx, |ui| {
+                    ui.set_min_size(egui::vec2(500.0, 400.0));
+                    chip_id.set(ui.id().with(("destination", held.id)));
+                    let row = egui::Rect::from_min_size(
+                        ui.max_rect().min + egui::vec2(0.0, 300.0),
+                        egui::vec2(500.0, 28.0),
+                    );
+                    destination(
+                        ui,
+                        held,
+                        row,
+                        row.right(),
+                        ui.visuals().text_color(),
+                        &device.state,
+                        &queue,
+                        &mut Vec::new(),
+                    );
+                });
+            });
+        };
+        let settle = || {
+            for _ in 0..3 {
+                draw(Vec::new());
+            }
+        };
+        let popup = || chip_id.get().with("popup");
+        let open_picker = || {
+            settle();
+            let chip = ctx
+                .read_response(chip_id.get())
+                .expect("the sheet drew its chip");
+            draw(testing::click(chip.rect.center()));
+            settle();
+            ctx.memory(|memory| memory.area_rect(popup()))
+                .expect("the picker opened")
+        };
+
+        open_picker();
+        draw(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }]);
+        settle();
+        let sheet = ctx
+            .memory(|memory| memory.area_rect(egui::Id::new("sheet")))
+            .expect("the sheet is open");
+        draw(testing::click(sheet.left_top() + egui::vec2(20.0, 20.0)));
+        let area = open_picker();
+        assert_eq!(
+            ctx.layer_id_at(area.center()),
+            Some(egui::LayerId::new(egui::Order::Foreground, popup())),
+            "the picker at {area:?} is not the top layer over the sheet at {sheet:?}"
         );
     }
 
