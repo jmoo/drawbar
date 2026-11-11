@@ -1,28 +1,19 @@
-//! About drawbar: what it is, where the project lives, what this build is, the licenses
-//! of everything compiled into it, and the trademark disclaimer.
+//! About drawbar: what it is, where the project lives, the licenses of everything
+//! compiled into it, and the trademark disclaimer.
 //!
 //! The box is the same on every target. The license texts are compiled in, so every copy
 //! of the binary carries the terms it is distributed under.
 
 use eframe::egui;
 
-use crate::device::Device;
 use crate::icon::{sized, Glyph};
-use crate::log::Log;
 use crate::sheet::{self, GAP};
 use crate::shell::GUIDE;
-use crate::store::Store;
-use crate::workspace::Workspace;
 
-#[cfg(any(target_arch = "wasm32", test))]
-mod agent;
 mod crates;
-#[cfg(target_arch = "wasm32")]
-mod web;
 
 const REPO: &str = "https://github.com/jmoo/drawbar";
 pub(crate) const RELEASES: &str = "https://github.com/jmoo/drawbar/releases";
-const ISSUES: &str = "https://github.com/jmoo/drawbar/issues";
 
 /// What one license covers in the app, and its terms.
 struct Notice {
@@ -129,14 +120,8 @@ const NOTICES: &[Notice] = &[
     },
 ];
 
-/// What the reader is told the build lines are for.
-const WHY: &str = "paste this into a bug report so we know what you were running";
-
 /// The caption over crates whose license file names no copyright holder.
 const UNATTRIBUTED: &str = "no copyright line in the license file";
-
-/// The hover text of Copy diagnostics.
-const COPIES: &str = "Copies the lines below, plus the activity log's last 200 entries";
 
 /// The widest the sheet is drawn.
 const WIDE: f32 = 760.0;
@@ -155,16 +140,6 @@ const TOP: f32 = 18.0;
 /// second time. Texts with longer lines wrap to the sheet.
 const MONO: f32 = 10.0;
 
-/// A build line's key column width and row height, and the gutter between two columns
-/// of build lines.
-const KEY: f32 = 92.0;
-const LINE: f32 = 22.0;
-const GUTTER: f32 = 24.0;
-
-/// The least width of one column of build lines; two columns side by side need twice this
-/// plus a [`GUTTER`].
-const COLUMN: f32 = 330.0;
-
 /// The width the foot reserves for Close, right of the disclaimer.
 const CLOSE: f32 = 90.0;
 
@@ -172,278 +147,79 @@ const CLOSE: f32 = 90.0;
 const ROW: f32 = 26.0;
 const CHEVRON: f32 = 12.0;
 
-/// How long the button says "Copied", in seconds.
-const SAID: f64 = 1.6;
-
-/// The most log entries [`diagnostics`] includes.
-pub(crate) const ENTRIES: usize = 200;
-
 /// The release page of a version.
 pub fn release_page(version: &str) -> String {
     format!("{RELEASES}/tag/drawbar-v{version}")
 }
 
-/// One build line: its key, its value, and an optional note after it.
-struct Line {
-    key: &'static str,
-    value: String,
-    note: String,
+/// How the reader left the box.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Left {
+    Closed,
+    Reporting,
 }
 
-impl Line {
-    fn new(key: &'static str, value: impl Into<String>, note: impl Into<String>) -> Line {
-        Line {
-            key,
-            value: value.into(),
-            note: note.into(),
-        }
+/// Draw the box while it is open, and close it once the reader is done. Returns whether
+/// they left it to report a problem.
+pub fn dialog(ctx: &egui::Context, open: &mut bool) -> bool {
+    if !*open {
+        return false;
     }
-}
-
-/// What this build is, read once when the box opens.
-struct Build {
-    lines: Vec<Line>,
-}
-
-/// The build lines as Copy diagnostics writes them, one per line.
-pub(crate) fn build_lines(device: &Device, workspace: &Workspace, store: Option<&Store>) -> String {
-    Build::new(device, workspace, store).written()
-}
-
-impl Build {
-    fn written(&self) -> String {
-        let mut out = String::new();
-        for line in &self.lines {
-            match line.note.is_empty() {
-                true => out.push_str(&format!("{}: {}\n", line.key, line.value)),
-                false => out.push_str(&format!("{}: {} ({})\n", line.key, line.value, line.note)),
-            }
-        }
-        out
-    }
-
-    fn new(device: &Device, workspace: &Workspace, store: Option<&Store>) -> Build {
-        let mut lines = vec![Line::new("Version", sheet::VERSION, "alpha"), target()];
-        #[cfg(target_arch = "wasm32")]
-        lines.push(Line::new("Browser", web::agent(), ""));
-        lines.push(usb(device));
-        lines.push(files(workspace, store));
-        Build { lines }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn target() -> Line {
-    Line::new("Target", "wasm32-unknown-unknown", "in the browser")
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn target() -> Line {
-    let (arch, os) = (std::env::consts::ARCH, std::env::consts::OS);
-    Line::new("Target", format!("{arch} {os}"), "on the desktop")
-}
-
-#[cfg(target_arch = "wasm32")]
-fn usb(device: &Device) -> Line {
-    let instrument = device.state.product().unwrap_or("no instrument connected");
-    match device.usb() {
-        true => Line::new("WebUSB", "available", instrument),
-        false => Line::new(
-            "WebUSB",
-            "unavailable",
-            "Chrome, Edge or Brave can connect an instrument",
-        ),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn usb(device: &Device) -> Line {
-    use crate::device::Connection;
-    match &device.state.connection {
-        Connection::Connected(card) => Line::new("USB", "connected", card.product.as_str()),
-        Connection::Connecting => Line::new("USB", "connecting", ""),
-        Connection::Disconnected => Line::new("USB", "no instrument connected", ""),
-    }
-}
-
-/// How many files this computer holds, and in a browser how much room they take there.
-fn files(workspace: &Workspace, store: Option<&Store>) -> Line {
-    let held = crate::strings::counted(workspace.listed().count(), "file", "files");
-    Line::new("Files", held, store.map(Store::kept).unwrap_or_default())
-}
-
-/// What Copy diagnostics puts on the clipboard: what this build is, then the tail of the
-/// activity log.
-fn diagnostics(build: &Build, log: &Log) -> String {
-    let mut out = build.written();
-    out.push('\n');
-    out.push_str(&log.tail(ENTRIES));
-    out
-}
-
-/// The About sheet while it is open.
-pub struct About {
-    build: Build,
-    /// When the diagnostics were last copied, on egui's clock.
-    copied: Option<f64>,
-}
-
-impl About {
-    /// Read what this build is. Called when the box opens.
-    pub fn new(device: &Device, workspace: &Workspace, store: Option<&Store>) -> About {
-        About {
-            build: Build::new(device, workspace, store),
-            copied: None,
-        }
-    }
-
-    /// Returns whether the reader is done with it.
-    fn body(&mut self, ui: &mut egui::Ui, log: &Log) -> bool {
-        ui.set_width(sheet::width(ui.ctx(), WIDE));
-        ui.add_space(TOP);
-        sheet::section(ui, |ui| {
-            sheet::masthead(ui);
-            ui.add_space(GAP * 2.0);
-            links(ui);
-        });
-        egui::ScrollArea::vertical()
-            .id_salt("about")
-            .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
-            .show(ui, |ui| {
-                // The scrollbar floats over the content; keep the rows out from under it.
-                let scroll = ui.spacing().scroll;
-                ui.set_width(ui.available_width() - scroll.bar_width - scroll.bar_outer_margin);
-                sheet::section(ui, |ui| {
-                    self.this_build(ui, log);
-                    sheet::heading(ui, "Licenses", Some(&inventory()));
-                    licenses(ui);
-                });
-            });
-        let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
-        let mut closed = false;
-        sheet::foot(
-            ui,
-            |ui| sheet::disclaimer(ui, CLOSE),
-            |ui| closed = sheet::secondary(ui, None, "Close").clicked(),
-        );
-        closed || escaped
-    }
-
-    /// The heading, the button that copies what is under it, and the build lines.
-    fn this_build(&mut self, ui: &mut egui::Ui, log: &Log) {
-        let head = ui
-            .scope(|ui| sheet::heading(ui, "This build", Some(WHY)))
-            .response
-            .rect;
-        // A child ui over the heading's band that claims no space: the button goes on the
-        // heading's line, whose position is known only after the heading is drawn.
-        let band = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), head.y_range());
-        let mut beside = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(band)
-                .layout(egui::Layout::right_to_left(egui::Align::Max)),
-        );
-        self.copy(&mut beside, log);
-        grid(ui, &self.build.lines);
-    }
-
-    /// Put the diagnostics on the clipboard, and say so until [`SAID`] has passed.
-    fn copy(&mut self, ui: &mut egui::Ui, log: &Log) {
-        let now = ui.input(|input| input.time);
-        let since = self.copied.map(|at| now - at).filter(|since| *since < SAID);
-        let (glyph, label) = match since {
-            Some(_) => (Glyph::Check, "Copied"),
-            None => (Glyph::Clipboard, "Copy diagnostics"),
-        };
-        if let Some(since) = since {
-            // egui repaints on demand, so an idle window would keep showing "Copied"
-            // until something else asked for a frame.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(SAID - since));
-        }
-        if sheet::secondary(ui, Some(glyph), label)
-            .on_hover_text(COPIES)
-            .clicked()
-        {
-            ui.ctx().copy_text(diagnostics(&self.build, log));
-            self.copied = Some(now);
-        }
-    }
-}
-
-/// Draw the box while it is open, and close it once the reader is done.
-pub fn dialog(ctx: &egui::Context, open: &mut Option<About>, log: &Log) {
-    let Some(about) = open.as_mut() else {
-        return;
-    };
-    if egui::Modal::new(egui::Id::new("about"))
+    let left = egui::Modal::new(egui::Id::new("about"))
         .frame(sheet::frame(&ctx.style().visuals))
-        .show(ctx, |ui| about.body(ui, log))
-        .inner
-    {
-        *open = None;
+        .show(ctx, body)
+        .inner;
+    *open = left.is_none();
+    left == Some(Left::Reporting)
+}
+
+/// Returns how the reader left, once they have.
+fn body(ui: &mut egui::Ui) -> Option<Left> {
+    ui.set_width(sheet::width(ui.ctx(), WIDE));
+    ui.add_space(TOP);
+    let mut reporting = false;
+    sheet::section(ui, |ui| {
+        sheet::masthead(ui);
+        ui.add_space(GAP * 2.0);
+        reporting = links(ui);
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("about")
+        .max_height(sheet::middle(ui.ctx(), AROUND, FEWEST))
+        .show(ui, |ui| {
+            // The scrollbar floats over the content; keep the rows out from under it.
+            let scroll = ui.spacing().scroll;
+            ui.set_width(ui.available_width() - scroll.bar_width - scroll.bar_outer_margin);
+            sheet::section(ui, |ui| {
+                sheet::heading(ui, "Licenses", Some(&inventory()));
+                licenses(ui);
+            });
+        });
+    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let mut closed = false;
+    sheet::foot(
+        ui,
+        |ui| sheet::disclaimer(ui, CLOSE),
+        |ui| closed = sheet::secondary(ui, None, "Close").clicked(),
+    );
+    match (reporting, closed || escaped) {
+        (true, _) => Some(Left::Reporting),
+        (false, true) => Some(Left::Closed),
+        (false, false) => None,
     }
 }
 
-/// Where the rest of the project is.
-fn links(ui: &mut egui::Ui) {
+/// Where the rest of the project is, and the way to report a problem. Returns whether
+/// that was clicked.
+fn links(ui: &mut egui::Ui) -> bool {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = GAP * 3.5;
         sheet::glyph_link(ui, Glyph::Github, "Source on GitHub", REPO);
         sheet::glyph_link(ui, Glyph::BookOpen, "User guide", GUIDE);
         sheet::glyph_link(ui, Glyph::Tag, "Releases", RELEASES);
-        sheet::glyph_link(ui, Glyph::MessageSquareWarning, "Report a problem", ISSUES);
-    });
-}
-
-/// How many columns of build lines `room` holds.
-fn columns(room: f32) -> usize {
-    match room >= 2.0 * COLUMN + GUTTER {
-        true => 2,
-        false => 1,
-    }
-}
-
-/// The build lines, in two columns when the sheet is wide enough and in one otherwise.
-fn grid(ui: &mut egui::Ui, lines: &[Line]) {
-    let room = ui.available_width();
-    let columns = columns(room);
-    let width = (room - GUTTER * (columns - 1) as f32) / columns as f32;
-    for row in lines.chunks(columns) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = GUTTER;
-            for line in row {
-                cell(ui, line, width);
-            }
-        });
-    }
-}
-
-/// One build line on a ruled row: its key, value and note.
-fn cell(ui: &mut egui::Ui, line: &Line, width: f32) {
-    let row = egui::vec2(width, LINE);
-    let laid = egui::Layout::left_to_right(egui::Align::Center);
-    let rect = ui
-        .allocate_ui_with_layout(row, laid, |ui| {
-            ui.set_min_size(row);
-            ui.spacing_mut().item_spacing.x = 10.0;
-            ui.allocate_ui_with_layout(egui::vec2(KEY, LINE), laid, |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(line.key).size(11.0)).truncate());
-            });
-            ui.spacing_mut().item_spacing.x = 7.0;
-            let value = egui::RichText::new(&line.value)
-                .font(egui::FontId::monospace(11.0))
-                .strong();
-            ui.add(egui::Label::new(value).truncate());
-            if !line.note.is_empty() {
-                let note = egui::RichText::new(&line.note).small().weak();
-                ui.add(egui::Label::new(note).truncate());
-            }
-        })
-        .response
-        .rect;
-    let hairline = ui.visuals().widgets.noninteractive.bg_stroke;
-    ui.painter().hline(rect.x_range(), rect.bottom(), hairline);
+        sheet::glyph_action(ui, Glyph::MessageSquareWarning, "Report a problem").clicked()
+    })
+    .inner
 }
 
 /// The count beside the Licenses heading: notices and crates.
@@ -628,52 +404,6 @@ mod tests {
         );
     }
 
-    fn build() -> Build {
-        Build {
-            lines: vec![
-                Line::new("Version", "0.7.1", "alpha"),
-                Line::new("Target", "aarch64 macos", "on the desktop"),
-                Line::new("Files", "2 files", ""),
-            ],
-        }
-    }
-
-    #[test]
-    fn the_diagnostics_carry_every_build_line_and_its_aside() {
-        let text = diagnostics(&build(), &Log::default());
-        assert!(text.contains("Version: 0.7.1 (alpha)"), "{text}");
-        assert!(
-            text.contains("Target: aarch64 macos (on the desktop)"),
-            "{text}"
-        );
-        assert!(text.contains("Files: 2 files\n"), "{text}");
-    }
-
-    #[test]
-    fn the_diagnostics_carry_the_log_after_the_build_and_cap_it() {
-        let mut log = Log::default();
-        for n in 0..250 {
-            log.info(format!("line {n}"));
-        }
-        let text = diagnostics(&build(), &log);
-        let (build, tail) = text
-            .split_once("\n\n")
-            .expect("a blank line between the two");
-        assert_eq!(build.lines().count(), 3);
-        assert_eq!(tail.lines().count(), ENTRIES);
-        assert!(!tail.contains("line 49"), "the log was not capped");
-        assert!(
-            tail.contains("line 50") && tail.contains("line 249"),
-            "{tail}"
-        );
-    }
-
-    #[test]
-    fn the_diagnostics_of_a_silent_session_are_the_build_alone() {
-        let text = diagnostics(&build(), &Log::default());
-        assert!(text.ends_with("Files: 2 files\n\n"), "{text:?}");
-    }
-
     fn headless() -> egui::Context {
         let ctx = crate::testing::context();
         egui_extras::install_image_loaders(&ctx);
@@ -682,11 +412,6 @@ mod tests {
 
     /// Draw the sheet in a window of `size`, and return the rect it took.
     fn drawn_at(ctx: &egui::Context, size: egui::Vec2) -> egui::Rect {
-        let mut about = About {
-            build: build(),
-            copied: None,
-        };
-        let log = Log::default();
         let mut rect = egui::Rect::ZERO;
         // Twice, because a scroll area sizes itself from the previous frame's content.
         for _ in 0..2 {
@@ -697,14 +422,39 @@ mod tests {
             let _ = ctx.run(input, |ctx| {
                 rect = egui::Modal::new(egui::Id::new("about"))
                     .frame(sheet::frame(&ctx.style().visuals))
-                    .show(ctx, |ui| {
-                        about.body(ui, &log);
-                    })
+                    .show(ctx, body)
                     .response
                     .rect;
             });
         }
         rect
+    }
+
+    /// Click `label` in the open box. Returns whether the box asked for the report form,
+    /// and whether it is still open.
+    fn clicking(label: &str) -> (bool, bool) {
+        let ctx = headless();
+        let size = egui::vec2(1200.0, 900.0);
+        let mut open = true;
+        let mut frame = |events| {
+            let mut reporting = false;
+            let output = crate::testing::run(&ctx, crate::testing::screen(size, events), |ctx| {
+                reporting = dialog(ctx, &mut open);
+            });
+            (output, reporting)
+        };
+        // Twice, because a modal paints nothing on its first frame.
+        frame(Vec::new());
+        let (output, _) = frame(Vec::new());
+        let at = crate::testing::where_(&crate::testing::painted(&output), label).center();
+        let (_, reporting) = frame(crate::testing::click(at));
+        (reporting, open)
+    }
+
+    #[test]
+    fn report_a_problem_leaves_the_box_for_the_report_form() {
+        assert_eq!(clicking("Report a problem"), (true, false));
+        assert_eq!(clicking("Close"), (false, false));
     }
 
     #[test]
@@ -721,19 +471,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_build_lines_stand_in_two_columns_only_where_the_sheet_is_wide() {
-        let ctx = headless();
-        let room = |sheet: f32| sheet - 2.0 * sheet::PAD;
-        drawn_at(&ctx, crate::shell::LEAST);
-        assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 1);
-        drawn_at(&ctx, egui::vec2(1400.0, 980.0));
-        assert_eq!(columns(room(sheet::width(&ctx, WIDE))), 2);
-    }
-
-    /// A holder is a copyright line, and the license text carries every name in it. The
-    /// exception is a text with no copyright line, whose holder comes from the font
-    /// itself.
     #[test]
     fn every_notice_names_a_copyright_holder_its_license_agrees_with() {
         for notice in NOTICES {

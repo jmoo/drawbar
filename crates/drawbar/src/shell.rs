@@ -2751,10 +2751,10 @@ mod tests {
         assert!(!app.shell.log_open, "Escape closes the activity log");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
-        app.about = Some(crate::about::About::new(&app.device, &app.workspace, None));
+        app.about = true;
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
-        assert!(app.about.is_none(), "Escape closes About");
+        assert!(!app.about, "Escape closes About");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
         app.shell.zoom_open = true;

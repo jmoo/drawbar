@@ -227,11 +227,24 @@ pub(crate) fn glyph_link(
     label: &str,
     url: &str,
 ) -> egui::Response {
+    glyphed(ui, glyph, |ui| link(ui, label, url))
+}
+
+/// A [`glyph_link`] that opens no page: the caller answers its click.
+pub(crate) fn glyph_action(ui: &mut egui::Ui, glyph: Glyph, label: &str) -> egui::Response {
+    glyphed(ui, glyph, |ui| ui.link(label))
+}
+
+fn glyphed(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    label: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
     let tint = ui.visuals().hyperlink_color;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 5.0;
         ui.add(sized(glyph, 12.0, tint));
-        link(ui, label, url)
+        label(ui)
     })
     .inner
 }

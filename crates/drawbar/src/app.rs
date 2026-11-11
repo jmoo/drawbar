@@ -176,8 +176,8 @@ pub struct DrawbarApp {
     /// The MIDI controllers listened to, whichever tab is in front.
     pub(crate) midi: Midi,
     pub(crate) splash: crate::splash::Splash,
-    /// The About box while it is showing. Not kept between sessions.
-    pub(crate) about: Option<crate::about::About>,
+    /// Whether the About box is showing. Not kept between sessions.
+    pub(crate) about: bool,
     /// The report sheet while it is showing. Not kept between sessions.
     pub(crate) report: Option<crate::report::Report>,
     /// Where this build runs, and who draws the window's frame on this run.
@@ -303,7 +303,7 @@ impl DrawbarApp {
             room: Room::of(&cc.egui_ctx),
             midi: Midi::default(),
             splash: crate::splash::Splash::new(&cc.egui_ctx),
-            about: None,
+            about: false,
             report: None,
             platform: Platform::current(),
             chrome: crate::platform::Frame::of(Platform::current()),
@@ -1196,7 +1196,13 @@ impl eframe::App for DrawbarApp {
             self.tabs.open(made);
         }
         let asked = self.splash.show(ctx, crate::splash::Usb::of(&self.device));
-        crate::about::dialog(ctx, &mut self.about, &self.log);
+        if crate::about::dialog(ctx, &mut self.about) {
+            self.report = Some(crate::report::Report::problem(
+                &self.device,
+                &self.workspace,
+                self.store.as_ref(),
+            ));
+        }
         crate::report::dialog(ctx, &mut self.report, &self.log);
 
         // Before the panels, so an editor open this frame still has focus when Escape is

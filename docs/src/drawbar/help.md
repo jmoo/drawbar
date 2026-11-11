@@ -14,9 +14,11 @@ drawbar there. [What is supported](../getting-started/support.md) says what work
 with each instrument.
 
 **Help ▸ Report a problem** and **Help ▸ Send feedback** open a form that
-sends what you write straight to drawbar's developer. You choose what to attach, and
-the form shows exactly what will be sent. Leave an email address if you would like a
-reply.
+sends what you write straight to drawbar's developer. You choose what to attach:
+recent errors, what you are running (the version, the browser or operating system,
+the connected instrument and its firmware, and how many files this computer holds),
+and the activity log's last 200 entries. The form shows exactly what will be sent.
+Leave an email address if you would like a reply.
 
 In the browser, **Help ▸ Share anonymous usage** is checked while drawbar sends
 anonymous counts of visits, errors and instrument operations. Uncheck it to stop
@@ -27,16 +29,8 @@ them. The desktop app sends no counts. **Help ▸ Privacy** opens
 report. The [activity log](overview.md#the-activity-log) has the same button.
 
 **Help ▸ About drawbar** (on macOS, **drawbar ▸ About drawbar**) opens the About
-box, which links to the source, this
-guide, the releases and the issue tracker.
-
-**This build** lists what you are running: the version and target, the browser
-and whether it offers WebUSB when drawbar runs in one, the connected instrument,
-and how many files this computer holds. In the browser it also shows how much of
-the browser's storage the library takes, and whether the browser keeps it or may
-delete it ([What is supported](../getting-started/support.md#the-library-in-the-browser)).
-**Copy diagnostics** puts those lines and the activity log's last 200 entries on
-the clipboard. Paste them into a bug report so it says what you were running.
+box, which shows the version you are running and links to the source, this guide
+and the releases. Its **Report a problem** opens the same form as the Help menu.
 
 **Licenses** is every license a copy of drawbar has to carry: drawbar's own, the
 bundled fonts and icons, the Stage field maps it decodes with, and the Rust

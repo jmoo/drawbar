@@ -13,6 +13,11 @@ use crate::store::Store;
 use crate::telemetry::{self, Undelivered};
 use crate::workspace::Workspace;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod agent;
+#[cfg(target_arch = "wasm32")]
+mod web;
+
 /// The widest the sheet grows.
 const WIDE: f32 = 520.0;
 
@@ -28,6 +33,9 @@ const LONGEST: usize = 5_000;
 
 /// The longest contact address, in characters.
 const CONTACT: usize = 200;
+
+/// The most entries of the activity log a report carries.
+const ENTRIES: usize = 200;
 
 /// The most of the activity log a report carries, newest kept, in characters. Held under
 /// the collector's limit for the field, `log` in `js/telemetry/src/check.js`.
@@ -132,7 +140,7 @@ impl Report {
             with_build: true,
             with_log: false,
             faults: telemetry::recent(),
-            build: crate::about::build_lines(device, workspace, store),
+            build: build_lines(device, workspace, store),
             frozen: None,
             state: State::Drafting,
         }
@@ -140,7 +148,7 @@ impl Report {
 
     fn send(&mut self, ctx: &egui::Context, log: &Log) {
         let slot = Arc::new(Mutex::new(None));
-        let tail = newest(&log.tail(crate::about::ENTRIES), LOG);
+        let tail = newest(&log.tail(ENTRIES), LOG);
         let body = self.freeze(telemetry::instrument(), tail);
         self.state = State::Sending {
             answer: slot.clone(),
@@ -314,7 +322,7 @@ impl Report {
                 &mut self.with_log,
                 format!(
                     "The activity log's last {} entries, which name your files",
-                    crate::about::ENTRIES
+                    ENTRIES
                 ),
             );
         });
@@ -362,10 +370,7 @@ impl Report {
     fn preview(&self, log: &Log) -> String {
         let (instrument, tail) = match &self.frozen {
             Some(frozen) => (frozen.instrument.clone(), frozen.tail.clone()),
-            None => (
-                telemetry::instrument(),
-                newest(&log.tail(crate::about::ENTRIES), LOG),
-            ),
+            None => (telemetry::instrument(), newest(&log.tail(ENTRIES), LOG)),
         };
         let mut out = format!(
             "report: {} ({})\nversion: {}\n",
@@ -412,6 +417,63 @@ impl Report {
             State::Refused(status) => format!("The report was not accepted (error {status})."),
         }
     }
+}
+
+/// What this build is, and what it runs on, one `key: value (note)` line each.
+fn build_lines(device: &Device, workspace: &Workspace, store: Option<&Store>) -> String {
+    let mut lines = vec![line("Version", sheet::VERSION, "alpha"), target()];
+    #[cfg(target_arch = "wasm32")]
+    lines.push(line("Browser", &web::agent(), ""));
+    lines.push(usb(device));
+    lines.push(files(workspace, store));
+    lines.concat()
+}
+
+fn line(key: &str, value: &str, note: &str) -> String {
+    match note.is_empty() {
+        true => format!("{key}: {value}\n"),
+        false => format!("{key}: {value} ({note})\n"),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn target() -> String {
+    line("Target", "wasm32-unknown-unknown", "in the browser")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn target() -> String {
+    let (arch, os) = (std::env::consts::ARCH, std::env::consts::OS);
+    line("Target", &format!("{arch} {os}"), "on the desktop")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn usb(device: &Device) -> String {
+    let instrument = device.state.product().unwrap_or("no instrument connected");
+    match device.usb() {
+        true => line("WebUSB", "available", instrument),
+        false => line(
+            "WebUSB",
+            "unavailable",
+            "Chrome, Edge or Brave can connect an instrument",
+        ),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn usb(device: &Device) -> String {
+    use crate::device::Connection;
+    match &device.state.connection {
+        Connection::Connected(card) => line("USB", "connected", &card.product),
+        Connection::Connecting => line("USB", "connecting", ""),
+        Connection::Disconnected => line("USB", "no instrument connected", ""),
+    }
+}
+
+/// How many files this computer holds, and in a browser how much room they take there.
+fn files(workspace: &Workspace, store: Option<&Store>) -> String {
+    let held = crate::strings::counted(workspace.listed().count(), "file", "files");
+    line("Files", &held, &store.map(Store::kept).unwrap_or_default())
 }
 
 /// The last `most` characters of `text`, starting on a line of its own where one is
@@ -502,6 +564,15 @@ mod tests {
             after(Err(Undelivered::Refused(413))),
             State::Refused(413)
         ));
+    }
+
+    #[test]
+    fn a_build_line_carries_its_note_in_parentheses_and_only_when_it_has_one() {
+        assert_eq!(
+            line("Target", "aarch64 macos", "on the desktop"),
+            "Target: aarch64 macos (on the desktop)\n"
+        );
+        assert_eq!(line("Files", "2 files", ""), "Files: 2 files\n");
     }
 
     fn electro() -> telemetry::Instrument {

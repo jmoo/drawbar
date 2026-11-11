@@ -761,13 +761,7 @@ impl DrawbarApp {
             }
             Command::Privacy => ctx.open_url(egui::OpenUrl::new_tab(crate::telemetry::PRIVACY)),
             Command::CopyLog => acts.push(Act::CopyLog),
-            Command::About => {
-                self.about = Some(crate::about::About::new(
-                    &self.device,
-                    &self.workspace,
-                    self.store.as_ref(),
-                ))
-            }
+            Command::About => self.about = true,
         }
     }
 

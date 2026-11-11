@@ -1,11 +1,11 @@
-//! What the browser reports about itself, for the build lines.
+//! What the browser reports about itself, for a report's build lines.
 
 use wasm_bindgen::JsValue;
 
 use crate::js::field;
 
 /// How many characters of an unrecognized user agent are kept. The string can run to a
-/// paragraph of version numbers, and the sheet has one line.
+/// paragraph of version numbers.
 const MOST: usize = 60;
 
 /// The browser and operating system, as briefly as possible.
