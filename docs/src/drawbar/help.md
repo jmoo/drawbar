@@ -2,9 +2,9 @@
 
 **Help ▸ User guide** opens this guide.
 
-**Help ▸ What's new** lists what changed in the version you are running. In the
-browser it opens by itself after an update. On the desktop it opens the release
-page.
+**Help ▸ What's new** lists the features, fixes, and speedups in the version you
+are running. In the browser it opens by itself after an update. On the desktop it
+opens the release page.
 
 **Help ▸ Welcome** shows three places to start (connect an instrument, import
 files, or start with a demo), a reminder to keep your own backups, and the

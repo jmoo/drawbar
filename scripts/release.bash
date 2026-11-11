@@ -39,36 +39,6 @@ published() {
   esac
 }
 
-# Release notes for the crate, from commits_for output on stdin.
-notes() {
-  local crate=$1 tag=$2 previous=$3
-  awk -F'\t' -v url="$repo_url" '
-    function item(line,    s) {
-      s = "- " ($4 != "" ? "**" $4 ":** " : "") $5
-      if (url != "") s = s " ([" substr($1, 1, 7) "](" url "/commit/" $1 "))"
-      return s
-    }
-    $3 == 1 { breaking = breaking item($0) "\n"; next }
-    $2 == "feat" { feat = feat item($0) "\n"; next }
-    $2 == "fix" { fix = fix item($0) "\n"; next }
-    $2 == "perf" { perf = perf item($0) "\n"; next }
-    { other = other item($0) "\n" }
-    END {
-      if (breaking != "") print "### ⚠️ Breaking changes\n" breaking
-      if (feat != "") print "### Features\n" feat
-      if (fix != "") print "### Bug fixes\n" fix
-      if (perf != "") print "### Performance\n" perf
-      if (other != "") print "### Other changes\n" other
-    }'
-  if [[ -n $repo_url ]]; then
-    if [[ -n $previous ]]; then
-      echo "**Full changelog**: $repo_url/compare/$previous...$tag"
-    else
-      echo "**Full changelog**: $repo_url/commits/$tag"
-    fi
-  fi
-}
-
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -104,7 +74,7 @@ for crate in "${publish_order[@]}"; do
     continue
   fi
   previous="$(latest_tag "$crate")"
-  commits_for "$crate" "$previous" | notes "$crate" "$tag" "$previous" >"$tmp/notes.md"
+  commits_for "$crate" "$previous" | notes "$tag" "$previous" >"$tmp/notes.md"
 
   if published "$crate" "$version"; then
     echo "$crate $version: already on crates.io"
