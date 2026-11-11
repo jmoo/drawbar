@@ -63,25 +63,30 @@ are, and the take editor follows the other document editors.
      measured loudness useless on our test take).
    - **Loudness**: hits sorted by measured level, with near-duplicates within 2 dB dropped and the
      kept layers spread evenly in dB.
-4. **Hit grid.** One row per note, one column per hit. Each cell is one hit, saved as two regions
-   (attack and release). It plays the hit and shows its layer, its length, whether a release was
-   found, and the loop match. Warnings mark a pitch that disagrees with the note list, a hit with no
-   key-up, a hit too quiet to use, and a weak loop match. Each edit changes the WAV's regions:
-   - drop a hit (a stray noise, a stopped note): delete its regions; Undo brings them back;
-   - set its layer, swap it with another hit, or give it a different note: relabel the regions;
-   - drag its start, key-up, release end and loop on the waveform: move the regions or loop. Loop
-     points snap to zero crossings, and a loop-wrap audition plays from just before the loop end and
-     lets it cycle.
+4. **Take view.** The take's waveform, with a box over each sample the regions mark (`C4 v22`),
+   and under it the picked sample's own lane with its cut points. Both lanes start linear, so a
+   sample's shape shows as it decays, and small + and − at the right bend the scale toward log so
+   quiet key-offs show; lines at levels of full scale make clear the scale changes, not the gain.
+   Each edit changes the WAV's regions, and Undo takes it back:
+   - drag a sample's start, key-up, release end and loop on its lane: move the regions or loop. Loop
+     points snap to a rising zero crossing (Alt places them exactly);
+   - rename a sample by typing its note and layer in its name box: relabel its regions;
+   - Add ▸ Note at a place clicked in the take, where prep missed a hit: drawbar finds the hit, its
+     key-up and pitch, and guesses the note and layer, or marks default regions there to adjust;
+     Add ▸ Loop and Add ▸ Key-off give the picked sample default ones;
+   - Delete ▸ Note, Loop or Key-off: delete those marks; the audio is never touched.
+   Play original plays the sample as recorded; Play sample plays it as the instrument will (hold it
+   as a key, or click for the whole sample, loop and key-off); Loop wrap cycles the loop's join;
+   Release plays the key-off alone. ← and → step through the samples. The notes-by-layers overview
+   is drawbar's own piano grid, so the take editor does not repeat it.
 5. **Save** with drawbar's global save. Edits are held until then and written in one write, which
    #226 makes one undo step.
 6. **Build.** New ▸ Piano library takes the WAV and builds a stroke from each labelled region, so
    template, kind, gain and format work as they do now. It renders a fresh npno each time.
 
 The editor uses the standard document top bar for the file name, Detect and Build. The left bar
-stays the file tree. The selected hit, its cut points and its audition sit in the right sidebar.
-While the take editor has focus, its cards sit above the global Selection and Tags cards, which
-stay collapsed. The cards follow the hit selected in the take view; selecting another file in the
-browser gives the sidebar back to that file.
+stays the file tree. Everything about the picked sample sits in the document, under the take; the
+right sidebar keeps the global Selection and Tags cards, as for any other document.
 
 The WAV is the record. A user decides only where each stroke sits, what it is, and where its loop
 is, and standard RIFF chunks hold all three:
@@ -92,10 +97,15 @@ is, and standard RIFF chunks hold all three:
 - for a note that dies before its key-up, a region at the end of its attack labelled
   `060-b0-l00-fade`, where it starts fading to silence.
 
-A save rewrites only the `cue `, `LIST`/`adtl` and `smpl` chunks. The audio and every other chunk
-are kept byte for byte, so another app's data is never dropped. Nothing else is stored: no sheet, no
-hit states, and no overrides to re-match when a detector changes. Other editors can read and write
-the same regions.
+Two choices about the whole take sit in a small private chunk, id `npno`, of `key=value` lines,
+with lines it doesn't know skipped: the category it builds as (`kind=wurlitzer`, the words `--kind`
+takes) and whether it is cleaned of hum and hiss (`clean=off`). `nord piano build` reads them:
+`--kind` defaults to the takes' category, and takes that disagree are refused.
+
+A save rewrites only the `cue `, `LIST`/`adtl`, `smpl` and `npno` chunks. The audio and every other
+chunk are kept byte for byte, so another app's data is never dropped. Nothing else is stored: no
+sheet, no hit states, and no overrides to re-match when a detector changes. Other editors can read
+and write the same regions.
 
 | Step | Today | With this RFC |
 |---|---|---|
@@ -240,7 +250,7 @@ Two cases, decided by how the note decays before its key-up:
   Searched on the take with only its hum removed, three treble hits had swapped loop and fade.
 - At build, the last 30 ms before the loop end are crossfaded (raised cosine) into the audio before
   the loop start, so the wrap is continuous. The crossfade length is the one build setting in the
-  first version; a loop's length is set by dragging it. The match score is reported, and the hit grid
+  first version; a loop's length is set by dragging it. The match score is reported, and prep's listing
   warns below 0.5.
 - The build shapes loops and fades from the marks alone, so a loop or fade moved in an editor is
   shaped the same way. It does so only for a take's regions: a directory of WAVs with their own loops
@@ -340,7 +350,8 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 
 ### Pull requests
 
-The first four are written, on `mikesprad:feat/npno-prep`, and not yet opened.
+All five are written and none is opened yet: the first four on `mikesprad:feat/npno-prep`, the
+fifth on `mikesprad:feat/take-editor-wav`.
 
 - [ ] `npno-prep`: WAV handling moved from `nord-format`, with 24-bit and float reading, the
   resampler, and `cue `/`adtl` regions saved without touching other chunks. The build takes a
@@ -351,14 +362,17 @@ The first four are written, on `mikesprad:feat/npno-prep`, and not yet opened.
   regions, shaped at build.
 - [ ] Hum removal and hiss follow as build rules. Loop search and release levels then run on the
   cleaned strokes.
-- [ ] drawbar: the take editor over a WAV document, with Resample, Detect, playback, loop-wrap
-  audition and region edits. Docs.
+- [ ] drawbar: the take editor over a WAV document, with playback as the instrument plays it,
+  loop-wrap and release auditions, region edits, category and cleaning, and one Undo timeline with
+  the library's changes. Docs. Written on `mikesprad:feat/take-editor-wav`, on top of the first
+  four. Resample, Detect and Build from the editor are still to come; `nord piano prep` does them
+  for now.
 
 ## Drawbacks
 
 - It is a sizable addition: a new crate, a CLI command and a take editor.
 - The detectors are heuristics tuned on few recordings: two takes of one Wurlitzer, a four-note
-  pilot and synthetic takes. Other instruments and rooms will find cases they miss, so the hit grid's
+  pilot and synthetic takes. Other instruments and rooms will find cases they miss, so the take editor's
   region edits are not optional.
 - Without a broadband denoiser, a noisy recording gives a noisy library. Hiss inside the note's own
   band in its first second stays. The editor can only flag the worst hits and say what the recording
@@ -398,9 +412,6 @@ If nothing is done, library building stays limited to people willing to hand-edi
 
 ## Unresolved questions
 
-- **Right sidebar and the global cards.** The take editor's cards sit above the global ones while it
-  has focus (see the walkthrough). This touches every editor, so it is for drawbar's other editors
-  to follow or not.
 - **Other editors.** Which editors keep `cue `/`adtl` regions and `smpl` loops when they save? To be
   checked before relying on them.
 - **Default layer values, trims and ladders for v6** are the build's job, tracked in #278 and #279.
