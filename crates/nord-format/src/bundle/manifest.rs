@@ -7,7 +7,9 @@
 //! fixed down to the whitespace, and anything else is refused, so a read manifest
 //! writes back byte for byte.
 
-use crate::error::ParseError;
+use crate::bundle::archive::{copy_member, ArchiveError, Directory};
+use crate::error::{try_with_capacity, Error, ParseError};
+use std::io::{Read, Seek};
 
 /// The manifest's archive path.
 pub const PATH: &str = "meta.xml";
@@ -103,6 +105,50 @@ impl Manifest {
         }
         out += "</bundle>\n";
         out.into_bytes()
+    }
+}
+
+/// Refuses an archive that is not a whole bundle or backup: one with no member but its
+/// manifest, or whose manifest is missing, or is neither one [`Manifest::parse`] reads
+/// nor a [backup's](is_backup). A member the manifest does not name is let be: a bundle's
+/// names only the members with dependencies, and what they depend on.
+pub fn check(r: &mut (impl Read + Seek), directory: &Directory) -> Result<(), Error> {
+    if directory
+        .members
+        .iter()
+        .all(|member| member.entry.name == PATH)
+    {
+        return Err(ArchiveError::Empty.into());
+    }
+    let member = directory
+        .get(PATH)
+        .ok_or_else(|| ParseError::AssertFail(format!("the archive has no {PATH}")))?;
+    let mut bytes = try_with_capacity(member.entry.size as usize, "bytes")?;
+    copy_member(r, member, &mut bytes)?;
+    if !is_backup(&bytes) {
+        Manifest::parse(&bytes)?;
+    }
+    Ok(())
+}
+
+/// Whether `bytes` is the manifest a backup carries in place of a bundle's: an XML
+/// declaration, then one empty `<backup>` element, each on a line of its own. Its
+/// attributes are not read.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn is_backup(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut lines = text.split_terminator('\n');
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(declaration), Some(element), None) => {
+            declaration.starts_with("<?xml ")
+                && declaration.ends_with("?>")
+                && element.starts_with("<backup ")
+                && element.ends_with("/>")
+        }
+        _ => false,
     }
 }
 

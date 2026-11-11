@@ -43,6 +43,8 @@ pub enum ArchiveError {
         filled: usize,
         entries: u16,
     },
+    #[error("the archive holds no members")]
+    Empty,
     #[error("a member name is not UTF-8")]
     NameNotUtf8,
     #[error("the entry {name:?} is a folder, not a file")]

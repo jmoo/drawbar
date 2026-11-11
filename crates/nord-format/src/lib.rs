@@ -682,7 +682,7 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         // An archive with nothing in it would satisfy the all-members checks below
         // vacuously and read as a drum bank holding no programs.
         if names.is_empty() {
-            return Err(ParseError::AssertFail("the archive holds no members".into()).into());
+            return Err(bundle::archive::ArchiveError::Empty.into());
         }
         // ⚠️ `meta.xml` is shared across product families; only `.ne5*` members identify
         // an Electro 5 bundle.
