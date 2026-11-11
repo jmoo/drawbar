@@ -1059,22 +1059,22 @@ fn send_with<T: Transport + Recorded>(
     let backup = match &existing {
         // Nothing is deleted until the backup is in hand.
         Some(info) => {
-            let rescue = rescue_file(spill_into, info).map_err(|e| {
+            let unkept = |e: String| {
                 format!(
                     "could not keep a rescue copy of {} in {} ({e}), so it was left alone; \
                      run from a folder you can write to, or pass --rescue-dir",
                     shown(at),
                     spill_into.display(),
                 )
+            };
+            let (path, partial, file) = rescue_file(spill_into, info).map_err(unkept)?;
+            back_up(ui, device, class, info, &path, &partial, file).map_err(|e| {
+                format!(
+                    "could not read {} back before replacing it, so it was left alone: {e}",
+                    shown(at),
+                )
             })?;
-            Some(
-                back_up(ui, device, spill_into, class, info, rescue).map_err(|e| {
-                    format!(
-                        "could not read {} back before replacing it, so it was left alone: {e}",
-                        shown(at),
-                    )
-                })?,
-            )
+            Some(keep(spill_into, path, &partial).map_err(unkept)?)
         }
         None => None,
     };
@@ -1218,18 +1218,18 @@ fn rescue_file(
     fresh(dir, &envelope::rescue_name_for(info.location, &info.format))
 }
 
-/// Read the occupant of `info.location` so it can be put back, into `rescue`, a new file
-/// in `dir`, a transfer chunk at a time. It is written under its partial name, synced,
-/// and checked whole before it takes its own, and that name is synced in `dir` before
-/// this returns. A read that fails leaves no file behind.
+/// Read the occupant of `info.location` so it can be put back, into `file`, a new file
+/// at `partial` to be [kept](keep) at `path`, a transfer chunk at a time. It is synced
+/// and checked whole before this returns. A read that fails leaves no file behind.
 fn back_up<T: Transport + Recorded>(
     ui: &Ui,
     device: &mut Device<T>,
-    dir: &Path,
     class: ObjectClass,
     info: &ProgramInfo,
-    (path, partial, mut file): (PathBuf, PathBuf, std::fs::File),
-) -> Result<Backup, String> {
+    path: &Path,
+    partial: &Path,
+    mut file: std::fs::File,
+) -> Result<(), String> {
     let at = info.location;
     let intent = format!("{} read {}", noun(class), addr(at));
     ui.note(format!(
@@ -1244,12 +1244,17 @@ fn back_up<T: Transport + Recorded>(
             usb_op::verify_read(&mut Positional::new(&file)?, &received).await
         }))
     });
-    if let Err(e) = read {
-        let _ = std::fs::remove_file(&partial);
-        return Err(explain(e, at));
-    }
-    if let Err(e) = std::fs::rename(&partial, &path) {
-        let _ = std::fs::remove_file(&partial);
+    read.map_err(|e| {
+        let _ = std::fs::remove_file(partial);
+        explain(e, at)
+    })
+}
+
+/// Give a whole backup at `partial` its own name, `path`, and sync that name in `dir`,
+/// so the backup survives a power cut. One that cannot be kept leaves no file behind.
+fn keep(dir: &Path, path: PathBuf, partial: &Path) -> Result<Backup, String> {
+    if let Err(e) = std::fs::rename(partial, &path) {
+        let _ = std::fs::remove_file(partial);
         return Err(format!("{}: {e}", path.display()));
     }
     match sync_dir(dir) {
@@ -2766,6 +2771,14 @@ mod tests {
             )
             .unwrap_err();
 
+            assert!(
+                err.starts_with(&format!(
+                    "could not keep a rescue copy of {} in {} (",
+                    shown(AT),
+                    dir.display()
+                )),
+                "{err}"
+            );
             assert!(err.contains("left alone"), "{err}");
             let sent = device.transport().replay.sent();
             assert!(!sent.contains(&delete), "the DELETE was never sent");
