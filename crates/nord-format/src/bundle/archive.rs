@@ -8,7 +8,7 @@
 //! comes from the tail, and each member is a byte range of the file.
 
 use crate::crc::Crc32Stream;
-use crate::error::Error;
+use crate::error::{Error, ParseError};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -695,6 +695,9 @@ impl Directory {
     /// No member's bytes are read.
     pub fn read_from(r: &mut (impl Read + Seek)) -> Result<Directory, Error> {
         let len = r.seek(SeekFrom::End(0))?;
+        if len == 0 {
+            return Err(ParseError::Empty.into());
+        }
         let tail_len = len.min(TAIL_MAX);
         let tail = Tail::find(&read_range(r, len - tail_len..len)?, len)?;
         let bytes = read_range(r, tail.directory.clone())?;

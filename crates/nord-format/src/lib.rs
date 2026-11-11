@@ -854,11 +854,19 @@ mod bundle_tests {
     }
 
     /// An empty archive would pass every all-members check and read as a drum bank
-    /// holding no programs.
+    /// holding no programs. It starts with its end record, and is still an archive.
     #[test]
-    fn an_empty_zip_is_refused() {
+    fn an_empty_zip_is_refused_as_holding_no_members() {
         let bytes = archive(&[]);
-        assert!(from_stream(&mut Cursor::new(bytes)).is_err());
+        assert_eq!(&bytes[..4], b"PK\x05\x06");
+        let err = from_stream(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.to_string(), "the archive holds no members");
+    }
+
+    #[test]
+    fn an_empty_file_is_refused_as_empty() {
+        let err = from_stream(&mut Cursor::new(Vec::new())).unwrap_err();
+        assert_eq!(err.to_string(), "the file is empty");
     }
 
     /// Directory entries and a manifest are not members, so an archive of only those is
