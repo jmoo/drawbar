@@ -18,7 +18,7 @@ use nord_format::formats::nsmp::codec;
 use nord_format::take::clean::{self, Noise};
 use nord_format::take::layers;
 use nord_format::take::sustain;
-use nord_format::wav::{Audio, Loop, Play};
+use nord_format::wav::{Audio, Loop};
 
 use super::hit::Cuts;
 use super::wav;
@@ -137,11 +137,10 @@ impl Sounding {
         let channels = usize::from(audio.channels.max(1));
         let span = cuts.attack.as_ref().filter(|span| !span.is_empty())?;
         let raw = region(audio, span, root, noise);
-        let sample_loop = cuts.looped.as_ref().map(|found| Loop {
-            start: found.start - span.start,
-            end: found.end - 1 - span.start,
-            play: Play::Forward,
-        });
+        let sample_loop = cuts
+            .looped
+            .as_ref()
+            .map(|found| Loop::forward(found.start - span.start, found.end - 1 - span.start));
         let fade = cuts.fade.as_ref().map(|fade| fade.start - span.start);
         let (mut attack, held) =
             sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);

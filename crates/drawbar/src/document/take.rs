@@ -3,13 +3,13 @@
 //!
 //! A region is read by its label, as `nord piano build` reads it: an attack `060-b0-v22`
 //! and its release `060-b2-v22` fill the lane, a loop fills it too,
-//! and a dying attack's fade `060-b0-v22-fade` fills the lower half of the attack's end. A region labelled otherwise is
+//! and a dying attack's fade `060-b0-v22-fade` fills the lower half of the attack's end. A region labeled otherwise is
 //! drawn by its label, so nothing the file marks is hidden.
 
 use std::ops::Range;
 
 use eframe::egui;
-use nord_format::formats::npno::encode::{parse_stroke_name, LayerTag, Stem};
+use nord_format::formats::npno::encode::{parse_stroke_name, LayerTag, Stem, FADE_SUFFIX};
 use nord_format::formats::npno::Bank;
 use nord_format::note;
 use nord_format::wav::{self, Audio};
@@ -34,13 +34,10 @@ pub(super) const LEGEND_TEXT: f32 = 11.0;
 /// the blocks, so the whole take draws without touching each of its samples.
 const BLOCK: usize = 256;
 
-/// The suffix a dying attack's fade region carries after its stroke's name.
-pub(super) const FADE_SUFFIX: &str = "-fade";
-
 /// A lane's peak level in each column, from 0 up.
 pub type Lane = Vec<f32>;
 
-/// A hit: the root and layer its strokes are labelled with.
+/// A hit: the root and layer its strokes are labeled with.
 pub type Hit = (u8, LayerTag);
 
 /// What a region of the take is, by its label.
@@ -92,7 +89,7 @@ pub(super) fn named(hit: Hit) -> String {
     format!("{} {}", note::name(hit.0), layer(hit.1))
 }
 
-/// `v22` or `l01`, as the label writes the layer.
+/// `v22` or `l01`, as a lane names the layer.
 pub(super) fn layer(tag: LayerTag) -> String {
     match tag {
         LayerTag::Value(value) => format!("v{value:02}"),
@@ -100,7 +97,7 @@ pub(super) fn layer(tag: LayerTag) -> String {
     }
 }
 
-/// The region labelled `label` over `frames`, read as `nord piano build` reads it.
+/// The region labeled `label` over `frames`, read as `nord piano build` reads it.
 pub(super) fn mark(label: &str, frames: Range<u32>) -> Mark {
     let (stroke, fade) = match label.strip_suffix(FADE_SUFFIX) {
         Some(stroke) => (stroke, true),
@@ -374,7 +371,7 @@ impl View {
     }
 
     /// Pick `hit` of `marked`, in a take of `total` frames at `rate`, and bring it into
-    /// view, centred, where the lane is zoomed and it is not all shown.
+    /// view, centered, where the lane is zoomed and it is not all shown.
     pub fn pick(&mut self, hit: Hit, marked: &Marked, total: f64, rate: f64) {
         self.picked = Some(hit);
         self.place = None;
@@ -912,11 +909,7 @@ mod tests {
                     label: "060-b2-v22".into(),
                 },
             ],
-            loops: vec![wav::Loop {
-                start: 300,
-                end: 399,
-                play: wav::Play::Forward,
-            }],
+            loops: vec![wav::Loop::forward(300, 399)],
         };
         let marked = Marked::of(&wav::with_marks(&bytes, &marks).unwrap()).unwrap();
         assert_eq!(marked.regions[0].frames, 100..500);

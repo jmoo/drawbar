@@ -19,7 +19,7 @@ use crate::app;
 use crate::browser::Kind;
 use crate::icon::Glyph;
 use crate::workspace::{Bytes, LocalEntity};
-use nord_format::formats::npno::encode;
+use nord_format::formats::npno::{encode, Bank};
 
 /// The extension a WAV carries, and the tag it is kept under.
 pub const EXTENSION: &str = "wav";
@@ -77,9 +77,9 @@ fn renamed(marks: &wav::Marks, path: &str, label: &str, to: &str) -> Result<wav:
         }
         region.label = match mark.part {
             take::Part::Attack => adding::attack_label(to),
-            take::Part::Resonance => format!("{:03}-b1-{}", to.0, take::layer(to.1)),
+            take::Part::Resonance => encode::stroke_name(to.0, Bank::Resonance, to.1),
             take::Part::Release => adding::release_label(to),
-            take::Part::Fade => format!("{}{}", adding::attack_label(to), take::FADE_SUFFIX),
+            take::Part::Fade => adding::attack_label(to) + encode::FADE_SUFFIX,
             take::Part::Other => continue,
         };
     }
@@ -178,11 +178,7 @@ fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Mar
                 return Err(format!("{path}: a loop lies inside {label}"));
             }
             // ⚠️ A loop's end is its last frame, not the one after.
-            out.loops.push(wav::Loop {
-                start: span.start,
-                end: span.end - 1,
-                play: wav::Play::Forward,
-            });
+            out.loops.push(wav::Loop::forward(span.start, span.end - 1));
             Ok(out)
         }));
     }
@@ -224,7 +220,7 @@ fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Mar
     Some(deleted())
 }
 
-/// The path that moves `cut` of the hit whose attack is labelled `label`.
+/// The path that moves `cut` of the hit whose attack is labeled `label`.
 pub fn cut_path(label: &str, cut: hit::Cut) -> String {
     format!("{CUT}{label}/{}", cut.slug())
 }
@@ -247,7 +243,7 @@ pub fn is_wav(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE"
 }
 
-/// Whether these bytes mark a region labelled as a stroke: a take `nord piano prep` has
+/// Whether these bytes mark a region labeled as a stroke: a take `nord piano prep` has
 /// cut, against one as recorded.
 pub fn is_take(bytes: &[u8]) -> bool {
     take::Marked::of(bytes).is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
@@ -1557,11 +1553,7 @@ mod tests {
                 region(22_050, 30_000, "069-b0-v22"),
                 region(52_050, 4000, "069-b2-v22"),
             ],
-            loops: vec![wav::Loop {
-                start: 40_000,
-                end: 41_999,
-                play: wav::Play::Forward,
-            }],
+            loops: vec![wav::Loop::forward(40_000, 41_999)],
         };
         wav::with_marks(&take(peaks), &marks).unwrap()
     }

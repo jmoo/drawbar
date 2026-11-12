@@ -3501,11 +3501,7 @@ mod tests {
                 region(rate, 3 * rate, "060-b0-v22"),
                 region(4 * rate, rate / 2, "060-b2-v22"),
             ],
-            loops: vec![prep::Loop {
-                start: 2 * rate,
-                end: 2 * rate + rate / 2 - 1,
-                play: prep::Play::Forward,
-            }],
+            loops: vec![prep::Loop::forward(2 * rate, 2 * rate + rate / 2 - 1)],
         };
         let bytes = prep::with_marks(&bytes, &marks).unwrap();
         let mut open = Open::file("take.wav", bytes.clone());
@@ -3725,11 +3721,7 @@ mod tests {
                     label: "060-b2-v22".into(),
                 },
             ],
-            loops: vec![prep::Loop {
-                start: 3 * rate,
-                end: 4 * rate - 1,
-                play: prep::Play::Forward,
-            }],
+            loops: vec![prep::Loop::forward(3 * rate, 4 * rate - 1)],
         };
         let bytes = prep::with_marks(&raw, &marks).unwrap();
         let mut open = Open::file("Wurli take.wav", bytes);

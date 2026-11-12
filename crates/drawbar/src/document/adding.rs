@@ -5,11 +5,12 @@
 
 use std::ops::Range;
 
-use nord_format::formats::npno::encode::LayerTag;
+use nord_format::formats::npno::encode::{self, LayerTag};
+use nord_format::formats::npno::Bank;
 use nord_format::take::detect::{self, Envelope};
 use nord_format::wav::Audio;
 
-use super::take::{self, Hit, Marked, Part};
+use super::take::{Hit, Marked, Part};
 
 /// How far before the place the search for its hit reaches, in seconds: a click may
 /// fall late in a long sample, and the hit's onset is found only with quiet before it.
@@ -266,16 +267,17 @@ fn layer(audio: &Audio, marked: &Marked, root: u8, db: f64) -> u8 {
 
 /// The label of `hit`'s attack.
 pub fn attack_label(hit: Hit) -> String {
-    format!("{:03}-b0-{}", hit.0, take::layer(hit.1))
+    encode::stroke_name(hit.0, Bank::Attack, hit.1)
 }
 
 /// The label of `hit`'s key-off.
 pub fn release_label(hit: Hit) -> String {
-    format!("{:03}-b2-{}", hit.0, take::layer(hit.1))
+    encode::stroke_name(hit.0, Bank::Release, hit.1)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::take;
     use super::*;
 
     const RATE: u32 = 44_100;
@@ -336,7 +338,7 @@ mod tests {
         let added = sample(&audio, &marked, RATE);
         assert_eq!(added.attack.start, RATE);
         assert_eq!(added.attack.end, RATE * 4, "an attack of 3 s");
-        assert_eq!(added.hit.0, 64, "named by its neighbour");
+        assert_eq!(added.hit.0, 64, "named by its neighbor");
         assert_ne!(
             added.hit.1,
             LayerTag::Value(22),
@@ -349,7 +351,7 @@ mod tests {
 
     /// A layer between two of its note's in loudness takes a value between theirs.
     #[test]
-    fn a_new_layer_s_value_sits_between_its_neighbours_in_loudness() {
+    fn a_new_layer_s_value_sits_between_its_neighbors_in_loudness() {
         let mut audio = take(0.25);
         let loud = take(0.5);
         let soft = take(0.125);
