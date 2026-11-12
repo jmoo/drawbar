@@ -86,10 +86,13 @@ pub struct Rescued {
 }
 
 impl Rescued {
-    /// What `file_name` says, where it is a rescue's as [`rescue_name_for`] names one.
-    /// Whatever follows the location or the parenthesized name, such as a number that made
-    /// the name free, is ignored.
+    /// What `file_name` says, where it is a whole rescue's ([`is_rescue`]) as
+    /// [`rescue_name_for`] names one. Whatever follows the location or the parenthesized
+    /// name, such as a number that made the name free, is ignored.
     pub fn parse(file_name: &str) -> Option<Rescued> {
+        if !is_rescue(file_name) {
+            return None;
+        }
         let rest = file_name.strip_prefix(RESCUED)?;
         let (bank, rest) = rest.split_once('-')?;
         let digits = rest
@@ -119,8 +122,8 @@ fn plain(c: char) -> bool {
 /// Every rescued file's name starts with this.
 pub const RESCUED: &str = "nord-rescued-";
 
-/// What a rescue is called while it is being written: its own name, then this. Nothing is
-/// deleted until it is whole and renamed, so a file so named is never a slot's only copy.
+/// How the name of a rescue still being written ends. Nothing is deleted until the rescue
+/// is whole and has its own name, so a file so named is never a slot's only copy.
 pub const PARTIAL: &str = ".partial";
 
 /// Whether `name` is a rescue's, written whole: a file that may be a slot's only copy.
@@ -640,8 +643,11 @@ mod tests {
     fn a_rescue_still_being_written_is_not_a_rescue() {
         let name = rescue_name_for(&occupant(Location::from_user(1, 159), "nsmp", "Pad"));
         assert!(is_rescue(&name), "{name}");
-        assert!(!is_rescue(&format!("{name}{PARTIAL}")), "{name}{PARTIAL}");
         assert!(!is_rescue("fetched-0-158.nsmp"));
+        for partial in [format!("{name}{PARTIAL}"), format!("{name}-2{PARTIAL}")] {
+            assert!(!is_rescue(&partial), "{partial}");
+            assert_eq!(Rescued::parse(&partial), None, "{partial}");
+        }
     }
 
     #[test]

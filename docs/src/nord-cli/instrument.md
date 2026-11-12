@@ -70,11 +70,12 @@ unnamed.
 While the old sound is read, its file is named
 `nord-rescued-7-50 (Grand).ne5p.partial`.
 It takes its own name only once it is complete, and the slot is not touched
-before then. A `.partial` file left by a stopped `nord` can be deleted, and the
-next rescue of that slot replaces it.
+before then. A `.partial` file left by a stopped `nord` can be deleted. It never
+holds back a later rescue of that slot.
 
 `--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
-folder. Without a folder it can write to, `nord` leaves the slot alone.
+folder. Without a folder it can write to and make hard links in, `nord` leaves
+the slot alone.
 
 `put` checks that the file is intact before it touches the instrument.
 
