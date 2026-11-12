@@ -594,9 +594,9 @@ impl Recoded {
 /// layer value above the loudest's, and each release stroke is trimmed 18 dB under its root's
 /// loudest attack stroke. A recording's level is the most power any 10 ms of its first
 /// half second holds, on its louder channel. Where a stroke would need more boost than
-/// [`V6_MOST_BOOST`] leaves at the library's gain, an attack or resonance stroke turns
-/// every stroke down by the shortfall, so the balance holds; a release stroke just
-/// plays quieter, at the most boost there is. A recording silent over its first half second, or a
+/// [`V6_MOST_BOOST`] leaves at the library's gain, every stroke is turned down by the
+/// shortfall, so the balance holds; but a release from a take, whose balance with its
+/// attack is known, just plays quieter, at the most boost there is. A recording silent over its first half second, or a
 /// release stroke whose root has no attack stroke, has nothing to be leveled against
 /// and is refused.
 pub fn build(
@@ -1115,18 +1115,22 @@ fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
         tenths.push(((under + level - reference) / step).round());
     }
 
+    // A take's release, whose balance with its attack is known, plays quieter on its own
+    // when short of boost; any other stroke turns the library down.
+    let on_its_own =
+        |recording: &Recording| recording.bank == Bank::Release && recording.under_attack.is_some();
     let lowest = f64::from(rules.gain) - f64::from(V6_MOST_BOOST);
     let shortfall = order
         .iter()
         .zip(&tenths)
-        .filter(|(recording, _)| recording.bank != Bank::Release)
+        .filter(|(recording, _)| !on_its_own(recording))
         .fold(0.0, |most, (_, &trim)| f64::max(most, lowest - trim));
     order
         .iter()
         .zip(tenths)
-        .map(|(recording, trim)| match recording.bank {
-            Bank::Release => v6_trim((trim + shortfall).max(lowest)),
-            Bank::Attack | Bank::Resonance => v6_trim(trim + shortfall),
+        .map(|(recording, trim)| match on_its_own(recording) {
+            true => v6_trim((trim + shortfall).max(lowest)),
+            false => v6_trim(trim + shortfall),
         })
         .collect()
 }
@@ -2664,18 +2668,34 @@ mod tests {
         );
     }
 
-    /// A release 40 dB under its attack would need 19 dB of boost to play 21 dB under
-    /// it, more than the 5.8 left at +5.0 dB of gain. It plays quieter, at the most
-    /// boost there is, and the attack keeps its trim.
+    /// A release from a take, 40 dB under its attack, would need more boost to keep its
+    /// lifted balance than the 5.8 dB left at +5.0 dB of gain. It plays quieter, at the
+    /// most boost there is, and the attack keeps its trim.
     #[test]
-    fn a_release_too_quiet_for_the_boost_left_plays_quieter_on_its_own() {
+    fn a_take_release_too_quiet_for_the_boost_left_plays_quieter_on_its_own() {
+        let mut recordings = [
+            one(60, Bank::Attack, 0, steady(7_962)),
+            one(60, Bank::Release, 0, steady(80)),
+        ];
+        recordings[1].under_attack = Some(40.0);
+        assert_eq!(
+            trims_at(Version::V6, Kind::Harpsichord, DEFAULT_GAIN, &recordings),
+            [30, -58]
+        );
+    }
+
+    /// A release from a directory of WAVs, 40 dB under its attack, would need 19 dB of
+    /// boost to play 21 dB under it, 13.2 more than the 5.8 left at +5.0 dB of gain, so
+    /// every stroke gives up the 13.2 dB and the balance holds, as for an attack.
+    #[test]
+    fn a_directory_release_too_quiet_for_the_boost_left_moves_every_trim() {
         let recordings = [
             one(60, Bank::Attack, 0, steady(7_962)),
             one(60, Bank::Release, 0, steady(80)),
         ];
         assert_eq!(
             trims_at(Version::V6, Kind::Harpsichord, DEFAULT_GAIN, &recordings),
-            [30, -58]
+            [162, -58]
         );
     }
 
