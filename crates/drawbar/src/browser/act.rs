@@ -3847,6 +3847,45 @@ mod tests {
         );
     }
 
+    /// Once the rescue's slot holds something else, the copy wins: nothing is overwritten
+    /// to put back what the instrument still holds.
+    #[test]
+    fn a_rescued_program_stands_for_its_empty_slot_over_a_copy_elsewhere() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let id = bench.workspace.ingest(
+            "Africa Split".into(),
+            Origin::Rescued { at: at(2) },
+            Fresh::Program.bytes().unwrap(),
+            &mut bench.log,
+        );
+        let crc = bench.workspace.get(id).unwrap().saved.crc32().unwrap();
+        let copy = Some(("Africa Split", crc));
+        let spot = |bench: &mut Bench| {
+            bench.device.relink(&mut bench.workspace);
+            let entity = bench.workspace.get(id).unwrap();
+            (
+                entity.spot(),
+                bound_for(entity, &bench.device.state, &bench.queue),
+            )
+        };
+
+        bench.device.pretend_bodies(class, 7, &[copy, None, None]);
+        assert_eq!(
+            spot(&mut bench),
+            (Some((class, at(2))), Bound::At(class, at(2)))
+        );
+
+        bench
+            .device
+            .pretend_bodies(class, 7, &[copy, None, Some(("Squabble B", !crc))]);
+        assert_eq!(
+            spot(&mut bench),
+            (Some((class, at(0))), Bound::At(class, at(0)))
+        );
+    }
+
     /// The instrument keeps one sample of each name, so a sample whose name a slot
     /// already has stands for that slot and is queued to replace it. Sent to any other
     /// slot it is refused before it reaches the queue, as the instrument would refuse it.
