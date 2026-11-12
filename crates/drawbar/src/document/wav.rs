@@ -348,7 +348,7 @@ pub fn apply(
     current: &[u8],
     sets: &[(String, String)],
 ) -> Result<(Vec<u8>, Option<f64>), String> {
-    let error = |e: nord_format::take::Error| e.to_string();
+    let error = |e: nord_format::error::Error| e.to_string();
     let layout = wav::layout(original).map_err(error)?;
     let mut total = None;
     let mut marks: Option<wav::Marks> = None;
@@ -951,7 +951,10 @@ impl State {
     /// cleaned of `noise` where it is given.
     ///
     /// ⚠️ Shapes the sample's audio: run when it is asked to play, not per frame.
-    pub fn sounding(&self, noise: Option<&nord_format::take::clean::Noise>) -> Option<audition::Sounding> {
+    pub fn sounding(
+        &self,
+        noise: Option<&nord_format::take::clean::Noise>,
+    ) -> Option<audition::Sounding> {
         let (cuts, audio, root) = (self.cuts()?, self.audio()?, self.view.picked?.0);
         let rules = audition::Sounding::rules(self.kind());
         let marked = self.read.marked.as_ref().ok()?;
