@@ -411,7 +411,7 @@ pub fn named(text: &str) -> Result<Hit, String> {
 }
 
 /// Undo, at the far right of the row it ends, naming on hover the edit it takes back,
-/// `last`; greyed where there is none.
+/// `last`; grayed where there is none.
 fn undo(ui: &mut egui::Ui, last: Option<&str>, wanted: &mut Option<Wanted>) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let button = ui.add_enabled(last.is_some(), egui::Button::new(super::wav::UNDO_LABEL));
@@ -890,11 +890,7 @@ mod tests {
             frames: end - start,
             label: label.into(),
         };
-        let looped = |start: u32, end: u32| wav::Loop {
-            start,
-            end: end - 1,
-            play: wav::Play::Forward,
-        };
+        let looped = |start: u32, end: u32| wav::Loop::forward(start, end - 1);
         wav::Marks {
             regions: vec![
                 region(1000, 9000, "060-b0-v22"),
