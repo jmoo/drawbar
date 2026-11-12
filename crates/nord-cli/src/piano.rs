@@ -1079,9 +1079,8 @@ fn dither_seed(root: u8, bank: Bank, layer: LayerTag) -> u64 {
 /// loudest layer, whatever the stroke's own level, and each root at its loudest layer's
 /// audio level. So every region of a take is brought to one peak: a soft layer keeps
 /// its detail above the 16-bit steps, and a root recorded quieter plays as loud as the
-/// others. Kept at their recorded levels, the treble roots of the interface take played
-/// 2 to 12 dB under the prototype's, which brought every hit to one peak, and the top
-/// sounded dead (heard on a Stage 4). In any other library a stroke plays at its own
+/// others. Kept at their recorded levels instead, a take's treble roots sounded dead.
+/// Confirmed on hardware. In any other library a stroke plays at its own
 /// level, so nothing changes.
 fn take_gains(files: &[StrokeFile], leveled: bool) -> Vec<f32> {
     let target = 10f32.powf(TAKE_PEAK_DB as f32 / 20.0);
@@ -1094,7 +1093,7 @@ fn take_gains(files: &[StrokeFile], leveled: bool) -> Vec<f32> {
         .collect()
 }
 
-/// The lowest and highest keys a take's roots are pitched out towards: the instrument's
+/// The lowest and highest keys a take's roots are pitched out toward: the instrument's
 /// 88.
 const KEYS: (u8, u8) = (21, 108);
 
@@ -1102,8 +1101,7 @@ const KEYS: (u8, u8) = (21, 108);
 const MOST_PITCHED: i32 = 12;
 
 /// Extra roots that reach the keys a take's lowest and highest roots do not, each the
-/// strokes of that root pitched, as the prototype made them, for a format 6 library
-/// built from rules.
+/// strokes of that root pitched, for a format 6 library built from rules.
 ///
 /// A root plays from 12 semitones under it to one over, and a key past them is silent.
 /// The lowest root's strokes are pitched down to the root that reaches [`KEYS`]' lowest,
@@ -1186,7 +1184,7 @@ fn pitched_roots<'a>(files: &[StrokeFile<'a>]) -> Result<Vec<StrokeFile<'a>>, St
 ///
 /// One recording holds both strokes, so their balance is the instrument's: a format 6
 /// library from rules plays the release at it, lifted as quiet key-offs need. A
-/// directory's WAVs may each have been levelled on their own, so theirs is not used.
+/// directory's WAVs may each have been leveled on their own, so theirs is not used.
 fn release_balance(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<Option<f64>> {
     let attacks: BTreeMap<(u8, u8), f64> = files
         .iter()
@@ -1265,7 +1263,7 @@ fn region_strokes<'a>(
             .ok_or_else(|| {
                 named(&format!(
                     "region {:?} at frame {} is no stroke: a region here must span frames \
-                     and be labelled as a stroke's WAV is named, as in 060-b0-l00",
+                     and be labeled as a stroke's WAV is named, as in 060-b0-l00",
                     region.label, region.start
                 ))
             })?;
@@ -1305,7 +1303,7 @@ fn region_strokes<'a>(
             .find(|file| file.name() == stroke)
             .ok_or_else(|| {
                 refuse(&format!(
-                    "fades no stroke: no region is labelled {stroke:?}"
+                    "fades no stroke: no region is labeled {stroke:?}"
                 ))
             })?;
         let Source::Region {
@@ -1635,7 +1633,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     if balanced > 0 {
         ui.note(format!(
             "{balanced} release(s) play at their recorded level under their own attack, \
-             lifted by at most 12 dB towards 14 dB under it"
+             lifted by at most 12 dB toward 14 dB under it"
         ));
     }
     if raised > 0 {

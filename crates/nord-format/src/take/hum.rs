@@ -1,8 +1,7 @@
 //! Mains hum: finding it in a take, and taking it out.
 //!
-//! A take's quiet stretches can be mostly hum: on one interface take, 93% of the floor
-//! was 50 Hz hum. Hum lines stand out of the hiss, and the mains frequency wanders, so it
-//! is tracked through the take.
+//! A take's quiet stretches can be mostly hum. Hum lines stand out of the hiss, and the
+//! mains frequency wanders, so it is tracked through the take.
 
 use crate::take::detect::{self, Envelope};
 use crate::take::fft;
@@ -223,7 +222,7 @@ impl Hum {
     /// there, and it also takes out the action's knock. Above it, a notch rings on with
     /// the note's own energy, and the strike sets every notch ringing, so only notes
     /// under [`NOTCH_UNDER_HZ`] get notches, and only on lines [`NOTCH_OVER_DB`] over
-    /// the hiss and 30 notch widths from the nearest partial (heard on a Stage 4).
+    /// the hiss and 30 notch widths from the nearest partial. Confirmed on hardware.
     pub fn under(&self, x: &[f64], rate: u32, at: f64, f0: f64) -> Vec<f64> {
         let highpass = filter::highpass(4, 0.7 * f0, rate);
         self.blocks(x, rate, at, |mains| {

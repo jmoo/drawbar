@@ -5,7 +5,7 @@ use crate::formats::npno::encode;
 use crate::take::detect::Hit;
 
 /// The peak every region of a take is brought to before it is rounded to 16 bits, in
-/// dB under full scale: the prototype's, which left room for its loop crossfades.
+/// dB under full scale, which leaves room for the loop crossfades.
 pub const TAKE_PEAK_DB: f64 = -13.0;
 
 /// How loud a stroke plays, in decibels over a steady sample of one unit, measured as
@@ -153,9 +153,9 @@ pub fn pick(group: &[&Hit], layers: usize, order: Order, min_gap_db: f64) -> Vec
 /// instrument's own Wurlitzer libraries, and from 6 layers on spread evenly over 0 to
 /// 100.
 ///
-/// Three layers at 0, 20 and 70 were heard on a Stage 4 as the best spread. The others
-/// are inferred from specimens: the four at 0, 22, 50 and 85 were chosen by ear, after
-/// 0, 15, 40 and 75 played mostly the two softest.
+/// Three layers at 0, 20 and 70 were chosen by ear as the best spread, and four at 0,
+/// 22, 50 and 85 after 0, 15, 40 and 75 played mostly the two softest. Confirmed on
+/// hardware. The others are inferred from specimens; not confirmed on hardware.
 pub fn v6_values(count: usize) -> Vec<u8> {
     match count {
         1 => vec![0],

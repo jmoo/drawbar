@@ -185,7 +185,7 @@ fn nearest_ratio(x: f64, most: u64) -> (u64, u64) {
 
 /// `audio` pitched by `semitones`, at its own rate: resampled by the ratio of
 /// denominator at most 2000 nearest 2^(-semitones/12), so it plays that much higher in
-/// as many fewer frames. The prototype pitched its extra roots so.
+/// as many fewer frames.
 pub fn pitched(audio: &Audio, semitones: i32) -> Result<Audio, Error> {
     let (up, down) = nearest_ratio(2f64.powf(-f64::from(semitones) / 12.0), 2000);
     let shifted = resample(

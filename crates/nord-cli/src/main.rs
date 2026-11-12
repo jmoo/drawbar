@@ -359,7 +359,7 @@ enum PianoAction {
     ///
     /// Each hit is assigned to the next note of `--notes` its pitch is nearest, and a
     /// note's hits become its layers. Each kept hit is cut into an attack, from its
-    /// strike to its key-up, and a release from the key-up, each a region labelled as
+    /// strike to its key-up, and a release from the key-up, each a region labeled as
     /// a stroke's WAV is named. Hits standing too little over the take's hum-free floor
     /// are left out. The listing shows every hit and what became of it.
     ///

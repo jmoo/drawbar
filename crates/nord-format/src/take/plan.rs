@@ -23,7 +23,7 @@ pub struct PlanOptions {
     /// Hits closer than this in level are one layer, in dB.
     pub min_layer_gap_db: f64,
     /// A hit whose level stands less than this over the hum-free floor is left out, in
-    /// dB: levelled with the others, its hiss comes up with it.
+    /// dB: leveled with the others, its hiss comes up with it.
     pub min_snr_db: f64,
     pub cut: CutOptions,
     pub sustain: SustainOptions,
@@ -236,10 +236,10 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
 }
 
 impl Plan {
-    /// The regions of every kept hit's strokes, in the take's order: an attack labelled
+    /// The regions of every kept hit's strokes, in the take's order: an attack labeled
     /// `060-b0-v00`, and a release `060-b2-v00` where it has one. A dying attack ends
     /// where its fade reaches silence, and its fade is a region of its own within it,
-    /// labelled `060-b0-v00-fade`, ending with it.
+    /// labeled `060-b0-v00-fade`, ending with it.
     pub fn regions(&self) -> Vec<Region> {
         let mut regions = Vec::new();
         for planned in &self.hits {

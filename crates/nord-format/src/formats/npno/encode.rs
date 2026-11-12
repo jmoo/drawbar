@@ -1030,17 +1030,18 @@ fn layer_trim(version: Version, bank: Bank, layer: u8) -> i16 {
 const RELEASE_UNDER_ATTACK: f64 = 18.0;
 
 /// The most a release stroke's [`release_under`] lifts it over its recorded level, in
-/// decibels. Levelled all to one peak, quiet key-offs were lifted 25 to 40 dB and their
-/// noise came up with them (heard on a Stage 4).
+/// decibels. Leveled all to one peak, quiet key-offs were lifted 25 to 40 dB and their
+/// noise came up with them. Confirmed on hardware.
 const RELEASE_LIFT: f64 = 12.0;
 
 /// How near its attack [`release_under`] lifts a release stroke, in decibels under it.
 const RELEASE_NEAREST: f64 = 14.0;
 
 /// How far under its own attack a release recorded `recorded` decibels under it plays:
-/// lifted towards [`RELEASE_NEAREST`] by at most [`RELEASE_LIFT`]. One recorded nearer
+/// lifted toward [`RELEASE_NEAREST`] by at most [`RELEASE_LIFT`]. One recorded nearer
 /// than that keeps its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
-/// down and could not be heard; up to about 49 dB under played fine (heard on a Stage 4).
+/// down and could not be heard; up to about 49 dB under played fine. Confirmed on
+/// hardware.
 pub fn release_under(recorded: f64) -> f64 {
     recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
 }
@@ -2744,7 +2745,7 @@ mod tests {
     }
 
     /// A release that states how far under its attack it was recorded plays at that
-    /// balance with its attack, lifted towards 14 dB under it by at most 12 dB: recorded
+    /// balance with its attack, lifted toward 14 dB under it by at most 12 dB: recorded
     /// 10 dB under, it stays there; 20 dB under, it plays 14 under; 32 under, 20 under.
     /// Its trim is its attack's, plus that, less what its audio stands under its
     /// attack's: here 12 dB.

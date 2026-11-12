@@ -358,7 +358,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_percentile_interpolates_between_its_neighbours() {
+    fn a_percentile_interpolates_between_its_neighbors() {
         assert_eq!(percentile(&[4.0, 1.0, 3.0, 2.0], 50.0), 2.5);
         assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0), 1.4);
     }

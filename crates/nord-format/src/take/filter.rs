@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn a_notch_takes_out_its_line_and_leaves_its_neighbours() {
+    fn a_notch_takes_out_its_line_and_leaves_its_neighbors() {
         let line = notch(150.0, 150.0 / 0.66, 35_002);
         assert!(gain_db(&[line], 150.0, 35_002) < -40.0);
         assert!(gain_db(&[line], 170.0, 35_002).abs() < 0.1);

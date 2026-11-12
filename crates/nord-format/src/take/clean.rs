@@ -195,8 +195,8 @@ impl Stft {
 /// cutoff is the top of the highest band where it is, never rising again after the
 /// first 50 ms so the strike keeps all its treble, gliding down over 50 ms, never under
 /// 1.5 × `f0`, and rolling off at 24 dB an octave. Nothing is removed where the note is
-/// above the hiss. Treble boost and Dyno had made that hiss very loud (heard on a
-/// Stage 4).
+/// above the hiss. Treble boost and Dyno had made that hiss very loud. Confirmed on
+/// hardware.
 fn follow(channels: Vec<Vec<f64>>, hiss: &[f64], rate: u32, f0: f64) -> Vec<Vec<f64>> {
     let len = channels[0].len();
     let padded: Vec<Vec<f64>> = channels

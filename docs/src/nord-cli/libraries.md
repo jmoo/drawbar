@@ -49,11 +49,11 @@ release. The WAVs must be 16-bit PCM, mono or stereo, in the plain or the
 extensible WAV format. Any sample rate is accepted.
 
 `build` also takes one WAV holding every stroke, such as a recorded take, whose
-regions are the strokes. Each region is labelled as a stroke's WAV is named
+regions are the strokes. Each region is labeled as a stroke's WAV is named
 (`060-b0-l00`), and a loop inside a region is that stroke's loop. The take may be
 PCM of 8 to 32 bits or float, and each region is dithered to 16 bits: rounded
 after adding a little noise, so the quietest part of a decay turns to a steady
-hiss rather than distortion. Silence stays silent. A region labelled any other way, or a loop that crosses a
+hiss rather than distortion. Silence stays silent. A region labeled any other way, or a loop that crosses a
 region's end, is refused.
 
 A take's strokes are cleaned first. The take's mains hum is found and followed
@@ -69,7 +69,7 @@ recorded, with none of this.
 A take's strokes are shaped as they are built. Each attack fades in over 0.3 ms,
 and each release over 5 ms, fading out over its last 40 ms. A looped region's loop
 has the decay across it evened out, so its end meets its start, and its last 30 ms
-are crossfaded into the audio before its start. A region labelled with `-fade`
+are crossfaded into the audio before its start. A region labeled with `-fade`
 after a stroke's name (`084-b0-l00-fade`) lies at the end of that attack, and the
 attack fades from there to silence at its end, following the note's own decay as
 it slows, down to 70 dB under its peak, then loops on 100 ms of silence. A fade
@@ -86,7 +86,7 @@ reaches the whole 88 keys where it can: the lowest root's strokes are pitched
 down, and the highest's up, by at most 12 semitones, to roots that reach A0 and
 C8. A release from a take plays at its
 recorded level under its own attack, both measured once cleaned, the region of its root at its layer, lifted by
-at most 12 dB towards 14 dB under it, so a quiet key-off stays quiet without being
+at most 12 dB toward 14 dB under it, so a quiet key-off stays quiet without being
 lost. A release with no such attack, or one from a directory of WAVs, plays 18 dB
 under its root's loudest attack. A format 5 library, or one built
 against a template, plays each stroke's audio at its own level, so nothing is
@@ -107,7 +107,7 @@ keeps up to `--layers` of each note's hits: by measured level, dropping hits wit
 becomes an attack, from its strike to its key-up and at most `--max-seconds`
 long, and a release from the key-up, at most `--release-seconds` long. A hit
 standing less than 54 dB over the take's floor, measured with its mains hum taken
-out, is left out: levelled with the others, its hiss would come up with it. A
+out, is left out: leveled with the others, its hiss would come up with it. A
 key-off that stands clear of neither the quiet before its hit nor the floor gets
 no release. `--skip` leaves out hits by the number the listing gives them.
 

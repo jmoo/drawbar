@@ -11,14 +11,15 @@ use crate::wav::Loop;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SustainOptions {
     /// About how long a loop is, in seconds. 100 ms loops repeated the hiss audibly and
-    /// beat against the note (heard on a Stage 4).
+    /// beat against the note. Confirmed on hardware.
     pub loop_seconds: f64,
     /// How long the crossfade at a loop's end is, in seconds.
     pub crossfade_seconds: f64,
     /// A note that falls within this of the floor before its key-up dies, in dB.
     pub die_margin_db: f64,
     /// How far under its peak a dying note fades, in dB. Vendor dying notes loop on
-    /// silence 48 to 63 dB under their peak (inferred from specimens).
+    /// silence 48 to 63 dB under their peak. Inferred from specimens; not confirmed on
+    /// hardware.
     pub tail_depth_db: f64,
     /// How long before it dies a note's decay rate is measured over, in seconds.
     pub tail_fit_seconds: f64,
@@ -102,7 +103,7 @@ fn fade_line(db: &[f64], dies: usize, options: &SustainOptions) -> (f64, f64, f6
 /// [`SustainOptions::loop_seconds`] long and a whole number of the note's periods,
 /// ending clear of the damper or where it sinks to [`SustainOptions::loop_snr_db`]
 /// over the floor, tuned within a period for the best match. A loop placed in a dying
-/// note sat in the noise and clicked (heard on a Stage 4). A hit too short to hold such
+/// note sat in the noise and clicked. Confirmed on hardware. A hit too short to hold such
 /// a loop clear of the damper dies too, fading from just after its peak to silence
 /// before the damper.
 pub fn find(
@@ -311,7 +312,7 @@ const SILENT_LOOP: f64 = 0.1;
 /// The fade follows the note's own decay rate, slowing to a third of it, down to
 /// [`SustainOptions::tail_depth_db`] under its peak. It only ever lowers the audio,
 /// taking the noise down with the line. A straight line in dB was heard as a fade that
-/// stops (heard on a Stage 4). The last 10 ms fade to zero.
+/// stops. Confirmed on hardware. The last 10 ms fade to zero.
 pub fn fade_out(
     frames: &[f32],
     channels: usize,
