@@ -80,5 +80,5 @@ folder. Without a folder it can write to, `nord` leaves the slot alone.
 
 Every command closes its session even when it fails, so an error cannot leave the
 instrument stuck on its progress screen. If a run is interrupted, the next
-command may say the instrument answered out of step or refused a session.
+command may say the instrument answered out of step or refused the request.
 `nord device recover` releases the session it still holds.

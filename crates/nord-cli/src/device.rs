@@ -139,26 +139,27 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
 fn inventory<T: Transport + Recorded>(
     device: &mut Device<T>,
 ) -> Result<(Vec<Status>, nord_usb::Classes), String> {
-    let classes = read_geometry(device)?.classes().clone();
+    let classes = geometry_of(device).map_err(refused)?.classes().clone();
     let report = transact(device, "device status", |d| {
         nord_usb::block_on(op::inventory(d.transport(), &classes))
     })
-    .map_err(refused_session)?;
+    .map_err(refused)?;
     Ok((report, classes))
 }
 
 /// [`described`] for the inventory walk, which skips a class whose open or `STATUS` is
-/// refused: a status that reaches here refused the `HELLO` or the closing exchanges.
+/// refused: a status that reaches here refused the partition table, the `HELLO`, or the
+/// closing exchanges.
 ///
 /// After an interrupted write, `device status` failed with status 0x1, and
 /// `nord device recover` cleared it. Confirmed on hardware; which exchange was refused
 /// was not recorded.
-fn refused_session(e: nord_usb::Error) -> String {
+fn refused(e: nord_usb::Error) -> String {
     match e {
         nord_usb::Error::DeviceStatus(_) => format!(
-            "the instrument refused to open or close a session, as it does while it still \
-             holds a session from an interrupted run; run `nord device recover`, then try \
-             again ({e})"
+            "the instrument refused the request, as it does while it still holds a \
+             session from an interrupted run; run `nord device recover`, then try again \
+             ({e})"
         ),
         other => described(other),
     }
@@ -512,16 +513,20 @@ pub(crate) fn open_usb() -> Result<Device<UsbTransport>, String> {
     Ok(Device::new(transport))
 }
 
+/// [`geometry_of`], with its failure [described].
+fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geometry, String> {
+    geometry_of(device).map_err(described)
+}
+
 /// Cache geometry in its own intent so later recordings contain only their own frames.
 /// Once read, it records nothing again.
-fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geometry, String> {
+fn geometry_of<T: Transport + Recorded>(device: &mut Device<T>) -> nord_usb::Result<&Geometry> {
     if !device.has_geometry() {
         transact(device, "device geometry", |d| {
             nord_usb::block_on(d.geometry()).map(|_| ())
-        })
-        .map_err(described)?;
+        })?;
     }
-    nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
+    nord_usb::block_on(device.geometry())
 }
 
 /// The attached instrument with its partition table read, which places every session,
@@ -2263,36 +2268,66 @@ mod tests {
         );
     }
 
-    /// The status 0x1 that `device status` met after an interrupted write, here as a
-    /// refused `HELLO`.
-    #[test]
-    fn a_refused_session_in_the_status_walk_names_the_recovery() {
-        use nord_usb::transport::{ReplayTransport, Script, Step};
-        use nord_usb::wire::Message;
+    /// What `device status` said after an interrupted write left the instrument
+    /// answering status 0x1.
+    const REFUSED: &str = "the instrument refused the request, as it does while it still \
+                           holds a session from an interrupted run; run `nord device \
+                           recover`, then try again (device reported status 0x1)";
 
-        let steps = |text| Script::parse(text).expect("a script parses").steps();
-        let mut hello = steps(include_str!(
-            "../../nord-usb/tests/scripts/session/refused_hello.script"
-        ));
-        let Step::In(frame) = &mut hello[1] else {
-            panic!("the HELLO's reply is second");
+    fn script(text: &str) -> Vec<nord_usb::transport::Step> {
+        nord_usb::transport::Script::parse(text)
+            .expect("a script parses")
+            .steps()
+    }
+
+    /// `steps` with the reply at `i` turned into a refusal with status 0x1.
+    fn refused_at(
+        mut steps: Vec<nord_usb::transport::Step>,
+        i: usize,
+    ) -> Vec<nord_usb::transport::Step> {
+        let nord_usb::transport::Step::In(frame) = &mut steps[i] else {
+            panic!("step {i} is not a reply");
         };
-        let mut reply = Message::decode_response(frame).expect("the reply");
+        let mut reply = nord_usb::wire::Message::decode_response(frame).expect("the reply");
         reply.args[..4].copy_from_slice(&0x1u32.to_be_bytes());
         *frame = reply.encode();
-        let geometry = steps(include_str!(
+        steps
+    }
+
+    #[test]
+    fn a_refused_hello_in_the_status_walk_names_the_recovery() {
+        let geometry = script(include_str!(
             "../../nord-usb/tests/scripts/device/geometry.script"
         ));
-        let mut device = Device::new(ReplayTransport::new([geometry, hello].concat()));
+        let hello = refused_at(
+            script(include_str!(
+                "../../nord-usb/tests/scripts/session/refused_hello.script"
+            )),
+            1,
+        );
+        let mut device = Device::new(nord_usb::transport::ReplayTransport::new(
+            [geometry, hello].concat(),
+        ));
 
         let said = inventory(&mut device).expect_err("the walk was refused");
-        assert_eq!(
-            said,
-            "the instrument refused to open or close a session, as it does while it still \
-             holds a session from an interrupted run; run `nord device recover`, then try \
-             again (device reported status 0x1)"
-        );
+        assert_eq!(said, REFUSED);
         assert!(device.transport().is_exhausted(), "the GOODBYE was sent");
+    }
+
+    #[test]
+    fn a_refused_partition_table_in_the_status_walk_names_the_recovery() {
+        let geometry = script(include_str!(
+            "../../nord-usb/tests/scripts/device/geometry.script"
+        ));
+        let partitions = refused_at(geometry[..2].to_vec(), 1);
+        let mut device = Device::new(nord_usb::transport::ReplayTransport::new(partitions));
+
+        let said = inventory(&mut device).expect_err("the walk was refused");
+        assert_eq!(said, REFUSED);
+        assert!(
+            device.transport().is_exhausted(),
+            "nothing followed the refusal"
+        );
     }
 
     #[test]
