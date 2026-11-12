@@ -102,7 +102,9 @@ fn fade_line(db: &[f64], dies: usize, options: &SustainOptions) -> (f64, f64, f6
 /// [`SustainOptions::loop_seconds`] long and a whole number of the note's periods,
 /// ending clear of the damper or where it sinks to [`SustainOptions::loop_snr_db`]
 /// over the floor, tuned within a period for the best match. A loop placed in a dying
-/// note sat in the noise and clicked (heard on a Stage 4).
+/// note sat in the noise and clicked (heard on a Stage 4). A hit too short to hold such
+/// a loop clear of the damper dies too, fading from just after its peak to silence
+/// before the damper.
 pub fn find(
     attack: &[f64],
     rate: u32,
@@ -114,9 +116,10 @@ pub fn find(
     let period = sr / (440.0 * 2f64.powf((f64::from(note) - 69.0) / 12.0));
     let env = Envelope::of(attack, rate);
     let w = env.width;
-    let mut end = attack
+    let clear = attack
         .len()
         .saturating_sub(1 + detect::samples(options.damper_seconds, rate));
+    let mut end = clear;
     let top = peak(&env.db);
     let last = (end / w).min(env.db.len());
     let first_under = |over: f64| {
@@ -142,13 +145,16 @@ pub fn find(
         .max(1.0)
         * period;
     let crossfade = detect::samples(options.crossfade_seconds, rate).min(want as usize / 2);
-    end = end.max(
-        top * w
-            + detect::samples(options.settle_seconds, rate)
-            + (want + period) as usize
-            + crossfade,
-    );
-    end = end.min(attack.len().saturating_sub(1));
+    let settled = top * w + detect::samples(options.settle_seconds, rate);
+    let shortest = settled + (want + period) as usize + crossfade;
+    if shortest > clear {
+        let fade = settled.min(attack.len().saturating_sub(1));
+        return Sustain::Dies {
+            fade,
+            end: clear.max(fade + 1).min(attack.len().max(1)),
+        };
+    }
+    end = end.max(shortest);
     let width = (2.0 * period).max(0.01 * sr) as usize;
     let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
     let reference = &attack[end.saturating_sub(width)..end];
@@ -426,6 +432,30 @@ mod tests {
         let fade_s = fade as f64 / f64::from(rate);
         assert!((fade_s - 1.2).abs() < 0.1, "fades from {fade_s:.2} s");
         assert!(end > fade && end < x.len(), "{end}");
+    }
+
+    /// A hit too short to hold a loop clear of its damper, here 0.4 s of a note still
+    /// sounding, fades instead: from after its strike to silence before the damper.
+    #[test]
+    fn a_hit_too_short_for_a_loop_clear_of_its_damper_fades() {
+        let rate = 35_002;
+        let options = SustainOptions::default();
+        for seconds in [0.4, 0.15, 0.001] {
+            let x = tone(rate, 57, seconds, -12.0, 3.0, -100.0);
+            let found = find(&x, rate, 57, -100.0, &options);
+            let Sustain::Dies { fade, end } = found else {
+                panic!("{seconds} s: {found:?}");
+            };
+            assert!(fade < end && end <= x.len(), "{seconds} s: {found:?}");
+            if seconds == 0.4 {
+                let clear = x.len() - detect::samples(options.damper_seconds, rate);
+                assert!(end < clear, "{found:?}");
+                assert!(
+                    fade >= detect::samples(options.settle_seconds, rate),
+                    "{found:?}"
+                );
+            }
+        }
     }
 
     /// Evened out, the loop's last frames before its end are as loud as its first, and
