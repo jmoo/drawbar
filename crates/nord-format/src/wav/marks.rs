@@ -185,6 +185,9 @@ fn read_adtl(list: &[u8]) -> Result<Adtl, Error> {
             ));
         }
         at += 8 + size + size % 2;
+        if at > list.len() {
+            return malformed("an odd-sized adtl entry has no pad byte");
+        }
     }
     if at < list.len() {
         return malformed(format!(
@@ -634,5 +637,17 @@ mod tests {
         let orphan = append(&wav, b"LIST", &adtl_list(&marks().regions));
         let err = read_marks(&orphan).unwrap_err().to_string();
         assert!(err.contains("names cue 1, which no cue point has"), "{err}");
+    }
+
+    #[test]
+    fn an_odd_sized_adtl_entry_ending_the_list_without_its_pad_byte_is_refused() {
+        let mut list = b"adtl".to_vec();
+        list.extend_from_slice(b"labl");
+        list.extend_from_slice(&5u32.to_le_bytes());
+        list.extend_from_slice(&1u32.to_le_bytes());
+        list.push(b'a');
+        let wav = append(&take(100), b"LIST", &list);
+        let err = read_marks(&wav).unwrap_err().to_string();
+        assert!(err.contains("no pad byte"), "{err}");
     }
 }
