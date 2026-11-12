@@ -1441,6 +1441,115 @@ fn stated_kind(
     Ok(stated.map(|(kind, _)| kind))
 }
 
+/// The strokes of `takes`, read from `paths`, in stroke order: each take's regions,
+/// cleaned unless its editor set it to raw, and, where `leveled`, its lowest and
+/// highest roots pitched to reach the keys beyond them.
+fn take_strokes<'a>(
+    ui: &Ui,
+    paths: &'a [PathBuf],
+    takes: &'a [(wav::Audio, wav::Marks, wav::Settings)],
+    leveled: bool,
+) -> Result<Vec<StrokeFile<'a>>, String> {
+    let mut files = Vec::new();
+    for (path, (audio, marks, settings)) in paths.iter().zip(takes) {
+        // A take its editor set to raw is built as recorded.
+        let noise = match settings.clean {
+            Some(false) => {
+                ui.note(format!(
+                    "{}: built as recorded, not cleaned",
+                    path.display()
+                ));
+                None
+            }
+            _ => Some(Noise::of(&nord_format::take::plan::mono(audio), audio.rate)),
+        };
+        files.extend(region_strokes(path, audio, marks, noise.as_ref())?);
+    }
+    let pitched = match leveled {
+        true => pitched_roots(&files)?,
+        false => Vec::new(),
+    };
+    for file in &pitched {
+        let Source::Region { shift, .. } = file.source else {
+            unreachable!("pitched roots are regions");
+        };
+        ui.note(format!(
+            "{}: pitched {shift:+} semitones to a root of {}, to reach keys the take does not",
+            file.whose(),
+            note::name(file.root)
+        ));
+    }
+    files.extend(pitched);
+    in_stroke_order(&mut files);
+    Ok(files)
+}
+
+/// What [`recordings`] did to the strokes, for the notes a build prints.
+#[derive(Default)]
+struct Counts {
+    clipped: usize,
+    resampled: usize,
+    looped: usize,
+}
+
+/// Each of `files` as the encoder takes it, at its layer value, scaled by its gain, with
+/// its balance under its attack, printing a line for each.
+fn recordings(
+    ui: &Ui,
+    files: &[StrokeFile],
+    values: Vec<u8>,
+    gains: Vec<f32>,
+    balances: Vec<Option<f64>>,
+) -> Result<(Vec<encode::Recording>, Counts), String> {
+    let mut recordings = Vec::new();
+    let mut counts = Counts::default();
+    for (((file, layer), gain), under_attack) in files.iter().zip(values).zip(gains).zip(balances) {
+        let pcm = file.pcm(gain)?;
+        let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
+        let sustain = pcm
+            .sample_loop
+            .map(|found| encode::sustain(found, pcm.rate))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
+        counts.looped += usize::from(sustain.is_some());
+        counts.clipped += audio.clipped;
+        counts.resampled += usize::from(pcm.rate != codec::RATE);
+        let frames = audio.channels.first().map_or(0, Vec::len);
+        ui.out(format!(
+            "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
+            file.name(),
+            note::name(file.root),
+            file.bank.name(),
+            layer,
+            frames,
+            frames as f64 / f64::from(codec::RATE),
+            if pcm.rate == codec::RATE {
+                String::new()
+            } else {
+                format!("  from {} Hz", pcm.rate)
+            },
+            match sustain {
+                Some(sustain) => format!(
+                    "  loops {:.3} s from {:.3} s",
+                    f64::from(sustain.length()) / f64::from(codec::RATE),
+                    f64::from(sustain.start()) / f64::from(codec::RATE)
+                ),
+                None => String::new(),
+            }
+        ));
+        recordings.push(encode::Recording {
+            root: file.root,
+            bank: file.bank,
+            layer,
+            channels: audio.channels,
+            sustain,
+            under_attack,
+        });
+    }
+    Ok((recordings, counts))
+}
+
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let takes = match args.input.as_slice() {
         [dir] if dir.is_dir() => Vec::new(),
@@ -1482,106 +1591,22 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
         "wav", "root", "bank", "value", "frames", "seconds"
     )));
+    // A format 6 build without a template plays each stroke at its root's loudest
+    // layer, so a take's strokes are pitched to reach every key and leveled.
+    let leveled = matches!((&donor, version), (encode::Donor::Rules(_), Version::V6));
     let files = match takes.is_empty() {
         true => stroke_files(&args.input[0])?,
-        false => {
-            let mut files = Vec::new();
-            for (path, (audio, marks, settings)) in args.input.iter().zip(&takes) {
-                // A take its editor set to raw is built as recorded.
-                let noise = match settings.clean {
-                    Some(false) => {
-                        ui.note(format!(
-                            "{}: built as recorded, not cleaned",
-                            path.display()
-                        ));
-                        None
-                    }
-                    _ => Some(Noise::of(&nord_format::take::plan::mono(audio), audio.rate)),
-                };
-                files.extend(region_strokes(path, audio, marks, noise.as_ref())?);
-            }
-            let pitched = match (&donor, version) {
-                (encode::Donor::Rules(_), Version::V6) => pitched_roots(&files)?,
-                _ => Vec::new(),
-            };
-            for file in &pitched {
-                let Source::Region { shift, .. } = file.source else {
-                    unreachable!("pitched roots are regions");
-                };
-                ui.note(format!(
-                    "{}: pitched {shift:+} semitones to a root of {}, to reach keys the take does not",
-                    file.whose(),
-                    note::name(file.root)
-                ));
-            }
-            files.extend(pitched);
-            in_stroke_order(&mut files);
-            files
-        }
+        false => take_strokes(ui, &args.input, &takes, leveled)?,
     };
     let values = layer_values(&files, version)?;
-    let gains = take_gains(
-        &files,
-        matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
-    );
-    let balances = release_balance(
-        &files,
-        &values,
-        matches!((&donor, version), (encode::Donor::Rules(_), Version::V6)),
-    );
+    let gains = take_gains(&files, leveled);
+    let balances = release_balance(&files, &values, leveled);
     let balanced = balances.iter().flatten().count();
-    let leveled = gains.iter().filter(|&&gain| gain != 1.0).count();
+    let raised = gains.iter().filter(|&&gain| gain != 1.0).count();
     let (least, most) = gains
         .iter()
         .fold((1.0f32, 1.0f32), |(l, m), &gain| (l.min(gain), m.max(gain)));
-    let mut recordings = Vec::new();
-    let mut clipped = 0usize;
-    let mut resampled = 0usize;
-    let mut looped = 0usize;
-    for (((file, layer), gain), under_attack) in files.iter().zip(values).zip(gains).zip(balances) {
-        let pcm = file.pcm(gain)?;
-        let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
-            .map_err(|e| format!("{}: {e}", file.whose()))?;
-        let sustain = pcm
-            .sample_loop
-            .map(|found| encode::sustain(found, pcm.rate))
-            .transpose()
-            .map_err(|e| format!("{}: {e}", file.whose()))?;
-        looped += usize::from(sustain.is_some());
-        clipped += audio.clipped;
-        resampled += usize::from(pcm.rate != codec::RATE);
-        let frames = audio.channels.first().map_or(0, Vec::len);
-        ui.out(format!(
-            "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
-            file.name(),
-            note::name(file.root),
-            file.bank.name(),
-            layer,
-            frames,
-            frames as f64 / f64::from(codec::RATE),
-            if pcm.rate == codec::RATE {
-                String::new()
-            } else {
-                format!("  from {} Hz", pcm.rate)
-            },
-            match sustain {
-                Some(sustain) => format!(
-                    "  loops {:.3} s from {:.3} s",
-                    f64::from(sustain.length()) / f64::from(codec::RATE),
-                    f64::from(sustain.start()) / f64::from(codec::RATE)
-                ),
-                None => String::new(),
-            }
-        ));
-        recordings.push(encode::Recording {
-            root: file.root,
-            bank: file.bank,
-            layer,
-            channels: audio.channels,
-            sustain,
-            under_attack,
-        });
-    }
+    let (recordings, counts) = recordings(ui, &files, values, gains, balances)?;
 
     let options = encode::Options::new(&args.name).variant(&args.variant);
     let library = encode::build(&donor, &options, &recordings).map_err(|e| e.to_string())?;
@@ -1596,6 +1621,11 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         library.channels(),
         key_span(&covered),
     ));
+    let Counts {
+        clipped,
+        resampled,
+        looped,
+    } = counts;
     if resampled > 0 {
         ui.note(format!(
             "{resampled} WAV(s) were resampled to the {} Hz rate the instrument plays at",
@@ -1608,9 +1638,9 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
              lifted by at most 12 dB towards 14 dB under it"
         ));
     }
-    if leveled > 0 {
+    if raised > 0 {
         ui.note(format!(
-            "{leveled} region(s) were brought to a {TAKE_PEAK_DB} dBFS peak, by {:+.1} to \
+            "{raised} region(s) were brought to a {TAKE_PEAK_DB} dBFS peak, by {:+.1} to \
              {:+.1} dB, before rounding to 16 bits, so every root plays as loud as the others",
             20.0 * least.log10(),
             20.0 * most.log10()
