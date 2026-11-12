@@ -67,57 +67,11 @@ if ((${#under_bumped[@]})); then
   exit 1
 fi
 
-# A release this run makes, or one made at this commit by an earlier run of it.
-# Anything older keeps the assets it has; this commit did not build them.
-released_here() {
-  local ref="refs/tags/$1"
-  ! git -C "$repo" rev-parse -q --verify "$ref" >/dev/null ||
-    [[ "$(git -C "$repo" rev-parse "$ref^{commit}")" == "$sha" ]]
-}
-
-# The Windows build a crate's release carries: a cross package and its executable.
-declare -A windows_build=(["drawbar"]=drawbar-windows/drawbar.exe ["nord-cli"]=nord-cli-windows/nord.exe)
-
-# Built before anything is published, so a build that fails releases nothing.
-declare -A windows_asset=()
-for crate in "${publish_order[@]}"; do
-  [[ -v "windows_build[$crate]" ]] || continue
-  version="$(crate_version "$crate")"
-  released_here "$crate-v$version" || continue
-  build=${windows_build[$crate]}
-  asset="$tmp/$(basename "$build" .exe)-$version-x86_64-windows.exe"
-  windows_asset[$crate]=$asset
-  ((dry_run)) && continue
-  out="$(nix build --no-link --print-out-paths "$repo#${build%%/*}")"
-  cp "$out/${build#*/}" "$asset"
-done
-
-# Uploads only an asset the release lacks or holds different bytes for, so a
-# rerun converges.
-attach_windows_build() {
-  local crate=$1 tag=$2 asset name digest
-  [[ -v "windows_asset[$crate]" ]] || return 0
-  asset=${windows_asset[$crate]}
-  name="$(basename "$asset")"
-  if ((dry_run)); then
-    echo "$tag: would attach $name"
-    return
-  fi
-  digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
-  if [[ "$(gh release view "$tag" --repo "$repo_url" --json assets \
-    --jq ".assets[] | select(.name == \"$name\") | .digest")" == "$digest" ]]; then
-    echo "$tag: already carries $name"
-  else
-    gh release upload "$tag" "$asset" --repo "$repo_url" --clobber
-  fi
-}
-
 for crate in "${publish_order[@]}"; do
   version="$(crate_version "$crate")"
   tag="$crate-v$version"
   if git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
     echo "$tag: already released"
-    attach_windows_build "$crate" "$tag"
     continue
   fi
   previous="$(latest_tag "$crate")"
@@ -137,5 +91,47 @@ for crate in "${publish_order[@]}"; do
   else
     gh release create "$tag" --repo "$repo_url" --target "$sha" --title "$tag" --notes-file "$tmp/notes.md"
   fi
-  attach_windows_build "$crate" "$tag"
 done
+
+# The Windows build a crate's release carries: a cross package and its executable.
+declare -A windows_build=(["drawbar"]=drawbar-windows/drawbar.exe ["nord-cli"]=nord-cli-windows/nord.exe)
+
+carries() {
+  local tag=$1 name=$2
+  git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
+    [[ "$(gh release view "$tag" --repo "$repo_url" --json assets \
+      --jq "any(.assets[]; .name == \"$name\")")" == true ]]
+}
+
+# Built from the tag's own flake, so a backfilled release gets the code it names.
+attach() {
+  local tag=$1 build=$2 name=$3 out
+  out="$(nix build --no-link --print-out-paths "git+file://$repo?ref=refs/tags/$tag#${build%%/*}")" &&
+    cp "$out/${build#*/}" "$tmp/$name" &&
+    gh release upload "$tag" "$tmp/$name" --repo "$repo_url"
+}
+
+# After publishing, which must finish within the crates.io token's 30 minutes.
+# A release left without its build gets it on the next run.
+git -C "$repo" fetch --quiet --tags origin
+missing=()
+for crate in "${publish_order[@]}"; do
+  [[ -v "windows_build[$crate]" ]] || continue
+  version="$(crate_version "$crate")"
+  tag="$crate-v$version"
+  build=${windows_build[$crate]}
+  name="$(basename "$build" .exe)-$version-x86_64-windows.exe"
+  if carries "$tag" "$name"; then
+    echo "$tag: already carries $name"
+  elif ((dry_run)); then
+    echo "$tag: would build ${build%%/*} and attach $name"
+  elif ! attach "$tag" "$build" "$name"; then
+    missing+=("$tag: $name")
+  fi
+done
+
+if ((${#missing[@]})); then
+  echo "released, but without these Windows builds; a rerun attaches them:" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  exit 1
+fi

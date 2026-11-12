@@ -358,10 +358,10 @@ After the check, build, and corpus jobs pass on `master`, the release job runs
 version understates its commits since the last release; run `scripts/bump.bash`
 on `master` to catch up. It publishes each crate whose version has no matching
 `<crate>-v<version>` tag, then creates the tag and GitHub release. Dependencies
-publish before dependents. The Windows cross builds of drawbar and nord-cli are
-built before anything is published and attached to their crate's release made at
-that commit; a rerun replaces an asset only when its bytes differ. Both release
-scripts accept `--dry-run` and are idempotent.
+publish before dependents. Then it builds the Windows executable of drawbar and
+nord-cli from each one's current tag when that release lacks it, and attaches it;
+a failed build fails the job, and the next run retries it. Both release scripts
+accept `--dry-run` and are idempotent.
 
 Trusted Publishing cannot bootstrap a crate that has never been published.
 Publish a new crate locally once; subsequent releases need no extra script
