@@ -2126,6 +2126,65 @@ mod tests {
             from_take == from_cuts,
             "the take built another library than its cuts"
         );
+
+        // The cuts above go through the build's own cleaning and shaping, so what the
+        // take holds is checked against the take itself too: each region's stroke, as
+        // long as the region or up to its loop's end and padded to a whole block, with
+        // the loop where it was, and each attack as loud as the region recorded.
+        let (_, piano) = read(&dir.join("take.npno")).unwrap();
+        let library = piano.library().unwrap();
+        let block =
+            codec::block_frames(codec::MIN_WIDTH, library.block_bytes(), 2) - codec::OVERLAP;
+        let strokes: Vec<_> = library
+            .strokes()
+            .iter()
+            .map(|s| {
+                (
+                    s.root,
+                    s.bank(),
+                    s.sustain().map(|l| (l.start(), l.length())),
+                )
+            })
+            .collect();
+        assert_eq!(
+            strokes,
+            [
+                (60, Some(Bank::Attack), Some((4_900, 2_000))),
+                (60, Some(Bank::Release), None),
+                (64, Some(Bank::Attack), None),
+            ],
+            "the loop is counted from its region's start"
+        );
+        for (found, frames) in library.strokes().iter().zip([6_900, 1_000, 8_000]) {
+            let padding = found
+                .frames()
+                .checked_sub(frames)
+                .expect("no frame is lost");
+            assert!(padding < block as u32, "{padding} frames past the region");
+        }
+        let loudest = |left: &mut dyn Iterator<Item = f64>| {
+            let power: Vec<f64> = left.map(|v| v * v).collect();
+            let most = power
+                .windows(codec::RATE as usize / 100)
+                .map(|w| w.iter().sum::<f64>())
+                .fold(0.0, f64::max);
+            10.0 * most.log10()
+        };
+        for (stroke, start, frames) in [(0, 100, 6_900), (2, 9_000, 8_000)] {
+            let found = &library.strokes()[stroke];
+            let decoded = codec::decode(found, library.channels()).unwrap();
+            let built = loudest(&mut decoded.lanes[0].iter().map(|&v| f64::from(v)));
+            let recorded = loudest(
+                &mut audio.samples[2 * start..2 * (start + frames)]
+                    .iter()
+                    .step_by(2)
+                    .map(|&v| f64::from(v) * 32_767.0),
+            );
+            assert!(
+                (built - recorded).abs() < 0.5,
+                "stroke {stroke} plays {built:.2} dB, recorded {recorded:.2}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
