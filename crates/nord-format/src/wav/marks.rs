@@ -117,9 +117,14 @@ fn is_adtl(bytes: &[u8], chunk: &Chunk) -> bool {
     &chunk.id == b"LIST" && bytes.get(chunk.body.start..chunk.body.start + 4) == Some(b"adtl")
 }
 
-fn text(bytes: &[u8]) -> String {
+/// Cue `id`'s label: `bytes` up to its first NUL, refused unless UTF-8, so a save never
+/// rewrites it as something else.
+fn label(id: u32, bytes: &[u8]) -> Result<String, Error> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => malformed(format!("cue {id}'s label is not UTF-8")),
+    }
 }
 
 /// Cue ids and their sample offsets, in the cue chunk's order.
@@ -180,7 +185,7 @@ fn read_adtl(list: &[u8]) -> Result<Adtl, Error> {
         let twice = match id {
             b"labl" => adtl
                 .labels
-                .insert(u32_at(body, 0), text(&body[4..]))
+                .insert(u32_at(body, 0), label(u32_at(body, 0), &body[4..])?)
                 .is_some(),
             b"ltxt" if body.len() < LTXT_HEAD => {
                 return malformed(format!(
@@ -723,6 +728,22 @@ mod tests {
         let orphan = append(&wav, b"LIST", &adtl_list(&marks().regions));
         let err = read_marks(&orphan).unwrap_err().to_string();
         assert!(err.contains("names cue 1, which no cue point has"), "{err}");
+    }
+
+    #[test]
+    fn a_label_that_is_not_utf8_is_refused_not_rewritten() {
+        let mut list = b"adtl".to_vec();
+        push_chunk(&mut list, b"labl", b"\x01\x00\x00\x00C\xe94\x00");
+        let one = Region {
+            start: 42,
+            frames: 0,
+            label: String::new(),
+        };
+        let cue = append(&take(100), b"cue ", &cue_chunk(std::slice::from_ref(&one)));
+        let err = read_marks(&append(&cue, b"LIST", &list))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cue 1's label is not UTF-8"), "{err}");
     }
 
     #[test]
