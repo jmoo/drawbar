@@ -88,19 +88,29 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
     if layers == 0 {
         return Err("--layers must be at least 1".into());
     }
+    for (flag, value) in [
+        ("--max-seconds", args.max_seconds),
+        ("--release-seconds", args.release_seconds),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(format!("{flag} {value} is no length; give seconds over 0"));
+        }
+    }
+    if !(args.min_layer_gap.is_finite() && args.min_layer_gap >= 0.0) {
+        return Err(format!(
+            "--min-layer-gap {} is no gap; give decibels of 0 or more",
+            args.min_layer_gap
+        ));
+    }
     let skips = skips(&args.skip, args.takes.len())?;
     let outs: Vec<PathBuf> = match set {
         false => vec![args.out.clone()],
-        true => {
-            std::fs::create_dir_all(&args.out)
-                .map_err(|e| format!("{}: {e}", args.out.display()))?;
-            args.takes
-                .iter()
-                .map(|take| args.out.join(take.file_name().unwrap_or_default()))
-                .collect()
-        }
+        true => args
+            .takes
+            .iter()
+            .map(|take| args.out.join(take.file_name().unwrap_or_default()))
+            .collect(),
     };
-    let mut written = Vec::new();
     for (index, (path, out)) in args.takes.iter().zip(&outs).enumerate() {
         if outs[..index].contains(out) {
             return Err(format!(
@@ -109,6 +119,10 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
                 out.display()
             ));
         }
+    }
+    // Every take is planned before any is written, so one that fails leaves none.
+    let mut planned = Vec::new();
+    for (index, (path, out)) in args.takes.iter().zip(&outs).enumerate() {
         if set {
             ui.out(format!(
                 "take {}: {}, layer {} of {}",
@@ -131,7 +145,27 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
             layer: index,
             of: args.takes.len(),
         });
-        prep_take(ui, path, out, &options)?;
+        let (bytes, hits) = prep_take(ui, path, out, &options)?;
+        for &skip in &options.skip {
+            if !hits.contains(&skip) {
+                let named = match set {
+                    true => format!("{}:{skip}", index + 1),
+                    false => skip.to_string(),
+                };
+                return Err(format!(
+                    "--skip {named:?}: {} has no hit {skip}",
+                    path.display()
+                ));
+            }
+        }
+        planned.push((out, bytes));
+    }
+    if set {
+        std::fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
+    }
+    let mut written = Vec::new();
+    for (out, bytes) in planned {
+        write_file(ui, out, &bytes)?;
         written.push(out.display().to_string());
     }
     ui.note(format!(
@@ -165,13 +199,14 @@ fn skips(given: &[String], takes: usize) -> Result<Vec<Vec<usize>>, String> {
     Ok(out)
 }
 
-/// Finds one take's hits, lists them and writes its regions to `out`.
+/// Finds one take's hits and lists them: the take with its regions, as written to
+/// `out`, and the numbers of its hits.
 fn prep_take(
     ui: &Ui,
     path: &std::path::Path,
     out: &std::path::Path,
     options: &PlanOptions,
-) -> Result<(), String> {
+) -> Result<(Vec<u8>, Vec<usize>), String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     let layout = wav::layout(&bytes).map_err(|e| named(&e))?;
@@ -205,7 +240,6 @@ fn prep_take(
         false => bytes,
     };
     let written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
-    write_file(ui, out, &written)?;
     if resampled {
         ui.note(format!(
             "resampled to the {} Hz the instrument plays at, so the regions lie where the \
@@ -218,7 +252,8 @@ fn prep_take(
         marks.regions.len(),
         marks.loops.len()
     ));
-    Ok(())
+    let hits = plan.hits.iter().map(|planned| planned.hit.number).collect();
+    Ok((written, hits))
 }
 
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -551,6 +586,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("2:12"), "{err}");
+
+        // a take that fails, or a skip that matches no hit, leaves nothing written
+        let silent = dir.join("silent.wav");
+        let nothing = wav::Audio {
+            samples: vec![0.0; 44_100],
+            ..loud.clone()
+        };
+        let bytes = wav::write(&nothing, wav::Encoding::Int { bits: 24 }).unwrap();
+        std::fs::write(&silent, bytes).unwrap();
+        let silent_s = silent.to_str().unwrap();
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, silent_s, "--notes", "C4,E4", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("no hit was kept"), "{err}");
+        assert!(!out.join("loud.wav").exists(), "nothing written");
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, b, "--notes", "C4,E4", "--skip", "2:9", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("--skip \"2:9\""), "{err}");
+        assert!(!out.join("loud.wav").exists(), "nothing written");
+
         prep(
             &Ui::piped(),
             prep_args(&[a, b, "--notes", "C4,E4", "-o", out_s]),
@@ -699,5 +759,20 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("resampled"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn lengths_and_gaps_that_mean_nothing_are_refused() {
+        for (flag, value) in [
+            ("--max-seconds", "0"),
+            ("--release-seconds", "-1"),
+            ("--min-layer-gap", "NaN"),
+            ("--min-layer-gap", "-2"),
+        ] {
+            let given = format!("{flag}={value}");
+            let args = prep_args(&["take.wav", "--notes", "C4", &given, "-o", "out.wav"]);
+            let err = prep(&Ui::piped(), args).unwrap_err();
+            assert!(err.contains(flag), "{flag} {value}: {err}");
+        }
     }
 }
