@@ -113,7 +113,7 @@ const SAMPLER_LOOP: usize = 24;
 /// dialect and code page.
 const LTXT_HEAD: usize = 20;
 
-fn is_adtl(bytes: &[u8], chunk: &Chunk) -> bool {
+pub(super) fn is_adtl(bytes: &[u8], chunk: &Chunk) -> bool {
     &chunk.id == b"LIST" && bytes.get(chunk.body.start..chunk.body.start + 4) == Some(b"adtl")
 }
 
@@ -395,9 +395,8 @@ fn smpl_chunk(old: Option<&[u8]>, rate: u32, regions: &[Region], loops: &[Loop])
             (old[..28].to_vec(), u32_at(old, 32), &old[after..])
         }
         None => {
-            let period = (1e9 / f64::from(rate)).round() as u32;
             let mut fresh = vec![0; 28];
-            fresh[8..12].copy_from_slice(&period.to_le_bytes());
+            fresh[8..12].copy_from_slice(&sample_period(rate).to_le_bytes());
             fresh[12..16].copy_from_slice(&60u32.to_le_bytes()); // unity note: middle C
             (fresh, 0, &[][..])
         }
@@ -424,6 +423,21 @@ fn smpl_chunk(old: Option<&[u8]>, rate: u32, regions: &[Region], loops: &[Loop])
     }
     body.extend_from_slice(tail);
     body
+}
+
+/// A `smpl` chunk of `frames` of audio, as kept when that audio is resampled to `rate`:
+/// its header and sampler data, its sample period at `rate`, and no loops, since they
+/// count frames at the old rate.
+pub(super) fn unlooped(smpl: &[u8], frames: usize, rate: u32) -> Result<Vec<u8>, Error> {
+    read_loops(smpl, frames)?;
+    let mut body = smpl_chunk(Some(smpl), rate, &[], &[]);
+    body[8..12].copy_from_slice(&sample_period(rate).to_le_bytes());
+    Ok(body)
+}
+
+/// Nanoseconds per frame at `rate`, as `smpl` states it.
+fn sample_period(rate: u32) -> u32 {
+    (1e9 / f64::from(rate)).round() as u32
 }
 
 /// `bytes` with its `cue `, `adtl` and `smpl` chunks replaced by ones declaring `marks`,

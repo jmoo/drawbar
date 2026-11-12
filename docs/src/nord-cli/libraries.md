@@ -136,7 +136,8 @@ are measured on their own, and each is written into `-o` under its own name.
 
 A take at any other rate is resampled to the instrument's 35,002 Hz first, at its
 own bit depth, and the regions are placed on that, so they lie where the build
-reads them, and the original is never changed. A take already at 35,002 Hz may be
+reads them, and the original is never changed. The take's other chunks go with it as
+they were; a `smpl` chunk keeps its unity note and sampler data. A take already at 35,002 Hz may be
 its own `-o`: only its regions and loops are replaced. The listing shows every hit: its note
 and detected pitch, its level, what became of it, and how it sustains.
 

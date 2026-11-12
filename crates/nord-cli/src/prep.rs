@@ -201,7 +201,7 @@ fn prep_take(
         loops: plan.loops(),
     };
     let audio = match resampled {
-        true => wav::write(&take, layout.format.encoding).map_err(|e| named(&e))?,
+        true => wav::with_audio(&bytes, &take, layout.format.encoding).map_err(|e| named(&e))?,
         false => bytes,
     };
     let written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
@@ -427,11 +427,19 @@ mod tests {
             ],
         );
         let path = dir.join("take.wav");
-        std::fs::write(
-            &path,
-            wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap(),
-        )
-        .unwrap();
+        let info = b"LIST\x0e\x00\x00\x00INFOISFT\x02\x00\x00\x00me";
+        let mut smpl = b"smpl\x28\x00\x00\x00".to_vec();
+        // maker, product, period, unity note, pitch, SMPTE x2, no loops, 4 bytes of data
+        for word in [0, 0, 22_676, 64, 0, 0, 0, 0, 4] {
+            smpl.extend_from_slice(&u32::to_le_bytes(word));
+        }
+        smpl.extend_from_slice(b"mine");
+        let mut bytes = wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap();
+        bytes.extend_from_slice(info);
+        bytes.extend_from_slice(&smpl);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
         let out = dir.join("regions.wav");
         let (take, out_s) = (path.to_str().unwrap(), out.to_str().unwrap());
         let args = prep_args(&[take, "--notes", "C4,E4", "--layers", "2", "-o", out_s]);
@@ -441,6 +449,16 @@ mod tests {
         let layout = wav::layout(&bytes).unwrap();
         assert_eq!(layout.format.rate, codec::RATE);
         assert_eq!(layout.format.encoding, wav::Encoding::Int { bits: 24 });
+        let found = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+        assert!(found(info).is_some(), "the take's INFO list is kept");
+        let at = found(b"smpl").expect("the take's smpl chunk is kept") + 8;
+        let word = |i: usize| u32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap());
+        assert_eq!(
+            (word(8), word(12)),
+            (28_570, 64),
+            "period at the new rate, unity note kept"
+        );
+        assert!(found(b"mine").is_some(), "the sampler data is kept");
         let labels: Vec<String> = wav::read_marks(&bytes)
             .unwrap()
             .regions

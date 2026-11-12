@@ -333,6 +333,36 @@ pub fn write(audio: &Audio, encoding: Encoding) -> Result<Vec<u8>, Error> {
     riff(format, &audio.samples, |out, x| put(out, x, encoding))
 }
 
+/// `bytes` with its audio replaced by `audio` stored as `encoding`, as a resample writes
+/// it: a new fmt, fact and data, then every other chunk as it was, except the regions
+/// and loops, which count frames at the old rate and so are dropped. A `smpl` chunk
+/// keeps its header and sampler data, with its sample period at the new rate.
+pub fn with_audio(bytes: &[u8], audio: &Audio, encoding: Encoding) -> Result<Vec<u8>, Error> {
+    let frames = layout(bytes)?.frames();
+    let mut out = write(audio, encoding)?;
+    for chunk in &chunks(bytes)? {
+        let body = &bytes[chunk.body.clone()];
+        match &chunk.id {
+            b"fmt " | b"fact" | b"data" | b"cue " => {}
+            _ if marks::is_adtl(bytes, chunk) => {}
+            b"smpl" => marks::push_chunk(
+                &mut out,
+                b"smpl",
+                &marks::unlooped(body, frames, audio.rate)?,
+            ),
+            _ => out.extend_from_slice(&bytes[chunk.whole()]),
+        }
+    }
+    let Ok(riff) = u32::try_from(out.len() - 8) else {
+        return out_of_bounds(
+            format!("{} bytes", out.len()),
+            "a WAV whose RIFF length fits u32",
+        );
+    };
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
+    Ok(out)
+}
+
 /// A WAV of `format` holding `samples`, frames interleaved by channel, each stored by
 /// `store`.
 pub(crate) fn riff<T: Copy>(
@@ -621,6 +651,40 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("whole 4-byte frame"));
+    }
+
+    #[test]
+    fn new_audio_keeps_every_other_chunk_but_the_marks() {
+        let take = write(&audio(1, &[0.25; 100]), Encoding::Int { bits: 24 }).unwrap();
+        let marks = Marks {
+            regions: vec![Region {
+                start: 10,
+                frames: 80,
+                label: "060-b0-v00".into(),
+            }],
+            loops: vec![Loop::forward(40, 89)],
+        };
+        let mut bytes = with_marks(&take, &marks).unwrap();
+        marks::push_chunk(&mut bytes, b"junk", b"abc");
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let half = Audio {
+            rate: 22_050,
+            ..audio(1, &[0.25; 50])
+        };
+        let new = with_audio(&bytes, &half, Encoding::Float { bits: 32 }).unwrap();
+        assert_eq!(read(&new).unwrap(), half);
+        assert_eq!(read_marks(&new).unwrap(), Marks::default());
+        let chunks = chunks(&new).unwrap();
+        let ids: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.id).collect();
+        assert_eq!(ids, [b"fmt ", b"fact", b"data", b"smpl", b"junk"]);
+        let smpl = only(&chunks, b"smpl").unwrap().unwrap().body.start;
+        assert_eq!(
+            u32_at(&new, smpl + 8),
+            45_351,
+            "nanoseconds a frame at 22,050 Hz"
+        );
     }
 
     #[test]
