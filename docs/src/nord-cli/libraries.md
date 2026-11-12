@@ -48,102 +48,6 @@ the loudest layer. Banks are 0 for attack, 1 for pedal resonance and 2 for
 release. The WAVs must be 16-bit PCM, mono or stereo, in the plain or the
 extensible WAV format. Any sample rate is accepted.
 
-`build` also takes one WAV holding every stroke, such as a recorded take, whose
-regions are the strokes. Each region is labeled as a stroke's WAV is named
-(`060-b0-l00`), and a loop inside a region is that stroke's loop. The take may be
-PCM of 8 to 32 bits or float, and each region is dithered to 16 bits: rounded
-after adding a little noise, so the quietest part of a decay turns to a steady
-hiss rather than distortion. Silence stays silent. A region labeled any other way, or a loop that crosses a
-region's end, is refused.
-
-A take's strokes are cleaned first. The take's mains hum is found and followed
-as its frequency wanders, and its hiss is measured in its quietest stretch. Each
-stroke then loses everything under 0.7 times its root's fundamental, hum and the
-action's knock with it. A note below F4 also has its strongest hum lines notched
-where they lie clear of the note's own partials. As the note dies, a low-pass
-follows its top end down, so the hiss above it goes with it, while the strike
-keeps all its treble. Nothing is touched where the note stands over the hiss.
-A take whose **Clean audio** drawbar's take editor turned off is built as
-recorded, with none of this.
-
-A take's strokes are shaped as they are built. Each attack fades in over 0.3 ms,
-and each release over 5 ms, fading out over its last 40 ms. A looped region's loop
-has the decay across it evened out, so its end meets its start, and its last 30 ms
-are crossfaded into the audio before its start. A region labeled with `-fade`
-after a stroke's name (`084-b0-l00-fade`) lies at the end of that attack, and the
-attack fades from there to silence at its end, following the note's own decay as
-it slows, down to 70 dB under its peak, then loops on 100 ms of silence. A fade
-that does not end with its attack, or that names a release or a looped attack, is
-refused.
-
-A format 6 library built without a template plays each stroke at the level of
-its root's loudest layer, whatever the stroke's own level, and each root at the
-level of its loudest layer's audio. So before rounding, `build` brings every
-region of a take to a peak of -13 dBFS. The soft layers keep their detail above
-the 16-bit steps, and a note recorded quieter plays as loud as the others. The
-library grows, because louder audio takes more bits to code. Such a library also
-reaches the whole 88 keys where it can: the lowest root's strokes are pitched
-down, and the highest's up, by at most 12 semitones, to roots that reach A0 and
-C8. A release from a take plays at its
-recorded level under its own attack, both measured once cleaned, the region of its root at its layer, lifted by
-at most 12 dB toward 14 dB under it, so a quiet key-off stays quiet without being
-lost. A release with no such attack, or one from a directory of WAVs, plays 18 dB
-under its root's loudest attack. A format 5 library, or one built
-against a template, plays each stroke's audio at its own level, so nothing is
-raised.
-
-`prep` writes those regions. Give it the notes in the order you played them, and
-the number of velocity layers each note gets:
-
-```sh
-nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
-```
-
-Each note may be hit several times in a row, loud to soft or in any order. `prep`
-finds every hit, gives it to the next note in the list whose pitch is nearest, and
-keeps up to `--layers` of each note's hits: by measured level, dropping hits within
-`--min-layer-gap` dB of a louder one and spreading the rest evenly in dB, or with
-`--order played` the first ones played, the first the loudest. Each kept hit
-becomes an attack, from its strike to its key-up and at most `--max-seconds`
-long, and a release from the key-up, at most `--release-seconds` long. A hit
-standing less than 54 dB over the take's floor, measured with its mains hum taken
-out, is left out: leveled with the others, its hiss would come up with it. A
-key-off that stands clear of neither the quiet before its hit nor the floor gets
-no release. `--skip` leaves out hits by the number the listing gives them.
-
-Each attack also gets its sustain, found on the attack as the build cleans it. A
-note still sounding at its key-up is looped:
-about half a second, a whole number of its periods, ending 150 ms before the key-up
-or where it sinks to 30 dB over the floor, tuned within a period for the best
-match between its end and its start. The listing gives each loop's match, and warns
-under 0.5. A note that dies into the floor before its key-up, and would finish
-fading before it, gets a fade region instead, from where it came within 20 dB of the
-floor, and its attack ends where the fade reaches silence. Loops in the noise of a
-dying note clicked, so it is never looped.
-
-Or record one take per velocity layer, each playing every note once, and give them
-loudest first:
-
-```sh
-nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
-nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
-```
-
-Each take is one layer, whatever its level, so you may raise the gain for the softer
-ones. A note played twice in a take keeps its last hit. Each take's floor and hum
-are measured on their own, and each is written into `-o` under its own name.
-`--skip 2:12` leaves out hit 12 of the second take.
-
-A take at any other rate is resampled to the instrument's 35,002 Hz first, at its
-own bit depth, and the regions are placed on that, so they lie where the build
-reads them, and the original is never changed. The take's other chunks go with it as
-they were; a `smpl` chunk keeps its unity note and sampler data. A take already at 35,002 Hz may be
-its own `-o`: only its regions and loops are replaced. The listing shows every hit: its note
-and detected pitch, its level, what became of it, and how it sustains.
-
-A take works best opening with 3 to 5 seconds of silence, free of ground loops,
-peaking around -6 dBFS, and with each note held until it has died.
-
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
 nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno
@@ -177,13 +81,66 @@ nearest frame of the resampled audio.
 Whatever the audio does not decide, such as decay and per-note tables, comes from
 `--template` when you give one, and each stroke's level follows its layer. Without a
 template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
-values; without `--kind`, a take's own kind, as drawbar's take editor saves it,
-decides, and grand otherwise (takes that state different kinds need `--kind`), and each stroke decays from note-on as the instrument's own pianos of that
-kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
-level of its root's loudest layer, softer layers a little louder as that kind's are,
-up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
+values. Without `--kind`, the kind the takes state, as drawbar's take editor saves
+it, decides, and otherwise grand; takes that state different kinds need `--kind`.
+Each stroke decays from note-on as the instrument's own pianos of that kind do,
+faster on higher keys. In format 6, each layer is trimmed to play at the level of
+its root's loudest layer, softer layers a little louder as that kind's are, up to 6
+dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer or release needs more boost than the instrument gives at `--gain`, the whole
-library is turned down to fit; a release from a take just plays quieter. In format 5, each stroke's level follows its layer.
+library is turned down to fit, but a release from a take just plays quieter. In
+format 5, each stroke's level follows its layer.
+
+## Building from a recorded take
+
+`prep` finds the strokes in a recording of you playing, and `build` makes a library
+of them:
+
+```sh
+nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
+nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
+```
+
+Give `prep` the notes in the order you played them. Each note may be hit several
+times, loud to soft or in any order. Each hit goes to the nearest note in the list,
+and each note keeps up to `--layers` hits, spread evenly in level, or the first ones
+played with `--order played`. `--min-layer-gap` drops a hit too close in level to a
+louder one, and `--skip` leaves out hits by their number in the listing. A hit too
+quiet over the take's noise is left out. `--max-seconds` and `--release-seconds`
+limit each attack and release.
+
+The listing shows every hit: its note and pitch, its level, what became of it, and
+how it sustains. A note still sounding at its key-up is looped, with a warning where
+the loop matches poorly. A note that dies first fades to silence instead.
+
+Or record one take per velocity layer, each playing every note once, and give them
+loudest first:
+
+```sh
+nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
+nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
+```
+
+Each take is one layer, whatever its level, so you may raise the gain for the softer
+ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
+12 of the second take.
+
+`prep` never changes a take. A take at another rate is resampled to the instrument's
+35,002 Hz in `-o`, with its other chunks. A take already at 35,002 Hz may be its own
+`-o`, and only its regions and loops are replaced.
+
+A take works best opening with 3 to 5 seconds of silence, free of ground loops,
+peaking around -6 dBFS, and with each note held until it has died.
+
+`build` makes a stroke of each region of a take, labeled as a stroke's WAV is named
+(`060-b0-l00`), with a loop inside it as that stroke's loop. A region labeled
+`084-b0-l00-fade` marks where that attack fades to silence. The take may be PCM of 8
+to 32 bits or float. Each stroke is cleaned of the take's hum and hiss, its ends and
+loop are shaped, and it is dithered to 16 bits. In a format 6 library without a
+template, every region is also brought to one level, and the lowest and highest roots
+are pitched out to reach all 88 keys. A take whose **Clean audio** drawbar's take
+editor turned off is built as recorded. [Takes](../reference/takes.md) gives the
+details.
 
 [What is supported](../getting-started/support.md) says which of these libraries
 have been played on an instrument.
