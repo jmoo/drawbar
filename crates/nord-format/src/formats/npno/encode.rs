@@ -491,6 +491,20 @@ pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)>
     (usize::from(root) < NOTES).then_some((root, bank, layer))
 }
 
+/// The name [`parse_stroke_name`] reads back as `root`, `bank` and `layer`:
+/// `060-b0-l00`, or `060-b2-v12` for a layer value.
+pub fn stroke_name(root: u8, bank: Bank, layer: LayerTag) -> String {
+    let bank = bank.code();
+    match layer {
+        LayerTag::Index(index) => format!("{root:03}-b{bank}-l{index:02}"),
+        LayerTag::Value(value) => format!("{root:03}-b{bank}-v{value:02}"),
+    }
+}
+
+/// The end of a take region's label that makes it the fade of the stroke the rest
+/// names: `084-b0-v00-fade`.
+pub const FADE_SUFFIX: &str = "-fade";
+
 /// Why the names for one root and bank give no layer values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayerClash {
@@ -2987,6 +3001,22 @@ mod tests {
             "C4-b0-l00",
         ] {
             assert_eq!(parse_stroke_name(bad, Stem::None), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_stroke_name_reads_back_as_the_stroke_it_was_made_from() {
+        use LayerTag::{Index, Value};
+        for (root, bank, layer, name) in [
+            (60, Bank::Attack, Index(0), "060-b0-l00"),
+            (7, Bank::Release, Value(100), "007-b2-v100"),
+            (101, Bank::Resonance, Index(3), "101-b1-l03"),
+        ] {
+            assert_eq!(stroke_name(root, bank, layer), name);
+            assert_eq!(
+                parse_stroke_name(name, Stem::None),
+                Some((root, bank, layer))
+            );
         }
     }
 

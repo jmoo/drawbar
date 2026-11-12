@@ -1,5 +1,7 @@
 //! A take's hits as the regions of a library: every detector in turn.
 
+use crate::formats::npno::encode::{stroke_name, LayerTag, FADE_SUFFIX};
+use crate::formats::npno::Bank;
 use crate::take::clean::{self, Noise};
 use crate::take::cut::{self, CutOptions, Cuts, Take};
 use crate::take::detect::{self, Envelope, Hit};
@@ -260,9 +262,9 @@ impl Plan {
                 fade = Some(attack.start + from..attack.end);
             }
             let strokes = [
-                (0, Some(attack), ""),
-                (0, fade, "-fade"),
-                (2, cuts.release.clone(), ""),
+                (Bank::Attack, Some(attack), ""),
+                (Bank::Attack, fade, FADE_SUFFIX),
+                (Bank::Release, cuts.release.clone(), ""),
             ];
             for (bank, span, suffix) in strokes {
                 let Some(span) = span.filter(|span| !span.is_empty()) else {
@@ -271,7 +273,7 @@ impl Plan {
                 regions.push(Region {
                     start: span.start as u32,
                     frames: span.len() as u32,
-                    label: format!("{note:03}-b{bank}-v{value:02}{suffix}"),
+                    label: stroke_name(note, bank, LayerTag::Value(*value)) + suffix,
                 });
             }
         }

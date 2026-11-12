@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, ValueEnum};
-use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
+use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem, FADE_SUFFIX};
 use nord_format::formats::npno::{
     self, codec, encode, Bank, Change, Layers, Library, Version, UNCOVERED,
 };
@@ -1223,9 +1223,6 @@ fn release_balance(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<Op
         })
         .collect()
 }
-
-/// The end of a region's label that makes it the fade of the stroke the rest names.
-const FADE_SUFFIX: &str = "-fade";
 
 fn in_stroke_order(strokes: &mut [StrokeFile]) {
     strokes.sort_by_key(|s| (s.root, s.bank.code(), s.layer, s.name()));
