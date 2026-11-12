@@ -2444,11 +2444,7 @@ mod tests {
     /// fall.
     #[test]
     fn a_wav_loop_moves_onto_the_lattice_with_its_frames() {
-        let at = |start, end| wav::Loop {
-            start,
-            end,
-            play: Play::Forward,
-        };
+        let at = |start, end| wav::Loop::forward(start, end);
         assert_eq!(
             sustain(at(100, 199), codec::RATE).unwrap(),
             Loop::new(100, 100).unwrap()

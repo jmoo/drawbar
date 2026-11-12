@@ -1778,11 +1778,7 @@ mod tests {
                 take,
                 region,
                 audio: take.samples.clone(),
-                sample_loop: Some(wav::Loop {
-                    start: frames / 2,
-                    end: frames - 1,
-                    play: wav::Play::Forward,
-                }),
+                sample_loop: Some(wav::Loop::forward(frames / 2, frames - 1)),
                 fade: Some(frames / 2),
                 shift: 0,
             },
@@ -2086,11 +2082,7 @@ mod tests {
                 region(8_000, 1_000, "060-b2-l00"),
                 region(9_000, 8_000, "064-b0-l00"),
             ],
-            loops: vec![wav::Loop {
-                start: 5_000,
-                end: 6_999,
-                play: wav::Play::Forward,
-            }],
+            loops: vec![wav::Loop::forward(5_000, 6_999)],
         };
         let path = dir.join("take.wav");
         let take = write_take(&path, &audio, &marks);

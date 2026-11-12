@@ -5,7 +5,7 @@
 //! so a mark moved in an editor is shaped the same way.
 
 use crate::take::detect::{self, Envelope, FRAME};
-use crate::wav::{Loop, Play};
+use crate::wav::Loop;
 
 /// How [`find`] places a loop or a fade, and how the build shapes them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,11 +63,10 @@ impl Sustain {
     /// The loop as a WAV states it, both ends played, in frames from `at`.
     pub fn sample_loop(&self, at: usize) -> Option<Loop> {
         match *self {
-            Sustain::Loop { start, len, .. } => Some(Loop {
-                start: (at + start) as u32,
-                end: (at + start + len - 1) as u32,
-                play: Play::Forward,
-            }),
+            Sustain::Loop { start, len, .. } => Some(Loop::forward(
+                (at + start) as u32,
+                (at + start + len - 1) as u32,
+            )),
             Sustain::Dies { .. } => None,
         }
     }
@@ -360,11 +359,7 @@ pub fn fade_out(
     }
     let silent = detect::samples(SILENT_LOOP, rate);
     out.resize((total + silent + 64) * channels, 0.0);
-    let sample_loop = Loop {
-        start: (total + 32) as u32,
-        end: (total + 32 + silent - 1) as u32,
-        play: Play::Forward,
-    };
+    let sample_loop = Loop::forward((total + 32) as u32, (total + 32 + silent - 1) as u32);
     (out, sample_loop)
 }
 

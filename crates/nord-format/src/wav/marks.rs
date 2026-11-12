@@ -26,12 +26,28 @@ pub enum Play {
     Other(u32),
 }
 
-/// A loop over frames `start` through `end`, both played.
+/// A loop over frames `start` through `end`, both played. `fraction` (of a frame past
+/// `end`) and `plays` (0 = for ever) are the `smpl` loop's own, kept as stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loop {
     pub start: u32,
     pub end: u32,
     pub play: Play,
+    pub fraction: u32,
+    pub plays: u32,
+}
+
+impl Loop {
+    /// A forward loop over frames `start` through `end`, played for ever.
+    pub fn forward(start: u32, end: u32) -> Loop {
+        Loop {
+            start,
+            end,
+            play: Play::Forward,
+            fraction: 0,
+            plays: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -81,7 +97,7 @@ impl Marks {
             *held = Some(Loop {
                 start: found.start - region.start,
                 end: found.end - region.start,
-                play: found.play,
+                ..*found
             });
         }
         Ok(out)
@@ -231,6 +247,8 @@ pub(super) fn read_loops(smpl: &[u8], frames: usize) -> Result<Vec<Loop>, Error>
                 start: u32_at(entry, 8),
                 end: u32_at(entry, 12),
                 play,
+                fraction: u32_at(entry, 16),
+                plays: u32_at(entry, 20),
             };
             check_loop(&found, frames)?;
             Ok(found)
@@ -345,39 +363,69 @@ fn adtl_list(regions: &[Region]) -> Vec<u8> {
     body
 }
 
-/// `head` is the first 28 bytes of the `smpl` chunk being replaced, if there was one,
-/// so its unity note, tuning and timing survive.
-fn smpl_chunk(head: Option<&[u8]>, rate: u32, loops: &[Loop]) -> Vec<u8> {
-    let mut body = match head {
-        Some(head) => head.to_vec(),
+/// Each loop's id: the cue id of the first region holding it that no earlier loop took,
+/// else one past every cue id, so ids stay unique.
+fn loop_ids(regions: &[Region], loops: &[Loop]) -> Vec<u32> {
+    let mut taken = std::collections::BTreeSet::new();
+    let mut spare = regions.len() as u32 + 1..;
+    loops
+        .iter()
+        .map(|found| {
+            let held = (1u32..)
+                .zip(regions)
+                .find(|(id, region)| region.holds(found) && !taken.contains(id));
+            let id = held.map_or_else(|| spare.next().unwrap(), |(id, _)| id);
+            taken.insert(id);
+            id
+        })
+        .collect()
+}
+
+/// `old` is the body of the `smpl` chunk being replaced, if there was one, so its unity
+/// note, tuning, timing and sampler data survive.
+fn smpl_chunk(old: Option<&[u8]>, rate: u32, regions: &[Region], loops: &[Loop]) -> Vec<u8> {
+    let (mut body, data, tail) = match old {
+        Some(old) => {
+            let after = SAMPLER_HEAD + u32_at(old, 28) as usize * SAMPLER_LOOP;
+            (old[..28].to_vec(), u32_at(old, 32), &old[after..])
+        }
         None => {
             let period = (1e9 / f64::from(rate)).round() as u32;
             let mut fresh = vec![0; 28];
             fresh[8..12].copy_from_slice(&period.to_le_bytes());
             fresh[12..16].copy_from_slice(&60u32.to_le_bytes()); // unity note: middle C
-            fresh
+            (fresh, 0, &[][..])
         }
     };
     body.extend_from_slice(&(loops.len() as u32).to_le_bytes());
-    body.extend_from_slice(&0u32.to_le_bytes());
-    for (id, found) in (0u32..).zip(loops) {
+    body.extend_from_slice(&data.to_le_bytes());
+    for (id, found) in loop_ids(regions, loops).into_iter().zip(loops) {
         let play = match found.play {
             Play::Forward => 0,
             Play::Alternating => 1,
             Play::Backward => 2,
             Play::Other(kind) => kind,
         };
-        for word in [id, play, found.start, found.end, 0, 0] {
+        for word in [
+            id,
+            play,
+            found.start,
+            found.end,
+            found.fraction,
+            found.plays,
+        ] {
             body.extend_from_slice(&word.to_le_bytes());
         }
     }
+    body.extend_from_slice(tail);
     body
 }
 
 /// `bytes` with its `cue `, `adtl` and `smpl` chunks replaced by ones declaring `marks`,
 /// written after every other chunk, which is copied as it was. No regions writes no
-/// `cue ` or `adtl`; a `smpl` chunk is kept, with `marks.loops`, if the file had one or
-/// `marks` has loops.
+/// `cue ` or `adtl`; a `smpl` chunk is kept, with `marks.loops` and the old one's header
+/// and sampler data, if the file had one or `marks` has loops. Each loop is tied to the
+/// region holding it by the region's cue id.
 pub fn with_marks(bytes: &[u8], marks: &Marks) -> Result<Vec<u8>, Error> {
     let layout = layout(bytes)?;
     let frames = layout.frames();
@@ -407,11 +455,11 @@ pub fn with_marks(bytes: &[u8], marks: &Marks) -> Result<Vec<u8>, Error> {
         push_chunk(&mut out, b"LIST", &adtl_list(&marks.regions));
     }
     if old_smpl.is_some() || !marks.loops.is_empty() {
-        let head = old_smpl.map(|smpl| &bytes[smpl.body.start..smpl.body.start + 28]);
+        let old = old_smpl.map(|smpl| &bytes[smpl.body.clone()]);
         push_chunk(
             &mut out,
             b"smpl",
-            &smpl_chunk(head, layout.format.rate, &marks.loops),
+            &smpl_chunk(old, layout.format.rate, &marks.regions, &marks.loops),
         );
     }
     let Ok(riff) = u32::try_from(out.len() - 8) else {
@@ -469,11 +517,7 @@ mod tests {
                     label: "odd".into(),
                 },
             ],
-            loops: vec![Loop {
-                start: 300,
-                end: 499,
-                play: Play::Forward,
-            }],
+            loops: vec![Loop::forward(300, 499)],
         }
     }
 
@@ -524,6 +568,56 @@ mod tests {
         assert_eq!(cleared, take(1000));
     }
 
+    fn smpl_body(bytes: &[u8]) -> &[u8] {
+        let chunks = chunks(bytes).unwrap();
+        let body = only(&chunks, b"smpl").unwrap().unwrap().body.clone();
+        &bytes[body]
+    }
+
+    #[test]
+    fn saving_keeps_the_sampler_data_and_each_loops_fraction_and_play_count() {
+        let unlooped = Marks {
+            loops: vec![],
+            ..marks()
+        };
+        let mut body = vec![0; 28];
+        body[12..16].copy_from_slice(&64u32.to_le_bytes());
+        // one loop, 5 bytes of sampler data; the loop is cue 1's, the region holding it
+        for word in [1, 5, 1, 0, 300, 499, 1 << 31, 3] {
+            body.extend_from_slice(&u32::to_le_bytes(word));
+        }
+        body.extend_from_slice(b"maker");
+        let wav = append(&with_marks(&take(1000), &unlooped).unwrap(), b"smpl", &body);
+
+        let read = read_marks(&wav).unwrap();
+        let found = Loop {
+            fraction: 1 << 31,
+            plays: 3,
+            ..Loop::forward(300, 499)
+        };
+        assert_eq!(read.loops, [found]);
+        let saved = with_marks(&wav, &read).unwrap();
+        assert_eq!(smpl_body(&saved), body);
+    }
+
+    #[test]
+    fn each_loop_is_tied_to_the_cue_id_of_the_region_holding_it() {
+        let loops = [(530, 550), (300, 399), (400, 449), (650, 660)];
+        let marks = Marks {
+            loops: loops.map(|(start, end)| Loop::forward(start, end)).to_vec(),
+            ..marks()
+        };
+        let saved = with_marks(&take(1000), &marks).unwrap();
+        let ids: Vec<u32> = smpl_body(&saved)[SAMPLER_HEAD..]
+            .as_chunks::<SAMPLER_LOOP>()
+            .0
+            .iter()
+            .map(|entry| u32_at(entry, 0))
+            .collect();
+        // the second loop in region 1, and one in no region, take ids no cue point has
+        assert_eq!(ids, [2, 1, 4, 5]);
+    }
+
     #[test]
     fn a_loop_type_of_the_sampler_makers_own_is_kept() {
         let mut theirs = marks();
@@ -540,11 +634,7 @@ mod tests {
             .iter()
             .map(|(region, found)| (region.label.as_str(), *found))
             .collect();
-        let attack = Loop {
-            start: 200,
-            end: 399,
-            play: Play::Forward,
-        };
+        let attack = Loop::forward(200, 399);
         assert_eq!(
             loops,
             [
@@ -557,11 +647,7 @@ mod tests {
 
     #[test]
     fn a_loop_that_no_one_region_holds_is_refused() {
-        let at = |start, end| Loop {
-            start,
-            end,
-            play: Play::Forward,
-        };
+        let at = |start, end| Loop::forward(start, end);
         for (loops, reason) in [
             (vec![at(450, 509)], "crosses an end"),
             (vec![at(505, 510)], "lies in no region"),

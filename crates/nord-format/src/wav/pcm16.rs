@@ -270,15 +270,10 @@ mod tests {
         let wav = mono_pcm16(&[0; 100], 44_100).unwrap();
         assert_eq!(read_pcm16(&wav).unwrap().sample_loop, None);
 
-        let first = Loop {
-            start: 20,
-            end: 79,
-            play: Play::Forward,
-        };
+        let first = Loop::forward(20, 79);
         let second = Loop {
-            start: 0,
-            end: 9,
             play: Play::Alternating,
+            ..Loop::forward(0, 9)
         };
         let marks = |loops: Vec<Loop>| Marks {
             regions: vec![],
