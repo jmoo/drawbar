@@ -1045,30 +1045,39 @@ pub fn release_under(recorded: f64) -> f64 {
     recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
 }
 
-/// Frames [`level`] averages power over: 10 ms.
-const LEVEL_WINDOW: usize = codec::RATE as usize / 100;
-
-/// Frames from a recording's start that [`level`] reads: half a second.
-const LEVEL_SPAN: usize = codec::RATE as usize / 2;
-
 /// How loud a recording plays, in decibels over a steady sample of one unit: the most
-/// power any [`LEVEL_WINDOW`] of its first [`LEVEL_SPAN`] frames averages, on its
-/// louder channel. A recording shorter than the window is measured whole, and silence
-/// has no level.
+/// power any 10 ms of its first half second averages, on its louder channel. A
+/// recording shorter than 10 ms is measured whole, and silence has no level.
 fn level(channels: &[Vec<i16>]) -> Option<f64> {
-    let power = |sample: &i16| i64::from(*sample).pow(2);
-    let loudest = channels
-        .iter()
+    let frames = channels.first().map_or(0, Vec::len);
+    loudness(channels.len(), frames, codec::RATE, |frame, channel| {
+        f64::from(channels[channel][frame])
+    })
+}
+
+/// [`level`] of any audio: `frames` frames of `channels` at `rate`, `sample` giving
+/// each frame's sample on each channel.
+///
+/// The sums are exact for 16-bit samples, so a recording measures the same whichever
+/// way it reaches here.
+pub fn loudness(
+    channels: usize,
+    frames: usize,
+    rate: u32,
+    sample: impl Fn(usize, usize) -> f64,
+) -> Option<f64> {
+    let span = frames.min(rate as usize / 2);
+    let width = span.min(rate as usize / 100).max(1);
+    let loudest = (0..channels)
         .map(|channel| {
-            let span = &channel[..channel.len().min(LEVEL_SPAN)];
-            let width = span.len().min(LEVEL_WINDOW);
-            let mut sum: i64 = span[..width].iter().map(power).sum();
+            let power = |frame: usize| sample(frame, channel).powi(2);
+            let mut sum: f64 = (0..width.min(span)).map(power).sum();
             let mut most = sum;
-            for (leaving, entering) in span.iter().zip(&span[width..]) {
-                sum += power(entering) - power(leaving);
+            for frame in width..span {
+                sum += power(frame) - power(frame - width);
                 most = most.max(sum);
             }
-            most as f64 / width as f64
+            most / width as f64
         })
         .fold(0.0, f64::max);
     (loudest > 0.0).then(|| 10.0 * loudest.log10())
