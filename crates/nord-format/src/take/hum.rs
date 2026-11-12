@@ -140,9 +140,9 @@ pub fn find(x: &[f64], rate: u32, env: &Envelope) -> Result<Hum, NoHum> {
     let block = detect::samples(TRACK_SECONDS, rate);
     let nf = (block * 8).next_power_of_two();
     let plan = fft::Plan::new(nf);
-    let mut track = Vec::new();
-    let mut start = 0;
-    while start + block < x.len() {
+    let blocks = x.len().saturating_sub(1) / block.max(1);
+    let track: Vec<(f64, f64)> = crate::take::each(blocks, |i| {
+        let start = i * block;
         let spec = detect::spectrum(&x[start..start + block], &plan);
         let mut found: Vec<f64> = Vec::new();
         for k in [3u32, 5, 7, 9, 13, 17] {
@@ -171,14 +171,16 @@ pub fn find(x: &[f64], rate: u32, env: &Envelope) -> Result<Hum, NoHum> {
                 found.push(top as f64 * f64::from(rate) / nf as f64 / k);
             }
         }
-        if !found.is_empty() {
-            track.push((
+        (!found.is_empty()).then(|| {
+            (
                 (start as f64 + block as f64 / 2.0) / f64::from(rate),
                 detect::median(&found),
-            ));
-        }
-        start += block;
-    }
+            )
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     if track.is_empty() {
         return Err(NoHum::Untracked);
     }
@@ -261,7 +263,7 @@ impl Hum {
         x: &[f64],
         rate: u32,
         at: f64,
-        sections: impl Fn(f64) -> Vec<filter::Section>,
+        sections: impl Fn(f64) -> Vec<filter::Section> + Sync,
     ) -> Vec<f64> {
         let hop = detect::samples(2.0, rate);
         let window: Vec<f64> = detect::hann(2 * hop + 1)[..2 * hop].to_vec();
@@ -269,14 +271,22 @@ impl Hum {
         padded.extend_from_slice(x);
         padded.resize(x.len() + 2 * hop, 0.0);
         let mut y = vec![0.0; x.len() + 2 * hop];
-        for c in (0..x.len() + hop).step_by(hop) {
+        let starts: Vec<usize> = (0..x.len() + hop).step_by(hop).collect();
+        let run = |c: usize| {
             let chosen = sections(self.mains_at(at + c as f64 / f64::from(rate)));
             let from = c.saturating_sub(hop);
             let to = (c + 2 * hop).min(padded.len());
-            let run = filter::run(&chosen, &padded[from..to]);
-            let m = (2 * hop).min(y.len() - c).min(to - c);
-            for i in 0..m {
-                y[c + i] += run[c - from + i] * window[i];
+            (from, to, filter::run(&chosen, &padded[from..to]))
+        };
+        // A batch at a time, each added in the take's order, so the sum is the same
+        // however many threads ran it.
+        for batch in starts.chunks(crate::take::MOST_THREADS) {
+            let runs = crate::take::each(batch.len(), |i| run(batch[i]));
+            for (&c, (from, to, run)) in batch.iter().zip(runs) {
+                let m = (2 * hop).min(y.len() - c).min(to - c);
+                for i in 0..m {
+                    y[c + i] += run[c - from + i] * window[i];
+                }
             }
         }
         y[hop..hop + x.len()].to_vec()
