@@ -1181,9 +1181,10 @@ fn pitched_roots<'a>(files: &[StrokeFile<'a>]) -> Result<Vec<StrokeFile<'a>>, St
                     take,
                     region,
                     audio: pitched.samples,
+                    // A loop's end is its last frame, so it stays on one.
                     sample_loop: sample_loop.map(|found| wav::Loop {
-                        start: scale(found.start),
-                        end: scale(found.end),
+                        start: scale(found.start).min(frames.saturating_sub(1)),
+                        end: scale(found.end).min(frames.saturating_sub(1)),
                         ..found
                     }),
                     fade: fade.map(scale),
@@ -1760,6 +1761,103 @@ mod tests {
             Ok(_) => panic!("{argv:?} parsed as another noun"),
             Err(e) => Err(e.kind()),
         }
+    }
+
+    /// A root's attack region, `frames` frames of a tone, with a loop ending on its last
+    /// frame and a fade from its middle.
+    fn region_stroke<'a>(
+        path: &'a Path,
+        take: &'a wav::Audio,
+        region: &'a wav::Region,
+        root: u8,
+    ) -> StrokeFile<'a> {
+        let frames = region.frames;
+        StrokeFile {
+            source: Source::Region {
+                path,
+                take,
+                region,
+                audio: take.samples.clone(),
+                sample_loop: Some(wav::Loop {
+                    start: frames / 2,
+                    end: frames - 1,
+                    play: wav::Play::Forward,
+                }),
+                fade: Some(frames / 2),
+                shift: 0,
+            },
+            root,
+            bank: Bank::Attack,
+            layer: LayerTag::Index(0),
+        }
+    }
+
+    #[test]
+    fn a_pitched_root_keeps_its_loop_inside_its_frames_and_reaches_the_keys() {
+        let path = Path::new("take.wav");
+        for frames in [99u32, 100, 101, 1001] {
+            let take = wav::Audio {
+                rate: 35_002,
+                channels: 1,
+                samples: (0..frames).map(|i| (i as f32 / 20.0).sin() / 2.0).collect(),
+            };
+            let region = wav::Region {
+                start: 0,
+                frames,
+                label: "060-b0-l00".into(),
+            };
+            let pitched = pitched_roots(&[region_stroke(path, &take, &region, 60)]).unwrap();
+            let roots: Vec<(u8, i32)> = pitched
+                .iter()
+                .map(|file| match file.source {
+                    Source::Region { shift, .. } => (file.root, shift),
+                    Source::File(_) => panic!("a pitched root is a region"),
+                })
+                .collect();
+            assert_eq!(roots, [(48, -12), (72, 12)], "{frames} frames");
+            for file in &pitched {
+                let Source::Region {
+                    audio,
+                    sample_loop: Some(found),
+                    fade: Some(fade),
+                    ..
+                } = &file.source
+                else {
+                    panic!("the loop and fade are kept");
+                };
+                let len = audio.len() as u32;
+                assert!(
+                    found.start <= found.end && found.end < len && *fade <= len,
+                    "{frames} frames pitched to {}: loop {found:?}, fade {fade}, {len} frames",
+                    file.root
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_root_is_pitched_where_the_take_reaches_the_keys_or_holds_none() {
+        assert!(pitched_roots(&[]).unwrap().is_empty());
+        let path = Path::new("take.wav");
+        let take = wav::Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.0; 100],
+        };
+        let low = wav::Region {
+            start: 0,
+            frames: 100,
+            label: "033-b0-l00".into(),
+        };
+        let high = wav::Region {
+            label: "107-b0-l00".into(),
+            ..low.clone()
+        };
+        let files = [
+            region_stroke(path, &take, &low, 33),
+            region_stroke(path, &take, &high, 107),
+        ];
+        assert!(pitched_roots(&files).unwrap().is_empty());
     }
 
     #[test]
