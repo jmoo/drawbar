@@ -12,6 +12,10 @@
 use crate::error::{out_of_bounds, Error};
 use crate::wav::Audio;
 
+/// The fastest rate converted from or to, in Hz: the fastest a take is recorded at.
+/// The filter grows with the rates, so a faster one would take minutes to build.
+pub const MOST_RATE: u32 = 384_000;
+
 const BETA: f64 = 5.0;
 const HALF_PERIODS: u64 = 10;
 
@@ -116,6 +120,12 @@ impl Filter {
 pub fn resample(audio: &Audio, rate: u32) -> Result<Audio, Error> {
     if rate == 0 || audio.rate == 0 {
         return out_of_bounds(format!("{} Hz to {rate} Hz", audio.rate), "positive rates");
+    }
+    if rate.max(audio.rate) > MOST_RATE {
+        return out_of_bounds(
+            format!("{} Hz to {rate} Hz", audio.rate),
+            format!("rates up to {MOST_RATE} Hz"),
+        );
     }
     let channels = usize::from(audio.channels);
     if channels == 0 || !audio.samples.len().is_multiple_of(channels) {
@@ -319,5 +329,18 @@ mod tests {
             ..a
         };
         assert!(resample(&ragged, 44_100).is_err());
+    }
+
+    #[test]
+    fn a_rate_past_the_fastest_a_take_is_recorded_at_is_refused_at_once() {
+        let fast = Audio {
+            rate: 4_000_000_007,
+            ..tone(35_002, 440.0, 10, 1)
+        };
+        let err = resample(&fast, 35_002).unwrap_err().to_string();
+        assert!(err.contains("384000 Hz"), "{err}");
+        assert!(resample(&tone(35_002, 440.0, 10, 1), 4_000_000_007).is_err());
+        let fastest = tone(MOST_RATE, 440.0, 1_000, 1);
+        assert_eq!(resample(&fastest, 35_002).unwrap().frames(), 92);
     }
 }
