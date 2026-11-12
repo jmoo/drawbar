@@ -53,7 +53,12 @@ impl std::fmt::Display for NoHum {
     }
 }
 
-/// The longest run of frames within 3 dB of the floor, as a range of frames.
+/// The most seconds of a take's quietest stretch its hum and hiss are measured on: the
+/// transforms grow with it.
+pub const QUIET_MOST: f64 = 10.0;
+
+/// The longest run of frames within 3 dB of the floor, as a range of frames, cut to its
+/// first [`QUIET_MOST`] seconds.
 pub(crate) fn quietest(env: &Envelope) -> std::ops::Range<usize> {
     let under = env.floor() + 3.0;
     let mut best = 0..0;
@@ -70,7 +75,7 @@ pub(crate) fn quietest(env: &Envelope) -> std::ops::Range<usize> {
             _ => {}
         }
     }
-    best
+    best.start..best.end.min(best.start + detect::frames(QUIET_MOST))
 }
 
 /// The bins of a spectrum of `n` points at `rate` whose frequency is in `lo..hi` of `f`
@@ -359,6 +364,20 @@ mod tests {
         let rms = |v: &[f64]| (v[note.clone()].iter().map(|s| s * s).sum::<f64>()).sqrt();
         let change = 20.0 * (rms(&y) / rms(&x)).log10();
         assert!(change.abs() < 0.5, "the note changed {change} dB");
+    }
+
+    #[test]
+    fn a_long_quiet_stretch_is_measured_on_its_first_ten_seconds() {
+        let mut db = vec![-20.0; 100];
+        db.extend(std::iter::repeat_n(-90.0, detect::frames(60.0)));
+        db.extend([-20.0; 100]);
+        let env = Envelope { width: 350, db };
+        assert_eq!(quietest(&env), 100..100 + detect::frames(QUIET_MOST));
+        let short = Envelope {
+            width: 350,
+            db: [vec![-20.0; 10], vec![-90.0; 300], vec![-20.0; 10]].concat(),
+        };
+        assert_eq!(quietest(&short), 10..310);
     }
 
     #[test]
