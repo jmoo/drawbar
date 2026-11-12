@@ -17,6 +17,9 @@ pub struct Settings {
     pub kind: Option<String>,
     /// Whether the build cleans the take's regions of its hum and hiss.
     pub clean: Option<bool>,
+    /// The `key=value` lines this version does not know, in their order, written back
+    /// after the ones it does.
+    pub others: Vec<String>,
 }
 
 impl Settings {
@@ -28,6 +31,10 @@ impl Settings {
         if let Some(clean) = self.clean {
             lines.push_str(&format!("clean={}\n", if clean { "on" } else { "off" }));
         }
+        for line in &self.others {
+            lines.push_str(line);
+            lines.push('\n');
+        }
         lines.into_bytes()
     }
 
@@ -38,8 +45,9 @@ impl Settings {
 
 /// The settings `bytes` states, none where it has no `npno` chunk.
 ///
-/// A line this version does not know is skipped, so a later one's settings do not stop
-/// a take from reading; a known one that does not read is refused.
+/// A line this version does not know is kept in [`Settings::others`], so a later one's
+/// settings neither stop a take from reading nor are lost when it saves; a known one
+/// that does not read is refused.
 pub fn read_settings(bytes: &[u8]) -> Result<Settings, Error> {
     let chunks = chunks(bytes)?;
     let Some(chunk) = only(&chunks, ID)? else {
@@ -62,7 +70,7 @@ pub fn read_settings(bytes: &[u8]) -> Result<Settings, Error> {
                     _ => return malformed(format!("npno chunk says clean={value}, not on or off")),
                 })
             }
-            _ => {}
+            _ => settings.others.push(line.to_string()),
         }
     }
     Ok(settings)
@@ -76,6 +84,13 @@ pub fn with_settings(bytes: &[u8], settings: &Settings) -> Result<Vec<u8>, Error
         if kind.is_empty() || kind.contains(['\n', '\r', '=']) {
             return out_of_bounds(format!("kind {kind:?}"), "a name on one line, with no =");
         }
+    }
+    if let Some(line) = settings
+        .others
+        .iter()
+        .find(|line| !line.contains('=') || line.contains(['\n', '\r']))
+    {
+        return out_of_bounds(format!("npno line {line:?}"), "key=value on one line");
     }
     let chunks = chunks(bytes)?;
     only(&chunks, ID)?;
@@ -126,6 +141,7 @@ mod tests {
         let settings = Settings {
             kind: Some("wurlitzer".into()),
             clean: Some(false),
+            ..Settings::default()
         };
         let saved = with_settings(&bytes, &settings).unwrap();
         assert_eq!(read_settings(&saved).unwrap(), settings);
@@ -150,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_a_later_version_wrote_is_skipped_and_a_bad_one_refused() {
+    fn a_line_a_later_version_wrote_does_not_stop_a_read_and_a_bad_one_is_refused() {
         let bytes = take();
         let mut odd = bytes[..].to_vec();
         push_chunk(&mut odd, ID, b"kind=grand\ntempo=fast\n");
@@ -165,8 +181,33 @@ mod tests {
         assert!(read_settings(&bad).is_err());
         let refused = Settings {
             kind: Some("a=b".into()),
-            clean: None,
+            ..Settings::default()
         };
         assert!(with_settings(&bytes, &refused).is_err());
+        for line in ["tempo", "tempo=fast\nmood=calm"] {
+            let refused = Settings {
+                others: vec![line.into()],
+                ..Settings::default()
+            };
+            assert!(with_settings(&bytes, &refused).is_err(), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn lines_a_later_version_wrote_are_saved_again_in_their_order() {
+        let mut odd = take();
+        push_chunk(&mut odd, ID, b"tempo=fast\nkind=grand\nmood=calm\n");
+        let riff = (odd.len() - 8) as u32;
+        odd[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let mut read = read_settings(&odd).unwrap();
+        read.clean = Some(true);
+        let saved = with_settings(&odd, &read).unwrap();
+        let chunks = chunks(&saved).unwrap();
+        let body = only(&chunks, ID).unwrap().unwrap().body.clone();
+        assert_eq!(
+            &saved[body],
+            b"kind=grand\nclean=on\ntempo=fast\nmood=calm\n"
+        );
     }
 }

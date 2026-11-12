@@ -2118,6 +2118,7 @@ mod tests {
         let settings = |kind: &str, clean: bool| wav::Settings {
             kind: Some(kind.into()),
             clean: Some(clean),
+            ..wav::Settings::default()
         };
         let stated = |path: &Path, settings: &wav::Settings| {
             let bytes = std::fs::read(path).unwrap();
