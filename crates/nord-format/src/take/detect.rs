@@ -34,6 +34,10 @@ pub(crate) fn samples(seconds: f64, rate: u32) -> usize {
     (seconds * f64::from(rate)) as usize
 }
 
+/// The level of a silent frame, in dB under full scale: [`Envelope::of`] adds 1e-9 to
+/// each frame's RMS.
+pub const SILENT_DB: f64 = -180.0;
+
 /// The level of a take in [`FRAME`]s: each frame's RMS, in dB under full scale.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Envelope {
@@ -55,8 +59,12 @@ impl Envelope {
         Envelope { width, db }
     }
 
-    /// The take's noise floor: the level 10% of its frames are under.
+    /// The take's noise floor: the level 10% of its frames are under, or a silent
+    /// frame's for a take shorter than one frame.
     pub fn floor(&self) -> f64 {
+        if self.db.is_empty() {
+            return SILENT_DB;
+        }
         percentile(&self.db, 10.0)
     }
 }

@@ -359,4 +359,18 @@ mod tests {
             ["048-b0-v20", "048-b2-v20", "055-b0-v20", "055-b2-v20"]
         );
     }
+
+    #[test]
+    fn a_take_shorter_than_one_envelope_frame_has_no_hits_and_no_noise() {
+        let rate = 35_002;
+        for len in [0, 1, 349] {
+            let x = vec![0.1; len];
+            let plan = plan(&x, rate, &PlanOptions::new(vec![48], 4));
+            assert!(plan.hits.is_empty(), "{len} samples");
+            assert_eq!(plan.missing, [48]);
+            assert_eq!(plan.hum, Err(NoHum::NoQuiet));
+            let noise = Noise::of(&x, rate);
+            assert_eq!((noise.hum, noise.hiss), (None, None));
+        }
+    }
 }
