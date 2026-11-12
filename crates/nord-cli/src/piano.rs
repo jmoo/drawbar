@@ -195,8 +195,8 @@ pub struct BuildArgs {
     /// The kind of instrument the library holds. It sets the damper limit and how the
     /// instrument files the library. Defaults to the kind the takes state, as drawbar's
     /// take editor saves it, and otherwise to grand.
-    #[arg(long, value_enum, conflicts_with = "template")]
-    pub kind: Option<KindName>,
+    #[arg(long, value_parser = kind_parser(), conflicts_with = "template")]
+    pub kind: Option<encode::Kind>,
 
     /// A gain over the whole library, in decibels. Stored in tenths, so the range is
     /// -12.8 to 12.7.
@@ -252,39 +252,19 @@ impl From<FormatName> for Version {
     }
 }
 
-/// The instruments a library can state it holds, at body `0x18`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum KindName {
-    Grand,
-    Upright,
-    ElectricGrand,
-    /// The tine electric pianos.
-    ElectricPiano,
-    /// The reed electric pianos.
-    Wurlitzer,
-    Clavinet,
-    Harpsichord,
-    Digital,
-    /// The hybrid and ballad electric pianos.
-    Hybrid,
-    Mallet,
-}
-
-impl From<KindName> for encode::Kind {
-    fn from(kind: KindName) -> encode::Kind {
+/// The instruments a library can state it holds, at body `0x18`, by [`encode::Kind::word`].
+fn kind_parser() -> impl TypedValueParser<Value = encode::Kind> {
+    use encode::Kind;
+    PossibleValuesParser::new(Kind::ALL.map(|kind| {
+        let value = PossibleValue::new(kind.word());
         match kind {
-            KindName::Grand => encode::Kind::Grand,
-            KindName::Upright => encode::Kind::Upright,
-            KindName::ElectricGrand => encode::Kind::ElectricGrand,
-            KindName::ElectricPiano => encode::Kind::ElectricPiano,
-            KindName::Wurlitzer => encode::Kind::Wurlitzer,
-            KindName::Clavinet => encode::Kind::Clavinet,
-            KindName::Harpsichord => encode::Kind::Harpsichord,
-            KindName::Digital => encode::Kind::DigitalPiano,
-            KindName::Hybrid => encode::Kind::Hybrid,
-            KindName::Mallet => encode::Kind::Mallet,
+            Kind::ElectricPiano => value.help("The tine electric pianos"),
+            Kind::Wurlitzer => value.help("The reed electric pianos"),
+            Kind::Hybrid => value.help("The hybrid and ballad electric pianos"),
+            _ => value,
         }
-    }
+    }))
+    .try_map(|word| Kind::from_word(&word).ok_or_else(|| format!("{word} is not a kind")))
 }
 
 #[derive(Args)]
@@ -1395,11 +1375,7 @@ fn layer_values(files: &[StrokeFile], version: Version) -> Result<Vec<u8>, Strin
 /// The rules a build follows without a template, from the flags that set them, and
 /// `stated`, the kind the takes state, where `--kind` says none.
 fn build_rules(args: &BuildArgs, stated: Option<encode::Kind>) -> Result<encode::Rules, String> {
-    let kind = args
-        .kind
-        .map(encode::Kind::from)
-        .or(stated)
-        .unwrap_or_default();
+    let kind = args.kind.or(stated).unwrap_or_default();
     let tenths = (args.gain * 10.0).round();
     let gain = (tenths.is_finite() && (f64::from(i8::MIN)..=f64::from(i8::MAX)).contains(&tenths))
         .then_some(tenths as i8)
@@ -1763,6 +1739,30 @@ mod tests {
             Ok(_) => panic!("{argv:?} parsed as another noun"),
             Err(e) => Err(e.kind()),
         }
+    }
+
+    #[test]
+    fn kind_takes_each_kind_by_the_word_a_take_states_it_with() {
+        for kind in encode::Kind::ALL {
+            let argv = [
+                "build",
+                "in",
+                "--kind",
+                kind.word(),
+                "--name",
+                "N",
+                "-o",
+                "o.npno",
+            ];
+            let Ok(crate::PianoAction::Build(args)) = piano(&argv) else {
+                panic!("--kind {} did not parse", kind.word());
+            };
+            assert_eq!(args.kind, Some(kind));
+        }
+        assert_eq!(
+            piano(&["build", "in", "--kind", "harp", "--name", "N", "-o", "o.npno"]).err(),
+            Some(clap::error::ErrorKind::InvalidValue)
+        );
     }
 
     /// A root's attack region, `frames` frames of a tone, with a loop ending on its last
