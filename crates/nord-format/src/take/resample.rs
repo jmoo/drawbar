@@ -1,8 +1,13 @@
 //! Rate conversion by a Kaiser-windowed sinc, polyphase over the rates' ratio.
 //!
-//! The filter is the one `scipy.signal.resample_poly` uses by default (cutoff at the
-//! lower Nyquist, ten of the lower rate's periods each side, Kaiser β 5, unit DC gain),
-//! so a take resampled here matches the Python prototype's to float precision.
+//! The filter is `scipy.signal.resample_poly`'s default design: cutoff at the lower
+//! Nyquist, ten of the lower rate's periods each side, Kaiser β 5, unit DC gain. Its
+//! length grows with the ratio, so a take recorded at any rate is band-limited alike.
+//!
+//! The instrument's own bank, [`crate::formats::nsmp::kernel`], is not used here: it
+//! spans a fixed 30 source samples, so the faster the source, the wider its transition
+//! band. From 44.1 kHz it keeps a 21 kHz tone about 38 dB down, folded to 14 kHz, where
+//! this filter keeps it more than 45 dB down.
 
 use crate::error::{out_of_bounds, Error};
 use crate::wav::Audio;
