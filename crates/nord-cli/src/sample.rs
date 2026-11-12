@@ -386,7 +386,7 @@ fn decode_target(
                 if let Some(wavs) = out.as_mut() {
                     let file = wavs.claim(&format!("{stem}-zone{n}.wav"))?;
                     let wav =
-                        npno_prep::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
+                        nord_format::wav::pcm16(&audio.samples, codec::FIELD_RATE, audio.channels)
                             .map_err(|e| format!("{}: {e}", file.display()))?;
                     crate::edit::replace_file(&file, &wav)?;
                     row.push_str(&format!("  -> {}", file.display()));
@@ -407,7 +407,7 @@ fn decode_target(
 }
 
 /// One WAV as this encoder needs it; see [`build::source_pcm`].
-fn pcm_source(path: &Path) -> Result<npno_prep::wav::Pcm16, String> {
+fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     build::source_pcm(&bytes).map_err(|e| named(&e))
@@ -758,7 +758,7 @@ fn stored_path(wav: &Path, project: &Path) -> String {
 
 fn zone(spec: &ZoneSpec, wav: &[u8], project: &Path) -> Result<NewZone, String> {
     let named = |e: String| format!("{}: {e}", spec.wav.display());
-    let audio = npno_prep::wav::read_pcm16(wav).map_err(|e| named(e.to_string()))?;
+    let audio = nord_format::wav::read_pcm16(wav).map_err(|e| named(e.to_string()))?;
     Ok(NewZone {
         path: stored_path(&spec.wav, project),
         sample_rate: audio.rate,
@@ -842,7 +842,7 @@ mod tests {
     use clap::Parser;
 
     fn wav(rate: u32, frames: usize) -> Vec<u8> {
-        npno_prep::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
+        nord_format::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
     }
 
     fn encoded(name: &str) -> Vec<u8> {

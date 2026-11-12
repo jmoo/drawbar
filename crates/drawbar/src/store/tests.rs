@@ -8611,7 +8611,7 @@ fn project_with_wavs(
             let samples: Vec<i16> = (0..SOURCE_RATE as usize)
                 .map(|i| ((i as f64 / pitch).sin() * 12_000.0) as i16)
                 .collect();
-            let wav = npno_prep::wav::mono_pcm16(&samples, SOURCE_RATE).unwrap();
+            let wav = nord_format::wav::mono_pcm16(&samples, SOURCE_RATE).unwrap();
             let at = root.at(on_disk);
             fs::create_dir_all(at.parent().unwrap()).unwrap();
             fs::write(at, wav).unwrap();

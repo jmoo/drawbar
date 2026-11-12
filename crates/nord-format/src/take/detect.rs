@@ -4,7 +4,7 @@
 //! Everything runs on the take as recorded, after a 15 Hz high-pass, in 10 ms frames
 //! of its level. A take is mono here; a stereo one is detected on its channels' mean.
 
-use crate::{fft, filter};
+use crate::take::{fft, filter};
 
 /// Seconds per envelope frame.
 pub const FRAME: f64 = 0.010;

@@ -5,9 +5,9 @@
 //! own pitch. The build cleans every stroke of a take this way, and Detect searches for
 //! loops on the strokes as the build leaves them.
 
-use crate::detect::{self, Envelope};
-use crate::fft;
-use crate::hum::{self, Hum};
+use crate::take::detect::{self, Envelope};
+use crate::take::fft;
+use crate::take::hum::{self, Hum};
 
 /// The size of the hiss follow's transform, 59 ms at 35,002 Hz.
 pub const HISS_N: usize = 2048;
@@ -36,7 +36,7 @@ pub struct Noise {
 }
 
 impl Noise {
-    /// The noise of `mono`, a take at `rate` as [`crate::plan::mono`] reads it.
+    /// The noise of `mono`, a take at `rate` as [`crate::take::plan::mono`] reads it.
     pub fn of(mono: &[f64], rate: u32) -> Noise {
         let x = detect::highpassed(mono, rate);
         let hum = hum::find(&x, rate, &Envelope::of(&x, rate)).ok();
@@ -113,13 +113,13 @@ impl Noise {
         f0: f64,
     ) -> Vec<Vec<f64>> {
         let at = from as f64 / f64::from(self.rate);
-        let highpass = crate::filter::highpass(4, 0.7 * f0, self.rate);
+        let highpass = crate::take::filter::highpass(4, 0.7 * f0, self.rate);
         let channels: Vec<Vec<f64>> = channels
             .iter()
             .map(|x| {
                 let y = match &self.hum {
                     Some(hum) => hum.under(x, self.rate, at, f0),
-                    None => crate::filter::run(&highpass, x),
+                    None => crate::take::filter::run(&highpass, x),
                 };
                 y[skip..].to_vec()
             })

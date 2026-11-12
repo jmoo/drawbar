@@ -1,6 +1,6 @@
 //! Which note each hit plays, and which hits become a note's velocity layers.
 
-use crate::detect::Hit;
+use crate::take::detect::Hit;
 
 /// How far `pitch` is from `note`'s pitch class, in semitones, at most 6.
 fn class_distance(pitch: f64, note: u8) -> f64 {

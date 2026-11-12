@@ -11,7 +11,7 @@ pub use pcm16::{
     dithered, mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout,
 };
 
-use crate::{malformed, out_of_bounds, Error};
+use crate::error::{malformed, out_of_bounds, Error};
 
 /// How each sample is stored. Integer samples of 8 bits are unsigned, wider ones signed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,9 +191,7 @@ fn format_tag(fmt: &[u8], bits: u16) -> Result<u16, Error> {
     }
     let sub_format = &extension[6..22];
     if sub_format[2..] != SUBTYPE_TAIL {
-        return Err(Error::Unsupported(
-            "the extensible sub-format is not a KSDATAFORMAT_SUBTYPE GUID".into(),
-        ));
+        return malformed("the extensible sub-format is not a KSDATAFORMAT_SUBTYPE GUID");
     }
     Ok(u16_at(sub_format, 0))
 }
@@ -214,15 +212,15 @@ fn read_format(fmt: &[u8]) -> Result<Format, Error> {
         (WAVE_FORMAT_PCM, 8 | 16 | 24 | 32) => Encoding::Int { bits },
         (WAVE_FORMAT_IEEE_FLOAT, 32 | 64) => Encoding::Float { bits },
         (tag @ (WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT), bits) => {
-            return Err(Error::Unsupported(format!(
+            return malformed(format!(
                 "{bits}-bit samples in format {tag}; PCM is read at 8, 16, 24 or 32 bits, \
                  float at 32 or 64"
-            )))
+            ))
         }
         (tag, _) => {
-            return Err(Error::Unsupported(format!(
+            return malformed(format!(
                 "format {tag} is neither PCM (1) nor IEEE float (3)"
-            )))
+            ))
         }
     };
     if channels == 0 {

@@ -4,9 +4,9 @@
 //! was 50 Hz hum. Hum lines stand out of the hiss, and the mains frequency wanders, so it
 //! is tracked through the take.
 
-use crate::detect::{self, Envelope};
-use crate::fft;
-use crate::filter;
+use crate::take::detect::{self, Envelope};
+use crate::take::fft;
+use crate::take::filter;
 
 /// Lines are notched up to this frequency, where a take's strong ones lie.
 pub const TOP_HZ: f64 = 1_250.0;
@@ -282,8 +282,8 @@ impl Hum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::tests::take;
-    use crate::detect::FRAME;
+    use crate::take::detect::tests::take;
+    use crate::take::detect::FRAME;
 
     /// A take with hum on the 3rd and 5th harmonics of `mains`, which wanders 0.05 Hz.
     fn hummed(rate: u32, seconds: f64, mains: f64) -> Vec<f64> {

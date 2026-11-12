@@ -199,7 +199,7 @@ impl build::Source for Synthetic {
     fn wav(&self, file: &nsmpproj::AudioFile) -> Result<Cow<'_, [u8]>, build::Unavailable> {
         let frames = *self.0.get(&file.id).ok_or(build::Unavailable::Missing)?;
         let audio: Vec<i16> = (0..frames).map(|k| (k % 512) as i16 * 16 - 4096).collect();
-        npno_prep::wav::mono_pcm16(&audio, nsmp::codec::SOURCE_RATE)
+        nord_format::wav::mono_pcm16(&audio, nsmp::codec::SOURCE_RATE)
             .map(Cow::Owned)
             .map_err(|e| build::Unavailable::Io(std::io::Error::other(e)))
     }

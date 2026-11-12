@@ -81,10 +81,6 @@ pub enum Error {
     #[error(transparent)]
     Parse(#[from] ParseError),
 
-    /// A WAV that does not read, or audio that cannot be written as one.
-    #[error(transparent)]
-    Wav(#[from] npno_prep::Error),
-
     #[cfg(feature = "bundle")]
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),
@@ -118,4 +114,19 @@ pub(crate) fn try_zeroed<T: Clone + Default>(
 /// A zeroed buffer of `len` bytes, failing as [`try_with_capacity`] does.
 pub(crate) fn try_vec(len: usize) -> std::result::Result<Vec<u8>, ParseError> {
     try_zeroed(len, "bytes")
+}
+
+/// Bytes that do not form what they claim to, or a well-formed file in an encoding
+/// this crate does not read.
+pub(crate) fn malformed<T>(why: impl Into<String>) -> Result<T> {
+    Err(ParseError::AssertFail(why.into()).into())
+}
+
+/// `value` outside `bound`, as [`ParseError::OutOfBounds`].
+pub(crate) fn out_of_bounds<T>(value: impl Into<String>, bound: impl Into<String>) -> Result<T> {
+    Err(ParseError::OutOfBounds {
+        value: value.into(),
+        bound: bound.into(),
+    }
+    .into())
 }

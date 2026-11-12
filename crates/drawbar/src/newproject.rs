@@ -22,8 +22,8 @@ use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
 use nord_format::note;
+use nord_format::wav::{Loop, Pcm16};
 use nord_format::Entity;
-use npno_prep::wav::{Loop, Pcm16};
 
 use crate::document::controls::fits;
 use crate::document::note_picker;
@@ -117,7 +117,7 @@ impl Making {
 pub type Source = Result<Pcm16, String>;
 
 fn read(bytes: &[u8]) -> Source {
-    npno_prep::wav::read_pcm16(bytes).map_err(|e| e.to_string())
+    nord_format::wav::read_pcm16(bytes).map_err(|e| e.to_string())
 }
 
 /// The audio an instrument can be encoded from, or which of the encoder's limits it hit:
@@ -1043,7 +1043,7 @@ mod tests {
     fn every_refusal_says_which_limit_it_hit() {
         let refused = |samples: &[i16], rate, channels| {
             encodable(&read(
-                &npno_prep::wav::pcm16(samples, rate, channels).unwrap(),
+                &nord_format::wav::pcm16(samples, rate, channels).unwrap(),
             ))
             .err()
         };
@@ -1111,7 +1111,7 @@ mod tests {
     }
 
     fn wav(rate: u32, frames: usize) -> Vec<u8> {
-        npno_prep::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
+        nord_format::wav::mono_pcm16(&vec![0i16; frames], rate).unwrap()
     }
 
     #[test]
@@ -1297,7 +1297,7 @@ mod tests {
         let samples: Vec<i16> = (0..frames)
             .map(|n| ((n as f64 * 0.05).sin() * 8_000.0) as i16)
             .collect();
-        npno_prep::wav::mono_pcm16(&samples, nord_format::formats::npno::codec::RATE).unwrap()
+        nord_format::wav::mono_pcm16(&samples, nord_format::formats::npno::codec::RATE).unwrap()
     }
 
     fn piano_draft(stems: &[&str]) -> Draft {
@@ -1465,7 +1465,7 @@ mod tests {
     /// A WAV's `smpl` loop reaches the built stroke.
     #[test]
     fn a_wav_with_a_loop_builds_a_stroke_that_loops_there() {
-        let mut looped = npno_prep::wav::mono_pcm16(
+        let mut looped = nord_format::wav::mono_pcm16(
             &vec![1_000i16; 10_000],
             nord_format::formats::npno::codec::RATE,
         )
@@ -1523,7 +1523,7 @@ mod tests {
     /// the takes still there.
     #[test]
     fn what_the_coder_refuses_comes_back_as_the_dialogs_own_line() {
-        let stereo = npno_prep::wav::pcm16(
+        let stereo = nord_format::wav::pcm16(
             &vec![1_000i16; 6_000],
             nord_format::formats::npno::codec::RATE,
             2,

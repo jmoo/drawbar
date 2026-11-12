@@ -94,7 +94,7 @@ use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
-use npno_prep::wav::{self, Play};
+use crate::wav::{self, Play};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 

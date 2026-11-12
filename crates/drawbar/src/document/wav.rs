@@ -7,7 +7,7 @@
 use std::ops::RangeInclusive;
 
 use eframe::egui;
-use npno_prep::wav::{self, Pcm16};
+use nord_format::wav::{self, Pcm16};
 
 use super::controls::Sets;
 use super::header::{Body, Cell};

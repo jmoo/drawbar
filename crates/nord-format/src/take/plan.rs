@@ -1,11 +1,11 @@
 //! A take's hits as the regions of a library: every detector in turn.
 
-use crate::clean::{self, Noise};
-use crate::cut::{self, CutOptions, Cuts, Take};
-use crate::detect::{self, Envelope, Hit};
-use crate::hum::{self, Hum, NoHum};
-use crate::layers::{self, Choice, Order};
-use crate::sustain::{self, Sustain, SustainOptions};
+use crate::take::clean::{self, Noise};
+use crate::take::cut::{self, CutOptions, Cuts, Take};
+use crate::take::detect::{self, Envelope, Hit};
+use crate::take::hum::{self, Hum, NoHum};
+use crate::take::layers::{self, Choice, Order};
+use crate::take::sustain::{self, Sustain, SustainOptions};
 use crate::wav::{Audio, Loop, Region};
 
 /// What [`plan`] is told about a take.
@@ -293,7 +293,7 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::tests::take;
+    use crate::take::detect::tests::take;
 
     #[test]
     fn a_take_becomes_a_region_per_stroke_named_by_its_note_and_layer() {

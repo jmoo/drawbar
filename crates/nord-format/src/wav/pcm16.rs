@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use super::marks::read_loops;
 use super::{chunks, layout, only, riff, to_int, Encoding, Format, Loop};
-use crate::Error;
+use crate::error::{malformed, Error};
 
 /// Uncompressed 16-bit PCM read off a RIFF/WAVE file.
 #[derive(Debug)]
@@ -104,14 +104,10 @@ pub fn pcm16_layout(bytes: &[u8]) -> Result<Pcm16Layout, Error> {
     match found.format.encoding {
         Encoding::Int { bits: 16 } => {}
         Encoding::Int { bits } => {
-            return Err(Error::Unsupported(format!(
-                "{bits}-bit samples; only 16-bit PCM is read"
-            )))
+            return malformed(format!("{bits}-bit samples; only 16-bit PCM is read"))
         }
         Encoding::Float { bits } => {
-            return Err(Error::Unsupported(format!(
-                "{bits}-bit float samples; only 16-bit PCM is read"
-            )))
+            return malformed(format!("{bits}-bit float samples; only 16-bit PCM is read"))
         }
     }
     let frames = found.frames();

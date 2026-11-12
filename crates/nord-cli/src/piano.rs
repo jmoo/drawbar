@@ -13,9 +13,9 @@ use nord_format::formats::npno::{
     self, codec, encode, Bank, Change, Layers, Library, Version, UNCOVERED,
 };
 use nord_format::note;
+use nord_format::take::clean::{self, Noise};
+use nord_format::wav;
 use nord_format::Entity;
-use npno_prep::clean::{self, Noise};
-use npno_prep::wav;
 
 use crate::edit::{write_edit, write_file};
 use crate::ui::Ui;
@@ -605,7 +605,7 @@ pub fn decode(ui: &Ui, args: DecodeArgs) -> Result<(), String> {
 
     let (index, stroke) = chosen;
     let audio = codec::decode(stroke, library.channels()).map_err(|e| e.to_string())?;
-    let wav = npno_prep::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
+    let wav = nord_format::wav::pcm16(&audio.interleaved(), codec::RATE, library.channels())
         .map_err(|e| e.to_string())?;
     write_file(ui, &args.out, &wav)?;
 
@@ -1178,7 +1178,7 @@ fn pitched_roots<'a>(files: &[StrokeFile<'a>]) -> Result<Vec<StrokeFile<'a>>, St
                 continue;
             };
             let named = |e: &dyn std::fmt::Display| format!("{}: {e}", file.whose());
-            let pitched = npno_prep::resample::pitched(
+            let pitched = nord_format::take::resample::pitched(
                 &wav::Audio {
                     rate: take.rate,
                     channels: take.channels,
@@ -1481,7 +1481,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         false => {
             let mut files = Vec::new();
             for (path, (audio, marks)) in args.input.iter().zip(&takes) {
-                let noise = Noise::of(&npno_prep::plan::mono(audio), audio.rate);
+                let noise = Noise::of(&nord_format::take::plan::mono(audio), audio.rate);
                 files.extend(region_strokes(path, audio, marks, &noise)?);
             }
             let pitched = match (&donor, version) {
@@ -1895,7 +1895,7 @@ mod tests {
     /// cleaned and their loops shaped as a take's build does it.
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
-        let noise = Noise::of(&npno_prep::plan::mono(take), take.rate);
+        let noise = Noise::of(&nord_format::take::plan::mono(take), take.rate);
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
             let (root, bank, layer) = parse_stroke_name(&found.label, Stem::None).unwrap();
             let frames = noise.stroke(

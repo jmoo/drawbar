@@ -4,7 +4,7 @@
 //! and [`fade_out`] shape the stroke's audio from those marks, as the build reads it,
 //! so a mark moved in an editor is shaped the same way.
 
-use crate::detect::{self, Envelope, FRAME};
+use crate::take::detect::{self, Envelope, FRAME};
 use crate::wav::{Loop, Play};
 
 /// How [`find`] places a loop or a fade, and how the build shapes them.

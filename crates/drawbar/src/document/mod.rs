@@ -1425,7 +1425,7 @@ fn hear(
             crate::audio::rate(semitones) * clock,
         ),
         Hear::Save(name) => {
-            match npno_prep::wav::pcm16(samples, rate, channels) {
+            match nord_format::wav::pcm16(samples, rate, channels) {
                 Ok(bytes) => workspace.save_bytes(name, bytes),
                 Err(e) => {
                     log.error(e.to_string());
@@ -3293,7 +3293,7 @@ mod tests {
     fn an_applied_gain_is_an_edit_that_reverts() {
         let bytes = wav_bytes();
         let peak = |bytes: &[u8]| {
-            let pcm = npno_prep::wav::read_pcm16(bytes).unwrap();
+            let pcm = nord_format::wav::read_pcm16(bytes).unwrap();
             pcm.samples.iter().map(|sample| sample.unsigned_abs()).max()
         };
         let mut open = Open::file("Marimba hit.wav", bytes.clone());
@@ -3328,7 +3328,7 @@ mod tests {
 
     #[test]
     fn a_zone_decodes_on_request_and_exports_under_the_instruments_name() {
-        let source = npno_prep::wav::read_pcm16(&wav_bytes()).unwrap();
+        let source = nord_format::wav::read_pcm16(&wav_bytes()).unwrap();
         let options = nord_format::formats::nsmp::encode::Options::new("Marimba").root_key(48);
         let bytes = nord_format::formats::nsmp::encode::instrument(&source.samples, &options)
             .unwrap()

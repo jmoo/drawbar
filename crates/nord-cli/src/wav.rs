@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use nord_format::formats::npno::Bank;
-use npno_prep::sustain::{self, SustainOptions};
-use npno_prep::wav::{self, Audio, Loop, Marks, Pcm16};
+use nord_format::take::sustain::{self, SustainOptions};
+use nord_format::wav::{self, Audio, Loop, Marks, Pcm16};
 
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
 /// Neither format has a stroke that holds more than two channels.

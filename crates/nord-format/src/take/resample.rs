@@ -4,8 +4,8 @@
 //! lower Nyquist, ten of the lower rate's periods each side, Kaiser β 5, unit DC gain),
 //! so a take resampled here matches the Python prototype's to float precision.
 
+use crate::error::{out_of_bounds, Error};
 use crate::wav::Audio;
-use crate::{out_of_bounds, Error};
 
 const BETA: f64 = 5.0;
 const HALF_PERIODS: u64 = 10;

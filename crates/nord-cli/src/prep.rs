@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
-use npno_prep::layers::{Choice, Order};
-use npno_prep::plan::{self, Fate, PlanOptions, SetLayer};
-use npno_prep::sustain::Sustain;
-use npno_prep::wav;
+use nord_format::take::layers::{Choice, Order};
+use nord_format::take::plan::{self, Fate, PlanOptions, SetLayer};
+use nord_format::take::sustain::Sustain;
+use nord_format::wav;
 
 use crate::edit::write_file;
 use crate::ui::Ui;
@@ -186,7 +186,7 @@ fn prep_take(
         )));
     }
     let take = match resampled {
-        true => npno_prep::resample::resample(&take, codec::RATE).map_err(|e| named(&e))?,
+        true => nord_format::take::resample::resample(&take, codec::RATE).map_err(|e| named(&e))?,
         false => take,
     };
     let plan = plan::plan(&plan::mono(&take), take.rate, options);
@@ -316,7 +316,7 @@ fn list(ui: &Ui, plan: &plan::Plan) {
         ui.out(format!(
             "  {:>4} {:>7.2}s  {:>4} {:>6} {:>6.1}  {:<24} {:>7} {:>7}  {}",
             hit.number,
-            hit.onset as f64 * npno_prep::detect::FRAME,
+            hit.onset as f64 * nord_format::take::detect::FRAME,
             planned.note.map_or("-".into(), note::name),
             hit.pitch.map_or(
                 "-".into(),

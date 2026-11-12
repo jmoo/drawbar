@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::{chunks, layout, only, u32_at, Chunk};
-use crate::{malformed, out_of_bounds, Error};
+use crate::error::{malformed, out_of_bounds, Error};
 
 /// A named span of frames: a cue point, its `labl` text and its `ltxt` length. A cue
 /// point with no length is a region of no frames.
@@ -123,10 +123,10 @@ fn cue_points(cue: &[u8]) -> Result<Vec<(u32, u32)>, Error> {
         .map(|point| {
             let id = u32_at(point, 0);
             if &point[8..12] != b"data" {
-                return Err(Error::Unsupported(format!(
+                return malformed(format!(
                     "cue point {id} sits in a {} chunk; only points in the data chunk are read",
                     String::from_utf8_lossy(&point[8..12])
-                )));
+                ));
             }
             if !seen.insert(id) {
                 return malformed(format!("cue id {id} is declared twice"));

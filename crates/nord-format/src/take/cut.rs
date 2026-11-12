@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::detect::{self, frames, samples, Envelope, Hit};
+use crate::take::detect::{self, frames, samples, Envelope, Hit};
 
 /// How [`cut`] places a hit's strokes.
 #[derive(Clone, Debug, PartialEq)]
@@ -196,8 +196,8 @@ pub fn cut(take: &Take<'_>, hit: &Hit, options: &CutOptions) -> Cuts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::tests::take;
-    use crate::hum;
+    use crate::take::detect::tests::take;
+    use crate::take::hum;
 
     fn cuts_of(rate: u32, notes: &[(f64, f64, f64, f64)], seconds: f64) -> Vec<Cuts> {
         let x = detect::highpassed(&take(rate, seconds, notes, -80.0), rate);
