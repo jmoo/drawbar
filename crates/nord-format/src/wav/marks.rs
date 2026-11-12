@@ -301,7 +301,7 @@ pub fn read_marks(bytes: &[u8]) -> Result<Marks, Error> {
     Ok(Marks { regions, loops })
 }
 
-fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
+pub(super) fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
     out.extend_from_slice(id);
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(body);

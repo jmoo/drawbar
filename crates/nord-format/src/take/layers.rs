@@ -1,6 +1,34 @@
-//! Which note each hit plays, and which hits become a note's velocity layers.
+//! Which note each hit plays, which hits become a note's velocity layers, and how loud
+//! a stroke plays.
 
 use crate::take::detect::Hit;
+
+/// The peak every region of a take is brought to before it is rounded to 16 bits, in
+/// dB under full scale: the prototype's, which left room for its loop crossfades.
+pub const TAKE_PEAK_DB: f64 = -13.0;
+
+/// How loud a stroke plays, in decibels over a steady sample of one unit, measured as
+/// the encoder measures one: the most power any 10 ms of its first half second
+/// averages, on its louder channel. `frames` are `channels` interleaved at `rate`, and
+/// silence has no level.
+pub fn level(frames: &[f32], channels: usize, rate: u32) -> Option<f64> {
+    let channels = channels.max(1);
+    let span = (frames.len() / channels).min(rate as usize / 2);
+    let width = span.min(rate as usize / 100).max(1);
+    let loudest = (0..channels)
+        .map(|channel| {
+            let power = |frame: usize| f64::from(frames[frame * channels + channel]).powi(2);
+            let mut sum: f64 = (0..width.min(span)).map(power).sum();
+            let mut most = sum;
+            for frame in width..span {
+                sum += power(frame) - power(frame - width);
+                most = most.max(sum);
+            }
+            most / width as f64
+        })
+        .fold(0.0, f64::max);
+    (loudest > 0.0).then(|| 10.0 * loudest.log10())
+}
 
 /// How far `pitch` is from `note`'s pitch class, in semitones, at most 6.
 fn class_distance(pitch: f64, note: u8) -> f64 {

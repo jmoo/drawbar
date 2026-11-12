@@ -189,6 +189,27 @@ impl Kind {
         self as u8
     }
 
+    /// The kind's name as `nord piano build --kind` takes it and a take's settings
+    /// state it: `wurlitzer`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Kind::ElectricGrand => "electric-grand",
+            Kind::ElectricPiano => "electric-piano",
+            Kind::Wurlitzer => "wurlitzer",
+            Kind::Clavinet => "clavinet",
+            Kind::Grand => "grand",
+            Kind::Upright => "upright",
+            Kind::Harpsichord => "harpsichord",
+            Kind::DigitalPiano => "digital",
+            Kind::Hybrid => "hybrid",
+            Kind::Mallet => "mallet",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Kind> {
+        Self::ALL.into_iter().find(|kind| kind.word() == word)
+    }
+
     /// The [`Rules::damper_top`] this kind of instrument has. The acoustic pianos damp up
     /// to a key well below the top of the keyboard and let the rest ring, the reed pianos
     /// damp up to a higher key, and everything else damps every key.
@@ -313,7 +334,25 @@ impl Rules {
             loop_fade: kind.loop_fade(),
         }
     }
+
+    /// Decibels per second the instrument fades a stroke of `bank` by from note-on until
+    /// its loop, on top of the stroke's own decay, played on its own `root`: the rate of
+    /// the [`DECAYS`] ladder [`build`] states.
+    pub fn held_fade(&self, bank: Bank, root: u8) -> f64 {
+        ladder_rate(self, bank, root)
+    }
+
+    /// Decibels per second a held loop on `root` fades by from the loop's start until
+    /// the key is released, as [`build`] states it.
+    pub fn loop_fading(&self, root: u8) -> f64 {
+        per_second((self.loop_fade, self.kind.fade_curve().1), root)
+    }
 }
+
+/// Decibels per second the instrument fades a sounding attack or resonance stroke by at
+/// key-up, under the fade [`build`] states: 40 dB in about 30 ms, which takes a released
+/// note away without a click. Confirmed on hardware.
+pub const KEY_UP_FADE: f64 = 40.0 / 0.03;
 
 impl Default for Rules {
     fn default() -> Rules {
@@ -988,7 +1027,7 @@ const RELEASE_NEAREST: f64 = 14.0;
 /// lifted towards [`RELEASE_NEAREST`] by at most [`RELEASE_LIFT`]. One recorded nearer
 /// than that keeps its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
 /// down and could not be heard; up to about 49 dB under played fine (heard on a Stage 4).
-fn release_under(recorded: f64) -> f64 {
+pub fn release_under(recorded: f64) -> f64 {
     recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
 }
 

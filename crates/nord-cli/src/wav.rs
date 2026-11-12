@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use nord_format::formats::npno::Bank;
-use nord_format::take::sustain::{self, SustainOptions};
-use nord_format::wav::{self, Audio, Loop, Marks, Pcm16};
+use nord_format::take::sustain;
+use nord_format::wav::{self, Audio, Loop, Marks, Pcm16, Settings};
 
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
 /// Neither format has a stroke that holds more than two channels.
@@ -30,15 +30,16 @@ pub fn pcm16(path: &Path) -> Result<Pcm16, String> {
     Ok(source)
 }
 
-/// A take as a build reads it: every sample, mono or stereo, and the regions and loops
-/// it declares.
-pub fn take(path: &Path) -> Result<(Audio, Marks), String> {
+/// A take as a build reads it: every sample, mono or stereo, the regions and loops it
+/// declares, and the settings the take editor saved in it.
+pub fn take(path: &Path) -> Result<(Audio, Marks, Settings), String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     let audio = wav::read(&bytes).map_err(|e| named(&e))?;
     stroke_channels(audio.channels).map_err(|e| named(&e))?;
     let marks = wav::read_marks(&bytes).map_err(|e| named(&e))?;
-    Ok((audio, marks))
+    let settings = wav::read_settings(&bytes).map_err(|e| named(&e))?;
+    Ok((audio, marks, settings))
 }
 
 /// `frames`, a region of `take` holding a stroke of `bank`, shaped, raised by `gain`
@@ -59,27 +60,14 @@ pub fn cut(
     seed: u64,
 ) -> Pcm16 {
     let channels = usize::from(take.channels.max(1));
-    let options = SustainOptions::default();
-    let mut shaped = frames.to_vec();
-    let (fade_in, fade_out) = match bank {
-        Bank::Release => (
-            sustain::RELEASE_FADE_IN,
-            sustain::RELEASE_FADE_OUT
-                .min((frames.len() / channels) as f64 / f64::from(take.rate) / 2.0),
-        ),
-        Bank::Attack | Bank::Resonance => (sustain::ATTACK_FADE_IN, 0.0),
-    };
-    sustain::fade_edges(&mut shaped, channels, take.rate, fade_in, fade_out);
-    let mut sample_loop = sample_loop;
-    match (&sample_loop, fade) {
-        (Some(held), _) => sustain::even_loop(&mut shaped, channels, take.rate, held, &options),
-        (None, Some(fade)) => {
-            let (faded, silent) =
-                sustain::fade_out(&shaped, channels, take.rate, fade as usize, &options);
-            (shaped, sample_loop) = (faded, Some(silent));
-        }
-        (None, None) => {}
-    }
+    let (mut shaped, sample_loop) = sustain::shaped(
+        frames,
+        channels,
+        take.rate,
+        bank == Bank::Release,
+        sample_loop,
+        fade,
+    );
     for v in &mut shaped {
         *v *= gain;
     }

@@ -3,6 +3,7 @@
 
 mod marks;
 mod pcm16;
+mod settings;
 
 use std::ops::Range;
 
@@ -10,6 +11,7 @@ pub use marks::{read_marks, with_marks, Loop, Marks, Play, Region};
 pub use pcm16::{
     dithered, mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout,
 };
+pub use settings::{read_settings, with_settings, Settings};
 
 use crate::error::{malformed, out_of_bounds, Error};
 

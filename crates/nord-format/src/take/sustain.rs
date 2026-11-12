@@ -259,6 +259,44 @@ pub fn fade_edges(frames: &mut [f32], channels: usize, rate: u32, fade_in: f64, 
     }
 }
 
+/// `frames`, a region of `channels` interleaved at `rate`, shaped as the build shapes a
+/// stroke from its marks, with the loop it then plays, counted from its start.
+///
+/// An attack fades in over [`ATTACK_FADE_IN`], and a `release` over [`RELEASE_FADE_IN`],
+/// fading out over at most [`RELEASE_FADE_OUT`] and half its length. A looped region's
+/// loop is evened out and crossfaded ([`even_loop`]). A region that fades from frame
+/// `fade` fades to silence and loops on silence after it ([`fade_out`]).
+pub fn shaped(
+    frames: &[f32],
+    channels: usize,
+    rate: u32,
+    release: bool,
+    sample_loop: Option<Loop>,
+    fade: Option<u32>,
+) -> (Vec<f32>, Option<Loop>) {
+    let options = SustainOptions::default();
+    let mut shaped = frames.to_vec();
+    let (edge_in, edge_out) = match release {
+        true => (
+            RELEASE_FADE_IN,
+            RELEASE_FADE_OUT.min((frames.len() / channels) as f64 / f64::from(rate) / 2.0),
+        ),
+        false => (ATTACK_FADE_IN, 0.0),
+    };
+    fade_edges(&mut shaped, channels, rate, edge_in, edge_out);
+    match (&sample_loop, fade) {
+        (Some(held), _) => {
+            even_loop(&mut shaped, channels, rate, held, &options);
+            (shaped, sample_loop)
+        }
+        (None, Some(fade)) => {
+            let (faded, silent) = fade_out(&shaped, channels, rate, fade as usize, &options);
+            (faded, Some(silent))
+        }
+        (None, None) => (shaped, None),
+    }
+}
+
 /// How long the silence a dying stroke loops on is, in seconds.
 const SILENT_LOOP: f64 = 0.1;
 

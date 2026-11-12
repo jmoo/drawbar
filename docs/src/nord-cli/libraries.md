@@ -63,6 +63,8 @@ action's knock with it. A note below F4 also has its strongest hum lines notched
 where they lie clear of the note's own partials. As the note dies, a low-pass
 follows its top end down, so the hiss above it goes with it, while the strike
 keeps all its treble. Nothing is touched where the note stands over the hiss.
+A take whose **Clean audio** drawbar's take editor turned off is built as
+recorded, with none of this.
 
 A take's strokes are shaped as they are built. Each attack fades in over 0.3 ms,
 and each release over 5 ms, fading out over its last 40 ms. A looped region's loop
@@ -174,7 +176,8 @@ nearest frame of the resampled audio.
 Whatever the audio does not decide, such as decay and per-note tables, comes from
 `--template` when you give one, and each stroke's level follows its layer. Without a
 template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
-values, and each stroke decays from note-on as the instrument's own pianos of that
+values; without `--kind`, a take's own kind, as drawbar's take editor saves it,
+decides, and grand otherwise (takes that state different kinds are refused), and each stroke decays from note-on as the instrument's own pianos of that
 kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
 level of its root's loudest layer, softer layers a little louder as that kind's are,
 up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
