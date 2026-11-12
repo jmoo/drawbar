@@ -1301,11 +1301,7 @@ fn region_strokes<'a>(
         let owner = out
             .iter_mut()
             .find(|file| file.name() == stroke)
-            .ok_or_else(|| {
-                refuse(&format!(
-                    "fades no stroke: no region is labeled {stroke:?}"
-                ))
-            })?;
+            .ok_or_else(|| refuse(&format!("fades no stroke: no region is labeled {stroke:?}")))?;
         let Source::Region {
             region,
             sample_loop,
