@@ -178,7 +178,7 @@ Whatever the audio does not decide, such as decay and per-note tables, comes fro
 `--template` when you give one, and each stroke's level follows its layer. Without a
 template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
 values; without `--kind`, a take's own kind, as drawbar's take editor saves it,
-decides, and grand otherwise (takes that state different kinds are refused), and each stroke decays from note-on as the instrument's own pianos of that
+decides, and grand otherwise (takes that state different kinds need `--kind`), and each stroke decays from note-on as the instrument's own pianos of that
 kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
 level of its root's loudest layer, softer layers a little louder as that kind's are,
 up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft

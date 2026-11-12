@@ -1482,7 +1482,12 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             })
             .collect::<Result<Vec<_>, String>>()?,
     };
-    let rules = build_rules(&args, stated_kind(&args.input, &takes)?)?;
+    // --kind, or a template's kind, decides over what the takes state.
+    let stated = match args.kind.is_none() && args.template.is_none() {
+        true => stated_kind(&args.input, &takes)?,
+        false => None,
+    };
+    let rules = build_rules(&args, stated)?;
     let template = match &args.template {
         Some(path) => {
             refuse_in_place(path, &args.out)?;
@@ -2190,13 +2195,32 @@ mod tests {
         );
 
         let other = dir.join("other.wav");
-        write_take(&other, &audio, &marks);
+        let softer = wav::Marks {
+            regions: vec![region(100, 7_900, "060-b0-l01")],
+            loops: Vec::new(),
+        };
+        write_take(&other, &audio, &softer);
         stated(&other, &settings("grand", true));
         let refused = built(&[&path, &other], &dir.join("both.npno")).unwrap_err();
         assert!(
             refused.contains("electric-piano") && refused.contains("grand"),
             "{refused}"
         );
+        let template = dir.join("raw.npno");
+        let out = dir.join("chosen.npno");
+        for chosen in [
+            ["--kind", "grand"],
+            ["--template", template.to_str().unwrap()],
+        ] {
+            let mut words = vec!["build", path.to_str().unwrap(), other.to_str().unwrap()];
+            words.extend(["--name", "Take", "-o", out.to_str().unwrap()]);
+            words.extend(chosen);
+            let Ok(crate::PianoAction::Build(args)) = piano(&words) else {
+                panic!("build did not parse");
+            };
+            let both = build(&Ui::piped(), args);
+            assert!(both.is_ok(), "{chosen:?} decides the kind: {both:?}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
