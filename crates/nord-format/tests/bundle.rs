@@ -113,12 +113,47 @@ fn a_backup_manifest_stands_in_for_a_bundles() {
     let backup = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<backup file_version=\"1\"/>\n";
     let bytes = archive(&[("Bank 1/One.ne5p", &program(0)), ("meta.xml", backup)]);
     assert_eq!(read(bytes).unwrap().programs().len(), 1);
-    assert!(!manifest::is_backup(
-        b"<?xml version=\"1.0\"?>\n<bundle/>\n"
-    ));
-    assert!(!manifest::is_backup(
-        b"<?xml version=\"1.0\"?>\n<backup a=\"1\"/>\n<backup a=\"2\"/>\n"
-    ));
+}
+
+#[test]
+fn a_backup_manifest_is_an_xml_declaration_and_one_backup_element() {
+    for manifest in [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<backup file_version=\"1\" backup_format_version=\"1\" product_id=\"41\"/>\n",
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<backup/>\n",
+        "<?xml version=\"1.0\"?>\n<backup file_version=\"1\"/>\n",
+    ] {
+        assert!(manifest::is_backup(manifest.as_bytes()), "{manifest:?}");
+    }
+}
+
+#[test]
+fn a_malformed_backup_manifest_is_refused() {
+    for manifest in [
+        "<?xml bogus?>\n<backup broken/>\n",
+        "<?xml version=\"1.0\"?>\n<backup broken/>\n",
+        "<?xml bogus?>\n<backup/>\n",
+        "<?xml version=\"2.0\"?>\n<backup/>\n",
+        "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<backup/>\n",
+        "<?xml encoding=\"UTF-8\" version=\"1.0\"?>\n<backup/>\n",
+        "<backup/>\n",
+        "<?xml version=\"1.0\"?>\n<bundle/>\n",
+        "<?xml version=\"1.0\"?>\n<backups/>\n",
+        "<?xml version=\"1.0\"?>\n<backup a=\"1\"/>\n<backup a=\"2\"/>\n",
+        "<?xml version=\"1.0\"?>\n<backup a=\"1\">\n",
+        "<?xml version=\"1.0\"?>\n<backup a=\"1/>\n",
+        "<?xml version=\"1.0\"?>\n<backup a=\"<\"/>\n",
+        "<?xml version=\"1.0\"?>\n<backup/>\ntrailing",
+    ] {
+        assert!(!manifest::is_backup(manifest.as_bytes()), "{manifest:?}");
+    }
+}
+
+/// `nord inspect` reads a bundle through this check, and `nord bundle unpack` runs it.
+#[test]
+fn an_archive_whose_backup_manifest_is_malformed_is_refused() {
+    let broken = b"<?xml bogus?>\n<backup broken/>\n";
+    let bytes = archive(&[("Bank 1/One.ne5p", &program(0)), ("meta.xml", broken)]);
+    assert!(read(bytes).is_err(), "a malformed backup manifest was read");
 }
 
 /// The manifest describes the archive. Reporting it as skipped would make every bundle

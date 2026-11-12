@@ -131,25 +131,24 @@ pub fn check(r: &mut (impl Read + Seek), directory: &Directory) -> Result<(), Er
     Ok(())
 }
 
-/// Whether `bytes` is the manifest a backup carries in place of a bundle's: an XML
-/// declaration, then one empty `<backup>` element, each on a line of its own. Its
-/// attributes are not read.
+/// Whether `bytes` is the manifest a backup carries in place of a bundle's: an XML 1.0
+/// declaration, UTF-8 if it names an encoding, then one empty `<backup>` element, each
+/// on a line of its own. The element's attributes are parsed as a bundle's are, and
+/// their values are not read.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 pub fn is_backup(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(mut rest) = std::str::from_utf8(bytes) else {
         return false;
     };
-    let mut lines = text.split_terminator('\n');
-    match (lines.next(), lines.next(), lines.next()) {
-        (Some(declaration), Some(element), None) => {
-            declaration.starts_with("<?xml ")
-                && declaration.ends_with("?>")
-                && element.starts_with("<backup ")
-                && element.ends_with("/>")
+    let declared = match element(&mut rest, "<?xml", "?>\n").as_deref() {
+        Ok([("version", version)]) => version == "1.0",
+        Ok([("version", version), ("encoding", encoding)]) => {
+            version == "1.0" && encoding.eq_ignore_ascii_case("UTF-8")
         }
         _ => false,
-    }
+    };
+    declared && element(&mut rest, "<backup", "/>\n").is_ok() && rest.is_empty()
 }
 
 fn malformed(what: &str) -> ParseError {
