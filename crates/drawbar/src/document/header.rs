@@ -360,7 +360,7 @@ pub(super) fn ui(
             if restage {
                 ui.ctx().request_discard("header restaged");
             }
-            // A take's Detect and its limit: a row of their own at the right, so the
+            // A take's Detect and its limit: a row of their own at the left, so the
             // top row keeps its name, size and state on one line.
             if facts.extras.limit.is_some() {
                 let line = egui::Rect::from_min_size(
@@ -370,10 +370,10 @@ pub(super) fn ui(
                 let mut under = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(line)
-                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
                 under.spacing_mut().item_spacing.x = GAP;
-                loud(&mut under, entity, facts, stage, &mut act);
+                take_row(&mut under, entity, facts, stage, &mut act);
                 ui.advance_cursor_after_rect(under.min_rect().union(line));
             }
             if !cells.is_empty() {
@@ -592,10 +592,9 @@ fn right(
 /// The label of a take's button that starts a piano library from it.
 pub const BUILD_PIANO: &str = "Build piano library…";
 
-/// A take's Build piano library…, the loud action, and a take's limit for Detect left
-/// of it. The layout runs right to
-/// left, so they are drawn in reverse.
-fn loud(
+/// A take's row under the strip, left to right: "Skip notes [54 dB] or less over
+/// noise", Detect, and Build piano library….
+fn take_row(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
     facts: &Facts<'_>,
@@ -604,6 +603,30 @@ fn loud(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
+    if let Some(limit) = facts.extras.limit {
+        let mut held = limit;
+        let hint = "Detect skips a note standing this little over the take's noise: the \
+                    build raises every layer to one level, and a quiet note's hiss rises \
+                    with it";
+        ui.label(egui::RichText::new("Skip notes").color(quiet))
+            .on_hover_text(hint);
+        let changed = ui
+            .add(
+                egui::DragValue::new(&mut held)
+                    .range(0.0..=90.0)
+                    .speed(0.5)
+                    .fixed_decimals(0)
+                    .suffix(" dB"),
+            )
+            .on_hover_text(hint)
+            .changed();
+        ui.label(egui::RichText::new("or less over noise").color(quiet))
+            .on_hover_text(hint);
+        if changed {
+            act.limit = Some(held);
+        }
+    }
+    loud(ui, entity, facts, stage, act);
     if let Some(marks) = facts.extras.piano {
         let why = match marks {
             true => "opens New ▸ Piano library with this take in it, as it is now",
@@ -629,6 +652,18 @@ fn loud(
         .on_hover_text(why)
         .clicked();
     }
+}
+
+/// The loud action.
+fn loud(
+    ui: &mut egui::Ui,
+    entity: &LocalEntity,
+    facts: &Facts<'_>,
+    stage: Stage,
+    act: &mut Clicked,
+) {
+    let visuals = ui.visuals().clone();
+    let quiet = caption(&visuals);
     let own = action(entity, facts.device);
     let loud = facts.extras.loud.as_ref().unwrap_or(&own);
     let label = match stage {
@@ -667,30 +702,6 @@ fn loud(
         (true, Click::Build) => act.build = true,
         (true, Click::Detect) => act.detect = true,
         (false, _) | (true, Click::Nothing) => {}
-    }
-    // Right to left: "Skip notes [54 dB] or less over noise", its last words first.
-    if let Some(limit) = facts.extras.limit {
-        let mut held = limit;
-        let hint = "Detect skips a note standing this little over the take's noise: the \
-                    build raises every layer to one level, and a quiet note's hiss rises \
-                    with it";
-        ui.label(egui::RichText::new("or less over noise").color(quiet))
-            .on_hover_text(hint);
-        let changed = ui
-            .add(
-                egui::DragValue::new(&mut held)
-                    .range(0.0..=90.0)
-                    .speed(0.5)
-                    .fixed_decimals(0)
-                    .suffix(" dB"),
-            )
-            .on_hover_text(hint)
-            .changed();
-        ui.label(egui::RichText::new("Skip notes").color(quiet))
-            .on_hover_text(hint);
-        if changed {
-            act.limit = Some(held);
-        }
     }
 }
 
