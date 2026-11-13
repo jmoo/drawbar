@@ -86,7 +86,9 @@ it, decides, and otherwise grand; takes that state different kinds need `--kind`
 Each stroke decays from note-on as the instrument's own pianos of that kind do,
 faster on higher keys. For a sound that sustains, such as organ, strings or pads,
 `--no-decay` holds every note and loop at its level, so a note has only its
-recording's own decay. In format 6, each layer is trimmed to play at the level of
+recording's own decay, and lets each release ring out its recorded tail. The
+instrument has no organ kind: build an organ, a pad or strings with
+`--kind hybrid --no-decay`. In format 6, each layer is trimmed to play at the level of
 its root's loudest layer, softer layers a little louder as that kind's are, up to 6
 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer or release needs more boost than the instrument gives at `--gain`, the whole
@@ -108,7 +110,8 @@ an octave off the notes played either side of it is put back in line. Each note 
 be hit several times, loud to soft or in any order. Where the pitches mislead, give
 the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then goes
 to the nearest note in the list. Each note keeps up to `--layers` hits, spread evenly
-in level, or the first ones played with `--order played`. `--min-layer-gap` drops a
+in level, or the first ones played with `--order played`. `--min-layer-gap`, 1 dB
+unless you change it, drops a
 hit too close in level to a louder one, and `--skip` leaves out hits by their number
 in the listing. A hit less than 54 dB over the take's noise is left out as too
 quiet, since the build raises it and its hiss with it; `--min-snr` sets that limit.

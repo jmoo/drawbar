@@ -46,7 +46,7 @@ pub struct PrepArgs {
     pub skip: Vec<String>,
 
     /// Hits of one note closer than this in level are one layer, in decibels.
-    #[arg(long, value_name = "DB", default_value_t = 2.0)]
+    #[arg(long, value_name = "DB", default_value_t = 1.0)]
     pub min_layer_gap: f64,
 
     /// A hit less than this many decibels over the take's floor, its hum taken out, is

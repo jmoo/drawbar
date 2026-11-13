@@ -321,10 +321,11 @@ pub struct Rules {
     /// [`Kind::loop_fade`]'s does for [`Rules::kind`], and 0 holds every loop at its
     /// level. Confirmed on hardware.
     pub loop_fade: u16,
-    /// Whether an attack or resonance stroke fades from note-on as vendor libraries of
-    /// [`Rules::kind`] fade theirs. False states no fade, for sounds that sustain, such
-    /// as organ, strings or pads: a held note then has only the recording's own decay,
-    /// and with a [`Rules::loop_fade`] of 0, holds its loop at its level.
+    /// Whether a stroke fades from note-on as vendor libraries of [`Rules::kind`] fade
+    /// theirs. False states no fade on any stroke, for sounds that sustain, such as
+    /// organ, strings or pads: a held note then has only the recording's own decay, and
+    /// with a [`Rules::loop_fade`] of 0, holds its loop at its level; a key-off keeps
+    /// its recorded tail.
     pub decays: bool,
 }
 
@@ -934,10 +935,12 @@ const RELEASE_DECAY: f64 = 36.0;
 /// its own `root`: [`Kind::ladder_curve`] for an attack or resonance stroke, and
 /// [`RELEASE_DECAY`] for a [`Version::V6`] release stroke. A [`Version::V5`] release
 /// stroke takes none, since it fades about 35 dB/s under any ladder below unity.
-/// Confirmed on hardware.
+/// Confirmed on hardware. Rules that do not decay state none on any stroke, so a
+/// sustained sound's key-off keeps the tail it was recorded with; not yet heard on
+/// hardware.
 fn ladder_rate(rules: &Rules, bank: Bank, root: u8) -> f64 {
     match (bank, rules.version) {
-        (Bank::Attack | Bank::Resonance, _) if !rules.decays => 0.0,
+        _ if !rules.decays => 0.0,
         (Bank::Attack | Bank::Resonance, _) => rules
             .kind
             .ladder_curve()
@@ -2367,10 +2370,10 @@ mod tests {
         assert_eq!(fades(held), [(30, 0), (60, 0), (72, LADDER_UNITY), (90, 0)]);
     }
 
-    /// Rules that do not decay state no fade from note-on on an attack, on any kind,
-    /// while a release still fades as a format 6 release does.
+    /// Rules that do not decay state no fade from note-on on any stroke, on any kind:
+    /// a key-off keeps its recorded tail.
     #[test]
-    fn rules_that_do_not_decay_hold_an_attack_and_still_fade_a_release() {
+    fn rules_that_do_not_decay_hold_an_attack_and_a_release() {
         for kind in Kind::ALL {
             let rules = Rules {
                 decays: false,
@@ -2378,14 +2381,11 @@ mod tests {
             };
             assert_eq!(rules.held_fade(Bank::Attack, 60), 0.0, "{kind:?}");
             assert_eq!(rules.held_fade(Bank::Resonance, 30), 0.0, "{kind:?}");
-            assert_eq!(
-                rules.held_fade(Bank::Release, 60),
-                RELEASE_DECAY,
-                "{kind:?}"
-            );
+            assert_eq!(rules.held_fade(Bank::Release, 60), 0.0, "{kind:?}");
         }
         let decaying = Rules::new(Version::V6, Kind::Grand);
         assert!(decaying.held_fade(Bank::Attack, 60) > 0.0);
+        assert_eq!(decaying.held_fade(Bank::Release, 60), RELEASE_DECAY);
     }
 
     /// The fastest fade a caller can state, on the top key of every kind's curve, still

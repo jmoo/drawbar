@@ -58,7 +58,7 @@ impl PlanOptions {
             layers,
             order: Order::Loudness,
             skip: Vec::new(),
-            min_layer_gap_db: 2.0,
+            min_layer_gap_db: 1.0,
             min_snr_db: MIN_SNR_DB,
             cut: CutOptions::default(),
             sustain: SustainOptions::default(),
