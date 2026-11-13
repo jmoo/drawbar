@@ -15,6 +15,7 @@
 //! These are tuned heuristics over audio, not declarations of a file format, which is
 //! why they sit outside [`crate::formats`].
 
+pub mod build;
 pub mod clean;
 pub mod cut;
 pub mod detect;
