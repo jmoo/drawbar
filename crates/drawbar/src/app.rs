@@ -1074,6 +1074,7 @@ impl eframe::App for DrawbarApp {
         for id in self.tabs.documents() {
             self.workspace.hurry(id);
         }
+        self.document.keep_wavs(self.tabs.documents());
         let picked = self.browser.picked();
         if self.picked != Some(picked.revision()) {
             self.picked = Some(picked.revision());
@@ -2201,6 +2202,95 @@ mod tests {
                 == gained),
             "⇧⌘Z again made the gain again"
         );
+    }
+
+    /// A WAV's edits outlive a trip to another tab: back on the WAV, ⌘Z takes back its
+    /// gain, not the import that put it in the library.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_wav_s_undo_survives_a_trip_to_another_tab() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        app.platform = crate::platform::Platform::Web;
+        let mut window = eframe::Frame::_new_kittest();
+        let mut step = |app: &mut DrawbarApp, keys: Vec<egui::Event>| {
+            let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+        };
+        let until = |app: &mut DrawbarApp,
+                     step: &mut dyn FnMut(&mut DrawbarApp, Vec<egui::Event>),
+                     keys: Vec<egui::Event>,
+                     done: &dyn Fn(&DrawbarApp) -> bool| {
+            step(app, keys);
+            for _ in 0..500 {
+                if done(app) {
+                    return true;
+                }
+                step(app, Vec::new());
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        let library = |app: &DrawbarApp| {
+            app.store
+                .as_ref()
+                .map(crate::store::Store::timeline)
+                .unwrap_or_default()
+        };
+        let audio = nord_format::wav::Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.1; 35_002],
+        };
+        let bytes =
+            nord_format::wav::write(&audio, nord_format::wav::Encoding::Int { bits: 24 }).unwrap();
+        let id = app.workspace.ingest(
+            "take.wav".into(),
+            crate::workspace::Origin::Fresh,
+            bytes.clone(),
+            &mut app.log,
+        );
+        app.tabs.open(id);
+        let settled = |app: &DrawbarApp| {
+            app.store
+                .as_ref()
+                .is_some_and(|store| store.undo_label().is_some())
+        };
+        assert!(
+            until(&mut app, &mut step, Vec::new(), &settled),
+            "the WAV is in the library"
+        );
+        let before = library(&app);
+        app.document
+            .docked
+            .push((crate::document::wav::GAIN.to_string(), "3.0".to_string()));
+        step(&mut app, Vec::new());
+        assert!(
+            app.workspace.get(id).unwrap().bytes.to_vec() != bytes,
+            "the gain is made"
+        );
+
+        app.tabs.show(crate::tabs::Spot::Library);
+        step(&mut app, Vec::new());
+        app.tabs.open(id);
+        step(&mut app, Vec::new());
+
+        let command = egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let bytes_now = |app: &DrawbarApp| app.workspace.get(id).unwrap().bytes.to_vec();
+        assert!(
+            until(&mut app, &mut step, vec![command], &|app| bytes_now(app)
+                == bytes),
+            "⌘Z took back the gain"
+        );
+        assert_eq!(library(&app), before, "and left the import alone");
     }
 
     /// End to end through the app's own frames: New makes a file, and the next run finds

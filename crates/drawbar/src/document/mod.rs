@@ -238,7 +238,15 @@ impl Opened {
     ///
     /// ⚠️ Reading a WAV copies every sample, so it happens once here and never per
     /// frame.
-    fn new(asset: Asset<'_>, view: bool, renaming: (Option<String>, Option<String>)) -> Opened {
+    ///
+    /// A WAV left for another tab comes back as `parked`, with its history and the
+    /// noise found for it.
+    fn new(
+        asset: Asset<'_>,
+        view: bool,
+        renaming: (Option<String>, Option<String>),
+        parked: Option<wav::State>,
+    ) -> Opened {
         let entity = asset.entity;
         let (name, variant) = header::boxes(entity, asset.shape, view, renaming);
         Opened {
@@ -249,7 +257,7 @@ impl Opened {
             paths: std::collections::HashMap::new(),
             error: None,
             wav: match asset.shape {
-                Shape::Wav => Some(wav::State::new(entity)),
+                Shape::Wav => Some(parked.unwrap_or_else(|| wav::State::new(entity))),
                 Shape::Fields
                 | Shape::SetList
                 | Shape::Sample
@@ -274,6 +282,10 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
+    /// The WAV documents left for another tab, so their undo and the noise found for
+    /// them outlive the switch. Only those still in a tab are kept; see
+    /// [`Document::keep_wavs`].
+    parked: std::collections::HashMap<u64, wav::State>,
     /// The Advanced table's filter and selected cell. One table serves every tab; see
     /// [`Advanced::leave`].
     advanced: Advanced,
@@ -342,7 +354,14 @@ impl Document {
         let shape = asset.shape;
 
         if self.opened() != Some(id) {
-            self.open = Some(Opened::new(asset, viewing, self.renaming(asset.entity)));
+            self.park();
+            let parked = self.parked.remove(&id);
+            self.open = Some(Opened::new(
+                asset,
+                viewing,
+                self.renaming(asset.entity),
+                parked,
+            ));
             self.advanced.leave();
             // ⚠️ Leaving the tab stops playback: a zone still playing over another
             // document has no control on screen to stop it.
@@ -663,6 +682,7 @@ impl Document {
     /// Let go of what is kept about an asset that has left the workspace.
     pub fn forget(&mut self, id: u64) {
         self.views.remove(&id);
+        self.parked.remove(&id);
         self.piano.forget(id);
         self.samples.forget(id);
     }
@@ -698,6 +718,7 @@ impl Document {
             // removed, and an edit over them would edit nothing.
             if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
                 self.piano.forget(*id);
+                self.parked.remove(id);
                 self.samples.forget(*id);
             }
             // Reopened on the next frame, because every box holds a reverted edit.
@@ -862,8 +883,26 @@ impl Document {
     /// ⚠️ A zone keeps sounding until something stops it, and the stop control is on the
     /// document. With no document there is nothing to click.
     pub fn leave(&mut self) {
-        self.open = None;
+        self.park();
         self.player.stop();
+    }
+
+    /// Close the open document, keeping a WAV's state for when its tab is shown again.
+    fn park(&mut self) {
+        if let Some(Opened {
+            id,
+            wav: Some(held),
+            ..
+        }) = self.open.take()
+        {
+            self.parked.insert(id, held);
+        }
+    }
+
+    /// Let go of the WAV documents whose tabs are closed: each holds its whole take.
+    pub fn keep_wavs(&mut self, open: impl IntoIterator<Item = u64>) {
+        let open: std::collections::HashSet<u64> = open.into_iter().collect();
+        self.parked.retain(|id, _| open.contains(id));
     }
 
     /// The body this shape draws.
