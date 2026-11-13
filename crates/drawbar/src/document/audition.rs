@@ -334,7 +334,7 @@ pub(super) type Made = (u64, super::take::Hit, Kind, bool);
 
 /// The take's noise, as the search for it goes.
 enum Search {
-    Running(work::Job<Noise>),
+    Running(work::Job<work::FoundNoise>),
     Done(Noise),
     /// The finding died; the take is heard as recorded.
     Lost,
@@ -375,14 +375,14 @@ impl Audition {
                 work::Answer::Running => {
                     ctx.request_repaint_after(std::time::Duration::from_millis(250))
                 }
-                work::Answer::Answered(noise) => self.noise = Some((at, Search::Done(noise))),
+                work::Answer::Answered(work::FoundNoise(noise)) => {
+                    self.noise = Some((at, Search::Done(noise)))
+                }
                 work::Answer::Died => self.noise = Some((at, Search::Lost)),
             },
             Some((held, _)) if *held == at => {}
             _ => {
-                let mono = nord_format::take::plan::mono(audio);
-                let rate = audio.rate;
-                let job = work::run(ctx, move |_| Noise::of(&mono, rate));
+                let job = work::hand(ctx, work::FindNoise::of(audio));
                 self.noise = Some((at, Search::Running(job)));
             }
         }
