@@ -32,6 +32,10 @@ pub struct PlanOptions {
     /// one velocity. Each note's last hit is then that layer, and [`PlanOptions::layers`]
     /// and [`PlanOptions::order`] are not read.
     pub set: Option<SetLayer>,
+    /// Set for a one-note file, one of a sample set's: its floor is read on its
+    /// quietest stretch ([`detect::Floor::OneNote`]), and only its loudest hit is
+    /// planned, the others skipped.
+    pub one_note: bool,
 }
 
 /// A take's place in a set of takes, one per layer.
@@ -59,6 +63,7 @@ impl PlanOptions {
             cut: CutOptions::default(),
             sustain: SustainOptions::default(),
             set: None,
+            one_note: false,
         }
     }
 }
@@ -125,19 +130,35 @@ pub fn mono(audio: &Audio) -> Vec<f64> {
 /// floor on the take with its hum taken out, whose floor is lower. Each attack's loop or
 /// fade is found on the attack as the build cleans it.
 pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
+    let floor_rule = match options.one_note {
+        true => detect::Floor::OneNote,
+        false => detect::Floor::Take,
+    };
     let x = detect::highpassed(mono, rate);
-    let env = Envelope::of(&x, rate);
+    let env = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&x, rate)
+    };
     let hits = detect::hits(&x, rate, &env);
     let hum = hum::find(&x, rate, &env);
     let cleaned = match &hum {
         Ok(found) => found.removed(&x, rate),
         Err(_) => x.clone(),
     };
-    let quiet = Envelope::of(&cleaned, rate);
+    let quiet = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&cleaned, rate)
+    };
     let floor = quiet.floor();
     let noise = Noise::measured(rate, hum.as_ref().ok().cloned(), &cleaned, &quiet);
 
-    let skipped = |hit: &Hit| options.skip.contains(&hit.number);
+    let loudest = hits
+        .iter()
+        .reduce(|a, b| if b.level_db > a.level_db { b } else { a })
+        .map(|hit| hit.number);
+    let skipped = |hit: &Hit| {
+        options.skip.contains(&hit.number) || (options.one_note && Some(hit.number) != loudest)
+    };
     let notes = match options.notes.is_empty() {
         true => layers::notes_of(&hits, skipped),
         false => options.notes.clone(),

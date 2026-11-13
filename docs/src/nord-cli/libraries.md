@@ -130,6 +130,19 @@ Each take is one layer, whatever its level, so you may raise the gain for the so
 ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
 12 of the second take.
 
+Or give a folder of one-note files, such as a free sample set, its subfolders too:
+
+```sh
+nord piano prep "Upright Piano/" -o regions/
+```
+
+Each file's loudest hit is its note, named by its pitch across the whole set, so file
+names are never read. A note's files become its layers by level, up to `--layers`,
+and a file within `--min-layer-gap` dB of a louder one, such as a second round-robin,
+is left out. Each file placed is written under `-o` at its own path, with the build
+command for them all. A file with no hit, no pitch, or too little level over its
+own noise is listed and left out.
+
 `prep` never changes a take. A take at another rate is resampled to the instrument's
 35,002 Hz in `-o`, with its other chunks. A take already at 35,002 Hz may be its own
 `-o`, and only its regions and loops are replaced.

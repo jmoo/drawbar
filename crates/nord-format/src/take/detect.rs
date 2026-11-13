@@ -44,7 +44,24 @@ pub struct Envelope {
     /// Samples per frame.
     pub width: usize,
     pub db: Vec<f64>,
+    /// How its noise floor is read.
+    pub floor: Floor,
 }
+
+/// How an [`Envelope`]'s noise floor is read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Floor {
+    /// The level 10% of its frames are under: a take of many notes rests between
+    /// them for far more than that.
+    #[default]
+    Take,
+    /// The mean level of its quietest [`QUIETEST`] seconds: a one-note file holds its
+    /// note for most of its length and may rest only after the key-up.
+    OneNote,
+}
+
+/// Seconds of a one-note file's quietest stretch its floor is read on.
+pub const QUIETEST: f64 = 0.5;
 
 impl Envelope {
     pub fn of(x: &[f64], rate: u32) -> Envelope {
@@ -56,17 +73,36 @@ impl Envelope {
                 20.0 * (power.sqrt() + 1e-9).log10()
             })
             .collect();
-        Envelope { width, db }
+        Envelope {
+            width,
+            db,
+            floor: Floor::Take,
+        }
     }
 
-    /// The take's noise floor: the level 10% of its frames are under, or a silent
-    /// frame's for a take shorter than one frame.
+    /// The noise floor, read as [`Envelope::floor`] says, or a silent frame's for a take
+    /// shorter than one frame.
     pub fn floor(&self) -> f64 {
         if self.db.is_empty() {
             return SILENT_DB;
         }
-        percentile(&self.db, 10.0)
+        match self.floor {
+            Floor::Take => percentile(&self.db, 10.0),
+            Floor::OneNote => quietest_mean(&self.db, frames(QUIETEST).max(1)),
+        }
     }
+}
+
+/// The lowest mean power of any `span` frames running of `db`, in dB, or of all of
+/// them when there are fewer.
+fn quietest_mean(db: &[f64], span: usize) -> f64 {
+    let power: Vec<f64> = db.iter().map(|&d| 10f64.powf(d / 10.0)).collect();
+    let span = span.min(power.len());
+    let lowest = power
+        .windows(span)
+        .map(|w| w.iter().sum::<f64>() / span as f64)
+        .fold(f64::INFINITY, f64::min);
+    10.0 * lowest.log10()
 }
 
 /// The `p`th percentile of `values`, interpolated between the nearest two.
@@ -362,6 +398,37 @@ pub(crate) mod tests {
             }
         }
         x
+    }
+
+    #[test]
+    fn a_one_note_file_s_floor_is_its_quietest_half_second() {
+        // a held organ note, its key-off, and 0.6 s of rest: under 10% of the frames
+        let db: Vec<f64> = [
+            vec![-33.0; 1100],
+            (0..20).map(|i| -33.0 - 3.0 * f64::from(i)).collect(),
+            vec![-95.0; 60],
+        ]
+        .concat();
+        let take = Envelope {
+            width: 441,
+            db,
+            floor: Floor::Take,
+        };
+        assert!(take.floor() > -40.0, "{}", take.floor());
+        let one = Envelope {
+            floor: Floor::OneNote,
+            ..take
+        };
+        assert!((one.floor() + 95.0).abs() < 1e-9, "{}", one.floor());
+        let short = Envelope {
+            db: vec![-60.0, -70.0],
+            ..one
+        };
+        let mean = 10.0 * ((1e-6 + 1e-7) / 2.0f64).log10();
+        assert!(
+            (short.floor() - mean).abs() < 1e-9,
+            "fewer frames than half a second"
+        );
     }
 
     #[test]

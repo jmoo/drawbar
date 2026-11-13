@@ -380,11 +380,16 @@ mod tests {
         let mut db = vec![-20.0; 100];
         db.extend(std::iter::repeat_n(-90.0, detect::frames(60.0)));
         db.extend([-20.0; 100]);
-        let env = Envelope { width: 350, db };
+        let env = Envelope {
+            width: 350,
+            db,
+            floor: detect::Floor::Take,
+        };
         assert_eq!(quietest(&env), 100..100 + detect::frames(QUIET_MOST));
         let short = Envelope {
             width: 350,
             db: [vec![-20.0; 10], vec![-90.0; 300], vec![-20.0; 10]].concat(),
+            floor: detect::Floor::Take,
         };
         assert_eq!(quietest(&short), 10..310);
     }

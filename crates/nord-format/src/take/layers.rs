@@ -235,6 +235,76 @@ pub fn pick(group: &[&Hit], layers: usize, order: Order, min_gap_db: f64) -> Vec
     choices
 }
 
+/// What became of one file of a sample set of one-note files.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Placed {
+    /// The `layer`th of the `of` layers of `note`, counting from the loudest.
+    Layer { note: u8, layer: usize, of: usize },
+    /// Within the layer gap of file `of`, by its index, which was kept.
+    Duplicate { note: u8, of: usize },
+    /// More files of its note than layers.
+    Extra { note: u8 },
+    /// No pitch was found, so it plays no known note.
+    NoPitch,
+}
+
+/// The note and layer of each file of a sample set, from `struck`: each file's hit, or
+/// none for a file with no hit loud enough, which is placed nowhere.
+///
+/// A set comes in no playing order and its file names are not trusted, so the hits are
+/// sorted by pitch and named by [`notes_of`], whose stretch and octave checks then have
+/// each note's neighbors to go by. A note's files are its hits, and its layers are chosen
+/// from them by level as [`pick`] chooses a take's: `layers` at most, files within
+/// `min_gap_db` of a louder one kept being duplicates, as round-robins of one dynamic
+/// often are.
+pub fn place(struck: &[Option<Hit>], layers: usize, min_gap_db: f64) -> Vec<Option<Placed>> {
+    let mut placed: Vec<Option<Placed>> = vec![None; struck.len()];
+    let mut sorted: Vec<Hit> = Vec::new();
+    for (i, hit) in struck.iter().enumerate() {
+        match hit {
+            Some(hit) if hit.pitch.is_some() => sorted.push(Hit {
+                number: i + 1,
+                ..hit.clone()
+            }),
+            Some(_) => placed[i] = Some(Placed::NoPitch),
+            None => {}
+        }
+    }
+    sorted.sort_by(|a, b| a.pitch.unwrap_or(0.0).total_cmp(&b.pitch.unwrap_or(0.0)));
+    let notes = notes_of(&sorted, |_| false);
+    let named: Vec<Option<u8>> = assign(&sorted, &notes, |_| false)
+        .into_iter()
+        .map(|a| a.map(|(k, _)| notes[k]))
+        .collect();
+    let mut distinct = notes.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    for note in distinct {
+        let group: Vec<&Hit> = sorted
+            .iter()
+            .zip(&named)
+            .filter(|(_, n)| **n == Some(note))
+            .map(|(hit, _)| hit)
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        let choices = pick(&group, layers, Order::Loudness, min_gap_db);
+        let of = choices
+            .iter()
+            .filter(|c| matches!(c, Choice::Layer(_)))
+            .count();
+        for (hit, choice) in group.iter().zip(choices) {
+            placed[hit.number - 1] = Some(match choice {
+                Choice::Layer(layer) => Placed::Layer { note, layer, of },
+                Choice::Duplicate { of } => Placed::Duplicate { note, of: of - 1 },
+                Choice::Extra | Choice::Replaced { .. } => Placed::Extra { note },
+            });
+        }
+    }
+    placed
+}
+
 /// The layer values of a format 6 root with `count` layers, loudest first: those of the
 /// instrument's own Wurlitzer libraries, and from 6 layers on spread evenly over 0 to
 /// 100.
@@ -383,5 +453,62 @@ mod tests {
     fn layer_values_spread_from_the_loudest() {
         assert_eq!(v6_values(4), [0, 22, 50, 85]);
         assert_eq!(v6_values(9), [0, 12, 25, 38, 50, 62, 75, 88, 100]);
+    }
+
+    /// A set's files, in no order: each note's files become its layers by level, a
+    /// round-robin as loud as one kept is a duplicate, and a file with no hit or no
+    /// pitch is placed nowhere.
+    #[test]
+    fn a_sample_set_s_files_are_placed_by_pitch_and_level() {
+        let mut no_pitch = hit(0, -10.0, 0.0);
+        no_pitch.pitch = None;
+        let struck = [
+            Some(hit(0, -12.0, 64.2)),
+            Some(hit(0, -20.0, 59.9)),
+            None,
+            Some(hit(0, -10.0, 60.1)),
+            Some(hit(0, -20.5, 60.0)),
+            Some(no_pitch),
+        ];
+        let placed = place(&struck, 4, 2.0);
+        assert_eq!(
+            placed,
+            [
+                Some(Placed::Layer {
+                    note: 64,
+                    layer: 0,
+                    of: 1
+                }),
+                Some(Placed::Layer {
+                    note: 60,
+                    layer: 1,
+                    of: 2
+                }),
+                None,
+                Some(Placed::Layer {
+                    note: 60,
+                    layer: 0,
+                    of: 2
+                }),
+                Some(Placed::Duplicate { note: 60, of: 1 }),
+                Some(Placed::NoPitch),
+            ]
+        );
+    }
+
+    /// Stretch tuning puts a set's top notes sharp by more than half a semitone: sorted
+    /// by pitch, each has its neighbors, and is named by the line they make.
+    #[test]
+    fn a_set_s_stretched_top_notes_keep_their_names() {
+        let pitches = [96.62, 84.3, 88.4, 92.5, 100.75, 80.15];
+        let struck: Vec<Option<Hit>> = pitches.iter().map(|&p| Some(hit(0, -10.0, p))).collect();
+        let notes: Vec<u8> = place(&struck, 4, 2.0)
+            .into_iter()
+            .map(|p| match p {
+                Some(Placed::Layer { note, .. }) => note,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(notes, [96, 84, 88, 92, 100, 80]);
     }
 }
