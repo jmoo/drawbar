@@ -7,9 +7,11 @@
 
 ## Summary
 
-Turn one long recording of an instrument into the strokes of a piano library, with the recording
-itself as the document. The take is first resampled to 35,002 Hz as a new WAV. Detectors then find
-the hits, name their notes and layers, mark each attack and release, and find a sustain loop. On
+Turn one long recording of an instrument, or a folder of one-note recordings, into the strokes of a
+piano library, with the recording itself as the document. The take is first resampled to 35,002 Hz
+as a new WAV. Detectors then find the hits, name each one's note by its pitch and its layer by its
+level, mark each attack and release, and find a sustain loop. The user tells them nothing; what they
+get wrong is fixed in the take view. On
 Save, the results go into the WAV as standard regions and loops, labelled with stroke names. New ▸
 Piano library then builds from "a WAV, or a named region of one". Levelling, fades, hum removal and
 the loop crossfade are build rules. The processing goes into a new crate of pure functions over
@@ -43,26 +45,34 @@ Recording stays outside drawbar. Anyone recording an instrument already has an a
 software that records, so drawbar starts from the WAV. WAVs are documents in drawbar, as Nord files
 are, and the take editor follows the other document editors.
 
-1. **Open a take** (16-bit, 24-bit or 32-bit float). A take comes in one of two shapes, so the
+1. **Open a take** (16-bit, 24-bit or 32-bit float). A take comes in one of three shapes, so the
    detectors never have to guess where a gain change or a new noise floor begins:
    - **One take**, each note played at every velocity in a row, loud to soft or in any order.
    - **One take per velocity layer**, each playing every note once, loudest take first. Each take is
      one layer whatever its level, so the gain may be raised for the softer ones, and each take's
      floor and hum are measured on their own. A note played twice in a take keeps its last hit.
+   - **A folder of one-note takes**, one WAV per hit, each a note struck, held and released, with
+     no loop: the way free sample sets are usually published. Each WAV is a take of one hit. Its
+     note and layer come from its file name where that names them, and otherwise from its pitch
+     and its level among the WAVs of its note. See One-note takes.
 2. **Resample.** Detect, the loop markers and Build work only at 35,002 Hz. At any other rate the
    document says so and offers Resample, which writes a new WAV next to the take and opens it. The
    original is never changed. The new WAV keeps the take's bit depth (24-bit or float); the build
    goes to 16-bit.
-3. **Detect.** The notes in playing order: a list (`E3 G3 A#3 …`), or a start note, a step in
-   semitones and a count. For a single take, the number of layers, and how they are chosen; takes of
-   one layer each take their layer from their order. These are inputs to the detectors, not stored;
-   Detect runs only when pressed, writes regions and is done. Pressed again on a take with regions,
-   it first warns that it replaces them, and the user can cancel or go ahead:
-   - **Playing order**: the first hit of a note is the loudest layer. This suits players who play
-     loud, medium, soft, and recordings whose level can't be trusted (a phone's automatic gain made
-     measured loudness useless on our test take).
-   - **Loudness**: hits sorted by measured level, with near-duplicates within 2 dB dropped and the
-     kept layers spread evenly in dB.
+3. **Detect.** Detect asks for nothing. It names each hit's note by its pitch, keeps a note's hits
+   as its layers, loudest first, and leaves out hits too quiet to use. Detect runs only when pressed,
+   writes regions and is done. Pressed again on a take with regions, it first warns that it replaces
+   them, and the user can cancel or go ahead. Options override what it measures, and none is
+   needed; they are inputs to the detectors, not stored:
+   - **Notes**: the notes in playing order, a list (`E3 G3 A#3 …`) or a start note, a step in
+     semitones and a count, for a take whose pitch misleads. Takes of one layer each take their
+     layer from their order.
+   - **Layers**: how many, where the hits per note are more than wanted.
+   - **Playing order**, in place of loudness: the first hit of a note is the loudest layer. This
+     suits players who play loud, medium, soft, and recordings whose level can't be trusted (a
+     phone's automatic gain made measured loudness useless on our first test take).
+   - Loudness, the default: hits sorted by measured level, with near-duplicates within 2 dB
+     dropped and the kept layers spread evenly in dB.
 4. **Take view.** The take's waveform, with a box over each sample the regions mark (`C4 v22`),
    and under it the picked sample's own lane with its cut points. Both lanes start linear, so a
    sample's shape shows as it decays, and small + and − at the right bend the scale toward log so
@@ -147,16 +157,23 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   closer than 1 s, the loudest wins. Only the first frame of a rise counts; otherwise a note whose
   level wavers drifts the onset 30 to 50 ms late.
 - Level of a hit: the envelope's maximum over its first 100 ms.
-- Pitch of a hit: harmonic product spectrum over 50 to 550 ms after the onset.
+- Pitch of a hit: over 50 to 550 ms after the onset, the fundamental whose harmonics stand highest
+  in the spectrum, preferring the higher of two that score alike, so a soft note's noise does not
+  pull it an octave down. A harmonic product spectrum, tried first, was fooled by mains hum on soft
+  treble notes.
 - Too quiet: a hit whose peak is less than 54 dB over the hum-free floor is flagged, and Detect leaves
   it out. Levelling brings its hiss up with it: soft treble hits recorded about 30 dB over the floor
   gave very noisy loops (heard on a Stage 4).
 
 ### Notes and layers
 
-- Hits are assigned by walking the note list in order. A hit moves on to the next note when its pitch
-  class is nearer that note's than the current one's. Dropped hits take no part. Comparing pitch
-  class tolerates the octave errors common on low notes.
+- With no note list, each hit is named by its pitch, rounded to the nearest note. A hit an octave
+  off the line its neighbors in playing order make is moved onto that line, which catches the octave
+  errors common on low notes. On the interface take, pitch alone named 90 of its 91 hits as its
+  take sheet did; the other, a second key caught with the first, is one the sheet skips.
+- With a note list, hits are assigned by walking it in order. A hit moves on to the next note when
+  its pitch class is nearer that note's than the current one's. Dropped hits take no part. Comparing
+  pitch class tolerates the octave errors common on low notes.
 - A hit more than half a semitone from its note's pitch class gets a warning.
 - More hits than layers: loudness mode keeps the hits nearest evenly spaced levels between the
   loudest and softest; playing-order mode keeps the first N.
@@ -164,6 +181,18 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   and 3 elsewhere.
 - Layer values are named into the stroke names, and the build turns them into thresholds as it does
   now. See Unresolved questions for the default spread.
+
+### One-note takes
+
+- Each WAV of the folder is read as a take of one hit: its hit, cuts, release and loop are found as
+  for a hit of a long take. A WAV holding more than one hit is flagged, and its loudest hit kept.
+- Note: a note name or MIDI number in the file name (`C4`, `Piano_C4_mf`, `060`), checked against
+  its pitch; a name and pitch more than a semitone apart are flagged. With none, its pitch.
+- Layer: a dynamic marking or velocity in the file name (`pp` to `ff`, `v1`, `vel64`), and with none,
+  its level among the WAVs of its note, loudest first.
+- Noise: a one-note WAV seldom holds a second of quiet to measure its hum and hiss on. Where it does
+  not, the quietest stretch among the folder's WAVs, from the same recording, stands in.
+- Detect writes each WAV's regions into it, and New ▸ Piano library builds from all of them at once.
 
 ### Cuts
 
@@ -350,7 +379,7 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 
 ### Pull requests
 
-All five are written and none is opened yet: the first four on `mikesprad:feat/npno-prep`, the
+The first five are written: the first four on `mikesprad:feat/npno-prep`, opened as #316, and the
 fifth on `mikesprad:feat/take-editor-wav`.
 
 - [ ] `npno-prep`: WAV handling moved from `nord-format`, with 24-bit and float reading, the
@@ -367,6 +396,9 @@ fifth on `mikesprad:feat/take-editor-wav`.
   the library's changes. Docs. Written on `mikesprad:feat/take-editor-wav`, on top of the first
   four. Resample, Detect and Build from the editor are still to come; `nord piano prep` does them
   for now.
+- [ ] Detect with no inputs: notes named by pitch, octaves checked against their neighbors. Not
+  written yet.
+- [ ] One-note takes: Detect and Build over a folder of WAVs of one hit each. Not written yet.
 
 ## Drawbacks
 
