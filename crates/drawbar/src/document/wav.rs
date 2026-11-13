@@ -669,6 +669,34 @@ impl Notes {
     }
 }
 
+/// A megabyte as the computer's own file sizes count one.
+const MB: usize = 1 << 20;
+
+/// The largest WAV drawbar-web opens, in bytes. Opening a take costs the page about nine
+/// times its file in memory, and finding its noise as much again in its worker
+/// (measured 2026-11-13 on a 132 MB take of 522 s, 24-bit stereo at 44.1 kHz: 1.2 GB
+/// each), and a browser tab gets at most 4 GB, often far less. A WAV of a few notes is
+/// far smaller: past this, a take is for the desktop.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const WEB_MOST_BYTES: usize = 120 * MB;
+
+/// Why a WAV of `len` bytes is not opened, where it is more than `most`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn too_large(len: usize, most: usize) -> Option<String> {
+    (len > most).then(|| {
+        // Whole megabytes cut down, as the computer's own file sizes show them, unless
+        // that would show the file no larger than the limit.
+        let size = match len / MB > most / MB {
+            true => format!("{}", len / MB),
+            false => format!("{:.1}", (len as f64 / MB as f64 * 10.0).floor() / 10.0),
+        };
+        format!(
+            "This WAV is {size} MB, more than the browser can work on ({} MB). Use the Desktop version of Drawbar instead.",
+            most / MB
+        )
+    })
+}
+
 /// One set of a WAV's bytes, read.
 ///
 /// ⚠️ Reading copies every sample, so it happens when the bytes change and never per
@@ -678,6 +706,9 @@ struct Read {
     stamp: u64,
     /// The audio as float, or why the bytes do not read.
     source: Result<Audio, String>,
+    /// Whether `source` was not read because the browser cannot spare the memory, so
+    /// its error is said as it stands.
+    too_large: bool,
     /// The regions and loops the file marks, as it holds them and as the lanes draw them,
     /// or why they do not read.
     marks: Result<wav::Marks, String>,
@@ -693,10 +724,19 @@ struct Read {
 
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
-        let source = wav::read(&entity.bytes).map_err(|e| e.to_string());
+        #[cfg(target_arch = "wasm32")]
+        let refused = too_large(entity.bytes.len(), WEB_MOST_BYTES);
+        #[cfg(not(target_arch = "wasm32"))]
+        let refused = None;
+        let too_large = refused.is_some();
+        let source = match refused {
+            Some(why) => Err(why),
+            None => wav::read(&entity.bytes).map_err(|e| e.to_string()),
+        };
         let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
         Read {
             stamp: entity.stamp,
+            too_large,
             summary: source.as_ref().map(take::Summary::of).unwrap_or_default(),
             source,
             marked: marks
@@ -1087,10 +1127,11 @@ pub fn ui(
             }
         }
         Err(why) => {
-            ui.label(
-                egui::RichText::new(format!("This WAV does not read: {why}"))
-                    .color(app::bad(ui.visuals())),
-            );
+            let said = match read.too_large {
+                true => why.clone(),
+                false => format!("This WAV does not read: {why}"),
+            };
+            ui.label(egui::RichText::new(said).color(app::bad(ui.visuals())));
         }
     }
     if state.audio().is_some() {
@@ -1237,6 +1278,20 @@ fn gain(ui: &mut egui::Ui, state: &mut State, sets: &mut Sets) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wav_too_large_for_the_browser_says_its_size_and_where_to_open_it() {
+        assert_eq!(too_large(WEB_MOST_BYTES, WEB_MOST_BYTES), None);
+        assert_eq!(too_large(104 * MB + MB / 2, WEB_MOST_BYTES), None);
+        assert_eq!(
+            too_large(138_193_000, WEB_MOST_BYTES).as_deref(),
+            Some(
+                "This WAV is 131 MB, more than the browser can work on (120 MB). Use the Desktop version of Drawbar instead."
+            )
+        );
+        let just = too_large(120 * MB + MB / 2, WEB_MOST_BYTES).unwrap();
+        assert!(just.starts_with("This WAV is 120.5 MB,"), "{just}");
+    }
 
     fn mono(samples: &[i16]) -> Vec<u8> {
         wav::mono_pcm16(samples, 44_100).unwrap()
