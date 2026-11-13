@@ -22,15 +22,16 @@ use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
 use nord_format::note;
-use nord_format::wav::{Loop, Pcm16};
+use nord_format::wav::{Loop, Pcm16, Play};
 use nord_format::Entity;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::document::controls::fits;
 use crate::document::note_picker;
 use crate::folders::Folders;
 use crate::log::Log;
-use crate::store::{names, LibPath};
-use crate::work::{self, Job, Progress};
+use crate::store::{names, wire, LibPath};
+use crate::work::{self, Job, Progress, Task, Work};
 use crate::workspace::{Origin, Workspace};
 
 /// The most zones one draft can hold: one per key the dialog can set a root on.
@@ -419,8 +420,9 @@ impl Draft {
     }
 
     /// Everything a build needs, owned, so it can run apart from the dialog.
-    fn coding(&self, donor: Option<Library<'static>>) -> Result<Coding, String> {
-        let version = donor.as_ref().map_or(self.version, Library::version);
+    fn coding(&self, donor: Option<(Version, Skeleton)>) -> Result<Coding, String> {
+        let version = donor.as_ref().map_or(self.version, |(version, _)| *version);
+        let donor = donor.map(|(_, template)| template);
         let values = layer_values(&self.takes, version)?;
         let mut takes = Vec::with_capacity(self.takes.len());
         for (take, layer) in self.takes.iter().zip(values) {
@@ -450,11 +452,11 @@ impl Draft {
     fn begin(
         &mut self,
         ctx: &egui::Context,
-        donor: Option<Library<'static>>,
+        donor: Option<(Version, Skeleton)>,
     ) -> Result<(), String> {
         let coding = self.coding(donor)?;
         self.refused = None;
-        self.job = Some(work::run(ctx, move |progress| coding.run(progress)));
+        self.job = Some(work::hand(ctx, coding));
         Ok(())
     }
 
@@ -608,29 +610,213 @@ fn leaves(takes: &[Take]) -> Vec<String> {
 }
 
 /// One take as a build reads it: the file's audio, and the stroke it becomes.
+#[derive(Serialize, Deserialize)]
 struct Recorded {
     path: String,
+    #[serde(with = "pcm")]
     samples: Vec<i16>,
     channels: u16,
     rate: u32,
+    #[serde(with = "sample_loop")]
     sample_loop: Option<Loop>,
     root: u8,
+    #[serde(with = "bank")]
     bank: Bank,
     layer: u8,
 }
 
-/// A piano library build, detached from the dialog that set it up.
-struct Coding {
+/// A piano library build, detached from the dialog that set it up, which
+/// [`work::hand`] runs off the page.
+#[derive(Serialize, Deserialize)]
+pub struct Coding {
     name: String,
     /// The format written where no template donates one.
+    #[serde(with = "version")]
     version: Version,
-    donor: Option<Library<'static>>,
+    donor: Option<Skeleton>,
     takes: Vec<Recorded>,
 }
 
+/// A template's prefix and stroke records, as a build takes them.
+pub enum Skeleton {
+    /// Read already, where the build runs beside the page: the desktop.
+    Parsed(Library<'static>),
+    /// The template's file, which the build's worker reads: the browser. A file crosses
+    /// to the worker without a copy in the page's memory.
+    #[cfg(target_arch = "wasm32")]
+    File(crate::store::Outside),
+}
+
+impl Skeleton {
+    fn read(self) -> Result<Library<'static>, String> {
+        match self {
+            Skeleton::Parsed(library) => Ok(library),
+            #[cfg(target_arch = "wasm32")]
+            Skeleton::File(file) => {
+                let js = |e: wasm_bindgen::JsValue| crate::js::describe(&e);
+                let reader = web_sys::FileReaderSync::new().map_err(js)?;
+                let buffer = reader.read_as_array_buffer(&file).map_err(js)?;
+                let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                Library::borrow(&bytes)
+                    .map(|library| library.without_audio())
+                    .map_err(|e| format!("{}: {e}", file.name()))
+            }
+        }
+    }
+}
+
+impl Serialize for Skeleton {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        match self {
+            Skeleton::Parsed(_) => {
+                let _ = serializer;
+                Err(S::Error::custom("a template read on the page stays there"))
+            }
+            #[cfg(target_arch = "wasm32")]
+            Skeleton::File(file) => wire::outside::serialize(file, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Skeleton {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Skeleton, D::Error> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            wire::outside::deserialize(deserializer).map(Skeleton::File)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use serde::de::Error as _;
+            let _ = deserializer;
+            Err(D::Error::custom(
+                "a template's file is handed over only in the browser",
+            ))
+        }
+    }
+}
+
+/// A take's samples, as their little-endian bytes beside a message's text.
+mod pcm {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(samples: &[i16], serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        wire::Handed::new(bytes).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<i16>, D::Error> {
+        let bytes = wire::bytes::deserialize(deserializer)?;
+        let whole = bytes.chunks_exact(2);
+        if !whole.remainder().is_empty() {
+            return Err(serde::de::Error::custom("samples cut short"));
+        }
+        Ok(whole.map(|b| i16::from_le_bytes([b[0], b[1]])).collect())
+    }
+}
+
+/// A take's loop, field by field.
+mod sample_loop {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    enum Played {
+        Forward,
+        Alternating,
+        Backward,
+        Other(u32),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Wire {
+        start: u32,
+        end: u32,
+        play: Played,
+        fraction: u32,
+        plays: u32,
+    }
+
+    pub fn serialize<S: Serializer>(held: &Option<Loop>, serializer: S) -> Result<S::Ok, S::Error> {
+        held.map(|held| Wire {
+            start: held.start,
+            end: held.end,
+            play: match held.play {
+                Play::Forward => Played::Forward,
+                Play::Alternating => Played::Alternating,
+                Play::Backward => Played::Backward,
+                Play::Other(code) => Played::Other(code),
+            },
+            fraction: held.fraction,
+            plays: held.plays,
+        })
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Loop>, D::Error> {
+        Ok(Option::<Wire>::deserialize(deserializer)?.map(|held| Loop {
+            start: held.start,
+            end: held.end,
+            play: match held.play {
+                Played::Forward => Play::Forward,
+                Played::Alternating => Play::Alternating,
+                Played::Backward => Play::Backward,
+                Played::Other(code) => Play::Other(code),
+            },
+            fraction: held.fraction,
+            plays: held.plays,
+        }))
+    }
+}
+
+/// A bank, as its record code.
+mod bank {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(bank: &Bank, serializer: S) -> Result<S::Ok, S::Error> {
+        bank.code().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bank, D::Error> {
+        let code = u8::deserialize(deserializer)?;
+        Bank::from_code(code).ok_or_else(|| serde::de::Error::custom(format!("no bank {code}")))
+    }
+}
+
+/// A format, as its stream version.
+mod version {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(version: &Version, serializer: S) -> Result<S::Ok, S::Error> {
+        version.stream().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Version, D::Error> {
+        let stream = u16::deserialize(deserializer)?;
+        Version::from_stream(stream)
+            .ok_or_else(|| serde::de::Error::custom(format!("no format {stream:#x}")))
+    }
+}
+
+impl From<Coding> for Task {
+    fn from(coding: Coding) -> Task {
+        Task::Piano(Box::new(coding))
+    }
+}
+
+impl Work for Coding {
+    type Answer = Result<Built, String>;
+
+    fn run(self, progress: &Progress) -> Result<Built, String> {
+        self.code(progress)
+    }
+}
+
 /// A built library, and what the build reports about it.
-#[derive(Debug)]
-struct Built {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Built {
+    #[serde(with = "wire::bytes")]
     bytes: Vec<u8>,
     strokes: usize,
     roots: usize,
@@ -639,7 +825,7 @@ struct Built {
 }
 
 impl Coding {
-    fn run(self, progress: &Progress) -> Result<Built, String> {
+    fn code(self, progress: &Progress) -> Result<Built, String> {
         let count = self.takes.len();
         let mut recordings = Vec::with_capacity(count);
         let mut clipped = 0usize;
@@ -664,7 +850,8 @@ impl Coding {
         }
 
         progress.say(format!("coding {count} strokes…"));
-        let donor = match &self.donor {
+        let template = self.donor.map(Skeleton::read).transpose()?;
+        let donor = match &template {
             Some(template) => Donor::Template(template),
             None => Donor::Rules(Rules::new(self.version, Kind::Grand)),
         };
@@ -978,18 +1165,38 @@ fn templates(workspace: &Workspace) -> Vec<Template> {
     open
 }
 
-/// A template's prefix and stroke records, read here because a build cannot borrow the
-/// document's bytes.
-fn skeleton(workspace: &Workspace, id: u64) -> Result<Library<'static>, String> {
+/// A template's format, and its prefix and stroke records as a build takes them: read
+/// here because a build cannot borrow the document's bytes, or in the browser, its file,
+/// read here only far enough to refuse one that does not read.
+fn skeleton(workspace: &Workspace, id: u64) -> Result<(Version, Skeleton), String> {
     let entity = workspace
         .get(id)
         .ok_or_else(|| "the template is no longer open".to_string())?;
-    if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
-        return Ok(index.library().clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let library = match entity.indexed() {
+            Some(crate::ondisk::Index::Piano(index)) => index.library().clone(),
+            _ => Library::borrow(&entity.bytes)
+                .map(|library| library.without_audio())
+                .map_err(|e| format!("{}: {e}", entity.name))?,
+        };
+        Ok((library.version(), Skeleton::Parsed(library)))
     }
-    Library::borrow(&entity.bytes)
-        .map(|library| library.without_audio())
-        .map_err(|e| format!("{}: {e}", entity.name))
+    #[cfg(target_arch = "wasm32")]
+    {
+        let js = |e: wasm_bindgen::JsValue| crate::js::describe(&e);
+        if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
+            let file = entity.saved.file().and_then(|file| file.snapshot());
+            let file = file.ok_or_else(|| format!("{}: its file is gone", entity.name))?;
+            return Ok((index.library().version(), Skeleton::File(file)));
+        }
+        let version = Library::borrow(&entity.bytes)
+            .map(|library| library.version())
+            .map_err(|e| format!("{}: {e}", entity.name))?;
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&entity.bytes[..]));
+        let file = web_sys::File::new_with_u8_array_sequence(&parts, &entity.name).map_err(js)?;
+        Ok((version, Skeleton::File(file)))
+    }
 }
 
 /// Start the build with the template chosen under Advanced, if any.
@@ -1308,6 +1515,50 @@ mod tests {
         Draft::plan(Making::Piano, files).expect("files were picked")
     }
 
+    #[test]
+    fn a_library_built_through_a_message_is_the_library_built_in_place() {
+        let draft = piano_draft(&[
+            "Grand-060-b0-l00",
+            "Grand-060-b0-l01",
+            "Grand-072-b0-l00",
+            "Grand-072-b2-l00",
+        ]);
+        let coding = || {
+            let mut coding = draft.coding(None).expect("the takes state a library");
+            coding.takes[0].sample_loop = Some(nord_format::wav::Loop::forward(400, 2_400));
+            coding
+        };
+        let here = coding().code(&Progress::default()).expect("a library");
+
+        let sent = wire::encode(&Task::from(coding())).unwrap();
+        let task: Task = wire::decode(sent).unwrap();
+        let answered = crate::work::answer(task, &Progress::default()).unwrap();
+        let there: Result<Built, String> = wire::decode(answered).unwrap();
+        let there = there.expect("a library");
+
+        assert_eq!(there.bytes, here.bytes, "the same file, to the byte");
+        assert_eq!(
+            (there.strokes, there.roots, there.clipped),
+            (here.strokes, here.roots, here.clipped)
+        );
+    }
+
+    #[test]
+    fn a_template_read_on_the_page_is_not_sent() {
+        let draft = piano_draft(&["Grand-060-b0-l00"]);
+        let rules = {
+            let mut plain = piano_draft(&["Grand-060-b0-l00"]);
+            plain.begin(&egui::Context::default(), None).unwrap();
+            finish(&mut plain).expect("a library").bytes
+        };
+        let donor = Library::borrow(&rules).unwrap().without_audio();
+        let coding = draft
+            .coding(Some((donor.version(), Skeleton::Parsed(donor))))
+            .unwrap();
+        let refused = wire::encode(&Task::from(coding)).expect_err("refused");
+        assert!(refused.contains("stays there"), "{refused}");
+    }
+
     fn finish(draft: &mut Draft) -> Result<Built, String> {
         loop {
             if let Some(answer) = draft.settle() {
@@ -1514,6 +1765,7 @@ mod tests {
 
         let mut again = piano_draft(&["Grand-060-b0-l00"]);
         let donor = Library::borrow(&template).unwrap().without_audio();
+        let donor = (donor.version(), Skeleton::Parsed(donor));
         again.begin(&egui::Context::default(), Some(donor)).unwrap();
         let built = finish(&mut again).expect("a library");
         assert_eq!(Library::borrow(&built.bytes).unwrap().damper_top(), 100);
