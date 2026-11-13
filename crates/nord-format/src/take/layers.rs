@@ -24,6 +24,12 @@ fn class_distance(pitch: f64, note: u8) -> f64 {
     ((pitch - f64::from(note) + 6.0).rem_euclid(12.0) - 6.0).abs()
 }
 
+/// How far a run's offset from its note may move from the run before's, in semitones,
+/// before [`notes_of`] takes it for stretch tuning that rounded to the next note. Stretch
+/// moves a few cents from note to note, and an instrument's detuning seldom more than a
+/// third of a semitone.
+pub const STRETCH_JUMP: f64 = 0.7;
+
 /// The notes `hits` play, in playing order, found from their pitches: the list [`assign`]
 /// walks where the take comes with none. Hits `skipped` leaves out, and hits with no
 /// pitch, take no part.
@@ -35,17 +41,45 @@ fn class_distance(pitch: f64, note: u8) -> f64 {
 /// two octaves at most, so a take that starts again at the bottom keeps its jump. That
 /// catches the octave errors pitch estimates make on low notes, and leaves a take that
 /// steps evenly, by octaves too, as played. A take of two notes has no line to go by.
+///
+/// A piano's stretch tuning puts its top notes sharp of equal temperament and its bass
+/// flat, by more than half a semitone at the ends, where rounding would name the next
+/// note. Stretch changes smoothly from note to note, so a run whose offset from its note
+/// jumps more than [`STRETCH_JUMP`] semitones from the run before is named the note on
+/// the other side instead.
 pub fn notes_of(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<u8> {
-    let mut runs: Vec<f64> = Vec::new();
+    // Each run's note and the mean pitch of its hits.
+    let mut named: Vec<(f64, f64, f64)> = Vec::new();
     for hit in hits.iter().filter(|hit| !skipped(hit)) {
         let Some(pitch) = hit.pitch else {
             continue;
         };
         let note = pitch.round().clamp(0.0, 127.0);
-        if runs.last() != Some(&note) {
-            runs.push(note);
+        match named.last_mut() {
+            Some((last, sum, count)) if *last == note => {
+                *sum += pitch;
+                *count += 1.0;
+            }
+            _ => named.push((note, pitch, 1.0)),
         }
     }
+    let mut runs: Vec<f64> = Vec::with_capacity(named.len());
+    let mut offset: Option<f64> = None;
+    for (note, sum, count) in named {
+        let pitch = sum / count;
+        let mut note = note;
+        if let Some(before) = offset {
+            let jump = (pitch - note) - before;
+            if jump < -STRETCH_JUMP && note > 0.0 {
+                note -= 1.0;
+            } else if jump > STRETCH_JUMP && note < 127.0 {
+                note += 1.0;
+            }
+        }
+        offset = Some(pitch - note);
+        runs.push(note);
+    }
+    runs.dedup();
     let bend = |runs: &[f64]| -> f64 {
         runs.windows(3)
             .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs().min(24.0))
@@ -260,6 +294,22 @@ mod tests {
         assert_eq!(notes_of(&hits, |_| false), [35, 38, 42, 45], "between");
         let hits = played(&[35.0, 38.0, 42.0, 33.0], 2);
         assert_eq!(notes_of(&hits, |_| false), [35, 38, 42, 45], "the top");
+    }
+
+    #[test]
+    fn a_stretched_top_and_bass_are_named_by_the_notes_they_stretch_from() {
+        // 0.45 sharp at A6, 0.66 at C7: rounding would name C#7.
+        let hits = played(&[90.3, 93.45, 96.66], 2);
+        assert_eq!(notes_of(&hits, |_| false), [90, 93, 96], "the top");
+        // 0.35 flat at C1, then 0.6 flat at A0: rounding would name G#0.
+        let hits = played(&[23.65, 20.4, 17.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [24, 21, 17], "the bass");
+    }
+
+    #[test]
+    fn a_detuned_instrument_keeps_its_nearest_notes() {
+        let hits = played(&[48.3, 51.0, 53.75, 57.1], 2);
+        assert_eq!(notes_of(&hits, |_| false), [48, 51, 54, 57]);
     }
 
     #[test]

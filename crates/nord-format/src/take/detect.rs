@@ -98,11 +98,18 @@ pub fn highpassed(x: &[f64], rate: u32) -> Vec<f64> {
 /// the floor 100 ms later, which a click is not. Of onsets closer than [`MIN_GAP`], the
 /// loudest wins. Only the first frame of a rise counts: the frames after it pass too,
 /// and a note whose level wavers would drift the onset 30 to 50 ms late.
+///
+/// A take that starts [`RISE_DB`] over the floor starts with a hit: a sample set's
+/// one-note files are cut at the strike, with nothing before it to rise from.
 pub fn onsets(env: &Envelope) -> Vec<usize> {
     let db = &env.db;
     let floor = env.floor();
     let (back, gap, hold) = (frames(LOOKBACK), frames(MIN_GAP), frames(0.1));
     let mut found: Vec<(usize, f64)> = Vec::new();
+    if db.len() > hold && db[0] - floor >= RISE_DB && db[hold] > floor + 15.0 {
+        let loudest = db[..hold].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        found.push((0, loudest));
+    }
     let mut rising = false;
     for i in back..db.len().saturating_sub(hold) {
         let was = rising;

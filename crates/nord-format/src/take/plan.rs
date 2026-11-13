@@ -349,6 +349,20 @@ mod tests {
     }
 
     #[test]
+    fn a_one_note_file_cut_at_its_strike_is_a_hit_with_its_release() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
+        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        assert_eq!(plan.hits.len(), 1, "{:?}", plan.hits);
+        assert_eq!(plan.hits[0].hit.onset, 0);
+        assert_eq!(plan.notes, [60]);
+        match &plan.hits[0].fate {
+            Fate::Kept { cuts, .. } => assert!(cuts.release.is_some(), "{:?}", cuts.no_release),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn a_take_with_no_note_list_is_planned_as_with_the_notes_its_pitches_name() {
         let rate = 35_002;
         let notes = [
