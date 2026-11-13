@@ -58,17 +58,36 @@ pub(crate) fn answer(task: Task, progress: &Progress) -> Result<wire::Message, S
 pub struct FindNoise {
     rate: u32,
     channels: u16,
-    samples: F32s,
+    /// The take's samples, as their little-endian bytes: the one copy of them made to
+    /// hand over, which the message takes.
+    samples: wire::Handed,
 }
 
 impl FindNoise {
     pub fn of(audio: &Audio) -> FindNoise {
+        let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
         FindNoise {
             rate: audio.rate,
             channels: audio.channels,
-            samples: F32s(audio.samples.clone()),
+            samples: wire::Handed::new(bytes),
         }
     }
+}
+
+/// [`nord_format::take::plan::mono`] of samples held as their bytes, summed in the same
+/// order, so to the bit what it gives.
+fn mono(bytes: &[u8], channels: u16) -> Vec<f64> {
+    let channels = usize::from(channels.max(1));
+    bytes
+        .chunks_exact(4 * channels)
+        .map(|frame| {
+            let sum: f64 = frame
+                .chunks_exact(4)
+                .map(|b| f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+                .sum();
+            sum / channels as f64
+        })
+        .collect()
 }
 
 impl From<FindNoise> for Task {
@@ -82,13 +101,9 @@ impl Work for FindNoise {
 
     fn run(self, progress: &Progress) -> FoundNoise {
         progress.say("finding the take's hum and hiss");
-        let audio = Audio {
-            rate: self.rate,
-            channels: self.channels,
-            samples: self.samples.0,
-        };
-        let mono = nord_format::take::plan::mono(&audio);
-        drop(audio);
+        let bytes = self.samples.into_inner().unwrap_or_default();
+        let mono = mono(&bytes, self.channels);
+        drop(bytes);
         FoundNoise(Noise::of(&mono, self.rate))
     }
 }
@@ -158,33 +173,8 @@ impl<'de> Deserialize<'de> for FoundNoise {
     }
 }
 
-/// Samples handed over as their little-endian bytes beside a message's text.
-struct F32s(Vec<f32>);
-
 /// Measures handed over as their little-endian bytes beside a message's text.
 struct F64s(Vec<f64>);
-
-impl Serialize for F32s {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let bytes: Vec<u8> = self.0.iter().flat_map(|v| v.to_le_bytes()).collect();
-        wire::bytes::serialize(&bytes, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for F32s {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<F32s, D::Error> {
-        let bytes = wire::bytes::deserialize(deserializer)?;
-        let whole = bytes.chunks_exact(4);
-        if !whole.remainder().is_empty() {
-            return Err(serde::de::Error::custom("samples cut short"));
-        }
-        Ok(F32s(
-            whole
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
-        ))
-    }
-}
 
 impl Serialize for F64s {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -271,6 +261,27 @@ mod tests {
                 .collect()
         };
         assert_eq!(bits(&there), bits(&here), "every measure, to the bit");
+    }
+
+    #[test]
+    fn a_take_s_mono_from_its_bytes_is_nord_format_s_mono_to_the_bit() {
+        for channels in [1u16, 2, 3] {
+            let samples: Vec<f32> = (0..3_000)
+                .map(|i| ((i * 37) % 101) as f32 / 97.0 - 0.5)
+                .collect();
+            let audio = Audio {
+                rate: 48_000,
+                channels,
+                samples,
+            };
+            let bytes: Vec<u8> = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let bits = |m: Vec<f64>| m.into_iter().map(f64::to_bits).collect::<Vec<_>>();
+            assert_eq!(
+                bits(mono(&bytes, channels)),
+                bits(nord_format::take::plan::mono(&audio)),
+                "{channels} channels"
+            );
+        }
     }
 
     #[test]
