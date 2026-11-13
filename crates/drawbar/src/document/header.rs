@@ -549,12 +549,14 @@ fn right(
         (true, Click::Detect) => act.detect = true,
         (false, _) | (true, Click::Nothing) => {}
     }
-    // Right to left: the field, then its words to its left.
+    // Right to left: "Skip notes [54 dB] or less over noise", its last words first.
     if let Some(limit) = facts.extras.limit {
         let mut held = limit;
-        let hint = "a hit standing less than this over the take's noise is left out as too \
-                    quiet: the build raises every layer to one level, and a quiet hit's hiss \
-                    rises with it";
+        let hint = "Detect skips a note standing this little over the take's noise: the \
+                    build raises every layer to one level, and a quiet note's hiss rises \
+                    with it";
+        ui.label(egui::RichText::new("or less over noise").color(quiet))
+            .on_hover_text(hint);
         let changed = ui
             .add(
                 egui::DragValue::new(&mut held)
@@ -565,7 +567,7 @@ fn right(
             )
             .on_hover_text(hint)
             .changed();
-        ui.label(egui::RichText::new("too quiet under").color(quiet))
+        ui.label(egui::RichText::new("Skip notes").color(quiet))
             .on_hover_text(hint);
         if changed {
             act.limit = Some(held);
