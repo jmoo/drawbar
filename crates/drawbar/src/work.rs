@@ -1,23 +1,34 @@
 //! Work that outlives the frame that started it: encoding a piano library, or laying one
 //! out again from a plan.
 //!
-//! ⚠️ wasm has one thread, so there the work runs inline and the frame waits for it,
-//! except work that waits on the browser, which runs as a task of its own. The caller gets
-//! the same [`Job`] either way and polls it the same way.
+//! ⚠️ wasm has one thread, so there [`run`] runs the work inline and the frame waits for
+//! it, and `spawn` runs work that waits on the browser as a task of its own. Work
+//! [`hand`]ed off by name runs in a worker of its own instead, and the page stays live.
+//! The caller gets the same [`Job`] every way and polls it the same way.
 
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+mod tasks;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod worker;
+
+pub use tasks::{hand, FindNoise, FoundNoise, Task, Work};
+
 /// The latest progress message from a job.
 #[derive(Clone, Default)]
 pub struct Progress(Arc<Mutex<String>>);
 
 impl Progress {
+    /// Say `words`, and in a task's worker, tell the page.
     pub fn say(&self, words: impl Into<String>) {
+        let words = words.into();
+        #[cfg(target_arch = "wasm32")]
+        worker::tell(&words);
         if let Ok(mut held) = self.0.lock() {
-            *held = words.into();
+            *held = words;
         }
     }
 
@@ -40,6 +51,9 @@ pub enum Answer<T> {
 pub struct Job<T> {
     rx: Receiver<T>,
     progress: Progress,
+    /// The worker running the job, which ends when the job is dropped.
+    #[cfg(target_arch = "wasm32")]
+    _worker: Option<worker::Running>,
 }
 
 impl<T> Job<T> {
@@ -96,7 +110,11 @@ pub fn run<T: Send + 'static>(
     let (tx, rx) = channel();
     let progress = Progress::default();
     let _ = tx.send(work(&progress));
-    Job { rx, progress }
+    Job {
+        rx,
+        progress,
+        _worker: None,
+    }
 }
 
 /// Start `work`, a future the browser answers whenever it answers, and request a repaint
@@ -114,7 +132,11 @@ pub fn spawn<T: 'static, F: std::future::Future<Output = T> + 'static>(
         let _ = tx.send(working.await);
         ctx.request_repaint();
     });
-    Job { rx, progress }
+    Job {
+        rx,
+        progress,
+        _worker: None,
+    }
 }
 
 /// Seconds since the Unix epoch, or `None` when the clock reads before it or past what a

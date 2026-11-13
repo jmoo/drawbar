@@ -1001,3 +1001,78 @@ async fn a_copy_is_not_opened_into_a_library_open_in_another_tab() {
     );
     opening.close().await;
 }
+
+/// A stereo take of `seconds` at 44.1 kHz: a quiet hum and hiss, and a strike at a
+/// quarter of the way in that decays.
+fn take(seconds: usize) -> nord_format::wav::Audio {
+    let rate = 44_100u32;
+    let frames = rate as usize * seconds;
+    let mut seed = 0x2545_f491_u32;
+    let mut samples = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        let t = i as f64 / f64::from(rate);
+        let phase = std::f64::consts::TAU * 50.0 * t;
+        let hum = 3e-4 * (3.0 * phase).sin() + 1.6e-4 * (5.0 * phase).sin();
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let hiss = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 1.1e-4;
+        let at = seconds as f64 / 4.0;
+        let strike = if t >= at {
+            0.3 * (-(t - at) * 1.5).exp() * (std::f64::consts::TAU * 220.0 * t).sin()
+        } else {
+            0.0
+        };
+        let v = (hum + hiss + strike) as f32;
+        samples.extend([v, v * 0.9]);
+    }
+    nord_format::wav::Audio {
+        rate,
+        channels: 2,
+        samples,
+    }
+}
+
+/// `job`'s answer, waiting for it while the page stays live.
+async fn answered<T>(job: &drawbar::work::Job<T>) -> drawbar::work::Answer<T> {
+    for _ in 0..600 {
+        match job.poll() {
+            drawbar::work::Answer::Running => sleep(50).await,
+            done => return done,
+        }
+    }
+    panic!("no answer in 30 s; it last said {:?}", job.progress());
+}
+
+#[wasm_bindgen_test]
+async fn a_take_s_noise_found_in_a_worker_is_the_noise_found_on_the_page() {
+    use drawbar::work::{self, FindNoise, FoundNoise};
+    let audio = take(12);
+    let here =
+        nord_format::take::clean::Noise::of(&nord_format::take::plan::mono(&audio), audio.rate);
+    let ctx = egui::Context::default();
+    let job = work::hand(&ctx, FindNoise::of(&audio));
+    // The page is free while the worker works: the job is still running on return.
+    assert_eq!(job.poll(), work::Answer::Running);
+    let work::Answer::Answered(FoundNoise(there)) = answered(&job).await else {
+        panic!("the worker died: {}", job.progress());
+    };
+    assert_eq!(there, here);
+    assert!(
+        !job.progress().is_empty(),
+        "the worker's progress reached the page"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_dropped_job_s_worker_ends_and_the_next_job_runs() {
+    use drawbar::work::{self, FindNoise, FoundNoise};
+    let ctx = egui::Context::default();
+    let audio = take(12);
+    drop(work::hand(&ctx, FindNoise::of(&audio)));
+    let job = work::hand(&ctx, FindNoise::of(&take(4)));
+    assert!(matches!(
+        answered(&job).await,
+        work::Answer::Answered(FoundNoise(_))
+    ));
+}

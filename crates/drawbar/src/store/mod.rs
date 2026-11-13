@@ -40,6 +40,8 @@ pub use web::{copy_of, default_root, permission, Backend, Picked, Risk, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
 #[cfg(target_arch = "wasm32")]
+pub(crate) use worker::{from_js, glue, object, to_js, BOOTSTRAP};
+#[cfg(target_arch = "wasm32")]
 pub use worker::{RescueIo, Unrun, Worker};
 
 /// The folder of this install's own state for a library that holds the slots' former
