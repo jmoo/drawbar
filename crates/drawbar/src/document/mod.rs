@@ -22,7 +22,7 @@ use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
 mod adding;
 mod advanced;
-mod audition;
+pub(crate) mod audition;
 pub mod capability;
 pub mod controls;
 mod field;
