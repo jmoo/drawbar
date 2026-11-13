@@ -257,6 +257,9 @@ pub struct Extras {
     pub loud: Option<Loud>,
     /// The too-quiet limit Detect uses, in dB, beside the loud action of a take.
     pub limit: Option<f64>,
+    /// A take's **Build piano library…**, right of Detect: whether the take marks
+    /// samples to build from.
+    pub piano: Option<bool>,
 }
 
 /// One cell of the identity row: a MICRO-caps label and the value beside it.
@@ -302,6 +305,8 @@ pub(super) struct Clicked {
     pub send: Option<SendBack>,
     pub build: bool,
     pub detect: bool,
+    /// Build piano library… was clicked.
+    pub piano: bool,
     /// The too-quiet limit, where it was changed.
     pub limit: Option<f64>,
     /// The slot the panel is to play, where Load on instrument was clicked.
@@ -354,6 +359,22 @@ pub(super) fn ui(
             ui.data_mut(|data| data.insert_temp(key, learned));
             if restage {
                 ui.ctx().request_discard("header restaged");
+            }
+            // A take's Detect and its limit: a row of their own at the right, so the
+            // top row keeps its name, size and state on one line.
+            if facts.extras.limit.is_some() {
+                let line = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), HEIGHT - 8.0),
+                );
+                let mut under = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(line)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                under.spacing_mut().item_spacing.x = GAP;
+                loud(&mut under, entity, facts, stage, &mut act);
+                ui.advance_cursor_after_rect(under.min_rect().union(line));
             }
             if !cells.is_empty() {
                 row(ui, &cells, stage);
@@ -510,6 +531,104 @@ fn right(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
+    // ⚠️ A take's Detect and its limit have a row of their own, under this one.
+    if facts.extras.limit.is_none() {
+        loud(ui, entity, facts, stage, act);
+    }
+
+    // Right to left: Export is drawn first so that Revert sits to its left.
+    let words = stage == Stage::Full;
+    let quiet_pill = |ui: &mut egui::Ui, glyph, label: &str, live| {
+        pill(
+            ui,
+            Pill {
+                glyph: Some((glyph, SMALL, quiet)),
+                label: words.then_some(label),
+                ink: quiet,
+                mono: false,
+                stroke: visuals.widgets.noninteractive.bg_stroke.color,
+                dashed: false,
+                pad: match words {
+                    true => 7.0,
+                    false => 5.0,
+                },
+                height: CONTROL,
+                live,
+            },
+        )
+    };
+    if let Some((class, at)) = loads(entity, facts.device) {
+        let why = format!(
+            "the panel plays {} as the instrument holds it; nothing here is sent",
+            place(class, at)
+        );
+        act.load = quiet_pill(ui, Glyph::Keyboard, LOAD_ON_INSTRUMENT, true)
+            .on_hover_text(hint(LOAD_ON_INSTRUMENT, &why, words))
+            .clicked()
+            .then_some((class, at));
+    }
+    act.export = quiet_pill(ui, Glyph::ArrowDownToLine, "Export…", true)
+        .on_hover_text(hint(
+            "Export…",
+            "a copy on this computer, under a name you pick",
+            words,
+        ))
+        .clicked();
+    let unsaved = entity.is_unsaved();
+    let why = match unsaved {
+        true => "back to the bytes it was last saved as",
+        false => "nothing has changed since it was saved",
+    };
+    act.revert = quiet_pill(ui, Glyph::RotateCcw, "Revert", unsaved)
+        .on_hover_text(hint("Revert", why, words))
+        .clicked();
+
+    if facts.faces.len() > 1 {
+        rule(ui);
+        act.face = segments(ui, facts, stage);
+    }
+}
+
+/// The label of a take's button that starts a piano library from it.
+pub const BUILD_PIANO: &str = "Build piano library…";
+
+/// A take's Build piano library…, the loud action, and a take's limit for Detect left
+/// of it. The layout runs right to
+/// left, so they are drawn in reverse.
+fn loud(
+    ui: &mut egui::Ui,
+    entity: &LocalEntity,
+    facts: &Facts<'_>,
+    stage: Stage,
+    act: &mut Clicked,
+) {
+    let visuals = ui.visuals().clone();
+    let quiet = caption(&visuals);
+    if let Some(marks) = facts.extras.piano {
+        let why = match marks {
+            true => "opens New ▸ Piano library with this take in it, as it is now",
+            false => "Detect first, or mark the take's samples by hand",
+        };
+        act.piano = pill(
+            ui,
+            Pill {
+                glyph: Some((Glyph::Piano, SMALL, quiet)),
+                label: Some(BUILD_PIANO),
+                ink: match marks {
+                    true => visuals.text_color(),
+                    false => quiet,
+                },
+                mono: false,
+                stroke: visuals.widgets.noninteractive.bg_stroke.color,
+                dashed: !marks,
+                pad: 7.0,
+                height: CONTROL,
+                live: marks,
+            },
+        )
+        .on_hover_text(why)
+        .clicked();
+    }
     let own = action(entity, facts.device);
     let loud = facts.extras.loud.as_ref().unwrap_or(&own);
     let label = match stage {
@@ -572,58 +691,6 @@ fn right(
         if changed {
             act.limit = Some(held);
         }
-    }
-
-    // Right to left: Export is drawn first so that Revert sits to its left.
-    let words = stage == Stage::Full;
-    let quiet_pill = |ui: &mut egui::Ui, glyph, label: &str, live| {
-        pill(
-            ui,
-            Pill {
-                glyph: Some((glyph, SMALL, quiet)),
-                label: words.then_some(label),
-                ink: quiet,
-                mono: false,
-                stroke: visuals.widgets.noninteractive.bg_stroke.color,
-                dashed: false,
-                pad: match words {
-                    true => 7.0,
-                    false => 5.0,
-                },
-                height: CONTROL,
-                live,
-            },
-        )
-    };
-    if let Some((class, at)) = loads(entity, facts.device) {
-        let why = format!(
-            "the panel plays {} as the instrument holds it; nothing here is sent",
-            place(class, at)
-        );
-        act.load = quiet_pill(ui, Glyph::Keyboard, LOAD_ON_INSTRUMENT, true)
-            .on_hover_text(hint(LOAD_ON_INSTRUMENT, &why, words))
-            .clicked()
-            .then_some((class, at));
-    }
-    act.export = quiet_pill(ui, Glyph::ArrowDownToLine, "Export…", true)
-        .on_hover_text(hint(
-            "Export…",
-            "a copy on this computer, under a name you pick",
-            words,
-        ))
-        .clicked();
-    let unsaved = entity.is_unsaved();
-    let why = match unsaved {
-        true => "back to the bytes it was last saved as",
-        false => "nothing has changed since it was saved",
-    };
-    act.revert = quiet_pill(ui, Glyph::RotateCcw, "Revert", unsaved)
-        .on_hover_text(hint("Revert", why, words))
-        .clicked();
-
-    if facts.faces.len() > 1 {
-        rule(ui);
-        act.face = segments(ui, facts, stage);
     }
 }
 

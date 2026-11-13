@@ -1078,17 +1078,25 @@ impl State {
         self.applied = total;
     }
 
-    /// What Play plays: the picked sample as recorded, from its first cut to its last, or
-    /// the whole file where none is picked.
+    /// What Play plays: the picked sample as recorded, from its first cut to its last;
+    /// where a place is clicked instead, what the lane under the take shows about it; or
+    /// the whole file where neither is.
     pub fn heard(&self) -> Option<&[f32]> {
         let audio = self.audio()?;
         let channels = usize::from(audio.channels.max(1));
         let len = audio.samples.len();
-        let span = self
+        let picked = self
             .view
             .picked
             .zip(self.read.marked.as_ref().ok())
             .and_then(|(hit, marked)| marked.extent(hit));
+        let placed = || {
+            let place = self.view.place.filter(|_| self.view.picked.is_none())?;
+            let rate = f64::from(audio.rate.max(1));
+            let about = self.close.about(place, (len / channels) as f64, rate);
+            Some(about.start.floor() as u32..about.end.ceil() as u32)
+        };
+        let span = picked.or_else(placed);
         Some(match span {
             Some(span) => {
                 let at = |frame: u32| (frame as usize * channels).min(len);
@@ -1321,7 +1329,8 @@ pub fn ui(
     if state.audio().is_some() {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let (label, glyph) = match (playing, state.view.picked.is_some()) {
+            let shown = state.view.picked.is_some() || state.view.place.is_some();
+            let (label, glyph) = match (playing, shown) {
                 (true, _) => ("Stop", Glyph::X),
                 (false, true) => (PLAY_HIT, Glyph::AudioLines),
                 (false, false) => ("Play", Glyph::AudioLines),
