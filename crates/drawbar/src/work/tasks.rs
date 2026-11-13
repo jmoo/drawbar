@@ -21,6 +21,7 @@ use crate::store::wire;
 pub enum Task {
     Noise(FindNoise),
     Piano(Box<crate::newproject::Coding>),
+    Detect(FindHits),
 }
 
 /// A piece of work [`hand`] runs: a [`Task`] and what it answers.
@@ -50,6 +51,76 @@ pub(crate) fn answer(task: Task, progress: &Progress) -> Result<wire::Message, S
     match task {
         Task::Noise(work) => wire::encode(&work.run(progress)),
         Task::Piano(work) => wire::encode(&work.run(progress)),
+        Task::Detect(work) => wire::encode(&work.run(progress)),
+    }
+}
+
+/// Find a take's samples, as `nord piano prep` does with no note list: each hit named
+/// by its pitch, its layers chosen by level, a hit under `min_snr_db` over the floor left
+/// out.
+#[derive(Serialize, Deserialize)]
+pub struct FindHits {
+    rate: u32,
+    channels: u16,
+    samples: wire::Handed,
+    /// The too-quiet limit's bits, so it crosses exact.
+    min_snr_db: u64,
+}
+
+impl FindHits {
+    pub fn of(audio: &Audio, min_snr_db: f64) -> FindHits {
+        let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        FindHits {
+            rate: audio.rate,
+            channels: audio.channels,
+            samples: wire::Handed::new(bytes),
+            min_snr_db: min_snr_db.to_bits(),
+        }
+    }
+}
+
+impl From<FindHits> for Task {
+    fn from(work: FindHits) -> Task {
+        Task::Detect(work)
+    }
+}
+
+/// What Detect found: the take's new marks as a `detect` set's
+/// value, and what became of its hits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Detected {
+    pub value: String,
+    /// The hits kept as samples.
+    pub kept: usize,
+    /// The hits left out as too quiet.
+    pub too_quiet: usize,
+    /// The notes the hits' pitches named.
+    pub notes: usize,
+}
+
+impl Work for FindHits {
+    type Answer = Detected;
+
+    fn run(self, progress: &Progress) -> Detected {
+        use nord_format::take::plan::{self, Fate, PlanOptions};
+        progress.say("finding the take's notes");
+        let bytes = self.samples.into_inner().unwrap_or_default();
+        let mono = mono(&bytes, self.channels);
+        drop(bytes);
+        let mut options = PlanOptions::new(Vec::new(), 4);
+        options.min_snr_db = f64::from_bits(self.min_snr_db);
+        let found = plan::plan(&mono, self.rate, &options);
+        let marks = nord_format::wav::Marks {
+            regions: found.regions(),
+            loops: found.loops(),
+        };
+        let count = |fate: fn(&Fate) -> bool| found.hits.iter().filter(|p| fate(&p.fate)).count();
+        Detected {
+            value: crate::document::wav::detected_value(&marks),
+            kept: count(|fate| matches!(fate, Fate::Kept { .. })),
+            too_quiet: count(|fate| matches!(fate, Fate::TooQuiet { .. })),
+            notes: found.notes.len(),
+        }
     }
 }
 
@@ -295,5 +366,26 @@ mod tests {
         });
         let back: FoundNoise = wire::decode(wire::encode(&none).unwrap()).unwrap();
         assert_eq!(back, none);
+    }
+
+    #[test]
+    fn a_take_s_samples_found_through_a_message_are_the_samples_found_in_place() {
+        use nord_format::take::plan::{self, PlanOptions};
+        let audio = take();
+        let mut options = PlanOptions::new(Vec::new(), 4);
+        options.min_snr_db = 40.0;
+        let here = plan::plan(&plan::mono(&audio), audio.rate, &options);
+        let marks = nord_format::wav::Marks {
+            regions: here.regions(),
+            loops: here.loops(),
+        };
+        assert!(!marks.regions.is_empty(), "the strike is a sample");
+
+        let sent = wire::encode(&Task::from(FindHits::of(&audio, 40.0))).unwrap();
+        let task: Task = wire::decode(sent).unwrap();
+        let answered = answer(task, &Progress::default()).unwrap();
+        let there: Detected = wire::decode(answered).unwrap();
+        assert_eq!(there.value, crate::document::wav::detected_value(&marks));
+        assert_eq!((there.kept, there.notes), (1, 1));
     }
 }

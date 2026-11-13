@@ -430,12 +430,19 @@ impl Document {
                 },
                 None => header::Extras::default(),
             },
+            Shape::Wav => match self.open.as_ref().and_then(|open| open.wav.as_ref()) {
+                Some(held) if !viewing => header::Extras {
+                    loud: Some(wav::detect_loud(held)),
+                    limit: Some(held.detect.limit),
+                    ..header::Extras::default()
+                },
+                _ => extras(asset, device, workspace, pending),
+            },
             Shape::Fields
             | Shape::SetList
             | Shape::Sample
             | Shape::Text
             | Shape::Verbatim
-            | Shape::Wav
             | Shape::Undecoded => extras(asset, device, workspace, pending),
         };
 
@@ -462,6 +469,14 @@ impl Document {
             &mut sets,
         );
         self.views.insert(id, act.face.unwrap_or(face));
+        if let Some(held) = open.wav.as_mut() {
+            if let Some(limit) = act.limit {
+                held.detect.limit = limit;
+            }
+            if act.detect {
+                held.start_detect(ui.ctx());
+            }
+        }
 
         let mut wants = Wants {
             send: act.send,

@@ -17,7 +17,7 @@ pub(crate) mod worker;
 
 #[cfg(test)]
 pub(crate) use tasks::answer;
-pub use tasks::{hand, FindNoise, FoundNoise, Task, Work};
+pub use tasks::{hand, Detected, FindHits, FindNoise, FoundNoise, Task, Work};
 
 /// The latest progress message from a job.
 #[derive(Clone, Default)]

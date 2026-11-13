@@ -47,6 +47,49 @@ pub const DELETED: &str = "delete/";
 /// whose attack label its value is, every region of it.
 pub const RENAMED: &str = "rename/";
 
+/// The path of a set that replaces every region and loop the take marks with what
+/// Detect found. Its value holds a line per region, `<start> <frames> <label>`, and a
+/// line per loop, `loop <start> <end>`, its end its last frame.
+pub const DETECTED: &str = "detect";
+
+/// The value of a [`DETECTED`] set marking `marks`, whose loops are forward.
+pub(crate) fn detected_value(marks: &wav::Marks) -> String {
+    let regions = marks
+        .regions
+        .iter()
+        .map(|region| format!("{} {} {}", region.start, region.frames, region.label));
+    let loops = marks
+        .loops
+        .iter()
+        .map(|found| format!("loop {} {}", found.start, found.end));
+    regions.chain(loops).collect::<Vec<_>>().join("\n")
+}
+
+/// The marks a [`DETECTED`] set's value holds.
+fn detected_marks(value: &str) -> Result<wav::Marks, String> {
+    let mut marks = wav::Marks::default();
+    for line in value.lines().filter(|line| !line.trim().is_empty()) {
+        let bad = || format!("{DETECTED}: {line:?} is no region or loop");
+        let mut words = line.split_whitespace();
+        let first = words.next().ok_or_else(bad)?;
+        let number = |word: Option<&str>| word.and_then(|w| w.parse::<u32>().ok()).ok_or_else(bad);
+        if first == "loop" {
+            let (start, end) = (number(words.next())?, number(words.next())?);
+            marks.loops.push(wav::Loop::forward(start, end));
+            continue;
+        }
+        let start = number(Some(first))?;
+        let frames = number(words.next())?;
+        let label = words.next().ok_or_else(bad)?.to_string();
+        marks.regions.push(wav::Region {
+            start,
+            frames,
+            label,
+        });
+    }
+    Ok(marks)
+}
+
 /// `marks` with every region of the sample whose attack is `label` renamed to the sample
 /// whose attack label is `to`.
 fn renamed(marks: &wav::Marks, path: &str, label: &str, to: &str) -> Result<wav::Marks, String> {
@@ -116,6 +159,9 @@ fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
 
 /// What a set that adds or deletes a region or a loop says, for Undo to name it.
 fn said_piece(path: &str, value: &str) -> Option<String> {
+    if path == DETECTED {
+        return Some("detect".to_string());
+    }
     let name = |label: &str| take::mark(label, 0..0).hit.map(take::named);
     if let Some(label) = path.strip_prefix(RENAMED) {
         return Some(format!(
@@ -149,6 +195,9 @@ fn said_piece(path: &str, value: &str) -> Option<String> {
 /// `marks` with the add or delete `path` with `value` made, or none where `path` is not
 /// one.
 fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Marks, String>> {
+    if path == DETECTED {
+        return Some(detected_marks(value));
+    }
     if let Some(label) = path.strip_prefix(RENAMED) {
         return Some(renamed(marks, path, label, value));
     }
@@ -443,6 +492,40 @@ pub const REDO: &str = "redo";
 /// The label of the button that undoes the last edit.
 pub const UNDO_LABEL: &str = "Undo";
 
+/// The take's loud action: Detect, which marks its samples in place of its regions.
+pub(super) fn detect_loud(state: &State) -> super::header::Loud {
+    use super::header::{Click, Loud, Tone};
+    let ready = Loud {
+        label: "Detect".to_string(),
+        short: "Detect".to_string(),
+        glyph: crate::icon::Glyph::Search,
+        tone: Tone::Ready,
+        hint: "finds the take's notes, layers, cuts and loops, and marks them in place of \
+               its regions; Undo puts them back"
+            .to_string(),
+        click: Click::Detect,
+    };
+    if state.detect.running() {
+        return Loud {
+            label: "Detecting…".to_string(),
+            short: "Detecting…".to_string(),
+            tone: Tone::Idle,
+            hint: "finding the take's notes".to_string(),
+            click: Click::Nothing,
+            ..ready
+        };
+    }
+    if state.audio().is_none() {
+        return Loud {
+            tone: Tone::Idle,
+            hint: "the WAV's audio does not read".to_string(),
+            click: Click::Nothing,
+            ..ready
+        };
+    }
+    ready
+}
+
 /// What an edit undoes to: the gain, the marks and the settings the bytes held before
 /// it, and what it was, for the Undo button to name.
 #[derive(Clone, Debug, PartialEq)]
@@ -608,6 +691,89 @@ pub struct State {
     pub close: hit::Close,
     /// What the take is heard as, kept across new bytes.
     pub audition: audition::Audition,
+    /// What Detect asks for and found, kept across new bytes.
+    pub detect: Detect,
+}
+
+/// Detect on a take: the too-quiet limit it uses, the search running, and what the last
+/// one found.
+pub struct Detect {
+    /// A hit standing less than this over the floor is left out, in dB.
+    pub limit: f64,
+    running: Option<crate::work::Job<crate::work::Detected>>,
+    /// What the last search found, or why it found nothing.
+    pub found: Option<Result<crate::work::Detected, String>>,
+}
+
+impl Default for Detect {
+    fn default() -> Detect {
+        Detect {
+            limit: nord_format::take::plan::MIN_SNR_DB,
+            running: None,
+            found: None,
+        }
+    }
+}
+
+impl Detect {
+    /// Whether a search is running.
+    pub fn running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Start finding the samples of `audio`, unless a search is running.
+    pub fn start(&mut self, ctx: &egui::Context, audio: &Audio) {
+        if self.running.is_none() {
+            let work = crate::work::FindHits::of(audio, self.limit);
+            self.running = Some(crate::work::hand(ctx, work));
+            self.found = None;
+        }
+    }
+
+    /// Take what the search found, once it has, as the set that marks it.
+    pub fn follow(&mut self, sets: &mut Sets) {
+        let Some(job) = &self.running else {
+            return;
+        };
+        let found = match job.poll() {
+            crate::work::Answer::Running => return,
+            crate::work::Answer::Answered(found) => found,
+            crate::work::Answer::Died => {
+                self.running = None;
+                self.found = Some(Err("Detect stopped without a result".to_string()));
+                return;
+            }
+        };
+        self.running = None;
+        if found.kept > 0 {
+            sets.push((DETECTED.to_string(), found.value.clone()));
+        }
+        self.found = Some(Ok(found));
+    }
+
+    /// What the last search found, in words.
+    pub fn said(&self) -> Option<String> {
+        if self.running() {
+            return Some("finding the take's notes…".to_string());
+        }
+        Some(match self.found.as_ref()? {
+            Err(why) => why.clone(),
+            Ok(found) if found.kept == 0 => format!(
+                "Detect kept no sample: {} hit(s) too quiet under {:.0} dB; the take's \
+                 regions are as they were",
+                found.too_quiet, self.limit
+            ),
+            Ok(found) => format!(
+                "Detect marked {} sample(s) of {} note(s){}",
+                found.kept,
+                found.notes,
+                match found.too_quiet {
+                    0 => String::new(),
+                    n => format!(", leaving out {n} too quiet"),
+                }
+            ),
+        })
+    }
 }
 
 /// The notes of the original, each by its quietest and loudest integer sample, so the
@@ -825,6 +991,7 @@ impl State {
             view: take::View::default(),
             close: hit::Close::default(),
             audition: audition::Audition::default(),
+            detect: Detect::default(),
         }
     }
 
@@ -843,13 +1010,15 @@ impl State {
                 self.read = Read::of(entity);
             }
             _ => {
-                let (view, close, audition) = (
+                let (view, close, audition, detect) = (
                     std::mem::take(&mut self.view),
                     std::mem::take(&mut self.close),
                     std::mem::take(&mut self.audition),
+                    std::mem::take(&mut self.detect),
                 );
                 *self = State::new(entity);
-                (self.view, self.close, self.audition) = (view, close, audition);
+                (self.view, self.close, self.audition, self.detect) =
+                    (view, close, audition, detect);
             }
         }
     }
@@ -1018,6 +1187,13 @@ impl State {
             .is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
     }
 
+    /// Start Detect on the take, where its audio reads.
+    pub fn start_detect(&mut self, ctx: &egui::Context) {
+        if let Ok(audio) = &self.read.source {
+            self.detect.start(ctx, audio);
+        }
+    }
+
     /// The audio as float, whatever the file stores it as.
     pub fn audio(&self) -> Option<&Audio> {
         self.read.source.as_ref().ok()
@@ -1049,6 +1225,14 @@ pub fn ui(
 ) -> (bool, Option<audition::Ask>) {
     let mut audition = false;
     let mut asked = None;
+    state.detect.follow(sets);
+    if let Some(said) = state.detect.said() {
+        let ink = match state.detect.found {
+            Some(Err(_)) => crate::app::bad(ui.visuals()),
+            _ => ui.visuals().weak_text_color(),
+        };
+        ui.label(egui::RichText::new(said).small().color(ink));
+    }
     if state.marks_samples() {
         // From the take's opening, so its samples are ready to hear by the time one is
         // picked.
@@ -1823,5 +2007,44 @@ mod tests {
         assert!(!is_wav(b"RIFF"));
         assert!(!is_wav(b"not a wav at all"));
         assert!(!is_wav(&[]));
+    }
+
+    #[test]
+    fn detect_marks_what_it_found_in_place_of_the_regions_and_undo_names_it() {
+        let found = wav::Marks {
+            regions: vec![
+                wav::Region {
+                    start: 100,
+                    frames: 900,
+                    label: "060-b0-v00".into(),
+                },
+                wav::Region {
+                    start: 1_000,
+                    frames: 500,
+                    label: "060-b2-v00".into(),
+                },
+            ],
+            loops: vec![wav::Loop::forward(300, 699)],
+        };
+        let value = detected_value(&found);
+        let bare = wav::pcm16(&[0i16; 4_000], 35_002, 1).unwrap();
+        let before = wav::Marks {
+            regions: vec![wav::Region {
+                start: 0,
+                frames: 50,
+                label: "072-b0-v00".into(),
+            }],
+            loops: Vec::new(),
+        };
+        let old = wav::with_marks(&bare, &before).unwrap();
+        let sets = [(DETECTED.to_string(), value)];
+        let (out, _) = apply(&old, &old, &sets).unwrap();
+        assert_eq!(
+            wav::read_marks(&out).unwrap(),
+            found,
+            "the old regions are gone"
+        );
+        assert_eq!(Step::before(&old, 0.0, &sets).what, "detect");
+        assert!(detected_marks("12 x 060-b0-v00").is_err());
     }
 }
