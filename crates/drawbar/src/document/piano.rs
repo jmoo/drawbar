@@ -972,7 +972,7 @@ pub(crate) fn kind_name(code: u8) -> String {
         Some(Kind::Harpsichord) => "Harpsichord",
         Some(Kind::DigitalPiano) => "Digital piano",
         Some(Kind::Hybrid) => "Hybrid",
-        Some(Kind::Mallet) => "Mallet",
+        Some(Kind::Mallet) => "Misc/Mallet",
         None => return format!("kind {code}"),
     };
     word.to_string()
