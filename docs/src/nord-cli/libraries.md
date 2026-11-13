@@ -84,7 +84,9 @@ template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
 values. Without `--kind`, the kind the takes state, as drawbar's take editor saves
 it, decides, and otherwise grand; takes that state different kinds need `--kind`.
 Each stroke decays from note-on as the instrument's own pianos of that kind do,
-faster on higher keys. In format 6, each layer is trimmed to play at the level of
+faster on higher keys. For a sound that sustains, such as organ, strings or pads,
+`--no-decay` holds every note and loop at its level, so a note has only its
+recording's own decay. In format 6, each layer is trimmed to play at the level of
 its root's loudest layer, softer layers a little louder as that kind's are, up to 6
 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer or release needs more boost than the instrument gives at `--gain`, the whole
@@ -108,8 +110,9 @@ the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then
 to the nearest note in the list. Each note keeps up to `--layers` hits, spread evenly
 in level, or the first ones played with `--order played`. `--min-layer-gap` drops a
 hit too close in level to a louder one, and `--skip` leaves out hits by their number
-in the listing. A hit too quiet over the take's noise is left out. `--max-seconds`
-and `--release-seconds` limit each attack and release.
+in the listing. A hit less than 54 dB over the take's noise is left out as too
+quiet, since the build raises it and its hiss with it; `--min-snr` sets that limit.
+`--max-seconds` and `--release-seconds` limit each attack and release.
 
 The listing shows every hit: its note and pitch, its level, what became of it, and
 how it sustains. A note still sounding at its key-up is looped, with a warning where

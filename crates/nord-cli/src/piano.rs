@@ -221,6 +221,12 @@ pub struct BuildArgs {
     #[arg(long, value_name = "DB_PER_S", conflicts_with = "template")]
     pub loop_fade: Option<f64>,
 
+    /// Held notes keep their level: no fade from note-on, and loops held at their
+    /// level, for sounds that sustain, such as organ, strings or pads. A note still has
+    /// its recording's own decay.
+    #[arg(long, conflicts_with_all = ["template", "loop_fade"])]
+    pub no_decay: bool,
+
     /// The library's name, the half of its name field before the `#`.
     #[arg(long)]
     pub name: String,
@@ -1392,6 +1398,7 @@ fn build_rules(args: &BuildArgs, stated: Option<encode::Kind>) -> Result<encode:
                     format!("--loop-fade {rate} dB/s is outside the 0 to 6553.5 the rules hold")
                 })?
         }
+        None if args.no_decay => 0,
         None => kind.loop_fade(),
     };
     Ok(encode::Rules {
@@ -1400,6 +1407,7 @@ fn build_rules(args: &BuildArgs, stated: Option<encode::Kind>) -> Result<encode:
         gain,
         damper_top,
         loop_fade,
+        decays: !args.no_decay,
     })
 }
 
@@ -1640,6 +1648,9 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             20.0 * most.log10()
         ));
     }
+    if !rules.decays && args.template.is_none() {
+        ui.note("held notes do not fade from note-on; each has its recording's own decay");
+    }
     if looped > 0 {
         ui.note(format!(
             "{looped} stroke(s) loop where their WAV's smpl chunk says while the key is held"
@@ -1787,6 +1798,39 @@ mod tests {
             piano(&["build", "in", "--kind", "harp", "--name", "N", "-o", "o.npno"]).err(),
             Some(clap::error::ErrorKind::InvalidValue)
         );
+    }
+
+    #[test]
+    fn no_decay_holds_notes_and_cannot_be_given_a_loop_fade_or_template() {
+        let build = |extra: &[&str]| {
+            let argv = [
+                &[
+                    "build", "in", "--kind", "grand", "--name", "N", "-o", "o.npno",
+                ],
+                extra,
+            ]
+            .concat();
+            match piano(&argv) {
+                Ok(crate::PianoAction::Build(args)) => Ok(build_rules(&args, None).unwrap()),
+                Ok(_) => panic!("{argv:?} parsed as another verb"),
+                Err(kind) => Err(kind),
+            }
+        };
+        let held = build(&["--no-decay"]).unwrap();
+        assert!(!held.decays);
+        assert_eq!(held.loop_fade, 0, "its loops held too");
+        let plain = build(&[]).unwrap();
+        assert!(plain.decays);
+        assert_eq!(plain.loop_fade, encode::Kind::Grand.loop_fade());
+        for clash in [
+            &["--no-decay", "--loop-fade", "2"][..],
+            &["--no-decay", "--template", "t.npno"],
+        ] {
+            assert_eq!(
+                build(clash).err(),
+                Some(clap::error::ErrorKind::ArgumentConflict)
+            );
+        }
     }
 
     /// A root's attack region, `frames` frames of a tone, with a loop ending on its last

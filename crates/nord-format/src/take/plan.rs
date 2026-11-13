@@ -43,6 +43,10 @@ pub struct SetLayer {
     pub of: usize,
 }
 
+/// The [`PlanOptions::min_snr_db`] unless a caller says otherwise: soft treble hits
+/// recorded about 30 dB over the floor gave very noisy loops once leveled.
+pub const MIN_SNR_DB: f64 = 54.0;
+
 impl PlanOptions {
     pub fn new(notes: Vec<u8>, layers: usize) -> PlanOptions {
         PlanOptions {
@@ -51,7 +55,7 @@ impl PlanOptions {
             order: Order::Loudness,
             skip: Vec::new(),
             min_layer_gap_db: 2.0,
-            min_snr_db: 54.0,
+            min_snr_db: MIN_SNR_DB,
             cut: CutOptions::default(),
             sustain: SustainOptions::default(),
             set: None,
@@ -346,6 +350,20 @@ mod tests {
             ]
         );
         assert!(plan.missing.is_empty());
+
+        let lenient = PlanOptions {
+            min_snr_db: 25.0,
+            ..PlanOptions::new(vec![48, 55], 2)
+        };
+        let fates: Vec<Fate> = super::plan(&x, rate, &lenient)
+            .hits
+            .into_iter()
+            .map(|p| p.fate)
+            .collect();
+        assert!(
+            matches!(fates[4], Fate::Kept { .. }),
+            "a lower limit keeps it: {fates:?}"
+        );
     }
 
     #[test]

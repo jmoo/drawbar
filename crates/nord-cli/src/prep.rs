@@ -47,6 +47,12 @@ pub struct PrepArgs {
     #[arg(long, value_name = "DB", default_value_t = 2.0)]
     pub min_layer_gap: f64,
 
+    /// A hit less than this many decibels over the take's floor, its hum taken out, is
+    /// left out as too quiet: the build raises every layer to one level, and a quiet
+    /// hit's hiss rises with it.
+    #[arg(long, value_name = "DB", default_value_t = plan::MIN_SNR_DB)]
+    pub min_snr: f64,
+
     /// The longest attack, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = 6.0)]
     pub max_seconds: f64,
@@ -103,6 +109,12 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
             args.min_layer_gap
         ));
     }
+    if !(args.min_snr.is_finite() && args.min_snr >= 0.0) {
+        return Err(format!(
+            "--min-snr {} is no level; give decibels of 0 or more",
+            args.min_snr
+        ));
+    }
     let skips = skips(&args.skip, args.takes.len())?;
     let outs: Vec<PathBuf> = match set {
         false => vec![args.out.clone()],
@@ -140,6 +152,7 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
         };
         options.skip = skips[index].clone();
         options.min_layer_gap_db = args.min_layer_gap;
+        options.min_snr_db = args.min_snr;
         options.cut.max_seconds = args.max_seconds;
         options.cut.release_seconds = args.release_seconds;
         options.set = set.then_some(SetLayer {
@@ -784,6 +797,8 @@ mod tests {
             ("--release-seconds", "-1"),
             ("--min-layer-gap", "NaN"),
             ("--min-layer-gap", "-2"),
+            ("--min-snr", "NaN"),
+            ("--min-snr", "-1"),
         ] {
             let given = format!("{flag}={value}");
             let args = prep_args(&["take.wav", "--notes", "C4", &given, "-o", "out.wav"]);
