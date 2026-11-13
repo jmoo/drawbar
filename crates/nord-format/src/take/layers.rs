@@ -24,6 +24,58 @@ fn class_distance(pitch: f64, note: u8) -> f64 {
     ((pitch - f64::from(note) + 6.0).rem_euclid(12.0) - 6.0).abs()
 }
 
+/// The notes `hits` play, in playing order, found from their pitches: the list [`assign`]
+/// walks where the take comes with none. Hits `skipped` leaves out, and hits with no
+/// pitch, take no part.
+///
+/// Each hit is named by its pitch, rounded, and a run of hits on one note is one entry.
+/// Then, one run at a time, the octave move that most straightens the notes' line is
+/// made, while one straightens it by more than half an octave: the line's bend is the
+/// sum of how far each run lies off the middle of the runs either side, each counted to
+/// two octaves at most, so a take that starts again at the bottom keeps its jump. That
+/// catches the octave errors pitch estimates make on low notes, and leaves a take that
+/// steps evenly, by octaves too, as played. A take of two notes has no line to go by.
+pub fn notes_of(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<u8> {
+    let mut runs: Vec<f64> = Vec::new();
+    for hit in hits.iter().filter(|hit| !skipped(hit)) {
+        let Some(pitch) = hit.pitch else {
+            continue;
+        };
+        let note = pitch.round().clamp(0.0, 127.0);
+        if runs.last() != Some(&note) {
+            runs.push(note);
+        }
+    }
+    let bend = |runs: &[f64]| -> f64 {
+        runs.windows(3)
+            .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs().min(24.0))
+            .sum()
+    };
+    loop {
+        let now = bend(&runs);
+        let mut best: Option<(f64, usize, f64)> = None;
+        for i in 0..runs.len() {
+            for moved in [runs[i] - 12.0, runs[i] + 12.0] {
+                if !(0.0..=127.0).contains(&moved) {
+                    continue;
+                }
+                let mut tried = runs.clone();
+                tried[i] = moved;
+                let gain = now - bend(&tried);
+                if gain > 6.0 && best.is_none_or(|(most, _, _)| gain > most) {
+                    best = Some((gain, i, moved));
+                }
+            }
+        }
+        match best {
+            Some((_, i, moved)) => runs[i] = moved,
+            None => break,
+        }
+    }
+    runs.dedup();
+    runs.into_iter().map(|note| note as u8).collect()
+}
+
 /// The index into `notes` each of `hits` plays, or none for a hit `skipped` leaves out,
 /// with a warning where its pitch disagrees.
 ///
@@ -181,6 +233,53 @@ mod tests {
             level_db,
             pitch: Some(pitch),
         }
+    }
+
+    /// Hits of `notes` played in turn, each `per` times, measured at those pitches.
+    fn played(pitches: &[f64], per: usize) -> Vec<Hit> {
+        pitches
+            .iter()
+            .flat_map(|&p| std::iter::repeat_n(p, per))
+            .enumerate()
+            .map(|(i, p)| hit(i + 1, -20.0, p))
+            .collect()
+    }
+
+    #[test]
+    fn a_take_s_notes_are_named_by_its_hits_pitches_in_playing_order() {
+        let hits = played(&[47.1, 49.8, 53.9, 57.2], 3);
+        assert_eq!(notes_of(&hits, |_| false), [47, 50, 54, 57]);
+    }
+
+    #[test]
+    fn a_note_read_an_octave_off_its_neighbors_is_moved_back() {
+        // D2 read as D3 between B1 and F#2, and the lowest note, B1, read as B2.
+        let hits = played(&[47.0, 38.0, 42.0, 45.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [35, 38, 42, 45], "the bottom");
+        let hits = played(&[35.0, 50.0, 42.0, 45.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [35, 38, 42, 45], "between");
+        let hits = played(&[35.0, 38.0, 42.0, 33.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [35, 38, 42, 45], "the top");
+    }
+
+    #[test]
+    fn a_take_that_steps_by_octaves_keeps_its_octaves() {
+        let hits = played(&[36.0, 48.0, 60.0, 72.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [36, 48, 60, 72]);
+    }
+
+    #[test]
+    fn a_take_that_starts_again_at_the_bottom_keeps_its_jump() {
+        let hits = played(&[84.0, 87.0, 90.0, 36.0, 39.0, 42.0], 2);
+        assert_eq!(notes_of(&hits, |_| false), [84, 87, 90, 36, 39, 42]);
+    }
+
+    #[test]
+    fn skipped_hits_and_hits_with_no_pitch_name_no_note() {
+        let mut hits = played(&[48.0, 60.0, 52.0], 1);
+        hits[2].pitch = None;
+        assert_eq!(notes_of(&hits, |hit| hit.number == 2), [48]);
+        assert!(notes_of(&[], |_| false).is_empty());
     }
 
     #[test]

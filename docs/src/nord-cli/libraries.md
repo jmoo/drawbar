@@ -97,17 +97,19 @@ format 5, each stroke's level follows its layer.
 of them:
 
 ```sh
-nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
+nord piano prep take.wav -o regions.wav
 nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
 ```
 
-Give `prep` the notes in the order you played them. Each note may be hit several
-times, loud to soft or in any order. Each hit goes to the nearest note in the list,
-and each note keeps up to `--layers` hits, spread evenly in level, or the first ones
-played with `--order played`. `--min-layer-gap` drops a hit too close in level to a
-louder one, and `--skip` leaves out hits by their number in the listing. A hit too
-quiet over the take's noise is left out. `--max-seconds` and `--release-seconds`
-limit each attack and release.
+`prep` names each hit's note by its pitch, and lists the notes it found. A note read
+an octave off the notes played either side of it is put back in line. Each note may
+be hit several times, loud to soft or in any order. Where the pitches mislead, give
+the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then goes
+to the nearest note in the list. Each note keeps up to `--layers` hits, spread evenly
+in level, or the first ones played with `--order played`. `--min-layer-gap` drops a
+hit too close in level to a louder one, and `--skip` leaves out hits by their number
+in the listing. A hit too quiet over the take's noise is left out. `--max-seconds`
+and `--release-seconds` limit each attack and release.
 
 The listing shows every hit: its note and pitch, its level, what became of it, and
 how it sustains. A note still sounding at its key-up is looped, with a warning where
@@ -117,7 +119,7 @@ Or record one take per velocity layer, each playing every note once, and give th
 loudest first:
 
 ```sh
-nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
+nord piano prep loud.wav medium.wav soft.wav -o regions/
 nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
 ```
 

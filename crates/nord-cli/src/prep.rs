@@ -23,8 +23,9 @@ pub struct PrepArgs {
 
     /// The notes played, in playing order, as names or numbers: `B1,D2,F#2`. In a
     /// single take each note may be hit several times in a row; the hits of one note
-    /// become its layers.
-    #[arg(long, value_name = "NOTES", value_delimiter = ',', required = true)]
+    /// become its layers. Without it, each hit is named by its pitch, and the notes
+    /// found are listed.
+    #[arg(long, value_name = "NOTES", value_delimiter = ',')]
     pub notes: Vec<String>,
 
     /// The layers each note of a single take gets: 4 unless given. Takes of one layer
@@ -226,6 +227,13 @@ fn prep_take(
     };
     let plan = plan::plan(&plan::mono(&take), take.rate, options);
 
+    if options.notes.is_empty() {
+        let found: Vec<String> = plan.notes.iter().map(|&n| note::name(n)).collect();
+        ui.note(format!(
+            "notes found from the hits' pitches: {}",
+            found.join(",")
+        ));
+    }
     list(ui, &plan);
     let regions = plan.regions();
     if regions.is_empty() {
@@ -479,6 +487,14 @@ mod tests {
         let (take, out_s) = (path.to_str().unwrap(), out.to_str().unwrap());
         let args = prep_args(&[take, "--notes", "C4,E4", "--layers", "2", "-o", out_s]);
         prep(&Ui::piped(), args).unwrap();
+
+        let unnamed = dir.join("unnamed.wav");
+        let args = prep_args(&[take, "--layers", "2", "-o", unnamed.to_str().unwrap()]);
+        prep(&Ui::piped(), args).unwrap();
+        assert!(
+            std::fs::read(&unnamed).unwrap() == std::fs::read(&out).unwrap(),
+            "with no note list, the notes the hits' pitches name"
+        );
 
         let bytes = std::fs::read(&out).unwrap();
         let layout = wav::layout(&bytes).unwrap();
