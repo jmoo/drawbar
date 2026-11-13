@@ -592,8 +592,8 @@ fn right(
 /// The label of a take's button that starts a piano library from it.
 pub const BUILD_PIANO: &str = "Build piano library…";
 
-/// A take's row under the strip, left to right: "Skip notes [54 dB] or less over
-/// noise", Detect, and Build piano library….
+/// A take's row under the strip, left to right: Detect, "Skip notes [54 dB] or less
+/// over noise", and Build piano library….
 fn take_row(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
@@ -603,6 +603,7 @@ fn take_row(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
+    loud(ui, entity, facts, stage, act);
     if let Some(limit) = facts.extras.limit {
         let mut held = limit;
         let hint = "Detect skips a note standing this little over the take's noise: the \
@@ -626,7 +627,6 @@ fn take_row(
             act.limit = Some(held);
         }
     }
-    loud(ui, entity, facts, stage, act);
     if let Some(marks) = facts.extras.piano {
         let why = match marks {
             true => "opens New ▸ Piano library with this take in it, as it is now",
