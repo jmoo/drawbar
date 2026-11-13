@@ -53,8 +53,8 @@ are, and the take editor follows the other document editors.
      floor and hum are measured on their own. A note played twice in a take keeps its last hit.
    - **A folder of one-note takes**, one WAV per hit, each a note struck, held and released, with
      no loop: the way free sample sets are usually published. Each WAV is a take of one hit. Its
-     note and layer come from its file name where that names them, and otherwise from its pitch
-     and its level among the WAVs of its note. See One-note takes.
+     note comes from its pitch and its layer from its level among the WAVs of its note; file
+     names are not read. See One-note takes.
 2. **Resample.** Detect, the loop markers and Build work only at 35,002 Hz. At any other rate the
    document says so and offers Resample, which writes a new WAV next to the take and opens it. The
    original is never changed. The new WAV keeps the take's bit depth (24-bit or float); the build
@@ -184,14 +184,19 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 
 ### One-note takes
 
-- Each WAV of the folder is read as a take of one hit: its hit, cuts, release and loop are found as
-  for a hit of a long take. A WAV holding more than one hit is flagged, and its loudest hit kept.
-- Note: a note name or MIDI number in the file name (`C4`, `Piano_C4_mf`, `060`), checked against
-  its pitch; a name and pitch more than a semitone apart are flagged. With none, its pitch.
-- Layer: a dynamic marking or velocity in the file name (`pp` to `ff`, `v1`, `vel64`), and with none,
-  its level among the WAVs of its note, loudest first.
-- Noise: a one-note WAV seldom holds a second of quiet to measure its hum and hiss on. Where it does
-  not, the quietest stretch among the folder's WAVs, from the same recording, stands in.
+- Each WAV of the folder, its subfolders too, is read as a take of one hit: its loudest hit, whose
+  cuts, release and loop are found as for a hit of a long take.
+- Floor: each WAV's own, the mean level of its quietest half second. A held note fills most of its
+  file and rests only after its key-off, so the long take's floor, the level a tenth of the frames
+  are under, would read the note itself (an organ A3: -77 dB read, -96 dB real).
+- Note: its pitch. The folder's hits are sorted by pitch and named as a long take's are, so the
+  stretch and octave checks have each note's neighbors to go by. File names are not read: in one
+  free set the numbers in them were indexes, not MIDI notes. With no playing order, a pitch read an
+  octave off lands among the wrong note's WAVs, for the user to fix.
+- Layer: its level among the WAVs of its note, loudest first, as a long take's hits are chosen. A
+  WAV within the layer gap of a louder one, such as a second round-robin, is left out: the
+  instrument has no round-robins.
+- A WAV with no hit, no pitch, or too little level over its floor is listed and left out.
 - Detect writes each WAV's regions into it, and New ▸ Piano library builds from all of them at once.
 
 ### Cuts
@@ -396,9 +401,10 @@ fifth on `mikesprad:feat/take-editor-wav`.
   the library's changes. Docs. Written on `mikesprad:feat/take-editor-wav`, on top of the first
   four. Resample, Detect and Build from the editor are still to come; `nord piano prep` does them
   for now.
-- [ ] Detect with no inputs: notes named by pitch, octaves checked against their neighbors. Not
-  written yet.
-- [ ] One-note takes: Detect and Build over a folder of WAVs of one hit each. Not written yet.
+- [ ] Detect with no inputs: notes named by pitch, octaves checked against their neighbors. Written
+  in `nord piano prep` on `mikesprad:feat/take-auto-notes`; in the editor still to come.
+- [ ] One-note takes: Detect and Build over a folder of WAVs of one hit each. Written as
+  `nord piano prep FOLDER` on `mikesprad:feat/take-auto-notes`; in the editor still to come.
 
 ## Drawbacks
 
