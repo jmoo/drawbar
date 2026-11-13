@@ -59,7 +59,9 @@ highest roots pitched out to reach every key. Takes build on their own, not with
 WAVs of one stroke each. **Category**, beside the name, is the category whose
 rules a library without a template follows, preset from the take's own.
 **Advanced ▸ Don't decay long notes** keeps each held note's own decay and holds
-its loop at its level, for organs and other steady sounds.
+its loop at its level, and lets each key-off ring out its recorded tail, for organs
+and other steady sounds. The instrument has no organ category: for an organ, a pad
+or strings, choose **Hybrid** and tick Don't decay long notes.
 
 A new library is written in piano format 6.x. **Advanced ▸ Format** offers 5.x
 for an instrument that does not play 6.x. With a template, the library takes the
