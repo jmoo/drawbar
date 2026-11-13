@@ -236,6 +236,8 @@ pub enum Click {
     Send(ObjectClass, Location),
     /// Build this project into the instrument it describes.
     Build,
+    /// Mark this take's samples.
+    Detect,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
@@ -253,6 +255,8 @@ pub struct Extras {
     /// naming programs the instrument does not have where the list says.
     pub state: Option<StateLine>,
     pub loud: Option<Loud>,
+    /// The too-quiet limit Detect uses, in dB, beside the loud action of a take.
+    pub limit: Option<f64>,
 }
 
 /// One cell of the identity row: a MICRO-caps label and the value beside it.
@@ -297,6 +301,9 @@ pub(super) struct Clicked {
     pub export: bool,
     pub send: Option<SendBack>,
     pub build: bool,
+    pub detect: bool,
+    /// The too-quiet limit, where it was changed.
+    pub limit: Option<f64>,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
@@ -539,7 +546,30 @@ fn right(
             })
         }
         (true, Click::Build) => act.build = true,
+        (true, Click::Detect) => act.detect = true,
         (false, _) | (true, Click::Nothing) => {}
+    }
+    // Right to left: the field, then its words to its left.
+    if let Some(limit) = facts.extras.limit {
+        let mut held = limit;
+        let hint = "a hit standing less than this over the take's noise is left out as too \
+                    quiet: the build raises every layer to one level, and a quiet hit's hiss \
+                    rises with it";
+        let changed = ui
+            .add(
+                egui::DragValue::new(&mut held)
+                    .range(0.0..=90.0)
+                    .speed(0.5)
+                    .fixed_decimals(0)
+                    .suffix(" dB"),
+            )
+            .on_hover_text(hint)
+            .changed();
+        ui.label(egui::RichText::new("too quiet under").color(quiet))
+            .on_hover_text(hint);
+        if changed {
+            act.limit = Some(held);
+        }
     }
 
     // Right to left: Export is drawn first so that Revert sits to its left.
