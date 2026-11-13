@@ -698,7 +698,7 @@ pub struct State {
 /// Detect on a take: the too-quiet limit it uses, the search running, and what the last
 /// one found.
 pub struct Detect {
-    /// A hit standing less than this over the floor is left out, in dB.
+    /// A note standing this little over the floor is skipped, in dB.
     pub limit: f64,
     running: Option<crate::work::Job<crate::work::Detected>>,
     /// What the last search found, or why it found nothing.
@@ -759,8 +759,8 @@ impl Detect {
         Some(match self.found.as_ref()? {
             Err(why) => why.clone(),
             Ok(found) if found.kept == 0 => format!(
-                "Detect kept no sample: {} hit(s) too quiet under {:.0} dB; the take's \
-                 regions are as they were",
+                "Detect marked no sample: skipped {} at {:.0} dB or less over noise; the \
+                 take's regions are as they were",
                 found.too_quiet, self.limit
             ),
             Ok(found) => format!(
@@ -769,7 +769,7 @@ impl Detect {
                 found.notes,
                 match found.too_quiet {
                     0 => String::new(),
-                    n => format!(", leaving out {n} too quiet"),
+                    n => format!(", skipped {n} at {:.0} dB or less over noise", self.limit),
                 }
             ),
         })
