@@ -936,8 +936,8 @@ const RELEASE_DECAY: f64 = 36.0;
 /// [`RELEASE_DECAY`] for a [`Version::V6`] release stroke. A [`Version::V5`] release
 /// stroke takes none, since it fades about 35 dB/s under any ladder below unity.
 /// Confirmed on hardware. Rules that do not decay state none on any stroke, so a
-/// sustained sound's key-off keeps the tail it was recorded with; not yet heard on
-/// hardware.
+/// sustained sound's key-off keeps the tail it was recorded with; heard on hardware
+/// with an organ.
 fn ladder_rate(rules: &Rules, bank: Bank, root: u8) -> f64 {
     match (bank, rules.version) {
         _ if !rules.decays => 0.0,
