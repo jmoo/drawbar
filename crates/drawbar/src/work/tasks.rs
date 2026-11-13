@@ -20,6 +20,7 @@ use crate::store::wire;
 #[derive(Serialize, Deserialize)]
 pub enum Task {
     Noise(FindNoise),
+    Piano(Box<crate::newproject::Coding>),
 }
 
 /// A piece of work [`hand`] runs: a [`Task`] and what it answers.
@@ -48,6 +49,7 @@ pub fn hand<W: Work>(ctx: &egui::Context, work: W) -> Job<W::Answer> {
 pub(crate) fn answer(task: Task, progress: &Progress) -> Result<wire::Message, String> {
     match task {
         Task::Noise(work) => wire::encode(&work.run(progress)),
+        Task::Piano(work) => wire::encode(&work.run(progress)),
     }
 }
 
