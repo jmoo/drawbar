@@ -94,7 +94,7 @@ use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
-use crate::wav::SampleLoop;
+use crate::wav::{self, Play};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -187,6 +187,27 @@ impl Kind {
 
     pub fn code(self) -> u8 {
         self as u8
+    }
+
+    /// The kind's name as `nord piano build --kind` takes it and a take's settings
+    /// state it: `wurlitzer`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Kind::ElectricGrand => "electric-grand",
+            Kind::ElectricPiano => "electric-piano",
+            Kind::Wurlitzer => "wurlitzer",
+            Kind::Clavinet => "clavinet",
+            Kind::Grand => "grand",
+            Kind::Upright => "upright",
+            Kind::Harpsichord => "harpsichord",
+            Kind::DigitalPiano => "digital",
+            Kind::Hybrid => "hybrid",
+            Kind::Mallet => "mallet",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Kind> {
+        Self::ALL.into_iter().find(|kind| kind.word() == word)
     }
 
     /// The [`Rules::damper_top`] this kind of instrument has. The acoustic pianos damp up
@@ -313,7 +334,25 @@ impl Rules {
             loop_fade: kind.loop_fade(),
         }
     }
+
+    /// Decibels per second the instrument fades a stroke of `bank` by from note-on until
+    /// its loop, on top of the stroke's own decay, played on its own `root`: the rate of
+    /// the [`DECAYS`] ladder [`build`] states.
+    pub fn held_fade(&self, bank: Bank, root: u8) -> f64 {
+        ladder_rate(self, bank, root)
+    }
+
+    /// Decibels per second a held loop on `root` fades by from the loop's start until
+    /// the key is released, as [`build`] states it.
+    pub fn loop_fading(&self, root: u8) -> f64 {
+        per_second((self.loop_fade, self.kind.fade_curve().1), root)
+    }
 }
+
+/// Decibels per second the instrument fades a sounding attack or resonance stroke by at
+/// key-up, under the fade [`build`] states: 40 dB in about 30 ms, which takes a released
+/// note away without a click. Confirmed on hardware.
+pub const KEY_UP_FADE: f64 = 40.0 / 0.03;
 
 impl Default for Rules {
     fn default() -> Rules {
@@ -344,6 +383,13 @@ pub struct Recording {
     /// the loop. The loop's last four frames become the four before its start. A release
     /// stroke plays once and cannot loop.
     pub sustain: Option<Loop>,
+    /// How far under its own attack a release stroke was recorded, in decibels: under
+    /// the attack stroke of its root at its layer, both measured as [`build`] measures
+    /// a stroke's level, before either was raised. A [`Version::V6`] library from rules
+    /// plays such a release at that balance with its attack, as [`release_under`] lifts
+    /// it. Without it a release plays 18 dB under its root's loudest attack, and the
+    /// value is ignored on other strokes and in other libraries.
+    pub under_attack: Option<f64>,
 }
 
 /// The fewest frames a loop may hold. Its last [`SEEDS`] frames restate the ones before
@@ -356,11 +402,11 @@ const SHORTEST_LOOP: usize = 2 * SEEDS;
 /// A loop is exact only in a source already at [`codec::RATE`]. Elsewhere its ends land
 /// on the nearest lattice frame at or before them, and its length may lose a fraction of
 /// a frame.
-pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
+pub fn sustain(found: wav::Loop, rate: u32) -> Result<Loop, Error> {
     if rate == 0 {
         return Err(refuse("a loop at 0 Hz has no place on the lattice"));
     }
-    if !found.forward {
+    if found.play != Play::Forward {
         return Err(refuse(format!(
             "the loop from frame {} to {} does not play forward, and a stroke loops only \
              forward",
@@ -444,6 +490,20 @@ pub fn parse_stroke_name(name: &str, stem: Stem) -> Option<(u8, Bank, LayerTag)>
     }
     (usize::from(root) < NOTES).then_some((root, bank, layer))
 }
+
+/// The name [`parse_stroke_name`] reads back as `root`, `bank` and `layer`:
+/// `060-b0-l00`, or `060-b2-v12` for a layer value.
+pub fn stroke_name(root: u8, bank: Bank, layer: LayerTag) -> String {
+    let bank = bank.code();
+    match layer {
+        LayerTag::Index(index) => format!("{root:03}-b{bank}-l{index:02}"),
+        LayerTag::Value(value) => format!("{root:03}-b{bank}-v{value:02}"),
+    }
+}
+
+/// The end of a take region's label that makes it the fade of the stroke the rest
+/// names: `084-b0-v00-fade`.
+pub const FADE_SUFFIX: &str = "-fade";
 
 /// Why the names for one root and bank give no layer values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -549,7 +609,8 @@ impl Recoded {
 /// loudest attack stroke. A recording's level is the most power any 10 ms of its first
 /// half second holds, on its louder channel. Where a stroke would need more boost than
 /// [`V6_MOST_BOOST`] leaves at the library's gain, every stroke is turned down by the
-/// shortfall, so the balance holds. A recording silent over its first half second, or a
+/// shortfall, so the balance holds; but a release from a take, whose balance with its
+/// attack is known, just plays quieter, at the most boost there is. A recording silent over its first half second, or a
 /// release stroke whose root has no attack stroke, has nothing to be leveled against
 /// and is refused.
 pub fn build(
@@ -968,30 +1029,56 @@ fn layer_trim(version: Version, bank: Bank, layer: u8) -> i16 {
 /// not confirmed on hardware.
 const RELEASE_UNDER_ATTACK: f64 = 18.0;
 
-/// Frames [`level`] averages power over: 10 ms.
-const LEVEL_WINDOW: usize = codec::RATE as usize / 100;
+/// The most a release stroke's [`release_under`] lifts it over its recorded level, in
+/// decibels. Leveled all to one peak, quiet key-offs were lifted 25 to 40 dB and their
+/// noise came up with them. Confirmed on hardware.
+const RELEASE_LIFT: f64 = 12.0;
 
-/// Frames from a recording's start that [`level`] reads: half a second.
-const LEVEL_SPAN: usize = codec::RATE as usize / 2;
+/// How near its attack [`release_under`] lifts a release stroke, in decibels under it.
+const RELEASE_NEAREST: f64 = 14.0;
 
-/// How loud a recording plays, in decibels over a steady sample of one unit: the most
-/// power any [`LEVEL_WINDOW`] of its first [`LEVEL_SPAN`] frames averages, on its
-/// louder channel. A recording shorter than the window is measured whole, and silence
-/// has no level.
+/// How far under its own attack a release recorded `recorded` decibels under it plays:
+/// lifted toward 14 dB under it by at most 12 dB. One recorded nearer than 14 dB keeps
+/// its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
+/// down and could not be heard; up to about 49 dB under played fine. Confirmed on
+/// hardware.
+pub fn release_under(recorded: f64) -> f64 {
+    recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
+}
+
+/// [`loudness`] of a recording at the codec's rate.
 fn level(channels: &[Vec<i16>]) -> Option<f64> {
-    let power = |sample: &i16| i64::from(*sample).pow(2);
-    let loudest = channels
-        .iter()
+    let frames = channels.first().map_or(0, Vec::len);
+    loudness(channels.len(), frames, codec::RATE, |frame, channel| {
+        f64::from(channels[channel][frame])
+    })
+}
+
+/// How loud audio plays, in decibels over a steady sample of one unit: the most power
+/// any 10 ms of its first half second averages, on its louder channel. The audio is
+/// `frames` frames of `channels` at `rate`, `sample` giving each frame's sample on each
+/// channel. Audio shorter than 10 ms is measured whole, and silence has no level.
+///
+/// The sums are exact for 16-bit samples, so a recording measures the same whichever
+/// way it reaches here.
+pub fn loudness(
+    channels: usize,
+    frames: usize,
+    rate: u32,
+    sample: impl Fn(usize, usize) -> f64,
+) -> Option<f64> {
+    let span = frames.min(rate as usize / 2);
+    let width = span.min(rate as usize / 100).max(1);
+    let loudest = (0..channels)
         .map(|channel| {
-            let span = &channel[..channel.len().min(LEVEL_SPAN)];
-            let width = span.len().min(LEVEL_WINDOW);
-            let mut sum: i64 = span[..width].iter().map(power).sum();
+            let power = |frame: usize| sample(frame, channel).powi(2);
+            let mut sum: f64 = (0..width.min(span)).map(power).sum();
             let mut most = sum;
-            for (leaving, entering) in span.iter().zip(&span[width..]) {
-                sum += power(entering) - power(leaving);
+            for frame in width..span {
+                sum += power(frame) - power(frame - width);
                 most = most.max(sum);
             }
-            most as f64 / width as f64
+            most / width as f64
         })
         .fold(0.0, f64::max);
     (loudest > 0.0).then(|| 10.0 * loudest.log10())
@@ -1040,22 +1127,35 @@ fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
                     describe(recording)
                 ))
             })?;
-        let under = match recording.bank {
-            Bank::Attack | Bank::Resonance => {
-                LAYER_TRIM - lift * (f64::from(recording.layer) - f64::from(loudest_layer))
+        let layer_under =
+            |layer: u8| LAYER_TRIM - lift * (f64::from(layer) - f64::from(loudest_layer));
+        let under = match (recording.bank, recording.under_attack) {
+            (Bank::Attack | Bank::Resonance, _) => layer_under(recording.layer),
+            (Bank::Release, Some(recorded)) => {
+                layer_under(recording.layer) + release_under(recorded)
             }
-            Bank::Release => LAYER_TRIM + RELEASE_UNDER_ATTACK,
+            (Bank::Release, None) => LAYER_TRIM + RELEASE_UNDER_ATTACK,
         };
         tenths.push(((under + level - reference) / step).round());
     }
 
+    // A take's release, whose balance with its attack is known, plays quieter on its own
+    // when short of boost; any other stroke turns the library down.
+    let on_its_own =
+        |recording: &Recording| recording.bank == Bank::Release && recording.under_attack.is_some();
     let lowest = f64::from(rules.gain) - f64::from(V6_MOST_BOOST);
-    let shortfall = tenths
+    let shortfall = order
         .iter()
-        .fold(0.0, |most, &trim| f64::max(most, lowest - trim));
-    tenths
-        .into_iter()
-        .map(|trim| v6_trim(trim + shortfall))
+        .zip(&tenths)
+        .filter(|(recording, _)| !on_its_own(recording))
+        .fold(0.0, |most, (_, &trim)| f64::max(most, lowest - trim));
+    order
+        .iter()
+        .zip(tenths)
+        .map(|(recording, trim)| match on_its_own(recording) {
+            true => v6_trim((trim + shortfall).max(lowest)),
+            false => v6_trim(trim + shortfall),
+        })
         .collect()
 }
 
@@ -1788,6 +1888,7 @@ mod tests {
             layer,
             channels,
             sustain: None,
+            under_attack: None,
         }
     }
 
@@ -2371,11 +2472,7 @@ mod tests {
     /// fall.
     #[test]
     fn a_wav_loop_moves_onto_the_lattice_with_its_frames() {
-        let at = |start, end| SampleLoop {
-            start,
-            end,
-            forward: true,
-        };
+        let at = |start, end| wav::Loop::forward(start, end);
         assert_eq!(
             sustain(at(100, 199), codec::RATE).unwrap(),
             Loop::new(100, 100).unwrap()
@@ -2390,8 +2487,8 @@ mod tests {
         assert!(error.contains("0 Hz"), "{error}");
         let refused = [
             (
-                SampleLoop {
-                    forward: false,
+                wav::Loop {
+                    play: Play::Alternating,
                     ..at(0, 99)
                 },
                 "does not play forward",
@@ -2595,6 +2692,37 @@ mod tests {
         );
     }
 
+    /// A release from a take, 40 dB under its attack, would need more boost to keep its
+    /// lifted balance than the 5.8 dB left at +5.0 dB of gain. It plays quieter, at the
+    /// most boost there is, and the attack keeps its trim.
+    #[test]
+    fn a_take_release_too_quiet_for_the_boost_left_plays_quieter_on_its_own() {
+        let mut recordings = [
+            one(60, Bank::Attack, 0, steady(7_962)),
+            one(60, Bank::Release, 0, steady(80)),
+        ];
+        recordings[1].under_attack = Some(40.0);
+        assert_eq!(
+            trims_at(Version::V6, Kind::Harpsichord, DEFAULT_GAIN, &recordings),
+            [30, -58]
+        );
+    }
+
+    /// A release from a directory of WAVs, 40 dB under its attack, would need 19 dB of
+    /// boost to play 21 dB under it, 13.2 more than the 5.8 left at +5.0 dB of gain, so
+    /// every stroke gives up the 13.2 dB and the balance holds, as for an attack.
+    #[test]
+    fn a_directory_release_too_quiet_for_the_boost_left_moves_every_trim() {
+        let recordings = [
+            one(60, Bank::Attack, 0, steady(7_962)),
+            one(60, Bank::Release, 0, steady(80)),
+        ];
+        assert_eq!(
+            trims_at(Version::V6, Kind::Harpsichord, DEFAULT_GAIN, &recordings),
+            [162, -58]
+        );
+    }
+
     /// A softer layer plays louder than its root's loudest by its kind's lift per 100 of
     /// layer value counted from the loudest's: 6 dB for a Wurlitzer, so a root recorded
     /// at one level and valued 20/45/70 is trimmed 3.0, 1.5 and 0 dB.
@@ -2614,6 +2742,25 @@ mod tests {
             [30, 27, 24],
             "a grand lifts 1.2 dB per 100"
         );
+    }
+
+    /// A release that states how far under its attack it was recorded plays at that
+    /// balance with its attack, lifted toward 14 dB under it by at most 12 dB: recorded
+    /// 10 dB under, it stays there; 20 dB under, it plays 14 under; 32 under, 20 under.
+    /// Its trim is its attack's, plus that, less what its audio stands under its
+    /// attack's: here 12 dB.
+    #[test]
+    fn a_6_x_rule_build_keeps_a_releases_recorded_balance_with_its_attack() {
+        for (recorded, plays) in [(10.0, 100), (20.0, 140), (32.0, 200)] {
+            let mut recordings = twelve_decibels_apart();
+            recordings[2].under_attack = Some(recorded);
+            let trims = trims_at(Version::V6, Kind::Harpsichord, 0, &recordings);
+            assert_eq!(
+                trims[2] - trims[0],
+                plays - 120,
+                "recorded {recorded} dB under"
+            );
+        }
     }
 
     /// A 6.x library from rules levels every stroke against its root's, so a silent
@@ -2864,6 +3011,22 @@ mod tests {
             "C4-b0-l00",
         ] {
             assert_eq!(parse_stroke_name(bad, Stem::None), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_stroke_name_reads_back_as_the_stroke_it_was_made_from() {
+        use LayerTag::{Index, Value};
+        for (root, bank, layer, name) in [
+            (60, Bank::Attack, Index(0), "060-b0-l00"),
+            (7, Bank::Release, Value(100), "007-b2-v100"),
+            (101, Bank::Resonance, Index(3), "101-b1-l03"),
+        ] {
+            assert_eq!(stroke_name(root, bank, layer), name);
+            assert_eq!(
+                parse_stroke_name(name, Stem::None),
+                Some((root, bank, layer))
+            );
         }
     }
 

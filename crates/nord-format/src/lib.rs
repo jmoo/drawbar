@@ -39,7 +39,8 @@
 //!   [`panel`] groups them the way the instrument's panel does.
 //! - [`components`] and [`types`] are the typed values those fields hold.
 //! - [`accept`] says which format tags each instrument family takes.
-//! - [`wav`] moves decoded audio in and out of WAV files.
+//! - [`wav`] reads and writes WAV files, with the regions and loops that mark strokes.
+//! - [`take`] cuts a recorded take into the strokes of a piano library.
 //!
 //! # Features and dependencies
 //!
@@ -67,6 +68,7 @@ pub mod formats;
 pub mod layout;
 pub mod note;
 pub mod panel;
+pub mod take;
 pub mod types;
 pub mod util;
 pub mod wav;

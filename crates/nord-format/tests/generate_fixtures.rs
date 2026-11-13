@@ -63,6 +63,7 @@ fn piano_bytes(version: Version) -> Vec<u8> {
         layer: 0,
         channels: vec![tone(1_024)],
         sustain: None,
+        under_attack: None,
     };
     let library = piano::build(
         &Donor::Rules(Rules::new(version, Kind::Grand)),

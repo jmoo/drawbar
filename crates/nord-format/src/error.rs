@@ -115,3 +115,18 @@ pub(crate) fn try_zeroed<T: Clone + Default>(
 pub(crate) fn try_vec(len: usize) -> std::result::Result<Vec<u8>, ParseError> {
     try_zeroed(len, "bytes")
 }
+
+/// Bytes that do not form what they claim to, or a well-formed file in an encoding
+/// this crate does not read.
+pub(crate) fn malformed<T>(why: impl Into<String>) -> Result<T> {
+    Err(ParseError::AssertFail(why.into()).into())
+}
+
+/// `value` outside `bound`, as [`ParseError::OutOfBounds`].
+pub(crate) fn out_of_bounds<T>(value: impl Into<String>, bound: impl Into<String>) -> Result<T> {
+    Err(ParseError::OutOfBounds {
+        value: value.into(),
+        bound: bound.into(),
+    }
+    .into())
+}

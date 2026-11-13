@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, ValueEnum};
-use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
+use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem, FADE_SUFFIX};
 use nord_format::formats::npno::{
     self, codec, encode, Bank, Change, Layers, Library, Version, UNCOVERED,
 };
 use nord_format::note;
+use nord_format::take::clean::{self, Noise};
+use nord_format::take::layers::TAKE_PEAK_DB;
+use nord_format::wav;
 use nord_format::Entity;
 
 use crate::edit::{write_edit, write_file};
@@ -161,10 +164,20 @@ pub struct BuildArgs {
     /// layer of one root and bank must use the same form. Files that are not WAVs are
     /// skipped, and a WAV named any other way is refused.
     ///
+    /// Or one WAV, a take, whose regions are the strokes: each region labeled as a
+    /// stroke's WAV is named (`060-b0-l00`), with the `smpl` loop it holds, if any, as
+    /// its loop. The take may be PCM of 8 to 32 bits or float; each region is rounded to
+    /// 16 bits, as a 16-bit WAV of it would be. In a format 6 library without a
+    /// template, a softer region is first raised to its root's loudest layer's peak,
+    /// which keeps its detail and does not change how loud it plays.
+    ///
     /// The `frames` column in the output counts the WAV's frames. A stroke pads them
     /// out to whole blocks, or ends with the block holding its loop's end.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    ///
+    /// Several takes build one library, such as one take per velocity layer, each
+    /// holding every note.
+    #[arg(value_name = "DIR|TAKE", required = true, num_args = 1..)]
+    pub input: Vec<PathBuf>,
 
     /// A library to take everything the audio does not decide from: the decay
     /// coefficients, per-note tables, playback parameters, format and the word at the
@@ -180,9 +193,10 @@ pub struct BuildArgs {
     pub format: FormatName,
 
     /// The kind of instrument the library holds. It sets the damper limit and how the
-    /// instrument files the library.
-    #[arg(long, value_enum, default_value_t = KindName::Grand, conflicts_with = "template")]
-    pub kind: KindName,
+    /// instrument files the library. Defaults to the kind the takes state, as drawbar's
+    /// take editor saves it, and otherwise to grand.
+    #[arg(long, value_parser = kind_parser(), conflicts_with = "template")]
+    pub kind: Option<encode::Kind>,
 
     /// A gain over the whole library, in decibels. Stored in tenths, so the range is
     /// -12.8 to 12.7.
@@ -238,39 +252,19 @@ impl From<FormatName> for Version {
     }
 }
 
-/// The instruments a library can state it holds, at body `0x18`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum KindName {
-    Grand,
-    Upright,
-    ElectricGrand,
-    /// The tine electric pianos.
-    ElectricPiano,
-    /// The reed electric pianos.
-    Wurlitzer,
-    Clavinet,
-    Harpsichord,
-    Digital,
-    /// The hybrid and ballad electric pianos.
-    Hybrid,
-    Mallet,
-}
-
-impl From<KindName> for encode::Kind {
-    fn from(kind: KindName) -> encode::Kind {
+/// The instruments a library can state it holds, at body `0x18`, by [`encode::Kind::word`].
+fn kind_parser() -> impl TypedValueParser<Value = encode::Kind> {
+    use encode::Kind;
+    PossibleValuesParser::new(Kind::ALL.map(|kind| {
+        let value = PossibleValue::new(kind.word());
         match kind {
-            KindName::Grand => encode::Kind::Grand,
-            KindName::Upright => encode::Kind::Upright,
-            KindName::ElectricGrand => encode::Kind::ElectricGrand,
-            KindName::ElectricPiano => encode::Kind::ElectricPiano,
-            KindName::Wurlitzer => encode::Kind::Wurlitzer,
-            KindName::Clavinet => encode::Kind::Clavinet,
-            KindName::Harpsichord => encode::Kind::Harpsichord,
-            KindName::Digital => encode::Kind::DigitalPiano,
-            KindName::Hybrid => encode::Kind::Hybrid,
-            KindName::Mallet => encode::Kind::Mallet,
+            Kind::ElectricPiano => value.help("The tine electric pianos"),
+            Kind::Wurlitzer => value.help("The reed electric pianos"),
+            Kind::Hybrid => value.help("The hybrid and ballad electric pianos"),
+            _ => value,
         }
-    }
+    }))
+    .try_map(|word| Kind::from_word(&word).ok_or_else(|| format!("{word} is not a kind")))
 }
 
 #[derive(Args)]
@@ -312,7 +306,7 @@ pub struct SplitArgs {
 
 /// Read a file and parse it as a piano library, naming the format it turned out to
 /// be when it is not one.
-fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
+pub(crate) fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes))
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -974,16 +968,246 @@ pub fn split(ui: &Ui, args: SplitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// One WAV a build reads, and what its name says the stroke is.
-struct StrokeFile {
-    path: PathBuf,
+/// Where a stroke's audio is.
+enum Source<'a> {
+    /// A WAV of its own.
+    File(PathBuf),
+    /// A region of a take, with its frames as the build cleans them, the loop it holds
+    /// and the frame its fade starts at, both counted from the region's start.
+    Region {
+        path: &'a Path,
+        take: &'a wav::Audio,
+        region: &'a wav::Region,
+        audio: Vec<f32>,
+        sample_loop: Option<wav::Loop>,
+        fade: Option<u32>,
+        /// Semitones the region is pitched by, to play a root the take does not hold.
+        shift: i32,
+    },
+}
+
+/// One stroke a build reads, and what its name says the stroke is.
+struct StrokeFile<'a> {
+    source: Source<'a>,
     root: u8,
     bank: Bank,
     layer: LayerTag,
 }
 
+impl StrokeFile<'_> {
+    fn name(&self) -> String {
+        match &self.source {
+            Source::File(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into(),
+            Source::Region { region, shift, .. } => match shift {
+                0 => region.label.clone(),
+                _ => format!("{} {shift:+}", region.label),
+            },
+        }
+    }
+
+    /// The stroke as an error names it.
+    fn whose(&self) -> String {
+        match &self.source {
+            Source::File(path) => path.display().to_string(),
+            Source::Region { path, region, .. } => {
+                format!("{}: region {:?}", path.display(), region.label)
+            }
+        }
+    }
+
+    /// The stroke's audio, a region's raised by `gain` before it is dithered to 16 bits.
+    fn pcm(&self, gain: f32) -> Result<wav::Pcm16, String> {
+        let seed = dither_seed(self.root, self.bank, self.layer);
+        match &self.source {
+            Source::File(path) => crate::wav::pcm16(path),
+            Source::Region {
+                take,
+                audio,
+                sample_loop,
+                fade,
+                ..
+            } => Ok(crate::wav::cut(
+                take,
+                audio,
+                self.bank,
+                *sample_loop,
+                *fade,
+                gain,
+                seed,
+            )),
+        }
+    }
+
+    /// How loud a region is, in decibels over a steady sample of one unit, measured as
+    /// the encoder measures a stroke: the most power any 10 ms of its first half second
+    /// averages, on its louder channel. None for a WAV, and for a silent region.
+    fn level(&self) -> Option<f64> {
+        let Source::Region { take, audio, .. } = &self.source else {
+            return None;
+        };
+        nord_format::take::layers::level(audio, usize::from(take.channels), take.rate)
+    }
+
+    /// The loudest sample of a region, and none for a WAV, which is already 16 bits.
+    fn peak(&self) -> Option<f32> {
+        match &self.source {
+            Source::File(_) => None,
+            Source::Region { audio, .. } => {
+                Some(audio.iter().fold(0.0, |most, x| f32::max(most, x.abs())))
+            }
+        }
+    }
+}
+
+/// The dither noise of a stroke's audio, its own: its root, bank and layer pick it.
+fn dither_seed(root: u8, bank: Bank, layer: LayerTag) -> u64 {
+    let layer = match layer {
+        LayerTag::Index(index) => index,
+        LayerTag::Value(value) => value,
+    };
+    u64::from(root) << 16 | u64::from(bank.code()) << 8 | u64::from(layer)
+}
+
+/// The gain each stroke's audio is raised or lowered by before it is rounded to 16
+/// bits, in the order `files` came in.
+///
+/// A format 6 library built from rules plays each stroke at the level of its root's
+/// loudest layer, whatever the stroke's own level, and each root at its loudest layer's
+/// audio level. So every region of a take is brought to one peak: a soft layer keeps
+/// its detail above the 16-bit steps, and a root recorded quieter plays as loud as the
+/// others. Kept at their recorded levels instead, a take's treble roots sounded dead.
+/// Confirmed on hardware. In any other library a stroke plays at its own
+/// level, so nothing changes.
+fn take_gains(files: &[StrokeFile], leveled: bool) -> Vec<f32> {
+    let target = 10f32.powf(TAKE_PEAK_DB as f32 / 20.0);
+    files
+        .iter()
+        .map(|file| match (leveled, file.peak()) {
+            (true, Some(peak)) if peak > 0.0 => target / peak,
+            _ => 1.0,
+        })
+        .collect()
+}
+
+/// The lowest and highest keys a take's roots are pitched out toward: the instrument's
+/// 88.
+const KEYS: (u8, u8) = (21, 108);
+
+/// The furthest a root is pitched to play keys its take does not reach, in semitones.
+const MOST_PITCHED: i32 = 12;
+
+/// Extra roots that reach the keys a take's lowest and highest roots do not, each the
+/// strokes of that root pitched, for a format 6 library built from rules.
+///
+/// A root plays from 12 semitones under it to one over, and a key past them is silent.
+/// The lowest root's strokes are pitched down to the root that reaches [`KEYS`]' lowest,
+/// and the highest's up to the one that reaches its highest, by at most
+/// [`MOST_PITCHED`] semitones.
+fn pitched_roots<'a>(files: &[StrokeFile<'a>]) -> Result<Vec<StrokeFile<'a>>, String> {
+    let roots: BTreeSet<u8> = files.iter().map(|file| file.root).collect();
+    let (Some(&lowest), Some(&highest)) = (roots.first(), roots.last()) else {
+        return Ok(Vec::new());
+    };
+    let mut wanted = Vec::new();
+    if lowest > KEYS.0 + 12 {
+        let to = (KEYS.0 + 12).max(lowest.saturating_sub(MOST_PITCHED as u8));
+        wanted.push((lowest, to));
+    }
+    if highest < KEYS.1 - 1 {
+        let to = (KEYS.1 - 1).min(highest + MOST_PITCHED as u8);
+        wanted.push((highest, to));
+    }
+    let mut out = Vec::new();
+    for (from, to) in wanted {
+        let shift = i32::from(to) - i32::from(from);
+        for file in files.iter().filter(|file| file.root == from) {
+            let Source::Region {
+                path,
+                take,
+                region,
+                audio,
+                sample_loop,
+                fade,
+                ..
+            } = &file.source
+            else {
+                continue;
+            };
+            let named = |e: &dyn std::fmt::Display| format!("{}: {e}", file.whose());
+            let pitched = nord_format::take::resample::pitched(
+                &wav::Audio {
+                    rate: take.rate,
+                    channels: take.channels,
+                    samples: audio.clone(),
+                },
+                shift,
+            )
+            .map_err(|e| named(&e))?;
+            let frames = pitched.frames() as u32;
+            let scale = |at: u32| {
+                ((f64::from(at) * frames as f64 / (audio.len() / usize::from(take.channels)) as f64)
+                    .round() as u32)
+                    .min(frames)
+            };
+            out.push(StrokeFile {
+                source: Source::Region {
+                    path,
+                    take,
+                    region,
+                    audio: pitched.samples,
+                    // A loop's end is its last frame, so it stays on one.
+                    sample_loop: sample_loop.map(|found| wav::Loop {
+                        start: scale(found.start).min(frames.saturating_sub(1)),
+                        end: scale(found.end).min(frames.saturating_sub(1)),
+                        ..found
+                    }),
+                    fade: fade.map(scale),
+                    shift,
+                },
+                root: to,
+                bank: file.bank,
+                layer: file.layer,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// How far under its own attack each release region was recorded, in the order `files`
+/// came in, with `values` their layer values: under the attack region of its root at its
+/// layer value. None for every other stroke, for a release with no such attack, and
+/// unless `leveled`, as [`take_gains`] says.
+///
+/// One recording holds both strokes, so their balance is the instrument's: a format 6
+/// library from rules plays the release at it, lifted as quiet key-offs need. A
+/// directory's WAVs may each have been leveled on their own, so theirs is not used.
+fn release_balance(files: &[StrokeFile], values: &[u8], leveled: bool) -> Vec<Option<f64>> {
+    let attacks: BTreeMap<(u8, u8), f64> = files
+        .iter()
+        .zip(values)
+        .filter(|(file, _)| file.bank == Bank::Attack)
+        .filter_map(|(file, &value)| Some(((file.root, value), file.level()?)))
+        .collect();
+    files
+        .iter()
+        .zip(values)
+        .map(|(file, &value)| match (leveled, file.bank) {
+            (true, Bank::Release) => Some(attacks.get(&(file.root, value))? - file.level()?),
+            _ => None,
+        })
+        .collect()
+}
+
+fn in_stroke_order(strokes: &mut [StrokeFile]) {
+    strokes.sort_by_key(|s| (s.root, s.bank.code(), s.layer, s.name()));
+}
+
 /// The WAVs in a directory, with what their names say each one is, in stroke order.
-fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
+fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile<'static>>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
@@ -1004,7 +1228,7 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
             )
         })?;
         out.push(StrokeFile {
-            path,
+            source: Source::File(path),
             root,
             bank,
             layer,
@@ -1013,9 +1237,98 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     if out.is_empty() {
         return Err(format!("{}: no WAV to build a library from", dir.display()));
     }
-    out.sort_by(|a, b| {
-        (a.root, a.bank.code(), a.layer, &a.path).cmp(&(b.root, b.bank.code(), b.layer, &b.path))
-    });
+    in_stroke_order(&mut out);
+    Ok(out)
+}
+
+/// The regions of the take at `path`, with what their labels say each stroke is, in
+/// stroke order, each cleaned of the take's `noise` by its root's pitch, or as recorded
+/// where there is none.
+fn region_strokes<'a>(
+    path: &'a Path,
+    take: &'a wav::Audio,
+    marks: &'a wav::Marks,
+    noise: Option<&Noise>,
+) -> Result<Vec<StrokeFile<'a>>, String> {
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut out = Vec::new();
+    let mut fades = Vec::new();
+    for (region, sample_loop) in marks.regions_with_loops().map_err(|e| named(&e))? {
+        if let Some(stroke) = region.label.strip_suffix(FADE_SUFFIX) {
+            fades.push((stroke, region));
+            continue;
+        }
+        let (root, bank, layer) = parse_stroke_name(&region.label, Stem::None)
+            .filter(|_| region.frames > 0)
+            .ok_or_else(|| {
+                named(&format!(
+                    "region {:?} at frame {} is no stroke: a region here must span frames \
+                     and be labeled as a stroke's WAV is named, as in 060-b0-l00",
+                    region.label, region.start
+                ))
+            })?;
+        let channels = usize::from(take.channels.max(1));
+        let audio = match noise {
+            Some(noise) => noise.stroke(
+                &take.samples,
+                channels,
+                region.start as usize,
+                region.frames as usize,
+                clean::f0(root),
+            ),
+            None => {
+                let at = |frame: u32| (frame as usize * channels).min(take.samples.len());
+                take.samples[at(region.start)..at(region.start + region.frames)].to_vec()
+            }
+        };
+        out.push(StrokeFile {
+            source: Source::Region {
+                path,
+                take,
+                region,
+                audio,
+                sample_loop,
+                fade: None,
+                shift: 0,
+            },
+            root,
+            bank,
+            layer,
+        });
+    }
+    for (stroke, fade) in fades {
+        let refuse = |why: &str| named(&format!("region {:?} {why}", fade.label));
+        let owner = out
+            .iter_mut()
+            .find(|file| file.name() == stroke)
+            .ok_or_else(|| refuse(&format!("fades no stroke: no region is labeled {stroke:?}")))?;
+        let Source::Region {
+            region,
+            sample_loop,
+            fade: at,
+            ..
+        } = &mut owner.source
+        else {
+            unreachable!("a take's strokes are its regions");
+        };
+        let end = |r: &wav::Region| r.start + r.frames;
+        if fade.start < region.start || end(fade) != end(region) {
+            return Err(refuse(&format!(
+                "must lie within {stroke:?} and end with it, where the fade reaches silence"
+            )));
+        }
+        if owner.bank == Bank::Release || sample_loop.is_some() || at.is_some() {
+            return Err(refuse(&format!(
+                "fades {stroke:?}, which is a release, loops, or fades already; only an \
+                 attack or resonance that does not loop fades"
+            )));
+        }
+        *at = Some(fade.start - region.start);
+    }
+    if out.is_empty() {
+        return Err(named(&"no region to build a library from"));
+    }
+    in_stroke_order(&mut out);
     Ok(out)
 }
 
@@ -1045,7 +1358,7 @@ fn layer_values(files: &[StrokeFile], version: Version) -> Result<Vec<u8>, Strin
             return Err(format!(
                 "{}: no velocity selects layer value {value}; {highest} is the largest a \
                  key of a format {} library ever sounds",
-                file.path.display(),
+                file.whose(),
                 version.number()
             ));
         }
@@ -1053,9 +1366,10 @@ fn layer_values(files: &[StrokeFile], version: Version) -> Result<Vec<u8>, Strin
     Ok(values)
 }
 
-/// The rules a build follows without a template, from the flags that set them.
-fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
-    let kind = encode::Kind::from(args.kind);
+/// The rules a build follows without a template, from the flags that set them, and
+/// `stated`, the kind the takes state, where `--kind` says none.
+fn build_rules(args: &BuildArgs, stated: Option<encode::Kind>) -> Result<encode::Rules, String> {
+    let kind = args.kind.or(stated).unwrap_or_default();
     let tenths = (args.gain * 10.0).round();
     let gain = (tenths.is_finite() && (f64::from(i8::MIN)..=f64::from(i8::MAX)).contains(&tenths))
         .then_some(tenths as i8)
@@ -1089,52 +1403,116 @@ fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
     })
 }
 
-pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
-    let rules = build_rules(&args)?;
-    let template = match &args.template {
-        Some(path) => {
-            refuse_in_place(path, &args.out)?;
-            Some(read(path)?.1)
+/// The kind `takes` state, at `paths`: the one they agree on, none where none states one.
+fn stated_kind(
+    paths: &[PathBuf],
+    takes: &[(wav::Audio, wav::Marks, wav::Settings)],
+) -> Result<Option<encode::Kind>, String> {
+    let mut stated: Option<(encode::Kind, &Path)> = None;
+    for (path, (_, _, settings)) in paths.iter().zip(takes) {
+        let Some(word) = &settings.kind else {
+            continue;
+        };
+        let kind = encode::Kind::from_word(word).ok_or_else(|| {
+            format!(
+                "{}: states kind {word:?}, which is no kind of instrument",
+                path.display()
+            )
+        })?;
+        match stated {
+            Some((first, at)) if first != kind => {
+                return Err(format!(
+                    "{} states kind {}, but {} states {}; pass --kind to choose",
+                    at.display(),
+                    first.word(),
+                    path.display(),
+                    kind.word()
+                ));
+            }
+            _ => stated = Some((kind, path)),
         }
-        None => None,
-    };
-    let template = match &template {
-        Some(piano) => Some(piano.library().map_err(|e| e.to_string())?),
-        None => None,
-    };
-    let version = template.as_ref().map_or(rules.version, |t| t.version());
-    let donor = match &template {
-        Some(library) => encode::Donor::Template(library),
-        None => encode::Donor::Rules(rules),
-    };
+    }
+    Ok(stated.map(|(kind, _)| kind))
+}
 
-    ui.out(ui.dim(format!(
-        "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
-        "wav", "root", "bank", "value", "frames", "seconds"
-    )));
-    let files = stroke_files(&args.dir)?;
-    let values = layer_values(&files, version)?;
+/// The strokes of `takes`, read from `paths`, in stroke order: each take's regions,
+/// cleaned unless its editor set it to raw, and, where `leveled`, its lowest and
+/// highest roots pitched to reach the keys beyond them.
+fn take_strokes<'a>(
+    ui: &Ui,
+    paths: &'a [PathBuf],
+    takes: &'a [(wav::Audio, wav::Marks, wav::Settings)],
+    leveled: bool,
+) -> Result<Vec<StrokeFile<'a>>, String> {
+    let mut files = Vec::new();
+    for (path, (audio, marks, settings)) in paths.iter().zip(takes) {
+        // A take its editor set to raw is built as recorded.
+        let noise = match settings.clean {
+            Some(false) => {
+                ui.note(format!(
+                    "{}: built as recorded, not cleaned",
+                    path.display()
+                ));
+                None
+            }
+            _ => Some(Noise::of(&nord_format::take::plan::mono(audio), audio.rate)),
+        };
+        files.extend(region_strokes(path, audio, marks, noise.as_ref())?);
+    }
+    let pitched = match leveled {
+        true => pitched_roots(&files)?,
+        false => Vec::new(),
+    };
+    for file in &pitched {
+        let Source::Region { shift, .. } = file.source else {
+            unreachable!("pitched roots are regions");
+        };
+        ui.note(format!(
+            "{}: pitched {shift:+} semitones to a root of {}, to reach keys the take does not",
+            file.whose(),
+            note::name(file.root)
+        ));
+    }
+    files.extend(pitched);
+    in_stroke_order(&mut files);
+    Ok(files)
+}
+
+/// What [`recordings`] did to the strokes, for the notes a build prints.
+#[derive(Default)]
+struct Counts {
+    clipped: usize,
+    resampled: usize,
+    looped: usize,
+}
+
+/// Each of `files` as the encoder takes it, at its layer value, scaled by its gain, with
+/// its balance under its attack, printing a line for each.
+fn recordings(
+    ui: &Ui,
+    files: &[StrokeFile],
+    values: Vec<u8>,
+    gains: Vec<f32>,
+    balances: Vec<Option<f64>>,
+) -> Result<(Vec<encode::Recording>, Counts), String> {
     let mut recordings = Vec::new();
-    let mut clipped = 0usize;
-    let mut resampled = 0usize;
-    let mut looped = 0usize;
-    for (file, layer) in files.iter().zip(values) {
-        let path = &file.path;
-        let pcm = crate::wav::pcm16(path)?;
+    let mut counts = Counts::default();
+    for (((file, layer), gain), under_attack) in files.iter().zip(values).zip(gains).zip(balances) {
+        let pcm = file.pcm(gain)?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
         let sustain = pcm
             .sample_loop
             .map(|found| encode::sustain(found, pcm.rate))
             .transpose()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        looped += usize::from(sustain.is_some());
-        clipped += audio.clipped;
-        resampled += usize::from(pcm.rate != codec::RATE);
+            .map_err(|e| format!("{}: {e}", file.whose()))?;
+        counts.looped += usize::from(sustain.is_some());
+        counts.clipped += audio.clipped;
+        counts.resampled += usize::from(pcm.rate != codec::RATE);
         let frames = audio.channels.first().map_or(0, Vec::len);
         ui.out(format!(
             "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
+            file.name(),
             note::name(file.root),
             file.bank.name(),
             layer,
@@ -1160,8 +1538,69 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             layer,
             channels: audio.channels,
             sustain,
+            under_attack,
         });
     }
+    Ok((recordings, counts))
+}
+
+pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
+    let takes = match args.input.as_slice() {
+        [dir] if dir.is_dir() => Vec::new(),
+        paths => paths
+            .iter()
+            .map(|path| match path.is_dir() {
+                true => Err(format!(
+                    "{}: a directory of WAVs is built on its own, not with takes",
+                    path.display()
+                )),
+                false => crate::wav::take(path),
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    };
+    // --kind, or a template's kind, decides over what the takes state.
+    let stated = match args.kind.is_none() && args.template.is_none() {
+        true => stated_kind(&args.input, &takes)?,
+        false => None,
+    };
+    let rules = build_rules(&args, stated)?;
+    let template = match &args.template {
+        Some(path) => {
+            refuse_in_place(path, &args.out)?;
+            Some(read(path)?.1)
+        }
+        None => None,
+    };
+    let template = match &template {
+        Some(piano) => Some(piano.library().map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let version = template.as_ref().map_or(rules.version, |t| t.version());
+    let donor = match &template {
+        Some(library) => encode::Donor::Template(library),
+        None => encode::Donor::Rules(rules),
+    };
+
+    ui.out(ui.dim(format!(
+        "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
+        "wav", "root", "bank", "value", "frames", "seconds"
+    )));
+    // A format 6 build without a template plays each stroke at its root's loudest
+    // layer, so a take's strokes are pitched to reach every key and leveled.
+    let leveled = matches!((&donor, version), (encode::Donor::Rules(_), Version::V6));
+    let files = match takes.is_empty() {
+        true => stroke_files(&args.input[0])?,
+        false => take_strokes(ui, &args.input, &takes, leveled)?,
+    };
+    let values = layer_values(&files, version)?;
+    let gains = take_gains(&files, leveled);
+    let balances = release_balance(&files, &values, leveled);
+    let balanced = balances.iter().flatten().count();
+    let raised = gains.iter().filter(|&&gain| gain != 1.0).count();
+    let (least, most) = gains
+        .iter()
+        .fold((1.0f32, 1.0f32), |(l, m), &gain| (l.min(gain), m.max(gain)));
+    let (recordings, counts) = recordings(ui, &files, values, gains, balances)?;
 
     let options = encode::Options::new(&args.name).variant(&args.variant);
     let library = encode::build(&donor, &options, &recordings).map_err(|e| e.to_string())?;
@@ -1176,10 +1615,29 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         library.channels(),
         key_span(&covered),
     ));
+    let Counts {
+        clipped,
+        resampled,
+        looped,
+    } = counts;
     if resampled > 0 {
         ui.note(format!(
             "{resampled} WAV(s) were resampled to the {} Hz rate the instrument plays at",
             codec::RATE
+        ));
+    }
+    if balanced > 0 {
+        ui.note(format!(
+            "{balanced} release(s) play at their recorded level under their own attack, \
+             lifted by at most 12 dB toward 14 dB under it"
+        ));
+    }
+    if raised > 0 {
+        ui.note(format!(
+            "{raised} region(s) were brought to a {TAKE_PEAK_DB} dBFS peak, by {:+.1} to \
+             {:+.1} dB, before rounding to 16 bits, so every root plays as loud as the others",
+            20.0 * least.log10(),
+            20.0 * most.log10()
         ));
     }
     if looped > 0 {
@@ -1308,6 +1766,123 @@ mod tests {
     }
 
     #[test]
+    fn kind_takes_each_kind_by_the_word_a_take_states_it_with() {
+        for kind in encode::Kind::ALL {
+            let argv = [
+                "build",
+                "in",
+                "--kind",
+                kind.word(),
+                "--name",
+                "N",
+                "-o",
+                "o.npno",
+            ];
+            let Ok(crate::PianoAction::Build(args)) = piano(&argv) else {
+                panic!("--kind {} did not parse", kind.word());
+            };
+            assert_eq!(args.kind, Some(kind));
+        }
+        assert_eq!(
+            piano(&["build", "in", "--kind", "harp", "--name", "N", "-o", "o.npno"]).err(),
+            Some(clap::error::ErrorKind::InvalidValue)
+        );
+    }
+
+    /// A root's attack region, `frames` frames of a tone, with a loop ending on its last
+    /// frame and a fade from its middle.
+    fn region_stroke<'a>(
+        path: &'a Path,
+        take: &'a wav::Audio,
+        region: &'a wav::Region,
+        root: u8,
+    ) -> StrokeFile<'a> {
+        let frames = region.frames;
+        StrokeFile {
+            source: Source::Region {
+                path,
+                take,
+                region,
+                audio: take.samples.clone(),
+                sample_loop: Some(wav::Loop::forward(frames / 2, frames - 1)),
+                fade: Some(frames / 2),
+                shift: 0,
+            },
+            root,
+            bank: Bank::Attack,
+            layer: LayerTag::Index(0),
+        }
+    }
+
+    #[test]
+    fn a_pitched_root_keeps_its_loop_inside_its_frames_and_reaches_the_keys() {
+        let path = Path::new("take.wav");
+        for frames in [99u32, 100, 101, 1001] {
+            let take = wav::Audio {
+                rate: 35_002,
+                channels: 1,
+                samples: (0..frames).map(|i| (i as f32 / 20.0).sin() / 2.0).collect(),
+            };
+            let region = wav::Region {
+                start: 0,
+                frames,
+                label: "060-b0-l00".into(),
+            };
+            let pitched = pitched_roots(&[region_stroke(path, &take, &region, 60)]).unwrap();
+            let roots: Vec<(u8, i32)> = pitched
+                .iter()
+                .map(|file| match file.source {
+                    Source::Region { shift, .. } => (file.root, shift),
+                    Source::File(_) => panic!("a pitched root is a region"),
+                })
+                .collect();
+            assert_eq!(roots, [(48, -12), (72, 12)], "{frames} frames");
+            for file in &pitched {
+                let Source::Region {
+                    audio,
+                    sample_loop: Some(found),
+                    fade: Some(fade),
+                    ..
+                } = &file.source
+                else {
+                    panic!("the loop and fade are kept");
+                };
+                let len = audio.len() as u32;
+                assert!(
+                    found.start <= found.end && found.end < len && *fade <= len,
+                    "{frames} frames pitched to {}: loop {found:?}, fade {fade}, {len} frames",
+                    file.root
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_root_is_pitched_where_the_take_reaches_the_keys_or_holds_none() {
+        assert!(pitched_roots(&[]).unwrap().is_empty());
+        let path = Path::new("take.wav");
+        let take = wav::Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.0; 100],
+        };
+        let low = wav::Region {
+            start: 0,
+            frames: 100,
+            label: "033-b0-l00".into(),
+        };
+        let high = wav::Region {
+            label: "107-b0-l00".into(),
+            ..low.clone()
+        };
+        let files = [
+            region_stroke(path, &take, &low, 33),
+            region_stroke(path, &take, &high, 107),
+        ];
+        assert!(pitched_roots(&files).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_bank_is_named_as_the_format_spells_it_and_attack_is_never_dropped() {
         let trim = |bank| match piano(&["trim", "in.npno", "-o", "out.npno", "--drop-bank", bank]) {
             Ok(crate::PianoAction::Trim(args)) => Ok(args.drop_bank),
@@ -1327,9 +1902,9 @@ mod tests {
         }
     }
 
-    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile {
+    fn wav(root: u8, bank: Bank, layer: LayerTag) -> StrokeFile<'static> {
         StrokeFile {
-            path: PathBuf::new(),
+            source: Source::File(PathBuf::new()),
             root,
             bank,
             layer,
@@ -1429,5 +2004,447 @@ mod tests {
         assert!(note::parse("128").is_err(), "--at and --map's root");
         assert_eq!(parse_range("0..127").unwrap(), (0, 127));
         assert!(parse_range("0..128").is_err());
+    }
+
+    /// A decaying stereo tone of `frames` at `hz`, at a rate the instrument plays.
+    fn tone(hz: f64, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let t = i as f64 / f64::from(codec::RATE);
+                let x = (std::f64::consts::TAU * hz * t).sin() * (-3.0 * t).exp() * 0.4;
+                [x as f32, (x * 0.7) as f32]
+            })
+            .collect()
+    }
+
+    fn build_from(input: &Path, out: &Path) -> Result<Vec<u8>, String> {
+        build_as(input, out, "6")
+    }
+
+    fn build_as(input: &Path, out: &Path, format: &str) -> Result<Vec<u8>, String> {
+        let (input, out) = (input.to_str().unwrap(), out.to_str().unwrap());
+        let Ok(crate::PianoAction::Build(args)) = piano(&[
+            "build",
+            input,
+            "--name",
+            "Take",
+            "--kind",
+            "wurlitzer",
+            "--format",
+            format,
+            "-o",
+            out,
+        ]) else {
+            panic!("build did not parse");
+        };
+        build(&Ui::piped(), args)?;
+        Ok(std::fs::read(out).unwrap())
+    }
+
+    /// A take at `path`, 24-bit, of `audio` with `marks`, as a build reads it back.
+    fn write_take(path: &Path, audio: &wav::Audio, marks: &wav::Marks) -> wav::Audio {
+        let deep = wav::write(audio, wav::Encoding::Int { bits: 24 }).unwrap();
+        std::fs::write(path, wav::with_marks(&deep, marks).unwrap()).unwrap();
+        wav::read(&deep).unwrap()
+    }
+
+    /// The regions of `take` written into `dir` as 16-bit WAVs of their own, unraised,
+    /// cleaned and their loops shaped as a take's build does it.
+    fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
+        std::fs::create_dir(dir).unwrap();
+        let noise = Noise::of(&nord_format::take::plan::mono(take), take.rate);
+        for (found, sample_loop) in marks.regions_with_loops().unwrap() {
+            let (root, bank, layer) = parse_stroke_name(&found.label, Stem::None).unwrap();
+            let frames = noise.stroke(
+                &take.samples,
+                usize::from(take.channels),
+                found.start as usize,
+                found.frames as usize,
+                clean::f0(root),
+            );
+            let pcm = crate::wav::cut(
+                take,
+                &frames,
+                bank,
+                sample_loop,
+                None,
+                1.0,
+                dither_seed(root, bank, layer),
+            );
+            let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
+            let loops = wav::Marks {
+                regions: vec![],
+                loops: sample_loop.into_iter().collect(),
+            };
+            let file = wav::with_marks(&file, &loops).unwrap();
+            std::fs::write(dir.join(format!("{}.wav", found.label)), file).unwrap();
+        }
+    }
+
+    fn region(start: u32, frames: u32, label: &str) -> wav::Region {
+        wav::Region {
+            start,
+            frames,
+            label: label.into(),
+        }
+    }
+
+    /// The RFC's equivalence: a take's regions build the strokes their audio, cut into
+    /// WAVs of their own, builds. A format 5 library plays each stroke at its own
+    /// level, so nothing is raised.
+    #[test]
+    fn a_takes_regions_build_what_the_same_cuts_as_wavs_build() {
+        let dir = crate::edit::tests::scratch("piano-take");
+        let mut samples = tone(261.6, 9_000);
+        samples.extend(tone(329.6, 8_000));
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples,
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(100, 7_900, "060-b0-l00"),
+                region(8_000, 1_000, "060-b2-l00"),
+                region(9_000, 8_000, "064-b0-l00"),
+            ],
+            loops: vec![wav::Loop::forward(5_000, 6_999)],
+        };
+        let path = dir.join("take.wav");
+        let take = write_take(&path, &audio, &marks);
+        write_cuts(&dir.join("cuts"), &take, &marks);
+
+        let from_take = build_as(&path, &dir.join("take.npno"), "5").unwrap();
+        let from_cuts = build_as(&dir.join("cuts"), &dir.join("cuts.npno"), "5").unwrap();
+        assert!(
+            from_take == from_cuts,
+            "the take built another library than its cuts"
+        );
+
+        // The cuts above go through the build's own cleaning and shaping, so what the
+        // take holds is checked against the take itself too: each region's stroke, as
+        // long as the region or up to its loop's end and padded to a whole block, with
+        // the loop where it was, and each attack as loud as the region recorded.
+        let (_, piano) = read(&dir.join("take.npno")).unwrap();
+        let library = piano.library().unwrap();
+        let block =
+            codec::block_frames(codec::MIN_WIDTH, library.block_bytes(), 2) - codec::OVERLAP;
+        let strokes: Vec<_> = library
+            .strokes()
+            .iter()
+            .map(|s| {
+                (
+                    s.root,
+                    s.bank(),
+                    s.sustain().map(|l| (l.start(), l.length())),
+                )
+            })
+            .collect();
+        assert_eq!(
+            strokes,
+            [
+                (60, Some(Bank::Attack), Some((4_900, 2_000))),
+                (60, Some(Bank::Release), None),
+                (64, Some(Bank::Attack), None),
+            ],
+            "the loop is counted from its region's start"
+        );
+        for (found, frames) in library.strokes().iter().zip([6_900, 1_000, 8_000]) {
+            let padding = found
+                .frames()
+                .checked_sub(frames)
+                .expect("no frame is lost");
+            assert!(padding < block as u32, "{padding} frames past the region");
+        }
+        let loudest = |left: &mut dyn Iterator<Item = f64>| {
+            let power: Vec<f64> = left.map(|v| v * v).collect();
+            let most = power
+                .windows(codec::RATE as usize / 100)
+                .map(|w| w.iter().sum::<f64>())
+                .fold(0.0, f64::max);
+            10.0 * most.log10()
+        };
+        for (stroke, start, frames) in [(0, 100, 6_900), (2, 9_000, 8_000)] {
+            let found = &library.strokes()[stroke];
+            let decoded = codec::decode(found, library.channels()).unwrap();
+            let built = loudest(&mut decoded.lanes[0].iter().map(|&v| f64::from(v)));
+            let recorded = loudest(
+                &mut audio.samples[2 * start..2 * (start + frames)]
+                    .iter()
+                    .step_by(2)
+                    .map(|&v| f64::from(v) * 32_767.0),
+            );
+            assert!(
+                (built - recorded).abs() < 0.5,
+                "stroke {stroke} plays {built:.2} dB, recorded {recorded:.2}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A take states its kind and whether it is cleaned, as drawbar's take editor saves
+    /// them: a build files the library as that kind where `--kind` says none, builds a
+    /// take set to raw from its regions as recorded, and refuses takes whose kinds
+    /// disagree.
+    #[test]
+    fn a_take_s_own_settings_choose_its_kind_and_whether_it_is_cleaned() {
+        let dir = crate::edit::tests::scratch("piano-take-settings");
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples: tone(261.6, 9_000),
+        };
+        let marks = wav::Marks {
+            regions: vec![region(100, 7_900, "060-b0-l00")],
+            loops: Vec::new(),
+        };
+        let path = dir.join("take.wav");
+        let take = write_take(&path, &audio, &marks);
+        let settings = |kind: &str, clean: bool| wav::Settings {
+            kind: Some(kind.into()),
+            clean: Some(clean),
+            ..wav::Settings::default()
+        };
+        let stated = |path: &Path, settings: &wav::Settings| {
+            let bytes = std::fs::read(path).unwrap();
+            std::fs::write(path, wav::with_settings(&bytes, settings).unwrap()).unwrap();
+        };
+        stated(&path, &settings("electric-piano", false));
+        let built = |inputs: &[&Path], out: &Path| {
+            let mut words = vec!["build".to_string()];
+            words.extend(inputs.iter().map(|path| path.to_str().unwrap().to_string()));
+            words.extend(
+                [
+                    "--name",
+                    "Take",
+                    "--format",
+                    "5",
+                    "-o",
+                    out.to_str().unwrap(),
+                ]
+                .map(String::from),
+            );
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            let Ok(crate::PianoAction::Build(args)) = piano(&words) else {
+                panic!("build did not parse");
+            };
+            build(&Ui::piped(), args).map(|()| std::fs::read(out).unwrap())
+        };
+        let raw = built(&[&path], &dir.join("raw.npno")).unwrap();
+        let (_, piano_lib) = read(&dir.join("raw.npno")).unwrap();
+        assert_eq!(
+            piano_lib.library().unwrap().kind_code(),
+            encode::Kind::ElectricPiano.code(),
+            "filed as the kind the take states"
+        );
+
+        let cuts = dir.join("cuts");
+        std::fs::create_dir(&cuts).unwrap();
+        let (found, _) = marks.regions_with_loops().unwrap()[0];
+        let channels = usize::from(take.channels);
+        let frames = &take.samples
+            [found.start as usize * channels..(found.start + found.frames) as usize * channels];
+        let pcm = crate::wav::cut(
+            &take,
+            frames,
+            Bank::Attack,
+            None,
+            None,
+            1.0,
+            dither_seed(60, Bank::Attack, LayerTag::Index(0)),
+        );
+        let file = wav::pcm16(&pcm.samples, pcm.rate, pcm.channels).unwrap();
+        std::fs::write(cuts.join("060-b0-l00.wav"), file).unwrap();
+        let mut words = vec![
+            "build",
+            cuts.to_str().unwrap(),
+            "--name",
+            "Take",
+            "--kind",
+            "electric-piano",
+        ];
+        let out = dir.join("cuts.npno");
+        words.extend(["--format", "5", "-o", out.to_str().unwrap()]);
+        let Ok(crate::PianoAction::Build(args)) = piano(&words) else {
+            panic!("build did not parse");
+        };
+        build(&Ui::piped(), args).unwrap();
+        assert!(
+            raw == std::fs::read(&out).unwrap(),
+            "a raw take builds its regions as recorded"
+        );
+
+        let other = dir.join("other.wav");
+        let softer = wav::Marks {
+            regions: vec![region(100, 7_900, "060-b0-l01")],
+            loops: Vec::new(),
+        };
+        write_take(&other, &audio, &softer);
+        stated(&other, &settings("grand", true));
+        let refused = built(&[&path, &other], &dir.join("both.npno")).unwrap_err();
+        assert!(
+            refused.contains("electric-piano") && refused.contains("grand"),
+            "{refused}"
+        );
+        let template = dir.join("raw.npno");
+        let out = dir.join("chosen.npno");
+        for chosen in [
+            ["--kind", "grand"],
+            ["--template", template.to_str().unwrap()],
+        ] {
+            let mut words = vec!["build", path.to_str().unwrap(), other.to_str().unwrap()];
+            words.extend(["--name", "Take", "-o", out.to_str().unwrap()]);
+            words.extend(chosen);
+            let Ok(crate::PianoAction::Build(args)) = piano(&words) else {
+                panic!("build did not parse");
+            };
+            let both = build(&Ui::piped(), args);
+            assert!(both.is_ok(), "{chosen:?} decides the kind: {both:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each stroke of the library at `path`: its peak, and the decibels it plays at, the
+    /// most power any 10 ms of it holds less its trim, as the level rule measures it.
+    fn stroke_levels(path: &Path) -> Vec<(i16, f64)> {
+        let (_, piano) = read(path).unwrap();
+        let library = piano.library().unwrap();
+        library
+            .strokes()
+            .iter()
+            .map(|stroke| {
+                let audio = codec::decode(stroke, library.channels()).unwrap();
+                let lane = &audio.lanes[0];
+                let peak = lane.iter().map(|v| v.saturating_abs()).max().unwrap();
+                let power = lane
+                    .windows(codec::RATE as usize / 100)
+                    .map(|window| window.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>())
+                    .fold(0.0, f64::max);
+                let level = 10.0 * power.log10();
+                (peak, level - f64::from(stroke.trim()) / 10.0)
+            })
+            .collect()
+    }
+
+    /// A soft layer and a release, 32 dB under their root's loudest layer, are raised
+    /// to its peak before rounding. The soft layer still plays as loud against it as
+    /// unraised, and the release, which the WAVs' build plays 18 dB under the loudest
+    /// attack, plays at its recorded balance lifted by 12 dB: 20 dB under its attack.
+    #[test]
+    fn a_takes_soft_regions_are_raised_without_changing_how_loud_they_play() {
+        let dir = crate::edit::tests::scratch("piano-take-raise");
+        let soft = |hz, frames| {
+            tone(hz, frames)
+                .iter()
+                .map(|x| x / 40.0)
+                .collect::<Vec<_>>()
+        };
+        let gap = || vec![0.0f32; 2 * 9_000];
+        let mut samples = tone(261.6, 9_000);
+        samples.extend(gap());
+        samples.extend(soft(261.6, 9_000));
+        samples.extend(gap());
+        samples.extend(soft(261.6, 2_000));
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples,
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(0, 9_000, "060-b0-l00"),
+                region(18_000, 9_000, "060-b0-l01"),
+                region(36_000, 2_000, "060-b2-l00"),
+            ],
+            loops: vec![],
+        };
+        let path = dir.join("take.wav");
+        let take = write_take(&path, &audio, &marks);
+        write_cuts(&dir.join("cuts"), &take, &marks);
+        build_from(&path, &dir.join("take.npno")).unwrap();
+        build_from(&dir.join("cuts"), &dir.join("cuts.npno")).unwrap();
+
+        let raised = stroke_levels(&dir.join("take.npno"));
+        let unraised = stroke_levels(&dir.join("cuts.npno"));
+        for stroke in 1..raised.len() {
+            let under = 20.0 * (f64::from(raised[0].0) / f64::from(raised[stroke].0)).log10();
+            assert!(
+                under < 0.5,
+                "stroke {stroke} peaks {under:.1} dB under its root's"
+            );
+        }
+        let against = |levels: &[(i16, f64)], stroke: usize| levels[stroke].1 - levels[0].1;
+        assert!(
+            (against(&raised, 1) - against(&unraised, 1)).abs() < 0.15,
+            "the soft layer plays {:.2} dB against its root raised, {:.2} unraised",
+            against(&raised, 1),
+            against(&unraised, 1)
+        );
+        let recorded = 20.0 * 40f64.log10();
+        assert!(
+            (against(&raised, 2) + recorded - 12.0).abs() < 0.15,
+            "the release plays {:.2} dB against its attack",
+            against(&raised, 2)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fade region must end with the attack it names, and only an attack or
+    /// resonance that does not loop fades.
+    #[test]
+    fn a_fade_that_is_not_an_attacks_end_is_refused() {
+        let dir = crate::edit::tests::scratch("piano-take-fade");
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples: tone(261.6, 20_000),
+        };
+        let path = dir.join("take.wav");
+        let cases = [
+            (region(4_000, 5_000, "060-b0-l00-fade"), "end with it"),
+            (region(15_000, 5_000, "060-b2-l00-fade"), "is a release"),
+            (region(4_000, 6_000, "062-b0-l00-fade"), "fades no stroke"),
+        ];
+        for (fade, reason) in cases {
+            let marks = wav::Marks {
+                regions: vec![
+                    region(0, 10_000, "060-b0-l00"),
+                    region(10_000, 10_000, "060-b2-l00"),
+                    fade,
+                ],
+                loops: vec![],
+            };
+            write_take(&path, &audio, &marks);
+            let err = build_from(&path, &dir.join("out.npno")).unwrap_err();
+            assert!(err.contains(reason), "want {reason:?}: {err}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_region_that_names_no_stroke_is_refused_by_label() {
+        let dir = crate::edit::tests::scratch("piano-take-label");
+        let take = wav::Audio {
+            rate: codec::RATE,
+            channels: 1,
+            samples: vec![0.1; 2_000],
+        };
+        let path = dir.join("take.wav");
+        let plain = wav::write(&take, wav::Encoding::Int { bits: 24 }).unwrap();
+        for (frames, label) in [(500, "intro"), (0, "060-b0-l00")] {
+            let marks = wav::Marks {
+                regions: vec![wav::Region {
+                    start: 10,
+                    frames,
+                    label: label.into(),
+                }],
+                loops: vec![],
+            };
+            std::fs::write(&path, wav::with_marks(&plain, &marks).unwrap()).unwrap();
+            let err = build_from(&path, &dir.join("out.npno")).unwrap_err();
+            assert!(err.contains("take.wav"), "{err}");
+            assert!(err.contains(&format!("region {label:?}")), "{err}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

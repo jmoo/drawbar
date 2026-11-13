@@ -8,6 +8,8 @@
   decode is kept as raw bytes, and every editable field is checked to move no
   other bit.
 - Every decoded field can be listed and set by its path.
+- WAVs of any PCM or float encoding, with the regions and loops that mark strokes,
+  and a take module that cuts a recorded take into a piano library's strokes.
 - No I/O of its own beyond `Read`, `Seek` and `Write`, so it builds anywhere
   `std` does, including the browser.
 

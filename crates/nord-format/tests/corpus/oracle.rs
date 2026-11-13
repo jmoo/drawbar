@@ -754,6 +754,7 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
                 layer: stroke.layer(),
                 channels: audio.lanes,
                 sustain: None,
+                under_attack: None,
             })
         })
         .collect::<Result<_, String>>()?;

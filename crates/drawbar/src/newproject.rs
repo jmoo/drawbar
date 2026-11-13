@@ -22,7 +22,7 @@ use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
 use nord_format::note;
-use nord_format::wav::{Pcm16, SampleLoop};
+use nord_format::wav::{Loop, Pcm16};
 use nord_format::Entity;
 
 use crate::document::controls::fits;
@@ -613,7 +613,7 @@ struct Recorded {
     samples: Vec<i16>,
     channels: u16,
     rate: u32,
-    sample_loop: Option<SampleLoop>,
+    sample_loop: Option<Loop>,
     root: u8,
     bank: Bank,
     layer: u8,
@@ -659,6 +659,7 @@ impl Coding {
                 layer: take.layer,
                 channels: audio.channels,
                 sustain,
+                under_attack: None,
             });
         }
 

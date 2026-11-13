@@ -50,6 +50,7 @@ extensible WAV format. Any sample rate is accepted.
 
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
+nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno
 nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
 nord piano rebuild grand.npno -o again.npno        # re-encode a library's own strokes
 ```
@@ -80,12 +81,66 @@ nearest frame of the resampled audio.
 Whatever the audio does not decide, such as decay and per-note tables, comes from
 `--template` when you give one, and each stroke's level follows its layer. Without a
 template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
-values, and each stroke decays from note-on as the instrument's own pianos of that
-kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
-level of its root's loudest layer, softer layers a little louder as that kind's are,
-up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
-layer needs more boost than the instrument gives at `--gain`, the whole library is
-turned down to fit. In format 5, each stroke's level follows its layer.
+values. Without `--kind`, the kind the takes state, as drawbar's take editor saves
+it, decides, and otherwise grand; takes that state different kinds need `--kind`.
+Each stroke decays from note-on as the instrument's own pianos of that kind do,
+faster on higher keys. In format 6, each layer is trimmed to play at the level of
+its root's loudest layer, softer layers a little louder as that kind's are, up to 6
+dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
+layer or release needs more boost than the instrument gives at `--gain`, the whole
+library is turned down to fit, but a release from a take just plays quieter. In
+format 5, each stroke's level follows its layer.
+
+## Building from a recorded take
+
+`prep` finds the strokes in a recording of you playing, and `build` makes a library
+of them:
+
+```sh
+nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
+nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
+```
+
+Give `prep` the notes in the order you played them. Each note may be hit several
+times, loud to soft or in any order. Each hit goes to the nearest note in the list,
+and each note keeps up to `--layers` hits, spread evenly in level, or the first ones
+played with `--order played`. `--min-layer-gap` drops a hit too close in level to a
+louder one, and `--skip` leaves out hits by their number in the listing. A hit too
+quiet over the take's noise is left out. `--max-seconds` and `--release-seconds`
+limit each attack and release.
+
+The listing shows every hit: its note and pitch, its level, what became of it, and
+how it sustains. A note still sounding at its key-up is looped, with a warning where
+the loop matches poorly. A note that dies first fades to silence instead.
+
+Or record one take per velocity layer, each playing every note once, and give them
+loudest first:
+
+```sh
+nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
+nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
+```
+
+Each take is one layer, whatever its level, so you may raise the gain for the softer
+ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
+12 of the second take.
+
+`prep` never changes a take. A take at another rate is resampled to the instrument's
+35,002 Hz in `-o`, with its other chunks. A take already at 35,002 Hz may be its own
+`-o`, and only its regions and loops are replaced.
+
+A take works best opening with 3 to 5 seconds of silence, free of ground loops,
+peaking around -6 dBFS, and with each note held until it has died.
+
+`build` makes a stroke of each region of a take, labeled as a stroke's WAV is named
+(`060-b0-l00`), with a loop inside it as that stroke's loop. A region labeled
+`084-b0-l00-fade` marks where that attack fades to silence. The take may be PCM of 8
+to 32 bits or float. Each stroke is cleaned of the take's hum and hiss, its ends and
+loop are shaped, and it is dithered to 16 bits. In a format 6 library without a
+template, every region is also brought to one level, and the lowest and highest roots
+are pitched out to reach all 88 keys. A take whose **Clean audio** drawbar's take
+editor turned off is built as recorded. [Takes](../reference/takes.md) gives the
+details.
 
 [What is supported](../getting-started/support.md) says which of these libraries
 have been played on an instrument.

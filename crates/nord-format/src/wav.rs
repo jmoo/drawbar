@@ -1,686 +1,701 @@
-//! A minimal RIFF/WAVE reader and writer, for moving audio in and out of the codec.
+//! RIFF/WAVE as a take arrives: integer PCM of 8 to 32 bits or IEEE float, plain or
+//! `WAVE_FORMAT_EXTENSIBLE`, read to `f32`.
+
+mod marks;
+mod pcm16;
+mod settings;
 
 use std::ops::Range;
 
-use crate::error::{Error, ParseError};
+pub use marks::{read_marks, with_marks, Loop, Marks, Play, Region};
+pub use pcm16::{
+    dithered, mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout,
+};
+pub use settings::{read_settings, with_settings, Settings};
 
-/// Write mono 16-bit PCM at `rate` without resampling.
-pub fn mono_pcm16(samples: &[i16], rate: u32) -> Result<Vec<u8>, Error> {
-    pcm16(samples, rate, 1)
+use crate::error::{malformed, out_of_bounds, Error};
+
+/// How each sample is stored. Integer samples of 8 bits are unsigned, wider ones signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    Int { bits: u16 },
+    Float { bits: u16 },
 }
 
-/// Write interleaved 16-bit PCM at `rate` without resampling.
-pub fn pcm16(samples: &[i16], rate: u32, channels: u16) -> Result<Vec<u8>, Error> {
-    const BITS: u16 = 16;
-    let block = channels
-        .checked_mul(BITS / 8)
-        .filter(|&bytes| bytes > 0)
-        .ok_or_else(|| ParseError::OutOfBounds {
-            value: format!("{channels} channels"),
-            bound: "a positive channel count whose frame size fits u16".into(),
-        })?;
-    if rate == 0 {
-        return Err(ParseError::OutOfBounds {
-            value: "0 Hz".into(),
-            bound: "a positive sample rate".into(),
+impl Encoding {
+    fn bytes(self) -> usize {
+        match self {
+            Encoding::Int { bits } | Encoding::Float { bits } => usize::from(bits / 8),
         }
-        .into());
     }
-    if !samples.len().is_multiple_of(usize::from(channels)) {
-        return Err(ParseError::OutOfBounds {
-            value: format!("{} samples", samples.len()),
-            bound: format!("whole {channels}-channel frames"),
-        }
-        .into());
-    }
-    let data = samples
-        .len()
-        .checked_mul(usize::from(BITS / 8))
-        .and_then(|n| u32::try_from(n).ok())
-        .filter(|&n| n <= u32::MAX - 36)
-        .ok_or_else(|| ParseError::OutOfBounds {
-            value: format!("{} samples", samples.len()),
-            bound: "a WAV whose RIFF and data lengths fit u32".into(),
-        })?;
-    let byte_rate = rate
-        .checked_mul(u32::from(block))
-        .ok_or_else(|| ParseError::OutOfBounds {
-            value: format!("{rate} Hz"),
-            bound: "a WAV byte rate that fits u32".into(),
-        })?;
-
-    let mut out = Vec::new();
-    out.try_reserve(44 + data as usize)
-        .map_err(|_| ParseError::OutOfBounds {
-            value: format!("{} samples", samples.len()),
-            bound: "a WAV whose allocation fits memory".into(),
-        })?;
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM, uncompressed
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&block.to_le_bytes());
-    out.extend_from_slice(&BITS.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data.to_le_bytes());
-    for s in samples {
-        out.extend_from_slice(&s.to_le_bytes());
-    }
-    Ok(out)
 }
 
-/// Uncompressed 16-bit PCM read off a RIFF/WAVE file.
-#[derive(Debug)]
-pub struct Pcm16 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Format {
+    pub channels: u16,
+    pub rate: u32,
+    pub encoding: Encoding,
+}
+
+impl Format {
+    fn block(&self) -> usize {
+        usize::from(self.channels) * self.encoding.bytes()
+    }
+}
+
+/// Where a file keeps its samples, found without copying them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layout {
+    pub format: Format,
+    /// The data chunk's body: frames interleaved by channel.
+    pub data: Range<usize>,
+}
+
+impl Layout {
+    pub fn frames(&self) -> usize {
+        self.data.len() / self.format.block()
+    }
+}
+
+/// Samples in -1.0..1.0, frames interleaved by channel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Audio {
     pub rate: u32,
     pub channels: u16,
-    /// Frames interleaved by channel, as stored.
-    pub samples: Vec<i16>,
-    /// The first loop a `smpl` chunk declares, if there is one.
-    pub sample_loop: Option<SampleLoop>,
+    pub samples: Vec<f32>,
 }
 
-/// One loop of a `smpl` chunk, in frames of the file it was read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SampleLoop {
-    pub start: u32,
-    /// The loop's last frame, which the chunk counts as part of the loop.
-    pub end: u32,
-    /// The chunk's loop type 0, played start to end and around again. Types 1 and 2
-    /// alternate direction or play backward.
-    pub forward: bool,
-}
-
-impl Pcm16 {
-    /// Frames, whatever the channel count.
+impl Audio {
     pub fn frames(&self) -> usize {
         self.samples.len() / usize::from(self.channels).max(1)
     }
 }
 
+/// A top-level chunk: its id and where its body sits in the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Chunk {
+    pub id: [u8; 4],
+    pub body: Range<usize>,
+}
+
+impl Chunk {
+    /// The chunk with its header and any pad byte, as it sits in the file.
+    pub fn whole(&self) -> Range<usize> {
+        self.body.start - 8..self.body.end + self.body.len() % 2
+    }
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// The top-level chunks of a RIFF/WAVE file, in file order.
+pub(crate) fn chunks(bytes: &[u8]) -> Result<Vec<Chunk>, Error> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return malformed("not a RIFF/WAVE file");
+    }
+    let declared = u32_at(bytes, 4) as usize;
+    if declared.checked_add(8) != Some(bytes.len()) {
+        return malformed(format!(
+            "RIFF declares {declared} payload bytes but the file is {} bytes",
+            bytes.len()
+        ));
+    }
+    let mut found = Vec::new();
+    let mut at = 12;
+    while bytes.len() - at >= 8 {
+        let id: [u8; 4] = std::array::from_fn(|i| bytes[at + i]);
+        let size = u32_at(bytes, at + 4) as usize;
+        let body = at + 8;
+        let Some(end) = body.checked_add(size).filter(|&e| e <= bytes.len()) else {
+            return malformed(format!(
+                "chunk {} claims {size} bytes but the file ends first",
+                String::from_utf8_lossy(&id)
+            ));
+        };
+        found.push(Chunk {
+            id,
+            body: body..end,
+        });
+        at = end + size % 2;
+        if at > bytes.len() {
+            return malformed("an odd-sized chunk has no pad byte");
+        }
+    }
+    if at != bytes.len() {
+        return malformed(format!(
+            "{} trailing byte(s) do not form a chunk",
+            bytes.len() - at
+        ));
+    }
+    Ok(found)
+}
+
+/// The one chunk of `id`, if there is one; a second is refused.
+pub(crate) fn only<'a>(chunks: &'a [Chunk], id: &[u8; 4]) -> Result<Option<&'a Chunk>, Error> {
+    let mut of_id = chunks.iter().filter(|c| &c.id == id);
+    let first = of_id.next();
+    if of_id.next().is_some() {
+        return malformed(format!(
+            "more than one {} chunk",
+            String::from_utf8_lossy(id).trim_end()
+        ));
+    }
+    Ok(first)
+}
+
 const WAVE_FORMAT_PCM: u16 = 1;
+const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// The length of the extensible extension: valid bits, channel mask and sub-format GUID.
 const EXTENSIBLE_CB_SIZE: u16 = 22;
-/// `KSDATAFORMAT_SUBTYPE_PCM`, 00000001-0000-0010-8000-00aa00389b71, as stored.
-const KSDATAFORMAT_SUBTYPE_PCM: [u8; 16] = [
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+/// The tail every `KSDATAFORMAT_SUBTYPE_*` GUID shares; its first two bytes are the
+/// format tag the sub-format stands for.
+const SUBTYPE_TAIL: [u8; 14] = [
+    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
 ];
 
-/// The fmt chunk fields the reader checks, once its encoding is known to be PCM.
-struct Fmt {
-    channels: u16,
-    rate: u32,
-    byte_rate: u32,
-    block: u16,
-    bits: u16,
-}
-
-/// Read a fmt chunk that declares PCM, plainly or as `WAVE_FORMAT_EXTENSIBLE` with the
-/// PCM sub-format.
-fn read_fmt(fmt: &[u8]) -> Result<Fmt, Error> {
-    let u16_at = |at: usize| u16::from_le_bytes([fmt[at], fmt[at + 1]]);
-    let u32_at = |at: usize| u32::from_le_bytes([fmt[at], fmt[at + 1], fmt[at + 2], fmt[at + 3]]);
-
-    if fmt.len() < 16 {
-        return Err(ParseError::AssertFail(format!(
-            "fmt chunk is {} bytes; PCM requires at least 16",
-            fmt.len()
-        ))
-        .into());
+/// The format tag a fmt chunk stands for, looking through an extensible one to its
+/// sub-format.
+fn format_tag(fmt: &[u8], bits: u16) -> Result<u16, Error> {
+    let tag = u16_at(fmt, 0);
+    if tag != WAVE_FORMAT_EXTENSIBLE {
+        return Ok(tag);
     }
-    let read = Fmt {
-        channels: u16_at(2),
-        rate: u32_at(4),
-        byte_rate: u32_at(8),
-        block: u16_at(12),
-        bits: u16_at(14),
-    };
-    match u16_at(0) {
-        WAVE_FORMAT_PCM => Ok(read),
-        WAVE_FORMAT_EXTENSIBLE => {
-            check_extensible(fmt, read.bits)?;
-            Ok(read)
-        }
-        encoding => Err(ParseError::AssertFail(format!(
-            "encoding {encoding} is not uncompressed PCM; only PCM (1) and extensible \
-             PCM (65534) are read"
-        ))
-        .into()),
-    }
-}
-
-/// Check the extension of a `WAVE_FORMAT_EXTENSIBLE` fmt chunk of at least 16 bytes.
-fn check_extensible(fmt: &[u8], bits: u16) -> Result<(), Error> {
-    let refuse = |why: String| Err(ParseError::AssertFail(why).into());
-    let Some(cb_size) = fmt.get(16..18) else {
-        return refuse(format!(
+    let Some(cb_size) = fmt.get(16..18).map(|b| u16::from_le_bytes([b[0], b[1]])) else {
+        return malformed(format!(
             "the extensible fmt chunk is {} bytes, too short to declare its extension",
             fmt.len()
         ));
     };
-    let cb_size = u16::from_le_bytes([cb_size[0], cb_size[1]]);
     if cb_size != EXTENSIBLE_CB_SIZE {
-        return refuse(format!(
+        return malformed(format!(
             "the extensible fmt chunk declares a {cb_size}-byte extension; \
              the extension is {EXTENSIBLE_CB_SIZE} bytes"
         ));
     }
     let Some(extension) = fmt.get(18..18 + usize::from(EXTENSIBLE_CB_SIZE)) else {
-        return refuse(format!(
+        return malformed(format!(
             "the extensible fmt chunk is {} bytes, too short for its {EXTENSIBLE_CB_SIZE}-byte \
              extension",
             fmt.len()
         ));
     };
-    let sub_format: [u8; 16] = std::array::from_fn(|i| extension[6 + i]);
-    if sub_format != KSDATAFORMAT_SUBTYPE_PCM {
-        return refuse(format!(
-            "the extensible sub-format {} is not PCM; only PCM ({}) is read",
-            guid(&sub_format),
-            guid(&KSDATAFORMAT_SUBTYPE_PCM)
-        ));
-    }
-    let valid_bits = u16::from_le_bytes([extension[0], extension[1]]);
+    let valid_bits = u16_at(extension, 0);
     if valid_bits == 0 || valid_bits > bits {
-        return refuse(format!(
+        return malformed(format!(
             "the extensible fmt chunk declares {valid_bits} valid bits in a {bits}-bit sample"
         ));
     }
-    Ok(())
-}
-
-/// A stored GUID in its registry spelling: three little-endian fields, then eight bytes.
-fn guid(stored: &[u8; 16]) -> String {
-    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    format!(
-        "{:08x}-{:04x}-{:04x}-{}-{}",
-        u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]),
-        u16::from_le_bytes([stored[4], stored[5]]),
-        u16::from_le_bytes([stored[6], stored[7]]),
-        hex(&stored[8..10]),
-        hex(&stored[10..16])
-    )
-}
-
-/// Where a 16-bit PCM file keeps its samples, and how they are laid out, found without
-/// copying them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pcm16Layout {
-    pub rate: u32,
-    pub channels: u16,
-    /// The data chunk's body: frames interleaved by channel, each sample little-endian.
-    /// Every byte outside it belongs to the container.
-    pub data: Range<usize>,
-    /// The first loop a `smpl` chunk declares, if there is one.
-    pub sample_loop: Option<SampleLoop>,
-}
-
-impl Pcm16Layout {
-    /// Frames, whatever the channel count.
-    pub fn frames(&self) -> usize {
-        self.data.len() / (2 * usize::from(self.channels).max(1))
+    let sub_format = &extension[6..22];
+    if sub_format[2..] != SUBTYPE_TAIL {
+        return malformed("the extensible sub-format is not a KSDATAFORMAT_SUBTYPE GUID");
     }
+    Ok(u16_at(sub_format, 0))
 }
 
-/// Read uncompressed 16-bit PCM, preserving its stored channel count and rate.
-pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
-    let layout = pcm16_layout(bytes)?;
-    let samples = bytes[layout.data]
-        .chunks_exact(2)
-        .map(|s| i16::from_le_bytes([s[0], s[1]]))
-        .collect();
-    Ok(Pcm16 {
-        rate: layout.rate,
-        channels: layout.channels,
-        samples,
-        sample_loop: layout.sample_loop,
-    })
-}
-
-/// Check a file as [`read_pcm16`] does, and say where its samples are.
-pub fn pcm16_layout(bytes: &[u8]) -> Result<Pcm16Layout, Error> {
-    let u32_at =
-        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(ParseError::AssertFail("not a RIFF/WAVE file".into()).into());
+fn read_format(fmt: &[u8]) -> Result<Format, Error> {
+    if fmt.len() < 16 {
+        return malformed(format!(
+            "fmt chunk is {} bytes; it needs at least 16",
+            fmt.len()
+        ));
     }
-
-    let declared = u32_at(4) as usize;
-    let riff_len = declared
-        .checked_add(8)
-        .filter(|&n| n == bytes.len())
-        .ok_or_else(|| {
-            ParseError::AssertFail(format!(
-                "RIFF declares {declared} payload bytes but the file is {} bytes",
-                bytes.len()
+    let channels = u16_at(fmt, 2);
+    let rate = u32_at(fmt, 4);
+    let byte_rate = u32_at(fmt, 8);
+    let block = u16_at(fmt, 12);
+    let bits = u16_at(fmt, 14);
+    let encoding = match (format_tag(fmt, bits)?, bits) {
+        (WAVE_FORMAT_PCM, 8 | 16 | 24 | 32) => Encoding::Int { bits },
+        (WAVE_FORMAT_IEEE_FLOAT, 32 | 64) => Encoding::Float { bits },
+        (tag @ (WAVE_FORMAT_PCM | WAVE_FORMAT_IEEE_FLOAT), bits) => {
+            return malformed(format!(
+                "{bits}-bit samples in format {tag}; PCM is read at 8, 16, 24 or 32 bits, \
+                 float at 32 or 64"
             ))
-        })?;
-    let bytes = &bytes[..riff_len];
-    let mut format = None;
-    let mut data = None;
-    let mut sampler = None;
-    let mut at = 12;
-    while bytes.len() - at >= 8 {
-        let id = &bytes[at..at + 4];
-        let size = u32_at(at + 4) as usize;
-        let body = at + 8;
-        let end = body.checked_add(size).filter(|&e| e <= bytes.len());
-        let Some(end) = end else {
-            return Err(ParseError::AssertFail(format!(
-                "chunk {} claims {size} bytes but the file ends first",
-                String::from_utf8_lossy(id)
-            ))
-            .into());
-        };
-        match id {
-            b"fmt " => format = Some(body..end),
-            b"data" => data = Some(body..end),
-            b"smpl" => sampler = Some(body..end),
-            _ => {}
         }
-        at = end
-            .checked_add(size % 2)
-            .filter(|&next| next <= bytes.len())
-            .ok_or_else(|| ParseError::AssertFail("an odd-sized chunk has no pad byte".into()))?;
-    }
-    if at != bytes.len() {
-        return Err(ParseError::AssertFail(format!(
-            "{} trailing byte(s) do not form a chunk",
-            bytes.len() - at
-        ))
-        .into());
-    }
-
-    let Some(format) = format else {
-        return Err(ParseError::AssertFail("no fmt chunk".into()).into());
+        (tag, _) => {
+            return malformed(format!(
+                "format {tag} is neither PCM (1) nor IEEE float (3)"
+            ))
+        }
     };
-    let Fmt {
-        channels,
-        rate,
-        byte_rate,
-        block,
-        bits,
-    } = read_fmt(&bytes[format])?;
-    if bits != 16 {
-        return Err(
-            ParseError::AssertFail(format!("{bits}-bit samples; only 16-bit PCM is read")).into(),
-        );
-    }
     if channels == 0 {
-        return Err(ParseError::AssertFail("the fmt chunk declares no channels".into()).into());
+        return malformed("the fmt chunk declares no channels");
     }
     if rate == 0 {
-        return Err(
-            ParseError::AssertFail("the fmt chunk declares a zero sample rate".into()).into(),
-        );
+        return malformed("the fmt chunk declares a zero sample rate");
     }
-    let expected_block = channels
-        .checked_mul(bits / 8)
-        .ok_or_else(|| ParseError::AssertFail("the channel frame size overflows u16".into()))?;
-    let expected_rate = rate
-        .checked_mul(u32::from(expected_block))
-        .ok_or_else(|| ParseError::AssertFail("the byte rate overflows u32".into()))?;
-    if block != expected_block || byte_rate != expected_rate {
-        return Err(ParseError::AssertFail(format!(
-            "fmt declares byte rate {byte_rate} and block size {block}; expected {expected_rate} and {expected_block}"
-        ))
-        .into());
-    }
-    let Some(data) = data else {
-        return Err(ParseError::AssertFail("no data chunk".into()).into());
-    };
-    if data.len() % usize::from(expected_block) != 0 {
-        return Err(ParseError::AssertFail(format!(
-            "data chunk is {} bytes, not a whole {expected_block}-byte frame",
-            data.len()
-        ))
-        .into());
-    }
-
-    let frames = data.len() / usize::from(expected_block);
-    let sample_loop = match sampler {
-        Some(sampler) => first_loop(&bytes[sampler], frames)?,
-        None => None,
-    };
-    Ok(Pcm16Layout {
-        rate,
+    let format = Format {
         channels,
-        data,
-        sample_loop,
+        rate,
+        encoding,
+    };
+    let expected_block = format.block();
+    let expected_rate = u64::from(rate) * expected_block as u64;
+    if usize::from(block) != expected_block || u64::from(byte_rate) != expected_rate {
+        return malformed(format!(
+            "fmt declares {bits}-bit samples in {channels} channel(s) at byte rate \
+             {byte_rate} and block size {block}; they take {expected_rate} and {expected_block}"
+        ));
+    }
+    Ok(format)
+}
+
+/// Check a file as [`read`] does, and say where its samples are.
+pub fn layout(bytes: &[u8]) -> Result<Layout, Error> {
+    let chunks = chunks(bytes)?;
+    let Some(fmt) = only(&chunks, b"fmt ")? else {
+        return malformed("no fmt chunk");
+    };
+    let format = read_format(&bytes[fmt.body.clone()])?;
+    let Some(data) = only(&chunks, b"data")? else {
+        return malformed("no data chunk");
+    };
+    if data.body.len() % format.block() != 0 {
+        return malformed(format!(
+            "data chunk is {} bytes, not a whole {}-byte frame",
+            data.body.len(),
+            format.block()
+        ));
+    }
+    Ok(Layout {
+        format,
+        data: data.body.clone(),
     })
 }
 
-/// Bytes of a `smpl` chunk ahead of its loops; the loop count is the u32 at 28.
-const SAMPLER_HEAD: usize = 36;
-/// Bytes per loop: cue id, type, start, end, fraction and play count, each a u32.
-const SAMPLER_LOOP: usize = 24;
-
-/// The first loop of a `smpl` chunk over `frames` frames of audio.
-fn first_loop(chunk: &[u8], frames: usize) -> Result<Option<SampleLoop>, Error> {
-    let u32_at =
-        |at: usize| u32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
-    if chunk.len() < SAMPLER_HEAD {
-        return Err(ParseError::AssertFail(format!(
-            "smpl chunk is {} bytes; its header is {SAMPLER_HEAD}",
-            chunk.len()
-        ))
-        .into());
-    }
-    if u32_at(28) == 0 {
-        return Ok(None);
-    }
-    if chunk.len() < SAMPLER_HEAD + SAMPLER_LOOP {
-        return Err(ParseError::AssertFail(format!(
-            "smpl chunk declares {} loop(s) but is {} bytes, too short for one",
-            u32_at(28),
-            chunk.len()
-        ))
-        .into());
-    }
-    let at = SAMPLER_HEAD;
-    let found = SampleLoop {
-        start: u32_at(at + 8),
-        end: u32_at(at + 12),
-        forward: u32_at(at + 4) == 0,
+/// Read every sample, whatever its encoding, at its stored rate and channel count.
+pub fn read(bytes: &[u8]) -> Result<Audio, Error> {
+    let layout = layout(bytes)?;
+    let data = &bytes[layout.data.clone()];
+    let width = layout.format.encoding.bytes();
+    let decode: fn(&[u8]) -> f32 = match layout.format.encoding {
+        Encoding::Int { bits: 8 } => |s: &[u8]| (f32::from(s[0]) - 128.0) / 128.0,
+        Encoding::Int { bits: 16 } => {
+            |s: &[u8]| f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0
+        }
+        Encoding::Int { bits: 24 } => {
+            |s: &[u8]| (i32::from_le_bytes([0, s[0], s[1], s[2]]) >> 8) as f32 / 8_388_608.0
+        }
+        Encoding::Int { .. } => |s: &[u8]| {
+            (f64::from(i32::from_le_bytes([s[0], s[1], s[2], s[3]])) / 2_147_483_648.0) as f32
+        },
+        Encoding::Float { bits: 32 } => |s: &[u8]| f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
+        Encoding::Float { .. } => {
+            |s: &[u8]| f64::from_le_bytes(std::array::from_fn(|i| s[i])) as f32
+        }
     };
-    if found.start > found.end || found.end as usize >= frames {
-        return Err(ParseError::AssertFail(format!(
-            "smpl loop runs from frame {} to {}, outside the {frames} frame(s) of audio",
-            found.start, found.end
-        ))
-        .into());
+    let samples = data.chunks_exact(width).map(decode).collect();
+    Ok(Audio {
+        rate: layout.format.rate,
+        channels: layout.format.channels,
+        samples,
+    })
+}
+
+/// `x` on the integer scale whose full range is `full` each side, rounded and clipped.
+fn to_int(x: f32, full: f64) -> i64 {
+    (f64::from(x) * full).round().clamp(-full, full - 1.0) as i64
+}
+
+/// One sample stored as `encoding`. Integer encodings round and clip to their range;
+/// float stores the value as it is.
+fn put(out: &mut Vec<u8>, x: f32, encoding: Encoding) {
+    let int = |full: f64| to_int(x, full);
+    match encoding {
+        Encoding::Int { bits: 8 } => out.push((int(128.0) + 128) as u8),
+        Encoding::Int { bits: 16 } => out.extend_from_slice(&(int(32_768.0) as i16).to_le_bytes()),
+        Encoding::Int { bits: 24 } => {
+            out.extend_from_slice(&(int(8_388_608.0) as i32).to_le_bytes()[..3]);
+        }
+        Encoding::Int { .. } => {
+            out.extend_from_slice(&(int(2_147_483_648.0) as i32).to_le_bytes());
+        }
+        Encoding::Float { bits: 32 } => out.extend_from_slice(&x.to_le_bytes()),
+        Encoding::Float { .. } => out.extend_from_slice(&f64::from(x).to_le_bytes()),
     }
-    Ok(Some(found))
+}
+
+/// Write `audio` as a WAV of `encoding`: a fmt chunk, a `fact` chunk for float, and the
+/// data.
+pub fn write(audio: &Audio, encoding: Encoding) -> Result<Vec<u8>, Error> {
+    let format = Format {
+        channels: audio.channels,
+        rate: audio.rate,
+        encoding,
+    };
+    riff(format, &audio.samples, |out, x| put(out, x, encoding))
+}
+
+/// `bytes` with its audio replaced by `audio` stored as `encoding`, as a resample writes
+/// it: a new fmt, fact and data, then every other chunk as it was, except the regions
+/// and loops, which count frames at the old rate and so are dropped. A `smpl` chunk
+/// keeps its header and sampler data, with its sample period at the new rate.
+pub fn with_audio(bytes: &[u8], audio: &Audio, encoding: Encoding) -> Result<Vec<u8>, Error> {
+    let frames = layout(bytes)?.frames();
+    let mut out = write(audio, encoding)?;
+    for chunk in &chunks(bytes)? {
+        let body = &bytes[chunk.body.clone()];
+        match &chunk.id {
+            b"fmt " | b"fact" | b"data" | b"cue " => {}
+            _ if marks::is_adtl(bytes, chunk) => {}
+            b"smpl" => marks::push_chunk(
+                &mut out,
+                b"smpl",
+                &marks::unlooped(body, frames, audio.rate)?,
+            ),
+            _ => out.extend_from_slice(&bytes[chunk.whole()]),
+        }
+    }
+    let Ok(riff) = u32::try_from(out.len() - 8) else {
+        return out_of_bounds(
+            format!("{} bytes", out.len()),
+            "a WAV whose RIFF length fits u32",
+        );
+    };
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
+    Ok(out)
+}
+
+/// A WAV of `format` holding `samples`, frames interleaved by channel, each stored by
+/// `store`.
+pub(crate) fn riff<T: Copy>(
+    format: Format,
+    samples: &[T],
+    store: impl Fn(&mut Vec<u8>, T),
+) -> Result<Vec<u8>, Error> {
+    let Format {
+        channels,
+        rate,
+        encoding,
+    } = format;
+    match encoding {
+        Encoding::Int {
+            bits: 8 | 16 | 24 | 32,
+        }
+        | Encoding::Float { bits: 32 | 64 } => {}
+        _ => return out_of_bounds(format!("{encoding:?}"), "an encoding this crate reads"),
+    }
+    if channels == 0 {
+        return out_of_bounds("0 channels", "a positive channel count");
+    }
+    if rate == 0 {
+        return out_of_bounds("0 Hz", "a positive sample rate");
+    }
+    if !samples.len().is_multiple_of(usize::from(channels)) {
+        return out_of_bounds(
+            format!("{} samples", samples.len()),
+            format!("whole {}-channel frames", channels),
+        );
+    }
+    let float = matches!(encoding, Encoding::Float { .. });
+    let fmt_len: u32 = if float { 18 } else { 16 };
+    let fact_len: u32 = if float { 12 } else { 0 };
+    let header = 4 + 8 + fmt_len + fact_len + 8;
+    let (Some(block), Some(frames)) = (
+        u16::try_from(format.block()).ok(),
+        u32::try_from(samples.len() / usize::from(channels)).ok(),
+    ) else {
+        return out_of_bounds(
+            format!(
+                "{} frames of {} channels",
+                samples.len() / usize::from(channels),
+                channels
+            ),
+            "a WAV whose frame size fits u16 and frame count u32",
+        );
+    };
+    let data = u32::from(block)
+        .checked_mul(frames)
+        .filter(|&n| n < u32::MAX - header);
+    let byte_rate = rate.checked_mul(u32::from(block));
+    let (Some(data), Some(byte_rate)) = (data, byte_rate) else {
+        return out_of_bounds(
+            format!("{frames} frames at {} Hz", rate),
+            "a WAV whose RIFF length and byte rate fit u32",
+        );
+    };
+
+    let pad = data % 2;
+    let mut out = Vec::with_capacity(8 + (header + data + pad) as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(header + data + pad).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&fmt_len.to_le_bytes());
+    let tag = if float {
+        WAVE_FORMAT_IEEE_FLOAT
+    } else {
+        WAVE_FORMAT_PCM
+    };
+    out.extend_from_slice(&tag.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block.to_le_bytes());
+    out.extend_from_slice(&(encoding.bytes() as u16 * 8).to_le_bytes());
+    if float {
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(b"fact");
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&frames.to_le_bytes());
+    }
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    for &x in samples {
+        store(&mut out, x);
+    }
+    if pad == 1 {
+        out.push(0);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn what_this_writes_it_reads_back() {
-        let want = [0i16, 1, -1, i16::MIN, 12_345];
-        let read = read_pcm16(&mono_pcm16(&want, 44_100).unwrap()).unwrap();
-        assert_eq!(read.rate, 44_100);
-        assert_eq!(read.channels, 1);
-        assert_eq!(read.samples, want);
-        assert_eq!(read.frames(), 5);
+    fn audio(channels: u16, samples: &[f32]) -> Audio {
+        Audio {
+            rate: 44_100,
+            channels,
+            samples: samples.to_vec(),
+        }
+    }
 
-        let stereo = [1, -1, 2, -2];
-        let read = read_pcm16(&pcm16(&stereo, 35_002, 2).unwrap()).unwrap();
-        assert_eq!((read.rate, read.channels, read.frames()), (35_002, 2, 2));
-        assert_eq!(read.samples, stereo);
+    const EVERY_ENCODING: [Encoding; 6] = [
+        Encoding::Int { bits: 8 },
+        Encoding::Int { bits: 16 },
+        Encoding::Int { bits: 24 },
+        Encoding::Int { bits: 32 },
+        Encoding::Float { bits: 32 },
+        Encoding::Float { bits: 64 },
+    ];
+
+    #[test]
+    fn every_encoding_reads_back_what_it_wrote() {
+        let want = [0.0, 0.5, -0.5, -1.0, 0.25, -0.25];
+        for encoding in EVERY_ENCODING {
+            let wav = write(&audio(2, &want), encoding).unwrap();
+            let read = read(&wav).unwrap();
+            assert_eq!((read.rate, read.channels, read.frames()), (44_100, 2, 3));
+            assert_eq!(read.samples, want, "{encoding:?}");
+            assert_eq!(layout(&wav).unwrap().format.encoding, encoding);
+        }
     }
 
     #[test]
-    fn the_layout_points_at_the_samples_past_any_chunk_before_them() {
-        let mut wav = pcm16(&[7i16, 8, -7, -8], 44_100, 2).unwrap();
-        let extra: Vec<u8> = b"LIST\x03\x00\x00\x00abc\x00".to_vec();
-        wav.splice(36..36, extra.iter().copied());
-        let size = u32::from_le_bytes(wav[4..8].try_into().unwrap()) + extra.len() as u32;
-        wav[4..8].copy_from_slice(&size.to_le_bytes());
-
-        let layout = pcm16_layout(&wav).unwrap();
+    fn twenty_four_bit_keeps_every_step() {
+        let steps: Vec<f32> = [-8_388_608, -1, 0, 1, 12_345, 8_388_607]
+            .iter()
+            .map(|&s| s as f32 / 8_388_608.0)
+            .collect();
+        let wav = write(&audio(1, &steps), Encoding::Int { bits: 24 }).unwrap();
+        assert_eq!(read(&wav).unwrap().samples, steps);
         assert_eq!(
-            (layout.rate, layout.channels, layout.frames()),
-            (44_100, 2, 2)
-        );
-        assert_eq!(layout.data, 44 + extra.len()..wav.len());
-        assert_eq!(
-            &wav[layout.data.start..layout.data.start + 2],
-            &7i16.to_le_bytes()
+            &wav[44..47],
+            &[0, 0, 0x80],
+            "-1.0 is stored as the lowest step"
         );
     }
 
     #[test]
-    fn a_chunk_before_the_data_is_walked_past() {
-        let mut wav = mono_pcm16(&[7i16, 8], 44_100).unwrap();
-        // A 3-byte LIST chunk, which pads to 4, spliced in ahead of the data chunk.
-        let extra: Vec<u8> = b"LIST\x03\x00\x00\x00abc\x00".to_vec();
-        wav.splice(36..36, extra.iter().copied());
-        let size = u32::from_le_bytes(wav[4..8].try_into().unwrap()) + extra.len() as u32;
-        wav[4..8].copy_from_slice(&size.to_le_bytes());
-        assert_eq!(read_pcm16(&wav).unwrap().samples, vec![7, 8]);
+    fn odd_length_data_is_padded_to_a_whole_chunk() {
+        let wav = write(&audio(1, &[0.5]), Encoding::Int { bits: 24 }).unwrap();
+        assert_eq!(wav.len(), 44 + 3 + 1);
+        assert_eq!(read(&wav).unwrap().samples, [0.5]);
     }
 
     #[test]
-    fn anything_but_sixteen_bit_pcm_is_refused_by_name() {
-        assert!(read_pcm16(b"not a wav at all").is_err());
-
-        let mut wav = mono_pcm16(&[1i16], 44_100).unwrap();
-        wav[34] = 24; // bits per sample
-        assert!(read_pcm16(&wav).unwrap_err().to_string().contains("24-bit"));
-
-        let mut wav = mono_pcm16(&[1i16], 44_100).unwrap();
-        wav[20] = 3; // IEEE float
-        assert!(read_pcm16(&wav).unwrap_err().to_string().contains("PCM"));
-
-        let mut wav = mono_pcm16(&[1i16], 44_100).unwrap();
-        wav[40..44].copy_from_slice(&999u32.to_le_bytes()); // data chunk overruns
-        assert!(read_pcm16(&wav).is_err());
+    fn integer_writes_clip_to_their_range() {
+        let wav = write(&audio(1, &[1.0, -1.5, 2.0]), Encoding::Int { bits: 16 }).unwrap();
+        let ints: Vec<i16> = wav[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&s| i16::from_le_bytes(s))
+            .collect();
+        assert_eq!(ints, [i16::MAX, i16::MIN, i16::MAX]);
     }
 
-    /// `wav` with its plain 16-byte fmt chunk rewritten as `WAVE_FORMAT_EXTENSIBLE`,
-    /// followed by `extension` as its cbSize-prefixed tail.
-    fn extensible(wav: &[u8], cb_size: u16, extension: &[u8]) -> Vec<u8> {
+    #[test]
+    fn a_float_file_carries_a_fact_chunk_counting_its_frames() {
+        let wav = write(&audio(2, &[0.0; 6]), Encoding::Float { bits: 32 }).unwrap();
+        let chunks = chunks(&wav).unwrap();
+        let fact = only(&chunks, b"fact").unwrap().unwrap();
+        assert_eq!(u32_at(&wav, fact.body.start), 3);
+    }
+
+    /// `wav` with its plain 16-byte fmt chunk rewritten as `WAVE_FORMAT_EXTENSIBLE`
+    /// over `sub_tag`, declaring `valid_bits`.
+    fn extensible(wav: &[u8], valid_bits: u16, sub_tag: u16) -> Vec<u8> {
         let mut fmt = wav[20..36].to_vec();
-        fmt[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
-        fmt.extend_from_slice(&cb_size.to_le_bytes());
-        fmt.extend_from_slice(extension);
+        fmt[0..2].copy_from_slice(&WAVE_FORMAT_EXTENSIBLE.to_le_bytes());
+        fmt.extend_from_slice(&EXTENSIBLE_CB_SIZE.to_le_bytes());
+        fmt.extend_from_slice(&valid_bits.to_le_bytes());
+        fmt.extend_from_slice(&0x3u32.to_le_bytes());
+        fmt.extend_from_slice(&sub_tag.to_le_bytes());
+        fmt.extend_from_slice(&SUBTYPE_TAIL);
         let mut out = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
-        out.extend_from_slice(&u32::try_from(fmt.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
         out.extend_from_slice(&fmt);
         out.extend_from_slice(&wav[36..]);
-        let riff = u32::try_from(out.len() - 8).unwrap();
-        out[4..8].copy_from_slice(&riff.to_le_bytes());
-        out
-    }
-
-    /// Valid bits, channel mask, then the sub-format GUID as stored.
-    fn extension(valid_bits: u16, sub_format: [u8; 16]) -> Vec<u8> {
-        let mut out = valid_bits.to_le_bytes().to_vec();
-        out.extend_from_slice(&0x3u32.to_le_bytes());
-        out.extend_from_slice(&sub_format);
-        out
-    }
-
-    #[test]
-    fn extensible_pcm_reads_as_plain_pcm_does() {
-        let stereo = [1i16, -1, 2, -2];
-        let wav = pcm16(&stereo, 44_100, 2).unwrap();
-        let read = read_pcm16(&extensible(
-            &wav,
-            22,
-            &extension(16, KSDATAFORMAT_SUBTYPE_PCM),
-        ))
-        .unwrap();
-        assert_eq!((read.rate, read.channels), (44_100, 2));
-        assert_eq!(read.samples, stereo);
-
-        let twelve_bit = extensible(&wav, 22, &extension(12, KSDATAFORMAT_SUBTYPE_PCM));
-        assert_eq!(read_pcm16(&twelve_bit).unwrap().samples, stereo);
-    }
-
-    #[test]
-    fn extensible_formats_other_than_pcm_are_refused_by_sub_format() {
-        let wav = mono_pcm16(&[1i16], 44_100).unwrap();
-        let mut float = KSDATAFORMAT_SUBTYPE_PCM;
-        float[0] = 3;
-        let err = read_pcm16(&extensible(&wav, 22, &extension(16, float)))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("00000003-0000-0010-8000-00aa00389b71 is not PCM"),
-            "refused for the wrong reason: {err}"
-        );
-    }
-
-    #[test]
-    fn a_malformed_extensible_fmt_chunk_is_refused() {
-        let wav = mono_pcm16(&[1i16], 44_100).unwrap();
-        let pcm = extension(16, KSDATAFORMAT_SUBTYPE_PCM);
-        let cases = [
-            (extensible(&wav, 0, &[]), "0-byte extension"),
-            (
-                extensible(&wav, 22, &pcm[..10]),
-                "too short for its 22-byte",
-            ),
-            (
-                extensible(&wav, 22, &extension(0, KSDATAFORMAT_SUBTYPE_PCM)),
-                "0 valid bits",
-            ),
-            (
-                extensible(&wav, 22, &extension(17, KSDATAFORMAT_SUBTYPE_PCM)),
-                "17 valid bits",
-            ),
-        ];
-        for (wav, reason) in cases {
-            let err = read_pcm16(&wav).unwrap_err().to_string();
-            assert!(err.contains(reason), "want {reason:?}, got {err}");
-        }
-
-        let mut no_cb_size = extensible(&wav, 0, &[]);
-        no_cb_size.drain(36..38);
-        no_cb_size[16..20].copy_from_slice(&16u32.to_le_bytes());
-        let riff = u32::try_from(no_cb_size.len() - 8).unwrap();
-        no_cb_size[4..8].copy_from_slice(&riff.to_le_bytes());
-        let err = read_pcm16(&no_cb_size).unwrap_err().to_string();
-        assert!(err.contains("too short to declare"), "{err}");
-    }
-
-    #[test]
-    fn malformed_rates_and_frames_are_refused() {
-        assert!(mono_pcm16(&[], 0).is_err());
-        assert!(pcm16(&[], 44_100, 0).is_err());
-        assert!(pcm16(&[1], 44_100, 2).is_err());
-
-        let mut zero_rate = mono_pcm16(&[1], 44_100).unwrap();
-        zero_rate[24..28].fill(0);
-        zero_rate[28..32].fill(0);
-        assert!(read_pcm16(&zero_rate).is_err());
-
-        // An odd-sized chunk pads to even, and the pad byte is missing here: the data
-        // chunk claims 3 bytes of the 3 that follow it, leaving no room for the pad.
-        let mut no_pad = mono_pcm16(&[1], 44_100).unwrap();
-        no_pad.push(0);
-        no_pad[4..8].copy_from_slice(&39u32.to_le_bytes());
-        no_pad[40..44].copy_from_slice(&3u32.to_le_bytes());
-        let err = read_pcm16(&no_pad).unwrap_err().to_string();
-        assert!(
-            err.contains("pad byte"),
-            "refused for the wrong reason: {err}"
-        );
-
-        let mut stereo_half_frame = mono_pcm16(&[1], 44_100).unwrap();
-        stereo_half_frame[22..24].copy_from_slice(&2u16.to_le_bytes());
-        stereo_half_frame[28..32].copy_from_slice(&176_400u32.to_le_bytes());
-        stereo_half_frame[32..34].copy_from_slice(&4u16.to_le_bytes());
-        assert!(read_pcm16(&stereo_half_frame).is_err());
-    }
-
-    /// The reader collects both chunks wherever they sit.
-    #[test]
-    fn a_data_chunk_before_the_fmt_chunk_still_reads() {
-        let wav = mono_pcm16(&[7i16, -8], 44_100).unwrap();
-        let mut swapped = wav[..12].to_vec();
-        swapped.extend_from_slice(&wav[36..]); // the data chunk
-        swapped.extend_from_slice(&wav[12..36]); // then the fmt chunk
-        assert_eq!(swapped.len(), wav.len());
-        assert_eq!(read_pcm16(&swapped).unwrap().samples, vec![7, -8]);
-    }
-
-    #[test]
-    fn trailing_bytes_that_form_no_chunk_are_refused() {
-        let mut trailing = mono_pcm16(&[1i16], 44_100).unwrap();
-        trailing.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-        let declared = u32::from_le_bytes(trailing[4..8].try_into().unwrap()) + 4;
-        trailing[4..8].copy_from_slice(&declared.to_le_bytes());
-        let err = read_pcm16(&trailing).unwrap_err().to_string();
-        assert!(
-            err.contains("trailing"),
-            "refused for the wrong reason: {err}"
-        );
-    }
-
-    /// A `smpl` chunk declaring `loops` as (type, start, end), appended to `wav`.
-    fn with_sampler(wav: &[u8], loops: &[(u32, u32, u32)]) -> Vec<u8> {
-        let mut chunk = vec![0u8; SAMPLER_HEAD];
-        chunk[28..32].copy_from_slice(&(loops.len() as u32).to_le_bytes());
-        for &(kind, start, end) in loops {
-            for word in [0, kind, start, end, 0, 0] {
-                chunk.extend_from_slice(&u32::to_le_bytes(word));
-            }
-        }
-        let mut out = wav.to_vec();
-        out.extend_from_slice(b"smpl");
-        out.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
-        out.extend_from_slice(&chunk);
         let riff = (out.len() - 8) as u32;
         out[4..8].copy_from_slice(&riff.to_le_bytes());
         out
     }
 
     #[test]
-    fn the_first_loop_a_sampler_chunk_declares_is_read() {
-        let wav = mono_pcm16(&[0; 100], 44_100).unwrap();
-        let read = read_pcm16(&with_sampler(&wav, &[(0, 20, 79), (1, 0, 9)])).unwrap();
-        assert_eq!(
-            read.sample_loop,
-            Some(SampleLoop {
-                start: 20,
-                end: 79,
-                forward: true
-            })
-        );
-        let read = read_pcm16(&with_sampler(&wav, &[(1, 0, 99)])).unwrap();
-        assert_eq!(read.sample_loop.map(|l| l.forward), Some(false));
+    fn extensible_files_read_as_their_sub_format() {
+        let want = [0.5, -0.25];
+        let pcm = write(&audio(2, &want), Encoding::Int { bits: 24 }).unwrap();
+        assert_eq!(read(&extensible(&pcm, 20, 1)).unwrap().samples, want);
 
-        assert_eq!(read_pcm16(&wav).unwrap().sample_loop, None);
-        assert_eq!(
-            read_pcm16(&with_sampler(&wav, &[])).unwrap().sample_loop,
-            None
-        );
+        let float = write(&audio(2, &want), Encoding::Float { bits: 32 }).unwrap();
+        let mut plain = float[..36].to_vec();
+        plain[16..20].copy_from_slice(&16u32.to_le_bytes());
+        plain.extend_from_slice(&float[50..]); // drop cbSize and the fact chunk
+        let riff = (plain.len() - 8) as u32;
+        plain[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert_eq!(read(&extensible(&plain, 32, 3)).unwrap().samples, want);
     }
 
     #[test]
-    fn a_sampler_chunk_that_cannot_hold_its_loop_is_refused() {
-        let wav = mono_pcm16(&[0; 100], 44_100).unwrap();
-        for (loops, reason) in [
-            (vec![(0, 20, 100)], "outside the 100 frame(s)"),
-            (vec![(0, 50, 40)], "outside the 100 frame(s)"),
-        ] {
-            let err = read_pcm16(&with_sampler(&wav, &loops))
-                .unwrap_err()
-                .to_string();
+    fn encodings_this_crate_does_not_read_are_refused_by_name() {
+        let wav = write(&audio(1, &[0.0, 0.0]), Encoding::Int { bits: 16 }).unwrap();
+        let cases = [
+            (extensible(&wav, 16, 2), "format 2"),
+            (extensible(&wav, 17, 1), "17 valid bits"),
+            (
+                {
+                    let mut w = wav.clone();
+                    w[20] = 6; // A-law
+                    w
+                },
+                "format 6",
+            ),
+            (
+                {
+                    let mut w = wav.clone();
+                    w[20] = 3; // 16-bit float
+                    w
+                },
+                "16-bit samples in format 3",
+            ),
+        ];
+        for (wav, reason) in cases {
+            let err = read(&wav).unwrap_err().to_string();
+            assert!(err.contains(reason), "want {reason:?}, got {err}");
+        }
+    }
+
+    #[test]
+    fn malformed_files_are_refused() {
+        let wav = write(&audio(1, &[0.0, 0.0]), Encoding::Int { bits: 16 }).unwrap();
+        let edit = |at: usize, bytes: &[u8]| {
+            let mut w = wav.clone();
+            w[at..at + bytes.len()].copy_from_slice(bytes);
+            w
+        };
+        let cases = [
+            (b"not a wav at all".to_vec(), "not a RIFF/WAVE"),
+            (edit(4, &99u32.to_le_bytes()), "RIFF declares"),
+            (edit(40, &999u32.to_le_bytes()), "file ends first"),
+            (
+                {
+                    let mut w = edit(40, &3u32.to_le_bytes());
+                    w.pop();
+                    let riff = w.len() as u32 - 8;
+                    w[4..8].copy_from_slice(&riff.to_le_bytes());
+                    w
+                },
+                "pad byte",
+            ),
+            (edit(22, &0u16.to_le_bytes()), "no channels"),
+            (edit(24, &0u32.to_le_bytes()), "zero sample rate"),
+            (edit(32, &4u16.to_le_bytes()), "block size 4"),
+            (edit(36, b"junk"), "no data chunk"),
+            (edit(12, b"junk"), "no fmt chunk"),
+        ];
+        for (wav, reason) in cases {
+            let err = read(&wav).unwrap_err().to_string();
             assert!(err.contains(reason), "want {reason:?}, got {err}");
         }
 
-        let mut short = with_sampler(&wav, &[(0, 0, 9)]);
-        short.truncate(short.len() - SAMPLER_LOOP);
-        let chunk = short.len() - SAMPLER_HEAD;
-        short[chunk - 4..chunk].copy_from_slice(&(SAMPLER_HEAD as u32).to_le_bytes());
-        let riff = (short.len() - 8) as u32;
-        short[4..8].copy_from_slice(&riff.to_le_bytes());
-        let err = read_pcm16(&short).unwrap_err().to_string();
-        assert!(err.contains("too short for one"), "{err}");
+        let mut two_data = wav.clone();
+        two_data.extend_from_slice(&wav[36..]);
+        let riff = (two_data.len() - 8) as u32;
+        two_data[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(read(&two_data)
+            .unwrap_err()
+            .to_string()
+            .contains("more than one data"));
+
+        let stereo = edit(22, &2u16.to_le_bytes());
+        let stereo = {
+            let mut w = stereo;
+            w[28..32].copy_from_slice(&(44_100u32 * 4).to_le_bytes());
+            w[32..34].copy_from_slice(&4u16.to_le_bytes());
+            w[40..44].copy_from_slice(&2u32.to_le_bytes());
+            w.truncate(46);
+            let riff = (w.len() - 8) as u32;
+            w[4..8].copy_from_slice(&riff.to_le_bytes());
+            w
+        };
+        assert!(read(&stereo)
+            .unwrap_err()
+            .to_string()
+            .contains("whole 4-byte frame"));
     }
 
     #[test]
-    fn the_header_describes_the_samples_that_follow() {
-        let wav = mono_pcm16(&[0, 1, -1, i16::MIN], 35_002).unwrap();
-        assert_eq!(&wav[..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(wav.len(), 44 + 8);
-        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 44);
-        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 35_002);
-        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 8);
-        assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), -1);
+    fn new_audio_keeps_every_other_chunk_but_the_marks() {
+        let take = write(&audio(1, &[0.25; 100]), Encoding::Int { bits: 24 }).unwrap();
+        let marks = Marks {
+            regions: vec![Region {
+                start: 10,
+                frames: 80,
+                label: "060-b0-v00".into(),
+            }],
+            loops: vec![Loop::forward(40, 89)],
+        };
+        let mut bytes = with_marks(&take, &marks).unwrap();
+        marks::push_chunk(&mut bytes, b"junk", b"abc");
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let half = Audio {
+            rate: 22_050,
+            ..audio(1, &[0.25; 50])
+        };
+        let new = with_audio(&bytes, &half, Encoding::Float { bits: 32 }).unwrap();
+        assert_eq!(read(&new).unwrap(), half);
+        assert_eq!(read_marks(&new).unwrap(), Marks::default());
+        let chunks = chunks(&new).unwrap();
+        let ids: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.id).collect();
+        assert_eq!(ids, [b"fmt ", b"fact", b"data", b"smpl", b"junk"]);
+        let smpl = only(&chunks, b"smpl").unwrap().unwrap().body.start;
+        assert_eq!(
+            u32_at(&new, smpl + 8),
+            45_351,
+            "nanoseconds a frame at 22,050 Hz"
+        );
+    }
+
+    #[test]
+    fn writes_that_cannot_form_a_file_are_refused() {
+        assert!(write(&audio(0, &[]), Encoding::Int { bits: 16 }).is_err());
+        assert!(write(&audio(2, &[0.0]), Encoding::Int { bits: 16 }).is_err());
+        assert!(write(&audio(1, &[0.0]), Encoding::Int { bits: 12 }).is_err());
+        let silent = Audio {
+            rate: 0,
+            ..audio(1, &[])
+        };
+        assert!(write(&silent, Encoding::Int { bits: 16 }).is_err());
     }
 }
