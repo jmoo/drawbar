@@ -387,8 +387,8 @@ pub struct Recording {
     /// the attack stroke of its root at its layer, both measured as [`build`] measures
     /// a stroke's level, before either was raised. A [`Version::V6`] library from rules
     /// plays such a release at that balance with its attack, as [`release_under`] lifts
-    /// it. Without it a release plays [`RELEASE_UNDER_ATTACK`] under its root's loudest
-    /// attack, and the value is ignored on other strokes and in other libraries.
+    /// it. Without it a release plays 18 dB under its root's loudest attack, and the
+    /// value is ignored on other strokes and in other libraries.
     pub under_attack: Option<f64>,
 }
 
@@ -1038,17 +1038,15 @@ const RELEASE_LIFT: f64 = 12.0;
 const RELEASE_NEAREST: f64 = 14.0;
 
 /// How far under its own attack a release recorded `recorded` decibels under it plays:
-/// lifted toward [`RELEASE_NEAREST`] by at most [`RELEASE_LIFT`]. One recorded nearer
-/// than that keeps its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
+/// lifted toward 14 dB under it by at most 12 dB. One recorded nearer than 14 dB keeps
+/// its level. Scaled with their attack alone, key-offs sat 35 to 57 dB
 /// down and could not be heard; up to about 49 dB under played fine. Confirmed on
 /// hardware.
 pub fn release_under(recorded: f64) -> f64 {
     recorded - (recorded - RELEASE_NEAREST).clamp(0.0, RELEASE_LIFT)
 }
 
-/// How loud a recording plays, in decibels over a steady sample of one unit: the most
-/// power any 10 ms of its first half second averages, on its louder channel. A
-/// recording shorter than 10 ms is measured whole, and silence has no level.
+/// [`loudness`] of a recording at the codec's rate.
 fn level(channels: &[Vec<i16>]) -> Option<f64> {
     let frames = channels.first().map_or(0, Vec::len);
     loudness(channels.len(), frames, codec::RATE, |frame, channel| {
@@ -1056,8 +1054,10 @@ fn level(channels: &[Vec<i16>]) -> Option<f64> {
     })
 }
 
-/// [`level`] of any audio: `frames` frames of `channels` at `rate`, `sample` giving
-/// each frame's sample on each channel.
+/// How loud audio plays, in decibels over a steady sample of one unit: the most power
+/// any 10 ms of its first half second averages, on its louder channel. The audio is
+/// `frames` frames of `channels` at `rate`, `sample` giving each frame's sample on each
+/// channel. Audio shorter than 10 ms is measured whole, and silence has no level.
 ///
 /// The sums are exact for 16-bit samples, so a recording measures the same whichever
 /// way it reaches here.
