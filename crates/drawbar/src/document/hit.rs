@@ -269,6 +269,8 @@ pub fn moved(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Close {
     hit: Option<Hit>,
+    /// The place clicked where no sample is, where the lane shows one.
+    place: Option<u32>,
     span: Option<Range<f64>>,
     /// The cut being dragged, and the frame it is at.
     dragging: Option<(Cut, u32)>,
@@ -313,8 +315,21 @@ impl Close {
         self.span = Some(from..from + span);
     }
 
+    /// What the lane shows about `place`, clicked where no sample is: the frames in
+    /// view, or from half a second before it to six seconds after.
+    pub fn about(&self, place: u32, total: f64, rate: f64) -> Range<f64> {
+        self.span.clone().unwrap_or_else(|| {
+            let at = f64::from(place);
+            (at - PLACE_BEFORE * rate).max(0.0)..(at + PLACE_AFTER * rate).min(total)
+        })
+    }
+
     fn zoom(&mut self, factor: f64, cuts: &Cuts, total: f64, rate: f64) {
         let shown = self.shown(cuts, total, rate);
+        self.zoom_shown(factor, shown, total, rate);
+    }
+
+    fn zoom_shown(&mut self, factor: f64, shown: Range<f64>, total: f64, rate: f64) {
         let middle = (shown.start + shown.end) / 2.0;
         let half = (shown.end - shown.start) * factor / 2.0;
         self.show(middle - half, middle + half, total, rate);
@@ -507,7 +522,6 @@ fn placed(
     let channels = usize::from(audio.channels.max(1));
     let total = (audio.samples.len() / channels) as f64;
     let at = f64::from(place);
-    let shown = (at - PLACE_BEFORE * rate).max(0.0)..(at + PLACE_AFTER * rate).min(total);
     ui.horizontal_wrapped(|ui| {
         ui.label(crate::panel::caps("Sample"));
         ui.label(
@@ -519,12 +533,36 @@ fn placed(
             .color(app::caption(ui.visuals())),
         );
     });
+    // ⚠️ The same row as over a picked sample, so the zoom stays where it was.
     ui.horizontal(|ui| {
+        let shown = close.about(place, total, rate);
+        if ui.button(take::ZOOM_IN).clicked() {
+            close.zoom_shown(0.5, shown.clone(), total, rate);
+        }
+        if ui.button(take::ZOOM_OUT).clicked() {
+            close.zoom_shown(2.0, shown, total, rate);
+        }
+        ui.add_enabled(false, egui::Button::new(LOOP));
+        if ui
+            .add_enabled(close.span.is_some(), egui::Button::new(WHOLE))
+            .clicked()
+        {
+            close.span = None;
+        }
+        ui.add_space(8.0);
         menus(ui, None, wanted);
         undo(ui, last, wanted);
     });
     let width = take::lane_width(ui);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
+    let shown = close.about(place, total, rate);
+    if response.dragged() && response.drag_delta().x != 0.0 {
+        let span = shown.end - shown.start;
+        let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
+        close.show(shown.start + shift, shown.end + shift, total, rate);
+    }
+    let shown = close.about(place, total, rate);
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals().clone();
     let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
@@ -575,9 +613,11 @@ pub fn ui(
     let Ok(marks) = marked else {
         return (None, None);
     };
-    if close.hit != picked {
+    let place = place.filter(|_| picked.is_none());
+    if close.hit != picked || close.place != place {
         *close = Close {
             hit: picked,
+            place,
             depth: close.depth,
             ..Close::default()
         };

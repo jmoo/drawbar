@@ -434,6 +434,7 @@ impl Document {
                 Some(held) if !viewing => header::Extras {
                     loud: Some(wav::detect_loud(held)),
                     limit: Some(held.detect.limit),
+                    piano: Some(held.marks_samples()),
                     ..header::Extras::default()
                 },
                 _ => extras(asset, device, workspace, pending),
@@ -593,6 +594,13 @@ impl Document {
         }
         if act.export {
             self.export(ui.ctx(), id, workspace, log);
+        }
+        if act.piano {
+            // The take as it is now, unsaved edits and all, as if picked from disk.
+            if let Some(held) = workspace.get(id) {
+                let files = vec![(held.name.clone(), held.bytes.to_vec())];
+                workspace.draft_from(crate::newproject::Making::Piano, files);
+            }
         }
         if act.revert {
             // Asked first; the revert runs as an act, in [`Document::settle`].
@@ -3740,6 +3748,51 @@ mod tests {
         let view = &open.state().wav.as_ref().unwrap().view;
         assert_eq!(view.picked, picked, "a gain keeps the pick");
         assert_eq!(view.shown(rate * 60.0), shown, "and the view");
+    }
+
+    /// Build piano library… starts a piano draft holding the take as it is now; on a
+    /// take that marks no sample it is shown but does nothing.
+    #[test]
+    fn build_piano_library_drafts_a_library_from_the_open_take() {
+        use nord_format::wav as prep;
+        let rate = 35_002u32;
+        let audio = prep::Audio {
+            rate,
+            channels: 1,
+            samples: (0..rate * 8)
+                .map(|i| 0.3 * (i as f32 * 0.05).sin())
+                .collect(),
+        };
+        let raw = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let mut plain = Open::file("Raw take.wav", raw.clone());
+        plain.twice();
+        let said = plain.painted(Vec::new());
+        plain.frame(testing::click(
+            testing::where_(&said, header::BUILD_PIANO).center(),
+        ));
+        assert!(
+            plain.workspace.draft_mut().is_none(),
+            "no samples, no draft"
+        );
+
+        let marks = prep::Marks {
+            regions: vec![prep::Region {
+                start: rate,
+                frames: 4 * rate,
+                label: "060-b0-v22".into(),
+            }],
+            loops: vec![],
+        };
+        let bytes = prep::with_marks(&raw, &marks).unwrap();
+        let mut open = Open::file("Wurli take.wav", bytes);
+        open.twice();
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, header::BUILD_PIANO).center(),
+        ));
+        let draft = open.workspace.draft_mut().expect("a draft");
+        assert_eq!(draft.making, crate::newproject::Making::Piano);
+        assert_eq!(draft.refusal(), None);
     }
 
     /// A take shows its category, the kind it is heard and built as, kept across a gain,
