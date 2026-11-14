@@ -679,6 +679,19 @@ impl DeviceState {
         self.needs.get(&key).map(Vec::as_slice)
     }
 
+    /// The Pianos bank a program's Type dial picks by its stored value, which counts the
+    /// banks from 0 in the instrument's order. Confirmed on hardware.
+    pub fn pianos_of(&self, category: u8) -> Option<&[Option<ProgramInfo>]> {
+        self.bank(ObjectClass::Piano, u32::from(category) + 1)
+    }
+
+    /// The piano a program's Type and Model dials pick, by the name the scan read there:
+    /// the Model dial counts the Type's bank in slot order. Confirmed on hardware.
+    pub fn piano_at(&self, category: u8, model: usize) -> Option<&str> {
+        let piano = self.pianos_of(category)?.get(model)?.as_ref()?;
+        Some(piano.name.trim())
+    }
+
     /// What the instrument called a library object, by class and id.
     ///
     /// ⚠️ Only the wire carries these names; a program's file stores its piano and sample
@@ -1444,17 +1457,28 @@ impl Device {
             _ => None,
         };
         let rescan: Vec<(ObjectClass, u32)> = touched
+            .as_ref()
             .map(|(class, touched)| {
                 let mut banks: Vec<u32> =
                     touched.iter().filter_map(|at| user_bank(at.bank)).collect();
                 banks.sort_unstable();
                 banks.dedup();
-                banks.into_iter().map(|bank| (class, bank)).collect()
+                banks.into_iter().map(|bank| (*class, bank)).collect()
             })
             .unwrap_or_default();
         for (class, bank) in &rescan {
             self.state.forget_bank(*class, *bank);
             self.revision += 1;
+        }
+        if let Some((class, slots)) = &touched {
+            let slot_touched = |(held, bank, slot): &(ObjectClass, u32, u32)| {
+                held == class && slots.iter().any(|at| at.bank == *bank && at.slot == *slot)
+            };
+            self.state.needs.retain(|key, _| !slot_touched(key));
+            // ⚠️ A library object written over may come back under another id.
+            if class.is_library() {
+                self.state.named.retain(|(held, _), _| held != class);
+            }
         }
         let rewritten = |((class, at), _): &((ObjectClass, Location), Asked)| {
             user_bank(at.bank).is_some_and(|bank| rescan.contains(&(*class, bank)))
@@ -3029,6 +3053,55 @@ mod tests {
         assert_eq!(owed(true, false), Some((class, vec![at])));
         assert_eq!(owed(true, true), None, "the refused write changed nothing");
         assert_eq!(owed(false, false), None, "this panel loads no programs");
+    }
+
+    /// A program written back changes what it needs, and a piano written over may come
+    /// back under another id, so neither cached answer outlives the write.
+    #[test]
+    fn a_write_forgets_what_its_slot_needed_and_the_ids_of_its_class() {
+        let program = ObjectClass::Program;
+        let (written, beside) = (Location { bank: 6, slot: 0 }, Location { bank: 6, slot: 1 });
+        let plays = |id| {
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id,
+                name: format!("Grand {id}"),
+                location: None,
+            }]
+        };
+        let after_a_put = |class, at| {
+            let mut device = Device::new(egui::Context::default());
+            device.pretend_attached();
+            device.pretend_deps(program, written, plays(1));
+            device.pretend_deps(program, beside, plays(2));
+            let put = DeviceCmd::Put {
+                id: 1,
+                class,
+                at,
+                name: "Africa Split".into(),
+                payload: Payload::Bytes(vec![0; 4]),
+            };
+            device.send(put, &mut Log::default());
+            device.pump();
+            device.state
+        };
+
+        let state = after_a_put(program, written);
+        assert_eq!(state.needs_of(program, written), None);
+        assert_eq!(
+            state.needs_of(program, beside),
+            Some(&[nord_format::bundle::Key::Piano(2)][..])
+        );
+        assert_eq!(
+            state.library_id(ObjectClass::Piano, "Grand 2"),
+            Some(2),
+            "a program write leaves the pianos' ids"
+        );
+
+        let state = after_a_put(ObjectClass::Piano, Location { bank: 0, slot: 0 });
+        assert_eq!(state.library_id(ObjectClass::Piano, "Grand 2"), None);
+        assert!(state.needs_of(program, written).is_some());
     }
 
     #[test]

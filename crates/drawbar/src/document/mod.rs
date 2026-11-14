@@ -1535,11 +1535,10 @@ fn piano_lookup(
     registry: Option<&[Field]>,
     device: &Device,
 ) -> panel::PianoLookup {
-    let id = registry
+    let stored = registry
         .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
-        .and_then(|field| library_id(&field.value))
-        // Zero means the program references no piano.
-        .filter(|id| *id != 0);
+        .and_then(|field| library_id(&field.value));
+    let id = stored.filter(|id| *id != 0);
     let slot = entity.origin.slot();
     let name = id
         .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
@@ -1547,6 +1546,14 @@ fn piano_lookup(
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
+    let dialed = registry
+        .filter(|_| stored == Some(0))
+        .and_then(current_model)
+        .and_then(|n| models.iter().find(|(i, _)| *i == n))
+        .map(|(_, piano)| piano.trim().to_string());
+    let dialed_unnamed = dialed
+        .as_deref()
+        .is_some_and(|piano| device.state.library_id(ObjectClass::Piano, piano).is_none());
     // Dependency ids are authoritative; disagreement means the scanned position mapping
     // is wrong.
     let scan_disagrees = match (&name, registry) {
@@ -1560,6 +1567,8 @@ fn piano_lookup(
     panel::PianoLookup {
         id,
         name,
+        dialed,
+        dialed_unnamed,
         can_ask: slot.is_some_and(|(class, _)| class.reports_dependencies())
             && device.state.connected(),
         refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
@@ -1572,20 +1581,19 @@ fn piano_lookup(
 /// The Pianos folder's names for the document's current category, by Model dial
 /// position, which turns the Model dial into a list of pianos.
 ///
-/// Banks map to categories and slot order to dial position. Confirmed on hardware. The
-/// instrument's bank list names the piano banks after the panel's categories, in panel
-/// order, and a program's stored category and model match the bank and slot the
+/// The instrument's bank list names the piano banks after the panel's categories, in
+/// panel order, and a program's stored category and model match the bank and slot the
 /// instrument reports for the piano it depends on. The dependency name remains the
 /// check; see `scan_disagrees` in [`piano_lookup`].
 fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
-    let Some(bank) = fields
+    let Some(category) = fields
         .iter()
         .find(|field| field.path == panel::PIANO_CATEGORY)
-        .and_then(|category| piano_bank(category, &category.value))
+        .and_then(|category| stored_category(category, &category.value))
     else {
         return Vec::new();
     };
-    let Some(slots) = device.state.bank(ObjectClass::Piano, bank) else {
+    let Some(slots) = device.state.pianos_of(category) else {
         return Vec::new();
     };
     slots
@@ -1598,14 +1606,14 @@ fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
         .collect()
 }
 
-/// The Pianos bank the category field names when it holds `value`.
-fn piano_bank(category: &Field, value: &str) -> Option<u32> {
+/// The value the category field stores when it holds `value`.
+fn stored_category(category: &Field, value: &str) -> Option<u8> {
     // The category's stored bits are its position in the legal list, because
     // `legal_values` walks the bit patterns in stored order.
     let raw = (category.spec.legal)()
         .iter()
         .position(|legal| legal == value)?;
-    u32::try_from(raw).ok()?.checked_add(1)
+    u8::try_from(raw).ok()
 }
 
 /// The id an edit that moves the Type or Model dial also writes, unless it sets the id
@@ -1628,24 +1636,14 @@ fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(Stri
     field(panel::PIANO_ID)?;
     let category = field(panel::PIANO_CATEGORY)?;
     let model = set(panel::PIANO_MODEL).or_else(|| Some(&field(panel::PIANO_MODEL)?.value))?;
-    let at = piano_bank(
+    let at = stored_category(
         category,
         set(panel::PIANO_CATEGORY).unwrap_or(&category.value),
     )
     .zip(model.trim().parse::<usize>().ok());
     let id = at
-        .and_then(|(bank, model)| {
-            device
-                .state
-                .bank(ObjectClass::Piano, bank)?
-                .get(model)?
-                .as_ref()
-        })
-        .and_then(|piano| {
-            device
-                .state
-                .library_id(ObjectClass::Piano, piano.name.trim())
-        })
+        .and_then(|(category, model)| device.state.piano_at(category, model))
+        .and_then(|name| device.state.library_id(ObjectClass::Piano, name))
         .unwrap_or(0);
     Some((panel::PIANO_ID.to_string(), id.to_string()))
 }
@@ -2817,7 +2815,7 @@ mod tests {
         );
         let copied = piano_lookup(workspace.get(from_device).unwrap(), Some(&fields), &device);
         assert!(copied.name.is_none(), "still nothing has been asked");
-        // A fresh program references no piano, and zero is not an id.
+        // A fresh program stores 0, so its dials pick its piano.
         assert_eq!(copied.id, None);
     }
 
@@ -2968,6 +2966,54 @@ mod tests {
         assert!(elsewhere.models.is_empty());
     }
 
+    /// The instrument plays the piano at the dials where the id is 0, and its
+    /// dependency reply gives that piano's id, which a bundle names it by.
+    #[test]
+    fn a_zero_id_shows_the_dialed_piano_and_asks_for_its_id() {
+        use nord_usb::wire::Dependency;
+
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let at = Location { bank: 6, slot: 3 };
+        let bytes = Fresh::Program.bytes().unwrap();
+        let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0".into())])
+            .unwrap()
+            .0;
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let id = workspace.ingest("Dialed.ne5p".into(), origin, bytes, &mut log);
+        let stored = fields
+            .iter()
+            .find(|field| field.path == panel::PIANO_ID)
+            .unwrap();
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
+
+        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        assert_eq!(lookup.names(stored), Some("Royal Grand"));
+        assert!(
+            lookup.wants_a_name(),
+            "the instrument has not given it an id"
+        );
+
+        let royal = Dependency {
+            flag: 1,
+            class: ObjectClass::Piano,
+            id: 0x0102_0304,
+            name: "Royal Grand".into(),
+            location: None,
+        };
+        device.pretend_deps(ObjectClass::Program, at, vec![royal]);
+        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        assert_eq!(lookup.names(stored), Some("Royal Grand"));
+        assert!(!lookup.wants_a_name());
+    }
+
     /// The Electro 5 plays the piano the id names, so a dial moved under an old id would
     /// keep playing the old piano.
     #[test]
@@ -2997,35 +3043,63 @@ mod tests {
                 location: None,
             }],
         );
-        let follows = |sets: &[(&str, &str)]| {
+        let follows = |device: &Device, sets: &[(&str, &str)]| {
             let sets: Sets = sets
                 .iter()
                 .map(|(path, value)| (path.to_string(), value.to_string()))
                 .collect();
-            piano_follows(&sets, &fields, &device).map(|(_, id)| id)
+            piano_follows(&sets, &fields, device).map(|(_, id)| id)
+        };
+        let names = |device: &mut Device, slot, id, name: &str| {
+            let dep = Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id,
+                name: name.into(),
+                location: None,
+            };
+            device.pretend_deps(ObjectClass::Program, Location { bank: 6, slot }, vec![dep]);
         };
 
         assert_eq!(
-            follows(&[(panel::PIANO_MODEL, "2")]),
+            follows(&device, &[(panel::PIANO_MODEL, "2")]),
             Some(0x0a0b_0c0d.to_string()),
             "a piano the instrument has named"
         );
         assert_eq!(
-            follows(&[(panel::PIANO_MODEL, "0")]),
+            follows(&device, &[(panel::PIANO_MODEL, "0")]),
             Some("0".to_string()),
             "a piano with no id in hand is left for the instrument to find by position"
         );
         assert_eq!(
-            follows(&[(panel::PIANO_CATEGORY, "Upright")]),
+            follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
             Some("0".to_string()),
             "a bank nobody scanned"
         );
         assert_eq!(
-            follows(&[(panel::PIANO_MODEL, "2"), (panel::PIANO_ID, "5")]),
+            follows(
+                &device,
+                &[(panel::PIANO_MODEL, "2"), (panel::PIANO_ID, "5")]
+            ),
             None,
             "an edit that sets the id keeps it"
         );
-        assert_eq!(follows(&[("piano_panel.touch", "2")]), None);
+        assert_eq!(follows(&device, &[("piano_panel.touch", "2")]), None);
+
+        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1"]);
+        names(&mut device, 4, 0x0b0c_0d0e, "Upright U1");
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
+            Some(0x0b0c_0d0e.to_string()),
+            "the Type dial counts in its own bank"
+        );
+
+        names(&mut device, 5, 0x0c0d_0e0f, "White Grand");
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_MODEL, "2")]),
+            Some("0".to_string()),
+            "two pianos the instrument calls White Grand"
+        );
     }
 
     /// ⚠️ A cell being edited belongs to the document it was opened in. One table serves
