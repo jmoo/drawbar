@@ -136,8 +136,8 @@ pub struct Shell {
     /// What the inspector's selection cards show, until what they describe changes.
     pub(crate) picked: crate::inspector::Picked,
     /// The document in front when the browser last changed its selection itself. Over
-    /// it the selection's cards describe that selection, until the center is pressed or
-    /// another tab comes to front.
+    /// it the selection's cards describe that selection, until the center is pressed,
+    /// another tab comes to front, or the selection is emptied.
     pub(crate) browsing: Option<u64>,
     /// When the library's oldest unanswered change was first seen, as
     /// [`egui::InputState::time`] counts.
@@ -1346,6 +1346,9 @@ impl DrawbarApp {
             &self.workspace,
             &self.device.state,
         ));
+        // ⚠️ Set while the browser is hidden too: the library's table and the keyboard
+        // click through the same selection.
+        self.browser.followed = self.described().is_none() || self.picks_front();
         if !self.shell.browser_open {
             return;
         }
@@ -1363,10 +1366,6 @@ impl DrawbarApp {
                 rect.min.x += GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
-                self.browser.followed = self.described().is_none() || self.picks_front();
-                if !self.browser.followed {
-                    unfollowed(inside.visuals_mut());
-                }
                 let revision = self.browser.picked().revision();
                 inside.add_space(GUTTER);
                 if self.platform == Platform::Windows {
@@ -1515,12 +1514,6 @@ fn logo(ui: &mut egui::Ui) {
 /// holding less than it shows would shrink to its minimum.
 fn claim(ui: &mut egui::Ui) {
     ui.set_min_size(ui.max_rect().size());
-}
-
-/// Draws a selection in the gray of a pressed widget, as one the inspector does not follow.
-fn unfollowed(visuals: &mut egui::Visuals) {
-    visuals.selection.bg_fill = visuals.widgets.active.weak_bg_fill;
-    visuals.selection.stroke.color = visuals.widgets.active.fg_stroke.color;
 }
 
 /// Whether a pointer went down in this frame on `ui` itself, not on a popup over it.
@@ -2978,7 +2971,7 @@ mod tests {
     fn the_inspector_follows_a_selection_made_in_the_browser_until_the_document_is_pressed() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
-        let [_, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        let [kept_upright, split] = kept(&mut app, ["Upright", "Africa Split"]);
         app.tabs.open(split);
         let painted = settled(&ctx, &mut app, LARGE);
         let browser = painted.region("browser").expect("the browser is open");
@@ -3012,12 +3005,6 @@ mod tests {
         let visuals = ctx.style().visuals.clone();
         assert!(shows(&mut app, "Africa Split"), "the document in front");
 
-        press(&mut app, in_browser(&painted, "Tags").center());
-        assert!(
-            shows(&mut app, "Africa Split"),
-            "a press that selects nothing"
-        );
-
         press(&mut app, upright.center());
         assert!(shows(&mut app, "Upright"), "a row selected in the browser");
         assert_eq!(app.tabs.active(), Some(split), "under the same document");
@@ -3031,6 +3018,11 @@ mod tests {
             gray.contains(&visuals.widgets.active.weak_bg_fill)
                 && !gray.contains(&visuals.selection.bg_fill),
             "the row the inspector no longer follows is gray: {gray:?}"
+        );
+        press(&mut app, in_browser(&painted, "Tags").center());
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "a press in the browser that selects nothing"
         );
 
         press(&mut app, upright.center());
@@ -3053,6 +3045,54 @@ mod tests {
             shows(&mut app, "Africa Split"),
             "the document over an empty selection"
         );
+        app.browser.check(crate::browser::Item::Local(kept_upright));
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "a selection made outside the browser afterwards"
+        );
+    }
+
+    #[test]
+    fn a_filter_row_keeps_its_color_while_the_inspector_follows_a_document() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [_, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        let sunday = app.browser.tags.make("Sunday").expect("a new tag");
+        app.shell.filter.narrow(crate::filter::Narrow::Tag(sunday));
+        app.tabs.open(split);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let browser = painted.region("browser").expect("the browser is open");
+        let lit = ctx.style().visuals.selection.bg_fill;
+        assert!(
+            painted
+                .rects
+                .iter()
+                .any(|drawn| drawn.fill == lit && browser.contains_rect(drawn.rect)),
+            "the tag's row is lit"
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_librarys_table_lets_go_of_a_selected_row_while_the_browser_is_hidden() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [upright, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        app.browser.check(crate::browser::Item::Local(upright));
+        app.tabs.open(split);
+        let _ = settled(&ctx, &mut app, LARGE);
+        app.shell.browser_open = false;
+        app.tabs.show(Spot::Library);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let row = painted
+            .words
+            .iter()
+            .find(|said| said.text == "Upright" && painted.center.contains_rect(said.rect))
+            .expect("Upright is in the table")
+            .rect;
+        let mut input = testing::screen(LARGE, testing::click(row.center()));
+        input.time = Some(ctx.input(|input| input.time) + 1.0);
+        let _ = frame_from(&ctx, &mut app, input);
+        assert!(app.browser.picked().items().next().is_none());
     }
 
     #[test]

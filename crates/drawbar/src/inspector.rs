@@ -2,9 +2,9 @@
 //! while one is attached.
 //!
 //! Each part is a card. A document draws its own cards, such as a program's Morph card,
-//! while the dock describes it. The selection cards describe the document in front, or the
-//! rows selected in the browser while no document is. Room and Info hold what an attached
-//! instrument reports, and are absent without one.
+//! while the dock follows it. The selection cards describe that document, or else the rows
+//! selected in the browser. Room and Info hold what an attached instrument reports, and are
+//! absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,8 +65,8 @@ const BODY: egui::Margin = egui::Margin {
 
 /// The document's cards, the selection's, then the instrument's while one is attached.
 ///
-/// `front` is the document in front, which the selection's cards describe alone in place
-/// of the browser's selection; a view of a slot is not on this computer, so they describe
+/// `front` is the document the dock follows, if any, which the selection's cards describe
+/// alone in place of the browser's selection; a view of a slot is not on this computer, so they describe
 /// nothing for it. `cards` draws the document's own cards and says whether it drew any;
 /// while it does, the Selection and Tags cards fold beneath them.
 #[allow(clippy::too_many_arguments)]

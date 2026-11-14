@@ -1315,10 +1315,11 @@ impl DrawbarApp {
             .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
                 let front = self.tabs.active();
+                let empty = self.browser.picked().items().next().is_none();
                 if self
                     .shell
                     .browsing
-                    .is_some_and(|over| Some(over) != front || pressed_inside(ui))
+                    .is_some_and(|over| Some(over) != front || empty || pressed_inside(ui))
                 {
                     self.shell.browsing = None;
                     // ⚠️ The inspector is drawn before the center, so it follows a press

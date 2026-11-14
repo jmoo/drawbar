@@ -196,6 +196,12 @@ pub fn list_width(ui: &egui::Ui, rows: usize, row: f32, head: f32) -> f32 {
     (ui.available_width() - bar).max(0.0)
 }
 
+/// Draws a selection in the gray of a pressed widget, as one the inspector does not follow.
+pub fn unfollowed(visuals: &mut egui::Visuals) {
+    visuals.selection.bg_fill = visuals.widgets.active.weak_bg_fill;
+    visuals.selection.stroke.color = visuals.widgets.active.fg_stroke.color;
+}
+
 /// Paint a list row's fill for its selection and hover, and return the row's text inks:
 /// the body's, and the quiet one.
 pub fn row_ink(

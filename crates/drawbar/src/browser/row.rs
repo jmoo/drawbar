@@ -36,6 +36,8 @@ pub struct Cells<'a> {
     pub child: bool,
     /// The name keeps its extension, for a file with no kind glyph to say what it is.
     pub whole: bool,
+    /// Its selection is not the one the inspector follows, so it is drawn gray.
+    pub gray: bool,
 }
 
 /// A drawn row: its response, and where its clickable parts ended up.
@@ -155,7 +157,10 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
     let rect = room.shrink2(egui::vec2(crate::panel::ROW_INSET, 0.0));
     let response = ui.interact(rect, id, egui::Sense::click_and_drag());
 
-    let visuals = ui.visuals().clone();
+    let mut visuals = ui.visuals().clone();
+    if cells.gray {
+        crate::panel::unfollowed(&mut visuals);
+    }
     let painter = ui.painter().clone();
     let (ink, quiet) =
         crate::panel::row_ink(&painter, rect, selected, response.hovered(), &visuals);
