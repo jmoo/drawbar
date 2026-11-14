@@ -1119,6 +1119,7 @@ impl Browser {
                 name: &name,
                 count: Some(self.folders.count(Some(id), workspace).to_string()),
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );
@@ -1242,6 +1243,7 @@ impl Browser {
                 dot: mark(entity, &device.state, queue, ui.visuals()),
                 tags: wears,
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );
@@ -1625,6 +1627,7 @@ impl Browser {
                 faint: held.is_none(),
                 loaded,
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );

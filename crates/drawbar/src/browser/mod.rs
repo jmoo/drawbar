@@ -251,6 +251,9 @@ pub struct Browser {
     /// Where this computer's folders were drawn as places a drop lands, in drawing order:
     /// `None` for the library's own top level.
     targets: Vec<(egui::Rect, Option<u64>)>,
+    /// Whether the inspector describes the selection. While it does not, a plain click
+    /// on a selected row selects it again rather than letting go of it.
+    pub(crate) followed: bool,
 }
 
 impl Default for Browser {
@@ -269,6 +272,7 @@ impl Default for Browser {
             rows: Rows::default(),
             held: Vec::new(),
             targets: Vec::new(),
+            followed: true,
         }
     }
 }
@@ -437,6 +441,7 @@ impl Browser {
     fn clicked(&mut self, ui: &egui::Ui, click: Click) {
         self.rename = None;
         match gesture(&ui.input(|input| input.modifiers)) {
+            Gesture::Plain if !self.followed => self.selection.only(click.item),
             Gesture::Plain => self.selection.plain(click.item),
             Gesture::Toggle => self.selection.toggle(click.item),
             Gesture::Extend => self.selection.extend(click.item, click.list),

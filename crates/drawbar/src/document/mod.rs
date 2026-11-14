@@ -376,6 +376,14 @@ impl Document {
             (Some(decoded), Some(fields)) => Some(field::of(decoded, fields)),
             _ => None,
         };
+        if let Some(open) = self.open.as_mut() {
+            let basic = shape == Shape::Fields && face == Face::Basic;
+            // ⚠️ The document's cards are drawn before the document, so they show a change
+            // only in a frame of its own.
+            if open.fields.publish(doc.as_ref().filter(|_| basic)) {
+                ui.ctx().request_repaint();
+            }
+        }
         let pending = match (doc.is_some(), self.open.as_ref()) {
             (true, Some(open)) => open.fields.pending().len(),
             _ => 0,
@@ -833,6 +841,20 @@ impl Document {
             .filter(|(id, _)| Some(*id) == opened)
             .filter_map(|(_, root)| u8::try_from(root).ok())
             .collect()
+    }
+
+    /// Draw the inspector cards of document `id`, from what it last drew, and say whether
+    /// there were any: a program's Morph card while its Basic face has morph slots.
+    pub fn cards(&mut self, ui: &mut egui::Ui, id: u64) -> bool {
+        let Some(open) = self.open.as_mut().filter(|open| open.id == id) else {
+            return false;
+        };
+        if !open.fields.morphed() {
+            return false;
+        }
+        let head = crate::inspector::Head::fixed(crate::icon::Glyph::Waves, "Morph");
+        crate::inspector::card(ui, head, |ui| field::lens(ui, &mut open.fields));
+        true
     }
 
     /// Close the document.
@@ -2684,7 +2706,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(PAGE))
                             .with(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace, &mut Vec::new());
+                    tabs.ui(ui, &workspace, true, &mut Vec::new());
                     ui.separator();
                     document.ui(
                         ui,
