@@ -8,8 +8,7 @@
 ## Summary
 
 Turn one long recording of an instrument, or a folder of one-note recordings, into the strokes of a
-piano library, with the recording itself as the document. The take is first resampled to 35,002 Hz
-as a new WAV. Detectors then find the hits, name each one's note by its pitch and its layer by its
+piano library, with the recording itself as the document. Detectors find the hits, name each one's note by its pitch and its layer by its
 level, mark each attack and release, and find a sustain loop. The user tells them nothing; what they
 get wrong is fixed in the take view. On
 Save, the results go into the WAV as standard regions and loops, labelled with stroke names. New ▸
@@ -55,14 +54,14 @@ are, and the take editor follows the other document editors.
      no loop: the way free sample sets are usually published. Each WAV is a take of one hit. Its
      note comes from its pitch and its layer from its level among the WAVs of its note; file
      names are not read. See One-note takes.
-2. **Resample.** Detect, the loop markers and Build work only at 35,002 Hz. At any other rate the
-   document says so and offers Resample, which writes a new WAV next to the take and opens it. The
-   original is never changed. The new WAV keeps the take's bit depth (24-bit or float); the build
-   goes to 16-bit.
+2. **Rate.** Detect and the take editor work at the take's own rate, and Build resamples each
+   stroke to 35,002 Hz, the rate the instrument plays at, with its marks. The take is never
+   resampled in place, so no Resample step is needed. `nord piano prep` writes its regions into a
+   35,002 Hz copy instead, at the take's bit depth (24-bit or float); the build goes to 16-bit.
 3. **Detect.** Detect asks for nothing. It names each hit's note by its pitch, keeps a note's hits
    as its layers, loudest first, and leaves out hits too quiet to use. Detect runs only when pressed,
-   writes regions and is done. Pressed again on a take with regions, it first warns that it replaces
-   them, and the user can cancel or go ahead. Options override what it measures, and none is
+   writes regions and is done. It replaces the take's regions as one edit, which Undo takes back,
+   so it asks nothing before doing so. Options override what it measures, and none is
    needed; they are inputs to the detectors, not stored:
    - **Notes**: the notes in playing order, a list (`E3 G3 A#3 …`) or a start note, a step in
      semitones and a count, for a take whose pitch misleads. Takes of one layer each take their
@@ -71,7 +70,7 @@ are, and the take editor follows the other document editors.
    - **Playing order**, in place of loudness: the first hit of a note is the loudest layer. This
      suits players who play loud, medium, soft, and recordings whose level can't be trusted (a
      phone's automatic gain made measured loudness useless on our first test take).
-   - Loudness, the default: hits sorted by measured level, with near-duplicates within 2 dB
+   - Loudness, the default: hits sorted by measured level, with near-duplicates within 1 dB
      dropped and the kept layers spread evenly in dB.
 4. **Take view.** The take's waveform, with a box over each sample the regions mark (`C4 v22`),
    and under it the picked sample's own lane with its cut points. Both lanes start linear, so a
@@ -93,8 +92,14 @@ are, and the take editor follows the other document editors.
    #226 makes one undo step.
 6. **Build.** New ▸ Piano library takes the WAV and builds a stroke from each labelled region, so
    template, kind, gain and format work as they do now. It renders a fresh npno each time.
+   **Build piano library…**, beside Detect, opens it with the open take as it is, unsaved edits
+   included. **Don't decay long notes** (`--no-decay`) states no fade on any stroke, key-offs
+   included, so an organ, pad or strings holds its notes and its key-offs ring out their recorded
+   tail; the instrument has no organ category, so such sounds are built as Hybrid. Heard on
+   hardware with an organ.
 
-The editor uses the standard document top bar for the file name, Detect and Build. The left bar
+The editor uses the standard document top bar for the file name, with a row under it for Detect,
+its too-quiet limit (Skip notes [54 dB] or less over noise) and Build piano library…. The left bar
 stays the file tree. Everything about the picked sample sits in the document, under the take; the
 right sidebar keeps the global Selection and Tags cards, as for any other document.
 
@@ -127,7 +132,7 @@ and write the same regions.
 | Level | Per-WAV gain (#165) | Build rules from the audio (#279); releases keep their recorded balance with their attack |
 | Loop | From a WAV's `smpl` loop (#256) | Loop search, written as a `smpl` loop on the region; crossfade at build; covers #257 |
 | Background noise | — | Too-quiet hits flagged; hum removed and hiss followed down per stroke at build |
-| Sample rate | Resampled at build | Resample the take first, as a new WAV |
+| Sample rate | Resampled at build | Detect at the take's own rate; Build resamples strokes and marks together |
 | Layer values, thresholds, trims, build | New ▸ Piano library (#267) | Builds from labelled regions as well as whole WAVs; v6 defaults in #278 and #279 |
 
 ## Reference-level explanation
@@ -141,11 +146,12 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   normally 24-bit or float; #165's reader takes only 16-bit. drawbar's WAV document reads all
   three, converts to floating point for the waveform and the player, and keeps gain edits in the
   file's own format. Only the build goes down to 16 bits.
-- Resample writes a band-limited resample to 35,002 Hz at the take's own bit depth (24-bit, or float
-  for a float take) as a new WAV. Detection and loop search run on that, so the loop points are
-  where the build plays them. On the interface take, detecting at 35,002 Hz rather than the take's
-  44.1 kHz gave 146 strokes for 148: one key-up and one release fell just the other side of their
-  thresholds. That is accepted.
+- `nord piano prep` writes a band-limited resample to 35,002 Hz at the take's own bit depth (24-bit,
+  or float for a float take) as a new WAV, and detection and loop search run on that, so its loop
+  points are where the build plays them. On the interface take, detecting at 35,002 Hz rather than
+  the take's 44.1 kHz gave 146 strokes for 148: one key-up and one release fell just the other side
+  of their thresholds. That is accepted. drawbar's Detect runs at the take's own rate, and the build
+  resamples the marks with the audio.
 - The detectors read the mean of a stereo take's channels. Its strokes keep both channels, with one
   loop for both.
 
@@ -399,12 +405,15 @@ fifth on `mikesprad:feat/take-editor-wav`.
 - [ ] drawbar: the take editor over a WAV document, with playback as the instrument plays it,
   loop-wrap and release auditions, region edits, category and cleaning, and one Undo timeline with
   the library's changes. Docs. Written on `mikesprad:feat/take-editor-wav`, on top of the first
-  four. Resample, Detect and Build from the editor are still to come; `nord piano prep` does them
-  for now.
+  four. Detect and Build from the editor are written there too (Build piano library… opens New ▸
+  Piano library with the open take).
 - [ ] Detect with no inputs: notes named by pitch, octaves checked against their neighbors. Written
-  in `nord piano prep` on `mikesprad:feat/take-auto-notes`; in the editor still to come.
+  in `nord piano prep` on `mikesprad:feat/take-auto-notes`, and as Detect in the editor on
+  `mikesprad:feat/take-editor-wav`.
 - [ ] One-note takes: Detect and Build over a folder of WAVs of one hit each. Written as
-  `nord piano prep FOLDER` on `mikesprad:feat/take-auto-notes`; in the editor still to come.
+  `nord piano prep FOLDER` on `mikesprad:feat/take-auto-notes`; in the editor later.
+- [ ] Sounds that sustain: no decay on any stroke, key-offs included (`--no-decay`, Don't decay long
+  notes), on `mikesprad:feat/take-auto-notes`.
 
 ## Drawbacks
 
