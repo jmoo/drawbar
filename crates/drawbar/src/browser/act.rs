@@ -3859,6 +3859,7 @@ mod tests {
         );
         let crc = bench.workspace.get(id).unwrap().saved.crc32().unwrap();
         let copy = Some(("Africa Split", crc));
+        let copy_at = Location::from_user(1, 1);
         let spot = |bench: &mut Bench| {
             bench.device.relink(&mut bench.workspace);
             let entity = bench.workspace.get(id).unwrap();
@@ -3868,15 +3869,22 @@ mod tests {
             )
         };
 
-        bench.device.pretend_bodies(class, 7, &[copy, None, None]);
+        bench.device.pretend_bodies(class, 1, &[copy]);
+        assert_eq!(
+            spot(&mut bench),
+            (Some((class, copy_at)), Bound::At(class, copy_at)),
+            "before its own bank is read, the copy stands for it"
+        );
+
+        bench.device.pretend_bodies(class, 7, &[None, None, None]);
         assert_eq!(spot(&mut bench), (None, Bound::At(class, at(2))));
 
         bench
             .device
-            .pretend_bodies(class, 7, &[copy, None, Some(("Squabble B", !crc))]);
+            .pretend_bodies(class, 7, &[None, None, Some(("Squabble B", !crc))]);
         assert_eq!(
             spot(&mut bench),
-            (Some((class, at(0))), Bound::At(class, at(0)))
+            (Some((class, copy_at)), Bound::At(class, copy_at))
         );
     }
 

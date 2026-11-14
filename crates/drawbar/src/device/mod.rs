@@ -1000,7 +1000,8 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
         // A library refuses a second object of one name, so a rescued sample or piano
         // still stands on the slot holding its name.
         if !class.is_library() && matches!(state.slot(class, at), Some(None)) {
-            return stands(state, entity);
+            let wrote = entity.wrote.map(|wrote| (wrote.class, wrote.at));
+            return wrote.filter(|(class, at)| !matches!(state.slot(*class, *at), Some(None)));
         }
     }
     let by_body = matchable(entity).and_then(|(folder, crc)| among(state, folder, crc, entity));
