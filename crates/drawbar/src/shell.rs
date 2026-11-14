@@ -131,6 +131,10 @@ pub struct Shell {
     pub zoom_chip: egui::Rect,
     /// What the inspector's selection cards show, until what they describe changes.
     pub(crate) picked: crate::inspector::Picked,
+    /// The document in front when the browser was last pressed. Over it the selection's
+    /// cards describe the browser's selection, until the center is pressed or another
+    /// tab comes to front.
+    pub(crate) browsing: Option<u64>,
     /// When the library's oldest unanswered change was first seen, as
     /// [`egui::InputState::time`] counts.
     pub(crate) changing: Option<f64>,
@@ -154,6 +158,7 @@ impl Default for Shell {
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
             picked: Default::default(),
+            browsing: None,
             changing: None,
         }
     }
@@ -1348,6 +1353,9 @@ impl DrawbarApp {
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 claim(ui);
+                if pressed_inside(ui) {
+                    self.shell.browsing = self.tabs.active();
+                }
                 let mut rect = ui.max_rect();
                 rect.min.x += GUTTER;
                 rect.max.y -= GUTTER;
@@ -1417,9 +1425,10 @@ impl DrawbarApp {
                 let mut inside = card(ui, rect);
                 let front = self.tabs.active();
                 let morphs = front.and_then(|id| self.document.morphs(id));
+                let described = front.filter(|&id| self.shell.browsing != Some(id));
                 acts.extend(crate::inspector::ui(
                     &mut inside,
-                    front,
+                    described,
                     morphs,
                     &mut self.shell,
                     &mut self.browser,
@@ -1478,6 +1487,11 @@ fn logo(ui: &mut egui::Ui) {
 /// holding less than it shows would shrink to its minimum.
 fn claim(ui: &mut egui::Ui) {
     ui.set_min_size(ui.max_rect().size());
+}
+
+/// Whether a pointer went down in this frame on `ui` itself, not on a popup over it.
+pub(crate) fn pressed_inside(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect())
 }
 
 /// The id of one part of the zoom chip or its popover.
@@ -2830,6 +2844,43 @@ mod tests {
         assert!(
             in_inspector(&painted, "Nothing is selected.").is_some(),
             "a view of a slot is not on this computer"
+        );
+    }
+
+    #[test]
+    fn a_press_in_the_browser_turns_the_selection_card_to_the_library_until_the_document_is_back() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [grand, split] = kept(&mut app, ["Grand", "Africa Split"]);
+        app.tabs.open(split);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let browser = painted.region("browser").expect("the browser is open");
+        let shows = |app: &mut DrawbarApp, name: &str| {
+            in_inspector(&settled(&ctx, app, LARGE), name).is_some()
+        };
+        let press = |app: &mut DrawbarApp, at: egui::Pos2| {
+            let _ = frame_of(&ctx, app, LARGE, testing::click(at));
+        };
+        assert!(shows(&mut app, "Africa Split"), "the document in front");
+
+        press(&mut app, browser.center_bottom() - egui::vec2(0.0, 40.0));
+        app.browser.check(crate::browser::Item::Local(grand));
+        assert!(shows(&mut app, "Grand"), "the library's selection");
+        assert_eq!(app.tabs.active(), Some(split), "under the same document");
+
+        press(&mut app, painted.center.center());
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "the document after a press on it"
+        );
+
+        press(&mut app, browser.center_bottom() - egui::vec2(0.0, 40.0));
+        app.tabs.show(Spot::Library);
+        let _ = settled(&ctx, &mut app, LARGE);
+        app.tabs.open(split);
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "the document once it comes to front again"
         );
     }
 
