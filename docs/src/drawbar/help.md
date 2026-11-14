@@ -17,7 +17,8 @@ with each instrument.
 sends what you write straight to drawbar's developer. You choose what to attach:
 recent errors, what you are running (the version, the browser or operating system,
 the connected instrument and its firmware, and how many files this computer holds),
-and the activity log's last 200 entries. The form shows exactly what will be sent.
+and the activity log's last 200 entries. A problem report starts with all three
+checked, and feedback with none. The form shows exactly what will be sent.
 Leave an email address if you would like a reply.
 
 In the browser, **Help ▸ Share anonymous usage** is checked while drawbar sends

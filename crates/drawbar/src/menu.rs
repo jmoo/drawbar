@@ -108,7 +108,7 @@ impl Offer {
     /// A command as its item looks when nothing about the moment changes it.
     fn of(command: Command) -> Offer {
         Offer {
-            label: label(command).to_string(),
+            label: label(command),
             enabled: true,
             checked: None,
             hint: hint(command),
@@ -116,14 +116,18 @@ impl Offer {
     }
 }
 
-/// The words of a command's item, before anything about the moment changes them.
-pub fn label(command: Command) -> &'static str {
+/// The words of a command's item, before anything about the moment changes them. A New
+/// line that makes a Nord file names its file type.
+pub fn label(command: Command) -> String {
     match command {
         Command::Import => IMPORT,
         Command::Undo => "Undo",
         Command::Redo => "Redo",
-        Command::New(kind) => kind.label(),
-        Command::FromWavs(making) => making.item().0,
+        Command::New(kind) if Fresh::LOOSE.contains(&kind) => kind.label(),
+        Command::New(kind) => return format!("{} (.{})", kind.label(), kind.tag()),
+        Command::FromWavs(making) => {
+            return format!("{} (.{})…", making.item().0, making.extension());
+        }
         Command::NewFolder => "New folder",
         Command::PickLibrary => OPEN_FOLDER,
         Command::Recent(_) => "Recent library",
@@ -167,6 +171,7 @@ pub fn label(command: Command) -> &'static str {
         Command::CopyLog => "Copy activity log",
         Command::About => "About drawbar",
     }
+    .to_string()
 }
 
 /// What a command's item says on hover, when it has more to say than its label.
@@ -181,9 +186,8 @@ fn hint(command: Command) -> Option<&'static str> {
     }
 }
 
-/// The New menu. Above the separator are files an instrument holds: each family's
-/// defaults, and the two instrument files built from audio. Below it are files only this
-/// computer keeps: a note, a Sample Editor project, and a folder.
+/// The New menu. Above the separator are Nord's file types: each family's defaults, and
+/// what is built from WAVs. Below it are drawbar's own: a text note and a folder.
 ///
 /// ⚠️ One menu wherever "New" is offered: the tree's context menu, the File menu, the top
 /// bar and the tab row. Connecting an instrument makes nothing on this computer, so it is
@@ -328,8 +332,8 @@ fn instrument_entries() -> Vec<Entry> {
     ]
 }
 
-/// New's lines: each instrument's kinds under its name, what is made from WAVs, then what
-/// no instrument holds.
+/// New's lines: each instrument's kinds under its name, what is made from WAVs, then
+/// drawbar's own.
 fn new_entries() -> Vec<Entry> {
     use Entry::{Do, Rule};
 
@@ -346,17 +350,9 @@ fn new_entries() -> Vec<Entry> {
             )
         })
         .collect();
-    let (held, loose): (Vec<Making>, Vec<Making>) = Making::FROM_WAVS
-        .iter()
-        .partition(|making| making.instrument_file());
-    entries.extend(held.into_iter().map(|making| Do(Command::FromWavs(making))));
+    entries.extend(Making::FROM_WAVS.map(|making| Do(Command::FromWavs(making))));
     entries.push(Rule);
-    entries.extend(Fresh::LOOSE.into_iter().map(|kind| Do(Command::New(kind))));
-    entries.extend(
-        loose
-            .into_iter()
-            .map(|making| Do(Command::FromWavs(making))),
-    );
+    entries.extend(Fresh::LOOSE.map(|kind| Do(Command::New(kind))));
     entries.push(Do(Command::NewFolder));
     entries
 }
@@ -1136,16 +1132,16 @@ mod tests {
         });
         let said = words(&output);
         for making in Making::FROM_WAVS {
-            let item = making.item().0;
-            assert!(said.iter().any(|word| word == item), "{item} is missing");
+            let item = label(Command::FromWavs(making));
+            assert!(said.contains(&item), "{item} is missing");
         }
         assert!(said.iter().any(|word| word == "New folder"));
     }
 
-    /// ⚠️ The New menu's separator splits files an instrument holds from files only this
-    /// computer keeps. A kind on the wrong side would misstate where the new file can go.
+    /// ⚠️ The New menu's separator splits Nord's file types from drawbar's own. A kind on
+    /// the wrong side would misstate what the new file is.
     #[test]
-    fn the_new_menu_parts_instrument_files_from_the_rest() {
+    fn the_new_menu_parts_nord_files_from_drawbars_own() {
         let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| new_menu(ui, &mut Vec::new()));
         });
@@ -1161,25 +1157,27 @@ mod tests {
             .chain(
                 Making::FROM_WAVS
                     .iter()
-                    .filter(|making| making.instrument_file())
-                    .map(|making| at(making.item().0)),
+                    .map(|making| at(&label(Command::FromWavs(*making)))),
             )
             .max()
-            .expect("the instrument files are above it");
-        let below: Vec<&str> = Fresh::LOOSE
+            .expect("the Nord files are above it");
+        for item in Fresh::LOOSE
             .iter()
-            .map(|kind| kind.label())
-            .chain(
-                Making::FROM_WAVS
-                    .iter()
-                    .filter(|making| !making.instrument_file())
-                    .map(|making| making.item().0),
-            )
-            .chain(["New folder"])
-            .collect();
-        for item in below {
-            assert!(at(item) > rule, "{item} belongs below the rule: {said:?}");
+            .map(|kind| label(Command::New(*kind)))
+            .chain(["New folder".to_string()])
+        {
+            assert!(at(&item) > rule, "{item} belongs below the rule: {said:?}");
         }
+    }
+
+    #[test]
+    fn a_new_line_names_the_file_type_of_a_nord_file_only() {
+        assert_eq!(label(Command::New(Fresh::SetList)), "Set list (.ne5t)");
+        assert_eq!(
+            label(Command::FromWavs(Making::Project)),
+            "Sample Editor project (.nsmpproj)…"
+        );
+        assert_eq!(label(Command::New(Fresh::Text)), "Text note");
     }
 
     fn commands(entries: &[Entry], into: &mut Vec<Command>) {

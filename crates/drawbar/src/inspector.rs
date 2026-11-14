@@ -15,7 +15,7 @@ use nord_usb::wire::Dependency;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
-use crate::browser::{Act, Browser, Bulk, Item, Kind, Offer};
+use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
@@ -375,7 +375,14 @@ fn selection(
     if shown.checked.is_empty() {
         return;
     }
-    tags(ui, &shown.locals, &shown.wearing, tags_open, acts);
+    tags(
+        ui,
+        &shown.locals,
+        &shown.wearing,
+        browser.tags(),
+        tags_open,
+        acts,
+    );
     kept_apart(ui, &shown.locals, browser, acts);
     let answer = answered(browser, device).filter(|_| shown.sources.front.is_none());
     if let Some((slot, deps)) = answer {
@@ -749,12 +756,13 @@ fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut V
 /// ⚠️ Only a kept asset can have a tag: a tag attaches to a workspace id, and a slot has
 /// none. So this covers only the part of the selection on this computer.
 ///
-/// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's Tags
-/// section, and added to something new from the row's Tag menu.
+/// Add tag opens every tag of `labels`, as a row's Tag menu does. `open` folds the card,
+/// while a document's cards stand above it.
 fn tags(
     ui: &mut egui::Ui,
     picked: &[u64],
     wearing: &[(u64, String, bool)],
+    labels: &Tags,
     open: Option<&mut bool>,
     acts: &mut Vec<Act>,
 ) {
@@ -766,11 +774,8 @@ fn tags(
         ..Head::fixed(Glyph::Tags, "Tags")
     };
     card(ui, head, |ui| {
-        let made = tonal_button(ui, Some(Glyph::Plus), "New tag")
-            .on_hover_text("a new tag on everything selected, named as you type");
-        if made.clicked() {
-            acts.push(Act::NewTag(picked.to_vec()));
-        }
+        let add = tonal_button(ui, Some(Glyph::Plus), "Add tag");
+        egui::Popup::menu(&add).show(|ui| tag_items(ui, labels, picked, acts));
         if wearing.is_empty() {
             return;
         }
@@ -858,9 +863,7 @@ fn tag_chip(ui: &mut egui::Ui, id: u64, name: &str, on_all: bool) -> egui::Respo
 
 /// The tags any picked asset has, and whether each is on all of them.
 ///
-/// ⚠️ Only tags in use, in list order. A tag nothing picked has is not part of this
-/// selection's state: the full list belongs to the tree, and adding a new tag belongs to
-/// the row's Tag menu.
+/// Only tags in use, in list order.
 fn wearing(picked: &[u64], worn: &Tags) -> Vec<(u64, String, bool)> {
     worn.all()
         .iter()
@@ -969,6 +972,7 @@ mod tests {
                             panel,
                             &[7, 8],
                             &wearing(&[7, 8], &labels),
+                            &labels,
                             None,
                             &mut Vec::new(),
                         );
@@ -1350,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selections_tags_are_chips_beside_new_tag_and_nothing_without_a_selection() {
+    fn the_selections_tags_are_chips_beside_add_tag_and_nothing_without_a_selection() {
         let ctx = context();
         let mut labels = Tags::default();
         let (both, some) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
@@ -1378,6 +1382,7 @@ mod tests {
                             panel,
                             picked,
                             &wearing(picked, &labels),
+                            &labels,
                             None,
                             &mut Vec::new(),
                         )
@@ -1386,11 +1391,11 @@ mod tests {
             testing::words(&output)
         };
         let said = painted(&[7, 8]);
-        for name in ["Sunday", "Loud", "New tag"] {
+        for name in ["Sunday", "Loud", "Add tag"] {
             assert!(said.contains(&name.to_string()), "{name}: {said:?}");
         }
         let untagged = painted(&[9]);
-        assert!(untagged.contains(&"New tag".to_string()), "{untagged:?}");
+        assert!(untagged.contains(&"Add tag".to_string()), "{untagged:?}");
         assert!(!untagged.contains(&"Sunday".to_string()), "{untagged:?}");
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
     }
@@ -1533,14 +1538,16 @@ mod tests {
         assert!(said.iter().any(|word| word.text == total), "{total}");
     }
 
-    /// New tag in the Tags card puts a new tag on everything selected, and nothing else.
-    #[test]
-    fn new_tag_in_the_card_tags_the_selection() {
+    /// What picking `item` from the Tags card's Add tag menu asks of a selection of 7
+    /// and 8, where only 7 wears Loud and nothing wears Sunday.
+    fn added_from_the_card(item: &str) -> (Vec<Act>, u64) {
         let ctx = context();
         egui_extras::install_image_loaders(&ctx);
-        let labels = Tags::default();
+        let mut labels = Tags::default();
+        let (sunday, loud) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
+        labels.set(7, loud, true);
         let mut acts = Vec::new();
-        let frame = |events: Vec<egui::Event>, acts: &mut Vec<Act>| {
+        let mut frame = |events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 events,
                 ..Default::default()
@@ -1549,17 +1556,43 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), None, acts)
+                        tags(
+                            panel,
+                            &[7, 8],
+                            &wearing(&[7, 8], &labels),
+                            &labels,
+                            None,
+                            &mut acts,
+                        )
                     });
             });
-            testing::where_(&testing::painted(&output), "New tag").center()
+            testing::painted(&output)
         };
-        let button = frame(Vec::new(), &mut acts);
-        frame(testing::click(button), &mut acts);
+        let add = testing::where_(&frame(Vec::new()), "Add tag").center();
+        frame(testing::click(add));
+        let mut said = frame(Vec::new());
+        for _ in 0..2 {
+            said = frame(Vec::new());
+        }
+        frame(testing::click(testing::where_(&said, item).center()));
+        (acts, sunday)
+    }
+
+    #[test]
+    fn add_tag_in_the_card_puts_a_tag_nothing_selected_wears_on_all_of_it() {
+        let (acts, sunday) = added_from_the_card("Sunday");
+        assert!(
+            matches!(acts.as_slice(), [Act::Tag { ids, tag }] if ids == &[7, 8] && *tag == sunday),
+            "Sunday on the selection; got {acts:?}"
+        );
+    }
+
+    #[test]
+    fn add_tag_in_the_card_offers_a_new_tag_on_the_selection() {
+        let (acts, _) = added_from_the_card("New tag…");
         assert!(
             matches!(acts.as_slice(), [Act::NewTag(ids)] if ids == &[7, 8]),
-            "one new tag on the selection; got {} acts",
-            acts.len()
+            "one new tag on the selection; got {acts:?}"
         );
     }
 

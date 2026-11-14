@@ -54,20 +54,8 @@ pub enum Making {
 }
 
 impl Making {
-    /// Everything a pick of WAVs makes.
-    pub const FROM_WAVS: [Making; 3] = [Making::Project, Making::Instrument, Making::Piano];
-
-    /// Whether this makes a file an instrument holds, which decides the side of the New
-    /// menu's separator it goes on.
-    ///
-    /// A project is the Sample Editor's save file. It builds an instrument, but no
-    /// instrument has a folder for the project itself.
-    pub fn instrument_file(self) -> bool {
-        match self {
-            Making::Instrument | Making::Piano => true,
-            Making::Project => false,
-        }
-    }
+    /// Everything a pick of WAVs makes, in New menu order.
+    pub const FROM_WAVS: [Making; 3] = [Making::Instrument, Making::Project, Making::Piano];
 
     /// What it makes, as the dialog, the file picker, and the log name it.
     pub fn label(self) -> &'static str {
@@ -78,19 +66,19 @@ impl Making {
         }
     }
 
-    /// The New menu item's label and hover text.
+    /// The New menu item's name, before its file type, and hover text.
     pub fn item(self) -> (&'static str, &'static str) {
         match self {
             Making::Project => (
-                "Sample Editor project…",
-                "copies the WAVs into a new folder",
+                "Sample Editor project",
+                "for Nord Sample Editor; copies the WAVs into a new folder",
             ),
-            Making::Instrument => ("Sample instrument…", "encodes the WAVs"),
-            Making::Piano => ("Piano library…", "encodes one WAV per stroke"),
+            Making::Instrument => ("Sample instrument", "encodes the WAVs"),
+            Making::Piano => ("Piano library", "encodes one WAV per stroke"),
         }
     }
 
-    fn extension(self) -> &'static str {
+    pub fn extension(self) -> &'static str {
         match self {
             Making::Project => nord_format::formats::nsmpproj::FORMAT,
             Making::Instrument => Layout::V2.extension(),

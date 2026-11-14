@@ -2842,7 +2842,7 @@ mod tests {
             in_inspector(&painted, "Tags").is_some(),
             "the Tags card's header"
         );
-        for body in [queue, "New tag"] {
+        for body in [queue, "Add tag"] {
             assert!(
                 in_inspector(&painted, body).is_none(),
                 "{body} is folded away"
@@ -2868,7 +2868,7 @@ mod tests {
             "without the document's cards"
         );
         assert!(
-            in_inspector(&browsing, "New tag").is_some(),
+            in_inspector(&browsing, "Add tag").is_some(),
             "and nothing folded"
         );
     }

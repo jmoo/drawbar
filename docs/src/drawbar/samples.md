@@ -59,11 +59,11 @@ many samples would clip. A gain is an edit like any other: **Save** writes it
 into the file and **Revert** takes it back. A WAV drawbar cannot read, such as
 a 24-bit one, says why and offers neither.
 
-**New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
-for each. **New ▸ Sample Editor project…** makes a project from them instead, in
-a new folder named after it. Its WAVs are copied beside it, so Build and the
-Sample Editor find them. Two WAVs with the same name are numbered apart, as
-`c3 2.wav`.
+**New ▸ Sample instrument (.nsmp)…** takes several WAVs, one zone each, with a
+root key for each. **New ▸ Sample Editor project (.nsmpproj)…** makes a project
+from them instead, in a new folder named after it. Its WAVs are copied beside
+it, so Build and the Sample Editor find them. Two WAVs with the same name are
+numbered apart, as `c3 2.wav`.
 
 The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,
