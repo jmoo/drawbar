@@ -101,14 +101,15 @@ pub struct EditArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Replace the variant: the text after the `#`, where the vendor records the
-    /// voicing and the library's size. It cannot contain a `#`.
+    /// Replace the variant: the text after the `#`, whose last word is the library's
+    /// size. It cannot contain a `#`.
     #[arg(long)]
     pub variant: Option<String>,
 
-    /// Replace the voicing, a separate field that only the newer stream version has.
+    /// Replace the description, a separate field that only the newer stream version
+    /// has.
     #[arg(long)]
-    pub voicing: Option<String>,
+    pub description: Option<String>,
 
     /// `KEY=UNITS`, repeatable: retune one key. A bare number is fine-tune units;
     /// a number suffixed with `c` is cents, rounded to the nearest unit.
@@ -225,7 +226,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub name: String,
 
-    /// The half after the `#`, where the vendor records the voicing and the size.
+    /// The half after the `#`, whose last word is the library's size.
     #[arg(long, default_value = "")]
     pub variant: String,
 
@@ -382,8 +383,8 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
         library.channels(),
         bytes.len(),
     ));
-    if let (Some(long), Some(voicing)) = (library.long_name(), library.voicing()) {
-        ui.out(ui.dim(format!("  long name {long:?}, voicing {voicing:?}")));
+    if let (Some(long), Some(description)) = (library.long_name(), library.description()) {
+        ui.out(ui.dim(format!("  long name {long:?}, description {description:?}")));
     }
     ui.out(format!(
         "  {} stroke(s) over {} root(s); keys {coverage}",
@@ -635,10 +636,10 @@ pub fn edit(ui: &Ui, args: EditArgs) -> Result<(), String> {
             .map_err(|e| format!("--variant: {e}"))?;
         changed += 1;
     }
-    if let Some(voicing) = &args.voicing {
+    if let Some(description) = &args.description {
         library
-            .set_voicing(voicing)
-            .map_err(|e| format!("--voicing: {e}"))?;
+            .set_description(description)
+            .map_err(|e| format!("--description: {e}"))?;
         changed += 1;
     }
     for spec in &args.tune {
