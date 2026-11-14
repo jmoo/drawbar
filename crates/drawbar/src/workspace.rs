@@ -1085,13 +1085,9 @@ impl LocalEntity {
         Baseline::new(Content::Resident { bytes, facts }, self.stamp)
     }
 
-    /// The slot this asset stands for: its link, or else the slot it came off or was
-    /// rescued from.
+    /// The slot this asset stands for: its link, or else the slot it came off.
     pub fn spot(&self) -> Option<(ObjectClass, Location)> {
-        self.link.or_else(|| match self.origin {
-            Origin::Rescued { at } => Some((crate::browser::Kind::of(self).home()?, at)),
-            _ => self.origin.slot(),
-        })
+        self.link.or_else(|| self.origin.slot())
     }
 
     /// A sample instrument's generation, `v2`, `v3` or `v4`, as

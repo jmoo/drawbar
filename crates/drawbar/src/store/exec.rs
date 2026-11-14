@@ -233,17 +233,16 @@ mod tests {
 
     impl Fs for Locked {
         async fn read(&self, _: &str) -> io::Result<Vec<u8>> {
-            Err(io::Error::from_raw_os_error(13))
+            Err(io::ErrorKind::PermissionDenied.into())
         }
         async fn stat(&self, _: &str) -> io::Result<Option<Stat>> {
-            Err(io::Error::from_raw_os_error(13))
+            Err(io::ErrorKind::PermissionDenied.into())
         }
         async fn rest(&self, _: &str, _: Option<Fingerprint>) -> io::Result<Option<Arc<OnDisk>>> {
-            Err(io::Error::from_raw_os_error(13))
+            Err(io::ErrorKind::PermissionDenied.into())
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_file_the_system_will_not_open_says_so_in_toshokans_words() {
         let read = now(read_all(&Locked, vec![(0, path("Grand.ne5p"), None)], 25));

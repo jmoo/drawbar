@@ -978,7 +978,7 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
 /// The slot it came off while the instrument still holds one there; otherwise a slot
 /// reporting the body it was saved as (`among`), the slot it was last written to
 /// (`stands`), or the slot carrying its name (`named`). A rescue whose own slot is empty
-/// stands on none, so [`LocalEntity::spot`] gives that slot.
+/// stands only on a slot this app wrote it to, so a copy elsewhere does not claim it.
 ///
 /// ⚠️ Reads the link the asset already carries, so running it again over an unchanged
 /// cache gives the same answer.
@@ -1000,7 +1000,7 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
         // A library refuses a second object of one name, so a rescued sample or piano
         // still stands on the slot holding its name.
         if !class.is_library() && matches!(state.slot(class, at), Some(None)) {
-            return None;
+            return stands(state, entity);
         }
     }
     let by_body = matchable(entity).and_then(|(folder, crc)| among(state, folder, crc, entity));

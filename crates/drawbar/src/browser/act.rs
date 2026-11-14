@@ -1618,8 +1618,8 @@ pub(super) fn spare_slot(
     state.first_free(class, &queue.waiting_in(class))
 }
 
-/// The slot an asset belongs to ([`owed`]), or else the first free slot of its folder
-/// that nothing in the queue is waiting for.
+/// The slot an asset belongs to ([`owed`]), or else the empty slot it was rescued from,
+/// or else the first free slot of its folder that nothing in the queue is waiting for.
 ///
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
@@ -1635,7 +1635,14 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     else {
         return Bound::Nowhere;
     };
-    match spare_slot(state, class, queue) {
+    let rescued_from = match entity.origin {
+        Origin::Rescued { at } => Some(at),
+        _ => None,
+    };
+    let waiting = queue.waiting_in(class);
+    let home = rescued_from
+        .filter(|at| matches!(state.slot(class, *at), Some(None)) && !waiting.contains(at));
+    match home.or_else(|| spare_slot(state, class, queue)) {
         Some(at) => Bound::At(class, at),
         None => Bound::Full(class),
     }
@@ -3836,10 +3843,11 @@ mod tests {
         );
     }
 
-    /// Once the rescue's slot holds something else, the copy wins: nothing is overwritten
-    /// to put back what the instrument still holds.
+    /// A copy elsewhere neither claims a rescue nor hides it from its empty slot. Once
+    /// that slot holds something else, the copy wins: nothing is overwritten to put back
+    /// what the instrument still holds.
     #[test]
-    fn a_rescued_program_stands_for_its_empty_slot_over_a_copy_elsewhere() {
+    fn a_rescued_program_is_queued_for_its_empty_slot_over_a_copy_elsewhere() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_partitions(&crate::device::ELECTRO5);
@@ -3861,10 +3869,7 @@ mod tests {
         };
 
         bench.device.pretend_bodies(class, 7, &[copy, None, None]);
-        assert_eq!(
-            spot(&mut bench),
-            (Some((class, at(2))), Bound::At(class, at(2)))
-        );
+        assert_eq!(spot(&mut bench), (None, Bound::At(class, at(2))));
 
         bench
             .device
@@ -3872,6 +3877,34 @@ mod tests {
         assert_eq!(
             spot(&mut bench),
             (Some((class, at(0))), Bound::At(class, at(0)))
+        );
+    }
+
+    #[test]
+    fn a_rescued_program_sent_to_another_slot_stays_linked_there_after_a_rescan() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.ingest(
+            "Africa Split".into(),
+            Origin::Rescued { at: at(2) },
+            bytes.clone(),
+            &mut bench.log,
+        );
+        let crc = bench.workspace.get(id).unwrap().saved.crc32().unwrap();
+
+        bench.workspace.landed(id, class, at(1), bytes);
+        bench
+            .device
+            .pretend_bodies(class, 7, &[None, Some(("Africa Split", crc)), None]);
+        bench.device.relink(&mut bench.workspace);
+
+        let entity = bench.workspace.get(id).unwrap();
+        assert_eq!(entity.spot(), Some((class, at(1))));
+        assert_eq!(
+            bound_for(entity, &bench.device.state, &bench.queue),
+            Bound::At(class, at(1))
         );
     }
 
