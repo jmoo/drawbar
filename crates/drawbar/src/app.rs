@@ -1231,7 +1231,7 @@ impl eframe::App for DrawbarApp {
         self.top_bar(ctx, frame, &mut acts);
         self.status_line(ctx, &mut acts);
         self.browser_card(ctx, &mut acts);
-        self.inspector_card(ctx, &mut acts);
+        self.inspector_cards(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
         // An instrument that goes away takes its queue's review with it.
         self.shell.review_open &= self.attached();

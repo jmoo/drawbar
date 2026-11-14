@@ -26,9 +26,6 @@ pub const GUTTER: f32 = 8.0;
 /// The rounding of a card on the canvas: a side panel, or the document under the tabs.
 pub const CARD_RADIUS: u8 = 12;
 
-/// The rounding of a card inside a card: an inspector section, a note, a diff.
-pub const INNER_RADIUS: u8 = 10;
-
 /// The rounding of a [`group_frame`].
 const GROUP_RADIUS: u8 = 8;
 

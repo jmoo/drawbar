@@ -19,7 +19,7 @@ use crate::browser::{Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
-use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
+use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
 use crate::queue::{Diff, Queue};
 use crate::room;
 use crate::shell::Shell;
@@ -85,23 +85,21 @@ pub fn ui(
         .id_salt("inspector")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
-            egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = GUTTER;
-                let folded = cards(ui).then_some((&mut shell.selection_open, &mut shell.tags_open));
-                let shown = shell.picked.now(front, browser, workspace, device, queue);
-                selection(ui, shown, browser, device, folded, &mut acts);
-                if !device.state.connected() {
-                    return;
-                }
-                room_card(ui, &mut shell.room_open, workspace, device, queue);
-                let info = Head {
-                    glyph: Glyph::Info,
-                    title: "Info",
-                    badge: None,
-                    open: Some(&mut shell.info_open),
-                };
-                card(ui, info, |ui| crate::browser::about(ui, device));
-            });
+            ui.spacing_mut().item_spacing.y = GUTTER;
+            let folded = cards(ui).then_some((&mut shell.selection_open, &mut shell.tags_open));
+            let shown = shell.picked.now(front, browser, workspace, device, queue);
+            selection(ui, shown, browser, device, folded, &mut acts);
+            if !device.state.connected() {
+                return;
+            }
+            room_card(ui, &mut shell.room_open, workspace, device, queue);
+            let info = Head {
+                glyph: Glyph::Info,
+                title: "Info",
+                badge: None,
+                open: Some(&mut shell.info_open),
+            };
+            card(ui, info, |ui| crate::browser::about(ui, device));
         });
     acts
 }
@@ -128,11 +126,12 @@ impl<'a> Head<'a> {
     }
 }
 
-/// A card inside the dock: a header, and under it the body while the card is open.
+/// A card of the dock, on the canvas: a header, and under it the body while the card is
+/// open.
 pub(crate) fn card(ui: &mut egui::Ui, head: Head, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .corner_radius(INNER_RADIUS)
+        .fill(ui.visuals().panel_fill)
+        .corner_radius(CARD_RADIUS)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;

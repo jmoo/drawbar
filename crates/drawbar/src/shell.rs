@@ -1363,7 +1363,7 @@ impl DrawbarApp {
                 rect.min.x += GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
-                self.browser.followed = self.described().is_none();
+                self.browser.followed = self.described().is_none() || self.picks_front();
                 if !self.browser.followed {
                     unfollowed(inside.visuals_mut());
                 }
@@ -1410,12 +1410,18 @@ impl DrawbarApp {
     }
 
     /// The document the selection's cards describe: the one in front, unless the browser's
-    /// selection changed over it and still holds something.
+    /// selection changed over it and holds something else.
     pub(crate) fn described(&self) -> Option<u64> {
         let front = self.tabs.active();
-        let browsing =
-            self.shell.browsing == front && self.browser.picked().items().next().is_some();
-        front.filter(|_| !browsing)
+        let elsewhere = self.browser.picked().items().next().is_some() && !self.picks_front();
+        front.filter(|_| self.shell.browsing != front || !elsewhere)
+    }
+
+    /// Whether the browser's selection is the document in front alone, which the inspector
+    /// follows either way.
+    fn picks_front(&self) -> bool {
+        let front = self.tabs.active().map(crate::browser::Item::Local);
+        front.is_some() && self.browser.picked().sole() == front
     }
 
     /// The width the inspector will take. The browser's maximum is computed before the
@@ -1427,9 +1433,9 @@ impl DrawbarApp {
         }
     }
 
-    /// The inspector card: the front program's morph lens, the selection, and the
-    /// instrument while one is attached. Not drawn at all while hidden.
-    pub(crate) fn inspector_card(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+    /// The inspector's column of cards on the canvas, level with the browser's card. Not
+    /// drawn at all while hidden.
+    pub(crate) fn inspector_cards(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         if !self.shell.inspector_open {
             return;
         }
@@ -1446,7 +1452,7 @@ impl DrawbarApp {
                 let mut rect = ui.max_rect();
                 rect.max.x -= GUTTER;
                 rect.max.y -= GUTTER;
-                let mut inside = card(ui, rect);
+                let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                 let document = &mut self.document;
                 let cards = |ui: &mut egui::Ui| described.is_some_and(|id| document.cards(ui, id));
                 acts.extend(crate::inspector::ui(
@@ -1459,7 +1465,6 @@ impl DrawbarApp {
                     &self.device,
                     &self.queue,
                 ));
-                round_off(ui, rect);
             });
         if let Some(rect) = laid_out(ctx, "inspector") {
             self.shell.inspector_width = rect.width();
@@ -2785,6 +2790,28 @@ mod tests {
     }
 
     #[test]
+    fn the_inspectors_cards_stand_on_the_canvas_level_with_the_browsers_card() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let inspector = painted.region("inspector").expect("the inspector is open");
+        let browser = painted.region("browser").expect("the browser is open");
+        let fill = ctx.style().visuals.panel_fill;
+        let top = |region: egui::Rect| {
+            painted
+                .rects
+                .iter()
+                .filter(|drawn| drawn.fill == fill && region.contains_rect(drawn.rect))
+                .map(|drawn| drawn.rect)
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .unwrap_or_else(|| panic!("no card in {region:?}"))
+        };
+        let first = top(inspector);
+        assert_eq!(first.top(), top(browser).top());
+        assert_eq!(first.right(), inspector.right() - GUTTER);
+    }
+
+    #[test]
     fn a_documents_cards_stand_above_the_selections_folded_cards_while_it_is_followed() {
         use crate::workspace::Fresh;
         let ctx = egui::Context::default();
@@ -2793,12 +2820,16 @@ mod tests {
         front(&ctx, &mut app, Fresh::Stage4Program);
         let painted = settled(&ctx, &mut app, LARGE);
         let browser = painted.region("browser").expect("the browser is open");
-        let upright = painted
-            .words
-            .iter()
-            .find(|said| said.text == "Upright" && browser.contains_rect(said.rect))
-            .expect("Upright is in the browser")
-            .rect;
+        let row = |name: &str| {
+            let said = painted
+                .words
+                .iter()
+                .find(|said| said.text == name && browser.contains_rect(said.rect));
+            said.unwrap_or_else(|| panic!("{name} is not in the browser"))
+                .rect
+        };
+        let own = row("untitled");
+        let upright = row("Upright");
         // Each press waits out the double-click, which would open the row.
         let press = |app: &mut DrawbarApp, at: egui::Pos2| {
             let mut input = testing::screen(LARGE, testing::click(at));
@@ -2824,6 +2855,12 @@ mod tests {
                 "{body} is folded away"
             );
         }
+
+        let picked = press(&mut app, own.center());
+        assert!(
+            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, queue).is_none(),
+            "a click on its own row in the browser leaves it followed"
+        );
 
         let opened = press(&mut app, selection.center());
         assert!(in_inspector(&opened, queue).is_some(), "a click unfolds it");
