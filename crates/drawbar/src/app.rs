@@ -14,7 +14,7 @@ use crate::log::Log;
 use crate::midi::{Midi, Played};
 use crate::platform::Platform;
 use crate::queue::Queue;
-use crate::shell::{Dock, Shell};
+use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
@@ -1314,6 +1314,17 @@ impl DrawbarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
+                let front = self.tabs.active();
+                if self
+                    .shell
+                    .browsing
+                    .is_some_and(|over| Some(over) != front || pressed_inside(ui))
+                {
+                    self.shell.browsing = None;
+                    // ⚠️ The inspector is drawn before the center, so it follows a press
+                    // here only in a frame of its own.
+                    ui.ctx().request_repaint();
+                }
                 self.tab_row(ui, acts);
                 let rect = ui.available_rect_before_wrap();
                 let mut inside = crate::shell::card(ui, rect);
