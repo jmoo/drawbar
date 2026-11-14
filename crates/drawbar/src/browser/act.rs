@@ -393,8 +393,7 @@ impl Act {
     }
 }
 
-/// The bulk actions on the checked set, in the order the Selection card and a checked
-/// row's menu offer them.
+/// The bulk actions on the checked set, in the order the Selection card offers them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bulk {
     Queue,
@@ -402,17 +401,15 @@ pub enum Bulk {
     Export,
     /// Write the checked set, and what it needs, as one bundle.
     Bundle,
-    Tag,
     Delete,
 }
 
 impl Bulk {
-    pub const ALL: [Bulk; 6] = [
+    pub const ALL: [Bulk; 5] = [
         Bulk::Queue,
         Bulk::Copy,
         Bulk::Export,
         Bulk::Bundle,
-        Bulk::Tag,
         Bulk::Delete,
     ];
 
@@ -422,7 +419,6 @@ impl Bulk {
             Bulk::Copy => "Copy to this computer",
             Bulk::Export => "Export…",
             Bulk::Bundle => "Export as bundle…",
-            Bulk::Tag => "Tag…",
             Bulk::Delete => "Delete…",
         }
     }
@@ -430,7 +426,7 @@ impl Bulk {
     /// Why the control is disabled, shown on hover.
     pub fn nothing(self) -> &'static str {
         match self {
-            Bulk::Queue | Bulk::Export | Bulk::Tag => "nothing checked is on this computer",
+            Bulk::Queue | Bulk::Export => "nothing checked is on this computer",
             Bulk::Copy => "nothing checked is on the instrument",
             Bulk::Bundle => "nothing is checked",
             Bulk::Delete => "nothing is checked",
@@ -503,8 +499,6 @@ pub fn bundled(checked: &[Item], workspace: &Workspace, state: &DeviceState) -> 
 }
 
 /// The acts one bulk action runs over the checked set.
-///
-/// [`Bulk::Tag`] returns none: the tag is picked from its own menu, which makes the act.
 pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
     match action {
         Bulk::Queue => match checked
@@ -562,7 +556,6 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
                 }],
             }
         }
-        Bulk::Tag => Vec::new(),
         Bulk::Delete => checked
             .iter()
             .filter_map(|item| match item {
@@ -2142,10 +2135,6 @@ mod tests {
                 [Act::Export(1), Act::Export(2)]
             ),
             "one export per asset on this computer"
-        );
-        assert!(
-            bulk(Bulk::Tag, &checked, state).is_empty(),
-            "a tag is picked first"
         );
         assert!(matches!(
             bulk(Bulk::Delete, &checked, state).as_slice(),

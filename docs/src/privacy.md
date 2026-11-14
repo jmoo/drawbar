@@ -64,7 +64,7 @@ says what can delete it.
 **Help ▸ Report a problem** and **Help ▸ Send feedback** send what you write, and
 an email address if you give one. You choose what to attach: the recent errors, what
 build and instrument you are running, and the activity log, which names your files.
-The form shows exactly what will be sent before you send it. These are sent even when
+A problem report starts with all three checked, and feedback with none. The form shows exactly what will be sent before you send it. These are sent even when
 sharing is off, because you asked.
 
 Reports are emailed to drawbar's developer and are never published. They are deleted
