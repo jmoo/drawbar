@@ -1068,6 +1068,11 @@ impl Library {
             &self.widths,
             device.state.connected(),
         );
+        if tracks[self.by as usize].is_empty() {
+            self.by = Column::Name;
+            self.order = Order::Up;
+            ui.ctx().request_repaint();
+        }
         self.head(ui, width, &tracks);
         ui.add_space(ABOVE);
         if items.is_empty() {
@@ -1740,6 +1745,26 @@ mod tests {
         assert!(
             width_of(&alone, Column::Name) > width_of(&attached, Column::Name),
             "the name takes the room: {alone:?}"
+        );
+    }
+
+    #[test]
+    fn a_sort_by_a_hidden_column_falls_back_to_the_name() {
+        let mut bench = Bench::new();
+        let mut library = Library {
+            by: Column::Needs,
+            ..Library::default()
+        };
+        library_frame(
+            &mut library,
+            &mut bench,
+            egui::vec2(900.0, 540.0),
+            Vec::new(),
+        );
+        assert_eq!(
+            library.by,
+            Column::Name,
+            "Needs is hidden with no instrument"
         );
     }
 

@@ -824,9 +824,7 @@ fn tag_chip(ui: &mut egui::Ui, id: u64, name: &str, on_all: bool) -> egui::Respo
 
 /// The tags any picked asset has, and whether each is on all of them.
 ///
-/// ⚠️ Only tags in use, in list order. A tag nothing picked has is not part of this
-/// selection's state: the full list belongs to the tree, and adding a new tag belongs to
-/// the row's Tag menu.
+/// Only tags in use, in list order.
 fn wearing(picked: &[u64], worn: &Tags) -> Vec<(u64, String, bool)> {
     worn.all()
         .iter()
