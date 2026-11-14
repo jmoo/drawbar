@@ -18,8 +18,9 @@ use crate::slot::{noun, shown};
 use crate::ui::Ui;
 
 /// Write every member of `bundle` into a new folder `out`, at its archive path, with its
-/// manifest. Refuses an `out` that exists and a member whose path would leave it. The
-/// folder appears whole or not at all.
+/// manifest. Refuses an `out` that exists, a bundle whose manifest [`manifest::check`]
+/// refuses, and a member whose path would leave it. The folder appears whole or not at
+/// all.
 pub fn unpack(ui: &Ui, bundle: &Path, out: Option<PathBuf>) -> Result<(), String> {
     let at = |e: &dyn std::fmt::Display| format!("{}: {e}", bundle.display());
     let out = out.unwrap_or_else(|| bundle.with_extension(""));
@@ -28,6 +29,7 @@ pub fn unpack(ui: &Ui, bundle: &Path, out: Option<PathBuf>) -> Result<(), String
     }
     let mut file = std::fs::File::open(bundle).map_err(|e| at(&e))?;
     let directory = Directory::read_from(&mut file).map_err(|e| at(&e))?;
+    manifest::check(&mut file, &directory).map_err(|e| at(&e))?;
     let temp = fresh_dir(&out, "unpacking")?;
     let written = (|| {
         for member in &directory.members {
@@ -453,6 +455,63 @@ fn read_library(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = Writer::new(Vec::new());
+        for (name, bytes) in members {
+            let entry = entry(name, bytes, DosTime::default()).unwrap();
+            writer.member(entry, &mut &bytes[..]).unwrap();
+        }
+        writer.finish(&[]).unwrap()
+    }
+
+    /// `inspect` and `unpack` refuse the same malformed bundles for the same reason, and
+    /// `unpack` then writes nothing.
+    #[test]
+    fn inspect_and_unpack_refuse_a_malformed_bundle_alike() {
+        let dir = crate::edit::tests::scratch("unpack-malformed");
+        let program = nord_format::to_bytes(&nord_format::Entity::Program(
+            nord_format::Program::Electro5(nord_format::formats::ne5::program::new(
+                (0, 0).try_into().unwrap(),
+            )),
+        ))
+        .unwrap();
+        let one = ("Program/Bank 1/One.ne5p", &program[..]);
+        let cases = [
+            ("empty", Vec::new(), "the file is empty"),
+            ("empty-zip", stored(&[]), "the archive holds no members"),
+            ("no-manifest", stored(&[one]), "the archive has no meta.xml"),
+            (
+                "garbage-manifest",
+                stored(&[one, (manifest::PATH, b"garbage")]),
+                "meta.xml: a missing XML declaration",
+            ),
+        ];
+        for (what, bytes, why) in cases {
+            let path = dir.join(format!("{what}.ne5pbundle"));
+            std::fs::write(&path, &bytes).unwrap();
+            let inspected = nord_format::from_path(&path).map(drop).unwrap_err();
+            assert_eq!(inspected.to_string(), why, "inspect {what}");
+            let out = dir.join(what);
+            let unpacked = unpack(&Ui::piped(), &path, Some(out.clone())).unwrap_err();
+            assert_eq!(
+                unpacked,
+                format!("{}: {why}", path.display()),
+                "unpack {what}"
+            );
+            assert!(!out.exists(), "unpack {what} wrote {}", out.display());
+        }
+
+        let manifest = Manifest::electro5(manifest::ELECTRO5_FIRMWARE, Vec::new()).to_bytes();
+        let path = dir.join("whole.ne5pbundle");
+        std::fs::write(&path, stored(&[one, (manifest::PATH, &manifest)])).unwrap();
+        assert!(nord_format::from_path(&path).is_ok(), "inspect whole");
+        unpack(&Ui::piped(), &path, Some(dir.join("whole"))).expect("unpack whole");
+        assert_eq!(
+            std::fs::read(dir.join("whole").join(manifest::PATH)).unwrap(),
+            manifest
+        );
+    }
 
     #[test]
     fn an_archive_path_that_could_leave_the_folder_is_refused() {

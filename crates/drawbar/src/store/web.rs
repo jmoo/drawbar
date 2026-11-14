@@ -698,7 +698,7 @@ async fn rescue(
     let file = snapshot(handle.unchecked_ref()).await.ok()?;
     let source = Ok(crate::ondisk::Sliced::new(file.clone()));
     Some(Rescue {
-        slot: Rescue::slot_of(&name),
+        slot: nord_usb::envelope::Rescued::parse(&name).map(|rescued| rescued.at),
         at: format!("{at}/{name}").into(),
         broken: super::unwhole(source).await,
         file,

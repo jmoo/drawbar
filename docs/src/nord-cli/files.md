@@ -51,7 +51,8 @@ play which programs. [What is supported](../getting-started/support.md)
 says which instruments' bundles these commands handle.
 
 `inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
-Manager writes. They refuse one with a compressed, damaged or repeated file, or a
-path that leads outside the folder, and `unpack` then writes nothing.
+Manager writes. They refuse one with a compressed, damaged or repeated file, a
+path that leads outside the folder, or no `meta.xml` they can read, and `unpack`
+then writes nothing.
 
 Changing what is inside a file is [Editing](editing.md).

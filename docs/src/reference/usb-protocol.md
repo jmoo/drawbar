@@ -36,11 +36,11 @@ docs.rs describes the protocol beside the code that speaks it:
 The instrument does not overwrite an occupied program, set list, sample or piano
 slot in place, so a write there deletes the occupant first. drawbar and `nord`
 both read the occupant into a file under a `.partial` name, sync it, check its
-length and checksum, and only then rename it, all before the delete. A process
-that dies with the slot empty leaves the whole occupant on disk, and one that
-dies during the read leaves only a `.partial` file and the slot as it was. If the
-new write fails, the occupant is written back. Live slots and settings are
-written in place.
+length and checksum, and only then give it its own name, all before the delete.
+A process that dies with the slot empty leaves the whole occupant on disk, and
+one that dies during the read leaves only a `.partial` file and the slot as it
+was. If the new write fails, the occupant is written back. Live slots and
+settings are written in place.
 
 What `nord` does with that file is under
 [What a write does](../nord-cli/instrument.md#what-a-write-does), and what

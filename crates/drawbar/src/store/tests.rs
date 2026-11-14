@@ -1074,21 +1074,6 @@ fn a_rescue_a_read_only_library_cannot_take_stays_and_is_offered() {
 }
 
 #[test]
-fn a_rescue_names_the_slot_it_came_off() {
-    let slot = |name: &str| Rescue::slot_of(name);
-    assert_eq!(
-        slot("nord-rescued-3-12.ne5p"),
-        Some(Location::from_user(3, 12))
-    );
-    assert_eq!(
-        slot("nord-rescued-1-4 2.npno"),
-        Some(Location::from_user(1, 4))
-    );
-    assert_eq!(slot("nord-rescued-0-4.npno"), None);
-    assert_eq!(slot("Grand.npno"), None);
-}
-
-#[test]
 fn a_copy_off_a_slot_still_says_which_once_reopened() {
     let (root, fetched) = (Temp::new(), Temp::new());
     let program = Fresh::Program.bytes().unwrap();
