@@ -23,7 +23,7 @@ use crate::workspace::{LocalEntity, VerifyState, Workspace};
 mod advanced;
 pub mod capability;
 pub mod controls;
-pub(crate) mod field;
+mod field;
 mod header;
 pub mod keys;
 mod panel;
@@ -378,8 +378,8 @@ impl Document {
         };
         if let Some(open) = self.open.as_mut() {
             let basic = shape == Shape::Fields && face == Face::Basic;
-            // ⚠️ The Morph card is drawn before the document, so it shows a change only in
-            // a frame of its own.
+            // ⚠️ The document's cards are drawn before the document, so they show a change
+            // only in a frame of its own.
             if open.fields.publish(doc.as_ref().filter(|_| basic)) {
                 ui.ctx().request_repaint();
             }
@@ -843,13 +843,18 @@ impl Document {
             .collect()
     }
 
-    /// The lens of document `id`, for the Morph card, while its Basic face last drew a
-    /// body with morph slots.
-    pub fn morphs(&mut self, id: u64) -> Option<&mut field::State> {
-        self.open
-            .as_mut()
-            .filter(|open| open.id == id && open.fields.morphed())
-            .map(|open| &mut open.fields)
+    /// Draw the inspector cards of document `id`, from what it last drew, and say whether
+    /// there were any: a program's Morph card while its Basic face has morph slots.
+    pub fn cards(&mut self, ui: &mut egui::Ui, id: u64) -> bool {
+        let Some(open) = self.open.as_mut().filter(|open| open.id == id) else {
+            return false;
+        };
+        if !open.fields.morphed() {
+            return false;
+        }
+        let head = crate::inspector::Head::fixed(crate::icon::Glyph::Waves, "Morph");
+        crate::inspector::card(ui, head, |ui| field::lens(ui, &mut open.fields));
+        true
     }
 
     /// Close the document.

@@ -111,6 +111,10 @@ pub struct Shell {
     /// The inspector's Room and Info cards, each collapsed separately.
     pub room_open: bool,
     pub info_open: bool,
+    /// The Selection and Tags cards, each collapsed separately while a document's cards
+    /// stand above them.
+    pub(crate) selection_open: bool,
+    pub(crate) tags_open: bool,
     /// Each side panel's last dragged width, its gutter included.
     pub browser_width: f32,
     pub inspector_width: f32,
@@ -147,6 +151,8 @@ impl Default for Shell {
             inspector_open: true,
             room_open: true,
             info_open: false,
+            selection_open: false,
+            tags_open: false,
             browser_width: BROWSER + GUTTER,
             inspector_width: INSPECTOR + GUTTER,
             omnibox: String::new(),
@@ -1441,12 +1447,12 @@ impl DrawbarApp {
                 rect.max.x -= GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
-                let front = self.tabs.active();
-                let morphs = front.and_then(|id| self.document.morphs(id));
+                let document = &mut self.document;
+                let cards = |ui: &mut egui::Ui| described.is_some_and(|id| document.cards(ui, id));
                 acts.extend(crate::inspector::ui(
                     &mut inside,
                     described,
-                    morphs,
+                    cards,
                     &mut self.shell,
                     &mut self.browser,
                     &self.workspace,
@@ -2779,20 +2785,62 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_card_stays_put_as_the_morph_card_comes_and_goes_below_it() {
+    fn a_documents_cards_stand_above_the_selections_folded_cards_while_it_is_followed() {
         use crate::workspace::Fresh;
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
-        let at = |painted: &Painted, title: &str| {
-            in_inspector(painted, title).unwrap_or_else(|| panic!("{title} is missing"))
-        };
-        let alone = at(&settled(&ctx, &mut app, LARGE), "Selection");
-
+        let _ = kept(&mut app, ["Upright"]);
         front(&ctx, &mut app, Fresh::Stage4Program);
         let painted = settled(&ctx, &mut app, LARGE);
-        let selection = at(&painted, "Selection");
-        assert_eq!(selection.top(), alone.top(), "where it was");
-        assert!(at(&painted, "Morph").top() > selection.top(), "below it");
+        let browser = painted.region("browser").expect("the browser is open");
+        let upright = painted
+            .words
+            .iter()
+            .find(|said| said.text == "Upright" && browser.contains_rect(said.rect))
+            .expect("Upright is in the browser")
+            .rect;
+        // Each press waits out the double-click, which would open the row.
+        let press = |app: &mut DrawbarApp, at: egui::Pos2| {
+            let mut input = testing::screen(LARGE, testing::click(at));
+            input.time = Some(ctx.input(|input| input.time) + 1.0);
+            let _ = frame_from(&ctx, app, input);
+            settled(&ctx, app, LARGE)
+        };
+        let queue = crate::browser::Bulk::Queue.label();
+
+        let morph = in_inspector(&painted, "Morph").expect("the Morph card");
+        let selection = in_inspector(&painted, "Selection").expect("the Selection card");
+        assert!(
+            morph.top() < selection.top(),
+            "the document's cards come first"
+        );
+        assert!(
+            in_inspector(&painted, "Tags").is_some(),
+            "the Tags card's header"
+        );
+        for body in [queue, "New tag"] {
+            assert!(
+                in_inspector(&painted, body).is_none(),
+                "{body} is folded away"
+            );
+        }
+
+        let opened = press(&mut app, selection.center());
+        assert!(in_inspector(&opened, queue).is_some(), "a click unfolds it");
+
+        let browsing = press(&mut app, upright.center());
+        assert!(
+            in_inspector(&browsing, "Upright").is_some(),
+            "the browser's selection"
+        );
+        assert!(
+            in_inspector(&browsing, "Morph").is_none(),
+            "without the document's cards"
+        );
+        assert!(
+            in_inspector(&browsing, "New tag").is_some(),
+            "and nothing folded"
+        );
     }
 
     /// Without another frame, the card would wait for the next input to catch up with

@@ -1,10 +1,10 @@
-//! The right dock: the selection, the front program's morph lens, and the instrument
+//! The right dock: the cards of the document in front, the selection, and the instrument
 //! while one is attached.
 //!
-//! Each part is a card. The selection cards describe the document in front, or the rows
-//! selected in the browser while no document is. Morph switches the lens of the program
-//! in front, and is absent without one. Room and Info hold what an attached instrument
-//! reports, and are absent without one.
+//! Each part is a card. A document draws its own cards, such as a program's Morph card,
+//! while the dock describes it. The selection cards describe the document in front, or the
+//! rows selected in the browser while no document is. Room and Info hold what an attached
+//! instrument reports, and are absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,7 +17,6 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, Fit};
-use crate::document::field;
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
@@ -64,17 +63,17 @@ const BODY: egui::Margin = egui::Margin {
     bottom: 12,
 };
 
-/// The selection's cards, the front program's Morph card, then the instrument's while one
-/// is attached. The cards that come and go sit below the selection's, so it stays put.
+/// The document's cards, the selection's, then the instrument's while one is attached.
 ///
 /// `front` is the document in front, which the selection's cards describe alone in place
 /// of the browser's selection; a view of a slot is not on this computer, so they describe
-/// nothing for it. `morphs` is its lens, from the frame before this one.
+/// nothing for it. `cards` draws the document's own cards and says whether it drew any;
+/// while it does, the Selection and Tags cards fold beneath them.
 #[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
     front: Option<u64>,
-    morphs: Option<&mut field::State>,
+    cards: impl FnOnce(&mut egui::Ui) -> bool,
     shell: &mut Shell,
     browser: &mut Browser,
     workspace: &Workspace,
@@ -88,13 +87,9 @@ pub fn ui(
         .show(ui, |ui| {
             egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = GUTTER;
+                let folded = cards(ui).then_some((&mut shell.selection_open, &mut shell.tags_open));
                 let shown = shell.picked.now(front, browser, workspace, device, queue);
-                selection(ui, shown, browser, device, &mut acts);
-                if let Some(fields) = morphs {
-                    card(ui, Head::fixed(Glyph::Waves, "Morph"), |ui| {
-                        field::lens(ui, fields);
-                    });
-                }
+                selection(ui, shown, browser, device, folded, &mut acts);
                 if !device.state.connected() {
                     return;
                 }
@@ -112,7 +107,7 @@ pub fn ui(
 }
 
 /// What a card's header shows.
-struct Head<'a> {
+pub(crate) struct Head<'a> {
     glyph: Glyph,
     title: &'a str,
     /// A short word at the right end, in its own color.
@@ -123,7 +118,7 @@ struct Head<'a> {
 
 impl<'a> Head<'a> {
     /// The header of a card that is always open and has no badge.
-    fn fixed(glyph: Glyph, title: &'a str) -> Head<'a> {
+    pub(crate) fn fixed(glyph: Glyph, title: &'a str) -> Head<'a> {
         Head {
             glyph,
             title,
@@ -134,7 +129,7 @@ impl<'a> Head<'a> {
 }
 
 /// A card inside the dock: a header, and under it the body while the card is open.
-fn card(ui: &mut egui::Ui, head: Head, body: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn card(ui: &mut egui::Ui, head: Head, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(ui.visuals().window_fill)
         .corner_radius(INNER_RADIUS)
@@ -362,9 +357,15 @@ fn selection(
     shown: &Shown,
     browser: &mut Browser,
     device: &Device,
+    folded: Option<(&mut bool, &mut bool)>,
     acts: &mut Vec<Act>,
 ) {
-    card(ui, Head::fixed(Glyph::ScanEye, "Selection"), |ui| {
+    let (selection_open, tags_open) = folded.unzip();
+    let head = Head {
+        open: selection_open,
+        ..Head::fixed(Glyph::ScanEye, "Selection")
+    };
+    card(ui, head, |ui| {
         match &shown.about {
             About::Nothing => return faint(ui, "Nothing is selected."),
             About::One(facts) => facts.iter().for_each(|fact| fact_line(ui, fact)),
@@ -375,7 +376,7 @@ fn selection(
     if shown.checked.is_empty() {
         return;
     }
-    tags(ui, &shown.locals, &shown.wearing, acts);
+    tags(ui, &shown.locals, &shown.wearing, tags_open, acts);
     kept_apart(ui, &shown.locals, browser, acts);
     let answer = answered(browser, device).filter(|_| shown.sources.front.is_none());
     if let Some((slot, deps)) = answer {
@@ -751,11 +752,21 @@ fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut V
 ///
 /// ⚠️ Toggling only. Tags are created, renamed, and removed in the browser's Tags
 /// section, and added to something new from the row's Tag menu.
-fn tags(ui: &mut egui::Ui, picked: &[u64], wearing: &[(u64, String, bool)], acts: &mut Vec<Act>) {
+fn tags(
+    ui: &mut egui::Ui,
+    picked: &[u64],
+    wearing: &[(u64, String, bool)],
+    open: Option<&mut bool>,
+    acts: &mut Vec<Act>,
+) {
     if picked.is_empty() {
         return;
     }
-    card(ui, Head::fixed(Glyph::Tags, "Tags"), |ui| {
+    let head = Head {
+        open,
+        ..Head::fixed(Glyph::Tags, "Tags")
+    };
+    card(ui, head, |ui| {
         let made = tonal_button(ui, Some(Glyph::Plus), "New tag")
             .on_hover_text("a new tag on everything selected, named as you type");
         if made.clicked() {
@@ -945,7 +956,7 @@ mod tests {
                         super::ui(
                             panel,
                             None,
-                            None,
+                            |_: &mut egui::Ui| false,
                             shell,
                             &mut browser,
                             &workspace,
@@ -955,7 +966,13 @@ mod tests {
                         if let Some((slot, deps)) = answered(&browser, device) {
                             dependencies(panel, slot, deps);
                         }
-                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), &mut Vec::new());
+                        tags(
+                            panel,
+                            &[7, 8],
+                            &wearing(&[7, 8], &labels),
+                            None,
+                            &mut Vec::new(),
+                        );
                     });
             });
             said = testing::words(&output);
@@ -1212,7 +1229,16 @@ mod tests {
                         queue,
                         ..
                     } = bench;
-                    super::ui(panel, None, None, shell, browser, workspace, device, queue);
+                    super::ui(
+                        panel,
+                        None,
+                        |_: &mut egui::Ui| false,
+                        shell,
+                        browser,
+                        workspace,
+                        device,
+                        queue,
+                    );
                 });
         });
         testing::words(&output)
@@ -1349,7 +1375,13 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        tags(panel, picked, &wearing(picked, &labels), &mut Vec::new())
+                        tags(
+                            panel,
+                            picked,
+                            &wearing(picked, &labels),
+                            None,
+                            &mut Vec::new(),
+                        )
                     });
             });
             testing::words(&output)
@@ -1396,7 +1428,7 @@ mod tests {
                             acts.extend(super::ui(
                                 panel,
                                 None,
-                                None,
+                                |_: &mut egui::Ui| false,
                                 &mut shell,
                                 &mut browser,
                                 &workspace,
@@ -1468,7 +1500,14 @@ mod tests {
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
                         super::ui(
-                            panel, None, None, shell, browser, &workspace, &device, &queue,
+                            panel,
+                            None,
+                            |_: &mut egui::Ui| false,
+                            shell,
+                            browser,
+                            &workspace,
+                            &device,
+                            &queue,
                         );
                     });
             });
@@ -1511,7 +1550,7 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), acts)
+                        tags(panel, &[7, 8], &wearing(&[7, 8], &labels), None, acts)
                     });
             });
             testing::where_(&testing::painted(&output), "New tag").center()

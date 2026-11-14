@@ -11,7 +11,7 @@ desktop app.
 | **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
 | **Keyboard** (center) | The instrument's slots, bank by bank, once connected. |
-| **Inspector** (right) | What is selected and what you can do with it. With a sound from this computer in front, that sound alone, until you select something in the browser. Click the sound to return. Whichever one the inspector is not showing has its highlight grayed. A program in front also shows its morph sources. |
+| **Inspector** (right) | What is selected and what you can do with it. With a sound from this computer in front, that sound alone, until you select something in the browser. Click the sound to return. Whichever one the inspector is not showing has its highlight grayed. A program in front adds its morph sources above them, and Selection and Tags then fold to their titles. |
 | **Status line** | The last thing that happened. Click it for the activity log. |
 
 ⌘K (Ctrl+K) jumps to the search box. The buttons at the two ends of the row of
