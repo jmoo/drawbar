@@ -129,7 +129,7 @@ pub struct Shell {
     /// The zoom popover, and where its chip was last drawn, which toggles it.
     pub zoom_open: bool,
     pub zoom_chip: egui::Rect,
-    /// What the inspector's selection cards show, until the selection changes.
+    /// What the inspector's selection cards show, until what they describe changes.
     pub(crate) picked: crate::inspector::Picked,
     /// When the library's oldest unanswered change was first seen, as
     /// [`egui::InputState::time`] counts.
@@ -1415,12 +1415,11 @@ impl DrawbarApp {
                 rect.max.x -= GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
-                let morphs = match self.tabs.showing() {
-                    Spot::Document(id) => self.document.morphs(id),
-                    Spot::Library | Spot::Keyboard => None,
-                };
+                let front = self.tabs.active();
+                let morphs = front.and_then(|id| self.document.morphs(id));
                 acts.extend(crate::inspector::ui(
                     &mut inside,
+                    front,
                     morphs,
                     &mut self.shell,
                     &mut self.browser,
@@ -2777,6 +2776,97 @@ mod tests {
         assert!(
             !click(&mut app, "Panel"),
             "and the panel's own values again"
+        );
+    }
+
+    /// Programs kept on this computer under `names`.
+    fn kept<const N: usize>(app: &mut DrawbarApp, names: [&str; N]) -> [u64; N] {
+        names.map(|name| {
+            let bytes = crate::workspace::Fresh::Program.bytes().unwrap();
+            let origin = crate::workspace::Origin::Fresh;
+            app.workspace
+                .ingest(format!("{name}.ne5p"), origin, bytes, &mut app.log)
+        })
+    }
+
+    #[test]
+    fn the_selection_card_describes_the_document_in_front_and_keeps_the_librarys_selection() {
+        use crate::browser::Item;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [grand, upright, split] = kept(&mut app, ["Grand", "Upright", "Africa Split"]);
+        app.browser.check(Item::Local(grand));
+        app.browser.check(Item::Local(upright));
+        let picked: Vec<Item> = app.browser.picked().items().collect();
+        let two = |app: &mut DrawbarApp| {
+            let painted = settled(&ctx, app, LARGE);
+            let inspector = painted.region("inspector").expect("the inspector is open");
+            painted.words.iter().any(|said| {
+                said.text.starts_with("2 selected") && inspector.contains_rect(said.rect)
+            })
+        };
+        assert!(two(&mut app), "the library's two");
+
+        app.tabs.open(split);
+        let named = in_inspector(&settled(&ctx, &mut app, LARGE), "Africa Split");
+        assert!(named.is_some(), "the document in front");
+        assert!(!two(&mut app), "and only it");
+
+        app.tabs.show(Spot::Library);
+        assert!(two(&mut app), "the library's two again");
+        assert_eq!(app.browser.picked().items().collect::<Vec<_>>(), picked);
+
+        let view = app.workspace.view(
+            "Bass Manual.ne5p".into(),
+            crate::workspace::Origin::Device {
+                class: ObjectClass::Program,
+                at: nord_usb::Location { bank: 1, slot: 0 },
+            },
+            crate::workspace::Fresh::Program.bytes().unwrap(),
+            &mut app.log,
+        );
+        app.tabs.open(view);
+        let painted = settled(&ctx, &mut app, LARGE);
+        assert!(
+            in_inspector(&painted, "Nothing is selected.").is_some(),
+            "a view of a slot is not on this computer"
+        );
+    }
+
+    #[test]
+    fn the_selection_cards_act_on_the_document_in_front_alone() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.device.pretend_attached_as("Nord Electro 5");
+        app.device
+            .pretend_scanned(ObjectClass::Program, 1, &["", ""]);
+        app.device.pretend_partitions(&crate::device::ELECTRO5);
+        let [grand, split] = kept(&mut app, ["Grand", "Africa Split"]);
+        app.browser.check(crate::browser::Item::Local(grand));
+        let sunday = app.browser.tags.make("Sunday").unwrap();
+        for id in [grand, split] {
+            app.browser.tags.set(id, sunday, true);
+        }
+        let _ = app.browser.take_tag_asks();
+        app.tabs.open(split);
+        let click = |app: &mut DrawbarApp, word: &str| {
+            let painted = settled(&ctx, app, LARGE);
+            let at = in_inspector(&painted, word).unwrap_or_else(|| panic!("{word} is missing"));
+            let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
+        };
+
+        click(&mut app, crate::browser::Bulk::Queue.label());
+        assert!(app.queue.holds(split), "the document is queued");
+        assert!(!app.queue.holds(grand), "the library's selection is not");
+
+        click(&mut app, "Sunday");
+        assert_eq!(
+            app.browser.take_tag_asks(),
+            [crate::tags::Asked::Untag {
+                assets: vec![split],
+                name: "Sunday".into()
+            }],
+            "the chip takes the tag off the document alone"
         );
     }
 

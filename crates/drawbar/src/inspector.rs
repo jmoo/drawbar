@@ -2,8 +2,9 @@
 //! while one is attached.
 //!
 //! Each part is a card. Morph switches the lens of the program in front, and is absent
-//! without one. The selection cards describe the rows selected in the browser; Room and
-//! Info hold what an attached instrument reports, and are absent without one.
+//! without one. The selection cards describe the document in front, or the rows selected
+//! in the browser while no document is; Room and Info hold what an attached instrument
+//! reports, and are absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,9 +67,13 @@ const BODY: egui::Margin = egui::Margin {
 /// The front program's Morph card, the selection's cards, then the instrument's while one
 /// is attached.
 ///
-/// `morphs` is the lens of the document in front, from the frame before this one.
+/// `front` is the document in front, which the selection's cards describe alone in place
+/// of the browser's selection; a view of a slot is not on this computer, so they describe
+/// nothing for it. `morphs` is its lens, from the frame before this one.
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut egui::Ui,
+    front: Option<u64>,
     morphs: Option<&mut field::State>,
     shell: &mut Shell,
     browser: &mut Browser,
@@ -88,8 +93,8 @@ pub fn ui(
                         field::lens(ui, fields);
                     });
                 }
-                let picked = &mut shell.picked;
-                selection(ui, picked, browser, workspace, device, queue, &mut acts);
+                let shown = shell.picked.now(front, browser, workspace, device, queue);
+                selection(ui, shown, browser, device, &mut acts);
                 if !device.state.connected() {
                     return;
                 }
@@ -222,8 +227,8 @@ fn header(ui: &mut egui::Ui, head: Head) -> bool {
 /// row, and only this many of its assets are read for it.
 pub const MANY: usize = 64;
 
-/// What the selection's cards show, taken again only when the selection or something it
-/// describes changes.
+/// What the selection's cards show, taken again only when what they describe, or
+/// something it reads, changes.
 #[derive(Default)]
 pub struct Picked {
     shown: Option<Shown>,
@@ -235,6 +240,7 @@ pub struct Picked {
 /// Everything the selection's cards read.
 #[derive(PartialEq)]
 struct Sources {
+    front: Option<u64>,
     picked: u64,
     revision: u64,
     device: u64,
@@ -266,12 +272,14 @@ impl Picked {
     /// What the cards show now, taken again where something it reads has changed.
     fn now(
         &mut self,
+        front: Option<u64>,
         browser: &Browser,
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
     ) -> &Shown {
         let sources = Sources {
+            front,
             picked: browser.picked().revision(),
             revision: workspace.revision(),
             device: device.revision(),
@@ -297,7 +305,15 @@ impl Shown {
         device: &Device,
         queue: &Queue,
     ) -> Shown {
-        let checked = as_listed(browser.picked().items(), workspace);
+        let checked = match sources.front {
+            Some(id) => workspace
+                .get(id)
+                .filter(|entity| entity.kept)
+                .map(|_| Item::Local(id))
+                .into_iter()
+                .collect(),
+            None => as_listed(browser.picked().items(), workspace),
+        };
         let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
         let (about, going) = match checked.len() {
             0 => (About::Nothing, None),
@@ -339,18 +355,15 @@ impl Shown {
     }
 }
 
-/// The selection: what it is and what can be asked of it, how it is tagged, and what it
-/// plays, each in its own card.
+/// The selection, or the document in front: what it is and what can be asked of it, how
+/// it is tagged, and what it plays, each in its own card.
 fn selection(
     ui: &mut egui::Ui,
-    picked: &mut Picked,
+    shown: &Shown,
     browser: &mut Browser,
-    workspace: &Workspace,
     device: &Device,
-    queue: &Queue,
     acts: &mut Vec<Act>,
 ) {
-    let shown = picked.now(browser, workspace, device, queue);
     card(ui, Head::fixed(Glyph::ScanEye, "Selection"), |ui| {
         match &shown.about {
             About::Nothing => return faint(ui, "Nothing is selected."),
@@ -364,7 +377,8 @@ fn selection(
     }
     tags(ui, &shown.locals, &shown.wearing, acts);
     kept_apart(ui, &shown.locals, browser, acts);
-    if let Some((slot, deps)) = answered(browser, device) {
+    let answer = answered(browser, device).filter(|_| shown.sources.front.is_none());
+    if let Some((slot, deps)) = answer {
         dependencies(ui, slot, deps);
     }
 }
@@ -928,7 +942,16 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        super::ui(panel, None, shell, &mut browser, &workspace, device, &queue);
+                        super::ui(
+                            panel,
+                            None,
+                            None,
+                            shell,
+                            &mut browser,
+                            &workspace,
+                            device,
+                            &queue,
+                        );
                         if let Some((slot, deps)) = answered(&browser, device) {
                             dependencies(panel, slot, deps);
                         }
@@ -1189,7 +1212,7 @@ mod tests {
                         queue,
                         ..
                     } = bench;
-                    super::ui(panel, None, shell, browser, workspace, device, queue);
+                    super::ui(panel, None, None, shell, browser, workspace, device, queue);
                 });
         });
         testing::words(&output)
@@ -1373,6 +1396,7 @@ mod tests {
                             acts.extend(super::ui(
                                 panel,
                                 None,
+                                None,
                                 &mut shell,
                                 &mut browser,
                                 &workspace,
@@ -1443,7 +1467,9 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        super::ui(panel, None, shell, browser, &workspace, &device, &queue);
+                        super::ui(
+                            panel, None, None, shell, browser, &workspace, &device, &queue,
+                        );
                     });
             });
             testing::painted(&output)
