@@ -26,6 +26,7 @@ use crate::queue::{Queue, Queued};
 use crate::store::LibPath;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
+use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
 /// A menu item that runs `act` and closes the menu.
@@ -1386,7 +1387,7 @@ impl Browser {
         });
     }
 
-    /// Tag, opening [`Self::tag_items`] for `picked`, or disabled when nothing picked is
+    /// Tag, opening [`tag_items`] for `picked`, or disabled when nothing picked is
     /// on this computer.
     fn tag_menu(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
         if picked.is_empty() {
@@ -1394,25 +1395,7 @@ impl Browser {
                 .on_disabled_hover_text("nothing checked is on this computer");
             return;
         }
-        menu::button(ui, "Tag", |ui| self.tag_items(ui, picked, acts));
-    }
-
-    /// Every tag, checked where it is on everything selected, then New tag.
-    fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
-        for tag in self.tags.all() {
-            let on = self.tags.on_all(picked, tag.id);
-            if marked(ui, &tag.name, on) {
-                let ids = picked.to_vec();
-                acts.push(match on {
-                    true => Act::Untag { ids, tag: tag.id },
-                    false => Act::Tag { ids, tag: tag.id },
-                });
-            }
-        }
-        if !self.tags.all().is_empty() {
-            ui.separator();
-        }
-        offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
+        menu::button(ui, "Tag", |ui| tag_items(ui, &self.tags, picked, acts));
     }
 
     fn instrument_row(
@@ -1947,6 +1930,24 @@ fn mark(
 /// Where a queued asset is going, for the note that says so.
 fn destination(held: &Queued) -> String {
     format!("→ {}", place(held.class, held.at))
+}
+
+/// Every tag, checked where it is on everything `picked`, then New tag.
+pub fn tag_items(ui: &mut egui::Ui, tags: &Tags, picked: &[u64], acts: &mut Vec<Act>) {
+    for tag in tags.all() {
+        let on = tags.on_all(picked, tag.id);
+        if marked(ui, &tag.name, on) {
+            let ids = picked.to_vec();
+            acts.push(match on {
+                true => Act::Untag { ids, tag: tag.id },
+                false => Act::Tag { ids, tag: tag.id },
+            });
+        }
+    }
+    if !tags.all().is_empty() {
+        ui.separator();
+    }
+    offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ pub use drag::{
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
-pub use tree::{library_items, offers_libraries};
+pub use tree::{library_items, offers_libraries, tag_items};
 pub(crate) use tree::{offers_recent, recent};
 
 use drag::ghost;
