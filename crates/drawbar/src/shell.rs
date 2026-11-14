@@ -111,6 +111,10 @@ pub struct Shell {
     /// The inspector's Room and Info cards, each collapsed separately.
     pub room_open: bool,
     pub info_open: bool,
+    /// The Selection and Tags cards, each collapsed separately while a document's cards
+    /// stand above them.
+    pub(crate) selection_open: bool,
+    pub(crate) tags_open: bool,
     /// Each side panel's last dragged width, its gutter included.
     pub browser_width: f32,
     pub inspector_width: f32,
@@ -129,8 +133,12 @@ pub struct Shell {
     /// The zoom popover, and where its chip was last drawn, which toggles it.
     pub zoom_open: bool,
     pub zoom_chip: egui::Rect,
-    /// What the inspector's selection cards show, until the selection changes.
+    /// What the inspector's selection cards show, until what they describe changes.
     pub(crate) picked: crate::inspector::Picked,
+    /// The document in front when the browser last changed its selection itself. Over
+    /// it the selection's cards describe that selection, until the center is pressed,
+    /// another tab comes to front, or the selection is emptied.
+    pub(crate) browsing: Option<u64>,
     /// When the library's oldest unanswered change was first seen, as
     /// [`egui::InputState::time`] counts.
     pub(crate) changing: Option<f64>,
@@ -143,6 +151,8 @@ impl Default for Shell {
             inspector_open: true,
             room_open: true,
             info_open: false,
+            selection_open: false,
+            tags_open: false,
             browser_width: BROWSER + GUTTER,
             inspector_width: INSPECTOR + GUTTER,
             omnibox: String::new(),
@@ -154,6 +164,7 @@ impl Default for Shell {
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
             picked: Default::default(),
+            browsing: None,
             changing: None,
         }
     }
@@ -1335,6 +1346,9 @@ impl DrawbarApp {
             &self.workspace,
             &self.device.state,
         ));
+        // ⚠️ Set while the browser is hidden too: the library's table and the keyboard
+        // click through the same selection.
+        self.browser.followed = self.described().is_none() || self.picks_front();
         if !self.shell.browser_open {
             return;
         }
@@ -1352,6 +1366,7 @@ impl DrawbarApp {
                 rect.min.x += GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
+                let revision = self.browser.picked().revision();
                 inside.add_space(GUTTER);
                 if self.platform == Platform::Windows {
                     self.tools_row(&mut inside, acts);
@@ -1363,6 +1378,12 @@ impl DrawbarApp {
                     &self.queue,
                     &self.shell.filter,
                 ));
+                if self.browser.picked().revision() != revision {
+                    self.shell.browsing = self.tabs.active();
+                    // ⚠️ The browser's rows were drawn before this change, so they show
+                    // it only in a frame of their own.
+                    ui.ctx().request_repaint();
+                }
                 round_off(ui, rect);
             });
         if let Some(rect) = laid_out(ctx, "browser") {
@@ -1387,6 +1408,21 @@ impl DrawbarApp {
         ui.advance_cursor_after_rect(row);
     }
 
+    /// The document the selection's cards describe: the one in front, unless the browser's
+    /// selection changed over it and holds something else.
+    pub(crate) fn described(&self) -> Option<u64> {
+        let front = self.tabs.active();
+        let elsewhere = self.browser.picked().items().next().is_some() && !self.picks_front();
+        front.filter(|_| self.shell.browsing != front || !elsewhere)
+    }
+
+    /// Whether the browser's selection is the document in front alone, which the inspector
+    /// follows either way.
+    fn picks_front(&self) -> bool {
+        let front = self.tabs.active().map(crate::browser::Item::Local);
+        front.is_some() && self.browser.picked().sole() == front
+    }
+
     /// The width the inspector will take. The browser's maximum is computed before the
     /// inspector is added, so it must be asked for here.
     fn inspector_room(&self) -> f32 {
@@ -1396,12 +1432,13 @@ impl DrawbarApp {
         }
     }
 
-    /// The inspector card: the selection, and the instrument while one is attached. Not
+    /// The inspector's column of cards on the canvas, level with the browser's card. Not
     /// drawn at all while hidden.
-    pub(crate) fn inspector_card(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+    pub(crate) fn inspector_cards(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         if !self.shell.inspector_open {
             return;
         }
+        let described = self.described();
         let most = (ctx.available_rect().width() - CENTER_WIDE).max(SIDE_LEAST);
         egui::SidePanel::right("inspector")
             .resizable(true)
@@ -1414,16 +1451,19 @@ impl DrawbarApp {
                 let mut rect = ui.max_rect();
                 rect.max.x -= GUTTER;
                 rect.max.y -= GUTTER;
-                let mut inside = card(ui, rect);
+                let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                let document = &mut self.document;
+                let cards = |ui: &mut egui::Ui| described.is_some_and(|id| document.cards(ui, id));
                 acts.extend(crate::inspector::ui(
                     &mut inside,
+                    described,
+                    cards,
                     &mut self.shell,
                     &mut self.browser,
                     &self.workspace,
                     &self.device,
                     &self.queue,
                 ));
-                round_off(ui, rect);
             });
         if let Some(rect) = laid_out(ctx, "inspector") {
             self.shell.inspector_width = rect.width();
@@ -1474,6 +1514,11 @@ fn logo(ui: &mut egui::Ui) {
 /// holding less than it shows would shrink to its minimum.
 fn claim(ui: &mut egui::Ui) {
     ui.set_min_size(ui.max_rect().size());
+}
+
+/// Whether a pointer went down in this frame on `ui` itself, not on a popup over it.
+pub(crate) fn pressed_inside(ui: &egui::Ui) -> bool {
+    ui.input(|input| input.pointer.any_pressed()) && ui.rect_contains_pointer(ui.max_rect())
 }
 
 /// The id of one part of the zoom chip or its popover.
@@ -1665,6 +1710,7 @@ mod tests {
         panels: Vec<(String, egui::Rect)>,
         /// Every string the frame painted, headers and button labels included.
         words: Vec<testing::Word>,
+        rects: Vec<egui::epaint::RectShape>,
     }
 
     impl Painted {
@@ -1748,6 +1794,7 @@ mod tests {
             center,
             panels,
             words: testing::painted(&output),
+            rects: testing::rects(&output),
         }
     }
 
@@ -2685,6 +2732,404 @@ mod tests {
         let _ = drawn(&ctx, &mut app);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![command_r()]);
         assert!(!left(&ctx), "⌘R reached the tab with one attached");
+    }
+
+    /// Where the inspector painted `word`, if it did.
+    fn in_inspector(painted: &Painted, word: &str) -> Option<egui::Rect> {
+        let inspector = painted.region("inspector").expect("the inspector is open");
+        painted
+            .words
+            .iter()
+            .find(|said| said.text == word && inspector.contains_rect(said.rect))
+            .map(|said| said.rect)
+    }
+
+    /// Open a fresh `kind` in front and let the inspector catch up with it.
+    fn front(ctx: &egui::Context, app: &mut DrawbarApp, kind: crate::workspace::Fresh) {
+        let id = app.workspace.create(kind, &mut app.log).unwrap();
+        app.tabs.open(id);
+        let _ = settled(ctx, app, LARGE);
+    }
+
+    #[test]
+    fn the_morph_card_shows_for_a_program_with_morphs_on_its_basic_face_alone() {
+        use crate::workspace::Fresh;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let morph = |app: &mut DrawbarApp| in_inspector(&settled(&ctx, app, LARGE), "Morph");
+        assert!(morph(&mut app).is_none(), "with no document");
+
+        front(&ctx, &mut app, Fresh::Stage4Program);
+        let basic = settled(&ctx, &mut app, LARGE);
+        for chip in ["Morph", "Panel", "Wheel", "Aftertouch", "Control pedal"] {
+            assert!(
+                in_inspector(&basic, chip).is_some(),
+                "{chip} is not in the card"
+            );
+        }
+
+        let advanced = basic.at("Advanced").expect("the face switch says Advanced");
+        let _ = frame_of(&ctx, &mut app, LARGE, testing::click(advanced.center()));
+        assert!(morph(&mut app).is_none(), "on the Advanced face");
+
+        front(&ctx, &mut app, Fresh::Settings);
+        assert!(morph(&mut app).is_none(), "for a body with no morph slots");
+
+        front(&ctx, &mut app, Fresh::Text);
+        assert!(morph(&mut app).is_none(), "for a note");
+
+        app.tabs.show(Spot::Library);
+        assert!(morph(&mut app).is_none(), "with the library in front");
+    }
+
+    #[test]
+    fn the_inspectors_cards_stand_on_the_canvas_level_with_the_browsers_card() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let inspector = painted.region("inspector").expect("the inspector is open");
+        let browser = painted.region("browser").expect("the browser is open");
+        let fill = ctx.style().visuals.panel_fill;
+        let top = |region: egui::Rect| {
+            painted
+                .rects
+                .iter()
+                .filter(|drawn| drawn.fill == fill && region.contains_rect(drawn.rect))
+                .map(|drawn| drawn.rect)
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .unwrap_or_else(|| panic!("no card in {region:?}"))
+        };
+        let first = top(inspector);
+        assert_eq!(first.top(), top(browser).top());
+        assert_eq!(first.right(), inspector.right() - GUTTER);
+    }
+
+    #[test]
+    fn a_documents_cards_stand_above_the_selections_folded_cards_while_it_is_followed() {
+        use crate::workspace::Fresh;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let _ = kept(&mut app, ["Upright"]);
+        front(&ctx, &mut app, Fresh::Stage4Program);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let browser = painted.region("browser").expect("the browser is open");
+        let row = |name: &str| {
+            let said = painted
+                .words
+                .iter()
+                .find(|said| said.text == name && browser.contains_rect(said.rect));
+            said.unwrap_or_else(|| panic!("{name} is not in the browser"))
+                .rect
+        };
+        let own = row("untitled");
+        let upright = row("Upright");
+        // Each press waits out the double-click, which would open the row.
+        let press = |app: &mut DrawbarApp, at: egui::Pos2| {
+            let mut input = testing::screen(LARGE, testing::click(at));
+            input.time = Some(ctx.input(|input| input.time) + 1.0);
+            let _ = frame_from(&ctx, app, input);
+            settled(&ctx, app, LARGE)
+        };
+        let queue = crate::browser::Bulk::Queue.label();
+
+        let morph = in_inspector(&painted, "Morph").expect("the Morph card");
+        let selection = in_inspector(&painted, "Selection").expect("the Selection card");
+        assert!(
+            morph.top() < selection.top(),
+            "the document's cards come first"
+        );
+        assert!(
+            in_inspector(&painted, "Tags").is_some(),
+            "the Tags card's header"
+        );
+        for body in [queue, "New tag"] {
+            assert!(
+                in_inspector(&painted, body).is_none(),
+                "{body} is folded away"
+            );
+        }
+
+        let picked = press(&mut app, own.center());
+        assert!(
+            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, queue).is_none(),
+            "a click on its own row in the browser leaves it followed"
+        );
+
+        let opened = press(&mut app, selection.center());
+        assert!(in_inspector(&opened, queue).is_some(), "a click unfolds it");
+
+        let browsing = press(&mut app, upright.center());
+        assert!(
+            in_inspector(&browsing, "Upright").is_some(),
+            "the browser's selection"
+        );
+        assert!(
+            in_inspector(&browsing, "Morph").is_none(),
+            "without the document's cards"
+        );
+        assert!(
+            in_inspector(&browsing, "New tag").is_some(),
+            "and nothing folded"
+        );
+    }
+
+    /// Without another frame, the card would wait for the next input to catch up with
+    /// a program just opened.
+    #[test]
+    fn the_morph_card_catches_up_with_no_further_input() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let _ = settled(&ctx, &mut app, LARGE);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Stage4Program, &mut app.log)
+            .unwrap();
+        app.tabs.open(id);
+        let mut painted = frame_of(&ctx, &mut app, LARGE, Vec::new());
+        for _ in 0..8 {
+            if in_inspector(&painted, "Morph").is_some() || !ctx.has_requested_repaint() {
+                break;
+            }
+            painted = frame_of(&ctx, &mut app, LARGE, Vec::new());
+        }
+        assert!(in_inspector(&painted, "Morph").is_some());
+    }
+
+    #[test]
+    fn a_morph_source_clicked_in_the_card_turns_the_programs_lens() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        front(&ctx, &mut app, crate::workspace::Fresh::Stage4Program);
+        let click = |app: &mut DrawbarApp, chip: &str| {
+            let painted = settled(&ctx, app, LARGE);
+            let at = in_inspector(&painted, chip).expect("the chip is in the card");
+            let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
+            settled(&ctx, app, LARGE).wrote("Back to the panel")
+        };
+        assert!(click(&mut app, "Wheel"), "the document shows wheel targets");
+        assert!(
+            !click(&mut app, "Panel"),
+            "and the panel's own values again"
+        );
+    }
+
+    /// Programs kept on this computer under `names`.
+    fn kept<const N: usize>(app: &mut DrawbarApp, names: [&str; N]) -> [u64; N] {
+        names.map(|name| {
+            let bytes = crate::workspace::Fresh::Program.bytes().unwrap();
+            let origin = crate::workspace::Origin::Fresh;
+            app.workspace
+                .ingest(format!("{name}.ne5p"), origin, bytes, &mut app.log)
+        })
+    }
+
+    #[test]
+    fn the_selection_card_describes_the_document_in_front_and_keeps_the_librarys_selection() {
+        use crate::browser::Item;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [grand, upright, split] = kept(&mut app, ["Grand", "Upright", "Africa Split"]);
+        app.browser.check(Item::Local(grand));
+        app.browser.check(Item::Local(upright));
+        let picked: Vec<Item> = app.browser.picked().items().collect();
+        let two = |app: &mut DrawbarApp| {
+            let painted = settled(&ctx, app, LARGE);
+            let inspector = painted.region("inspector").expect("the inspector is open");
+            painted.words.iter().any(|said| {
+                said.text.starts_with("2 selected") && inspector.contains_rect(said.rect)
+            })
+        };
+        assert!(two(&mut app), "the library's two");
+
+        app.tabs.open(split);
+        let named = in_inspector(&settled(&ctx, &mut app, LARGE), "Africa Split");
+        assert!(named.is_some(), "the document in front");
+        assert!(!two(&mut app), "and only it");
+
+        app.tabs.show(Spot::Library);
+        assert!(two(&mut app), "the library's two again");
+        assert_eq!(app.browser.picked().items().collect::<Vec<_>>(), picked);
+
+        let view = app.workspace.view(
+            "Bass Manual.ne5p".into(),
+            crate::workspace::Origin::Device {
+                class: ObjectClass::Program,
+                at: nord_usb::Location { bank: 1, slot: 0 },
+            },
+            crate::workspace::Fresh::Program.bytes().unwrap(),
+            &mut app.log,
+        );
+        app.tabs.open(view);
+        let painted = settled(&ctx, &mut app, LARGE);
+        assert!(
+            in_inspector(&painted, "Nothing is selected.").is_some(),
+            "a view of a slot is not on this computer"
+        );
+    }
+
+    #[test]
+    fn the_inspector_follows_a_selection_made_in_the_browser_until_the_document_is_pressed() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [kept_upright, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        app.tabs.open(split);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let browser = painted.region("browser").expect("the browser is open");
+        let in_browser = |painted: &Painted, word: &str| {
+            let said = painted
+                .words
+                .iter()
+                .find(|said| said.text == word && browser.contains_rect(said.rect));
+            said.unwrap_or_else(|| panic!("{word} is not in the browser"))
+                .rect
+        };
+        let upright = in_browser(&painted, "Upright");
+        let shows = |app: &mut DrawbarApp, name: &str| {
+            in_inspector(&settled(&ctx, app, LARGE), name).is_some()
+        };
+        // Each press waits out the double-click, which would open the row.
+        let press = |app: &mut DrawbarApp, at: egui::Pos2| {
+            let mut input = testing::screen(LARGE, testing::click(at));
+            input.time = Some(ctx.input(|input| input.time) + 1.0);
+            let _ = frame_from(&ctx, app, input);
+        };
+        let row_fills = |app: &mut DrawbarApp| -> Vec<egui::Color32> {
+            let painted = settled(&ctx, app, LARGE);
+            painted
+                .rects
+                .iter()
+                .filter(|drawn| drawn.rect.contains(upright.center()))
+                .map(|drawn| drawn.fill)
+                .collect()
+        };
+        let visuals = ctx.style().visuals.clone();
+        assert!(shows(&mut app, "Africa Split"), "the document in front");
+
+        press(&mut app, upright.center());
+        assert!(shows(&mut app, "Upright"), "a row selected in the browser");
+        assert_eq!(app.tabs.active(), Some(split), "under the same document");
+        let lit = row_fills(&mut app);
+        assert!(lit.contains(&visuals.selection.bg_fill), "{lit:?}");
+
+        press(&mut app, painted.center.center());
+        assert!(shows(&mut app, "Africa Split"), "a press on the document");
+        let gray = row_fills(&mut app);
+        assert!(
+            gray.contains(&visuals.widgets.active.weak_bg_fill)
+                && !gray.contains(&visuals.selection.bg_fill),
+            "the row the inspector no longer follows is gray: {gray:?}"
+        );
+        press(&mut app, in_browser(&painted, "Tags").center());
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "a press in the browser that selects nothing"
+        );
+
+        press(&mut app, upright.center());
+        assert!(
+            shows(&mut app, "Upright"),
+            "a press on the gray row keeps it"
+        );
+        app.tabs.show(Spot::Library);
+        let _ = settled(&ctx, &mut app, LARGE);
+        app.tabs.open(split);
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "the document once it comes to front again"
+        );
+
+        press(&mut app, upright.center());
+        press(&mut app, upright.center());
+        assert!(app.browser.picked().items().next().is_none(), "deselected");
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "the document over an empty selection"
+        );
+        app.browser.check(crate::browser::Item::Local(kept_upright));
+        assert!(
+            shows(&mut app, "Africa Split"),
+            "a selection made outside the browser afterwards"
+        );
+    }
+
+    #[test]
+    fn a_filter_row_keeps_its_color_while_the_inspector_follows_a_document() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [_, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        let sunday = app.browser.tags.make("Sunday").expect("a new tag");
+        app.shell.filter.narrow(crate::filter::Narrow::Tag(sunday));
+        app.tabs.open(split);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let browser = painted.region("browser").expect("the browser is open");
+        let lit = ctx.style().visuals.selection.bg_fill;
+        assert!(
+            painted
+                .rects
+                .iter()
+                .any(|drawn| drawn.fill == lit && browser.contains_rect(drawn.rect)),
+            "the tag's row is lit"
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_librarys_table_lets_go_of_a_selected_row_while_the_browser_is_hidden() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let [upright, split] = kept(&mut app, ["Upright", "Africa Split"]);
+        app.browser.check(crate::browser::Item::Local(upright));
+        app.tabs.open(split);
+        let _ = settled(&ctx, &mut app, LARGE);
+        app.shell.browser_open = false;
+        app.tabs.show(Spot::Library);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let row = painted
+            .words
+            .iter()
+            .find(|said| said.text == "Upright" && painted.center.contains_rect(said.rect))
+            .expect("Upright is in the table")
+            .rect;
+        let mut input = testing::screen(LARGE, testing::click(row.center()));
+        input.time = Some(ctx.input(|input| input.time) + 1.0);
+        let _ = frame_from(&ctx, &mut app, input);
+        assert!(app.browser.picked().items().next().is_none());
+    }
+
+    #[test]
+    fn the_selection_cards_act_on_the_document_in_front_alone() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.device.pretend_attached_as("Nord Electro 5");
+        app.device
+            .pretend_scanned(ObjectClass::Program, 1, &["", ""]);
+        app.device.pretend_partitions(&crate::device::ELECTRO5);
+        let [grand, split] = kept(&mut app, ["Grand", "Africa Split"]);
+        app.browser.check(crate::browser::Item::Local(grand));
+        let sunday = app.browser.tags.make("Sunday").unwrap();
+        for id in [grand, split] {
+            app.browser.tags.set(id, sunday, true);
+        }
+        let _ = app.browser.take_tag_asks();
+        app.tabs.open(split);
+        let click = |app: &mut DrawbarApp, word: &str| {
+            let painted = settled(&ctx, app, LARGE);
+            let at = in_inspector(&painted, word).unwrap_or_else(|| panic!("{word} is missing"));
+            let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
+        };
+
+        click(&mut app, crate::browser::Bulk::Queue.label());
+        assert!(app.queue.holds(split), "the document is queued");
+        assert!(!app.queue.holds(grand), "the library's selection is not");
+
+        click(&mut app, "Sunday");
+        assert_eq!(
+            app.browser.take_tag_asks(),
+            [crate::tags::Asked::Untag {
+                assets: vec![split],
+                name: "Sunday".into()
+            }],
+            "the chip takes the tag off the document alone"
+        );
     }
 
     /// The activity popover opens from the status line and its key, and Escape closes

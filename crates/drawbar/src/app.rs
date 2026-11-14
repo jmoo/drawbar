@@ -14,7 +14,7 @@ use crate::log::Log;
 use crate::midi::{Midi, Played};
 use crate::platform::Platform;
 use crate::queue::Queue;
-use crate::shell::{Dock, Shell};
+use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
@@ -1231,7 +1231,7 @@ impl eframe::App for DrawbarApp {
         self.top_bar(ctx, frame, &mut acts);
         self.status_line(ctx, &mut acts);
         self.browser_card(ctx, &mut acts);
-        self.inspector_card(ctx, &mut acts);
+        self.inspector_cards(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
         // An instrument that goes away takes its queue's review with it.
         self.shell.review_open &= self.attached();
@@ -1314,6 +1314,18 @@ impl DrawbarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
+                let front = self.tabs.active();
+                let empty = self.browser.picked().items().next().is_none();
+                if self
+                    .shell
+                    .browsing
+                    .is_some_and(|over| Some(over) != front || empty || pressed_inside(ui))
+                {
+                    self.shell.browsing = None;
+                    // ⚠️ The inspector is drawn before the center, so it follows a press
+                    // here only in a frame of its own.
+                    ui.ctx().request_repaint();
+                }
                 self.tab_row(ui, acts);
                 let rect = ui.available_rect_before_wrap();
                 let mut inside = crate::shell::card(ui, rect);
@@ -1370,7 +1382,8 @@ impl DrawbarApp {
                 .max_rect(strip)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        self.tabs.ui(&mut tabs, &self.workspace, acts);
+        let followed = self.described() == self.tabs.active();
+        self.tabs.ui(&mut tabs, &self.workspace, followed, acts);
         ui.advance_cursor_after_rect(row);
     }
 

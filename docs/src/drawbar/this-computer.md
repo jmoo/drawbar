@@ -267,8 +267,8 @@ Nothing kept apart changes your library until you choose to:
 A change marked “only taking it settles this” replaced a value that no computer
 shows any more, so it stays listed until you take it.
 
-When you select a sound with changes kept apart, the inspector says so and
-links to them.
+When the inspector shows a sound with changes kept apart, it says so and links
+to them.
 
 ## Demo sounds
 

@@ -178,9 +178,18 @@ impl Tabs {
 
     /// The row of tabs, in the `Ui` the shell gives it between the two panel toggles.
     ///
+    /// The tab in front marks its glyph with the accent while `followed`: while the
+    /// inspector describes what it shows.
+    ///
     /// ⚠️ The scroll area's salt is [`SCROLL`]: the document body below has its own salt,
     /// and two unsalted areas in one `Ui` would share a state.
-    pub fn ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace, acts: &mut Vec<Act>) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        followed: bool,
+        acts: &mut Vec<Act>,
+    ) {
         let mut close = None;
         let mut activate = None;
         let mut dropped = None;
@@ -199,7 +208,7 @@ impl Tabs {
                             continue;
                         };
                         let active = self.active == spot;
-                        let drawn = paint(ui, &face, active);
+                        let drawn = paint(ui, &face, active, active && followed);
                         painted.push((index, drawn.tab.rect));
                         let mut label = drawn.tab;
                         if active && came_forward {
@@ -313,8 +322,9 @@ struct Drawn {
 }
 
 /// A tab: a rounded pill on the canvas, filled with the card's color while it is in
-/// front, so the tab and the document under it read as one piece.
-fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
+/// front, so the tab and the document under it read as one piece. Its glyph takes the
+/// accent while `lit`.
+fn paint(ui: &mut egui::Ui, face: &Face, active: bool, lit: bool) -> Drawn {
     let visuals = ui.visuals().clone();
     let (rect, tab) = ui.allocate_exact_size(
         egui::vec2(width(ui, face), TAB),
@@ -336,7 +346,7 @@ fn paint(ui: &mut egui::Ui, face: &Face, active: bool) -> Drawn {
         painter.add(shadow.as_shape(rect, 8));
         painter.rect_filled(rect, 8.0, visuals.panel_fill);
     }
-    let mark = match active {
+    let mark = match lit {
         true => crate::app::accent(&visuals),
         false => ink,
     };
@@ -677,9 +687,37 @@ mod tests {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new())
                 .show(ctx, |ui| {
-                    tabs.ui(ui, ws, &mut Vec::new());
+                    tabs.ui(ui, ws, true, &mut Vec::new());
                 });
         })
+    }
+
+    #[test]
+    fn the_tab_in_front_marks_its_glyph_with_the_accent_only_while_followed() {
+        let (mut tabs, ws) = (Tabs::default(), workspace());
+        let ctx = testing::context();
+        egui_extras::install_image_loaders(&ctx);
+        let mut accented = |followed: bool| {
+            let mut output = None;
+            for _ in 0..3 {
+                output = Some(testing::run(
+                    &ctx,
+                    testing::screen(egui::vec2(600.0, 40.0), Vec::new()),
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            tabs.ui(ui, &ws, followed, &mut Vec::new());
+                        });
+                    },
+                ));
+            }
+            let accent = crate::app::accent(&ctx.style().visuals);
+            let output = output.expect("three frames ran");
+            testing::rects(&output)
+                .iter()
+                .any(|drawn| drawn.fill == accent)
+        };
+        assert!(accented(true));
+        assert!(!accented(false));
     }
 
     /// The library and keyboard tabs show no single asset, so pruning never removes them.

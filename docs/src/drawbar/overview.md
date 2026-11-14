@@ -53,8 +53,8 @@ them** turns on **Show hidden files** and opens the folder, which stays.
 
 Tags label sounds without moving them, and a sound can have several. **Tag ▸ New
 tag…** in a row's menu tags the selected sounds. Click a tag in the inspector to
-put it on, or take it off, everything selected. Renaming a tag to the name of
-another merges the two. Removing a tag deletes no sounds.
+put it on, or take it off, everything the inspector shows. Renaming a tag to the
+name of another merges the two. Removing a tag deletes no sounds.
 
 ## MIDI controllers
 
