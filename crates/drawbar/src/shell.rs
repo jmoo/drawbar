@@ -1396,8 +1396,8 @@ impl DrawbarApp {
         }
     }
 
-    /// The inspector card: the selection, and the instrument while one is attached. Not
-    /// drawn at all while hidden.
+    /// The inspector card: the front program's morph lens, the selection, and the
+    /// instrument while one is attached. Not drawn at all while hidden.
     pub(crate) fn inspector_card(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         if !self.shell.inspector_open {
             return;
@@ -1415,8 +1415,13 @@ impl DrawbarApp {
                 rect.max.x -= GUTTER;
                 rect.max.y -= GUTTER;
                 let mut inside = card(ui, rect);
+                let morphs = match self.tabs.showing() {
+                    Spot::Document(id) => self.document.morphs(id),
+                    Spot::Library | Spot::Keyboard => None,
+                };
                 acts.extend(crate::inspector::ui(
                     &mut inside,
+                    morphs,
                     &mut self.shell,
                     &mut self.browser,
                     &self.workspace,
@@ -2685,6 +2690,72 @@ mod tests {
         let _ = drawn(&ctx, &mut app);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![command_r()]);
         assert!(!left(&ctx), "⌘R reached the tab with one attached");
+    }
+
+    /// Where the inspector painted `word`, if it did.
+    fn in_inspector(painted: &Painted, word: &str) -> Option<egui::Rect> {
+        let inspector = painted.region("inspector").expect("the inspector is open");
+        painted
+            .words
+            .iter()
+            .find(|said| said.text == word && inspector.contains_rect(said.rect))
+            .map(|said| said.rect)
+    }
+
+    /// Open a fresh `kind` in front and let the inspector catch up with it.
+    fn front(ctx: &egui::Context, app: &mut DrawbarApp, kind: crate::workspace::Fresh) {
+        let id = app.workspace.create(kind, &mut app.log).unwrap();
+        app.tabs.open(id);
+        let _ = settled(ctx, app, LARGE);
+    }
+
+    #[test]
+    fn the_morph_card_shows_for_a_program_with_morphs_on_its_basic_face_alone() {
+        use crate::workspace::Fresh;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let morph = |app: &mut DrawbarApp| in_inspector(&settled(&ctx, app, LARGE), "Morph");
+        assert!(morph(&mut app).is_none(), "with no document");
+
+        front(&ctx, &mut app, Fresh::Stage4Program);
+        let basic = settled(&ctx, &mut app, LARGE);
+        for chip in ["Morph", "Panel", "Wheel", "Aftertouch", "Control pedal"] {
+            assert!(
+                in_inspector(&basic, chip).is_some(),
+                "{chip} is not in the card"
+            );
+        }
+
+        let advanced = basic.at("Advanced").expect("the face switch says Advanced");
+        let _ = frame_of(&ctx, &mut app, LARGE, testing::click(advanced.center()));
+        assert!(morph(&mut app).is_none(), "on the Advanced face");
+
+        front(&ctx, &mut app, Fresh::Settings);
+        assert!(morph(&mut app).is_none(), "for a body with no morph slots");
+
+        front(&ctx, &mut app, Fresh::Text);
+        assert!(morph(&mut app).is_none(), "for a note");
+
+        app.tabs.show(Spot::Library);
+        assert!(morph(&mut app).is_none(), "with the library in front");
+    }
+
+    #[test]
+    fn a_morph_source_clicked_in_the_card_turns_the_programs_lens() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        front(&ctx, &mut app, crate::workspace::Fresh::Stage4Program);
+        let click = |app: &mut DrawbarApp, chip: &str| {
+            let painted = settled(&ctx, app, LARGE);
+            let at = in_inspector(&painted, chip).expect("the chip is in the card");
+            let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
+            settled(&ctx, app, LARGE).wrote("Back to the panel")
+        };
+        assert!(click(&mut app, "Wheel"), "the document shows wheel targets");
+        assert!(
+            !click(&mut app, "Panel"),
+            "and the panel's own values again"
+        );
     }
 
     /// The activity popover opens from the status line and its key, and Escape closes

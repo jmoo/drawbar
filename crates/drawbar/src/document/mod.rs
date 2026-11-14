@@ -23,7 +23,7 @@ use crate::workspace::{LocalEntity, VerifyState, Workspace};
 mod advanced;
 pub mod capability;
 pub mod controls;
-mod field;
+pub(crate) mod field;
 mod header;
 pub mod keys;
 mod panel;
@@ -376,6 +376,10 @@ impl Document {
             (Some(decoded), Some(fields)) => Some(field::of(decoded, fields)),
             _ => None,
         };
+        if let Some(open) = self.open.as_mut() {
+            let basic = shape == Shape::Fields && face == Face::Basic;
+            open.fields.publish(doc.as_ref().filter(|_| basic));
+        }
         let pending = match (doc.is_some(), self.open.as_ref()) {
             (true, Some(open)) => open.fields.pending().len(),
             _ => 0,
@@ -833,6 +837,15 @@ impl Document {
             .filter(|(id, _)| Some(*id) == opened)
             .filter_map(|(_, root)| u8::try_from(root).ok())
             .collect()
+    }
+
+    /// The lens of document `id`, for the Morph card, while its Basic face last drew a
+    /// body with morph slots.
+    pub fn morphs(&mut self, id: u64) -> Option<&mut field::State> {
+        self.open
+            .as_mut()
+            .filter(|open| open.id == id && open.fields.morphed())
+            .map(|open| &mut open.fields)
     }
 
     /// Close the document.

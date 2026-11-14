@@ -60,9 +60,10 @@ Where a program refers to a piano or sample by id, drawbar asks the connected
 instrument for its name and shows it. Sections the program stores but is not
 using are folded away.
 
-A control with a morph shows three dots. Pick a morph source from the **MORPH**
-chips and every morphed control shows that source's target instead. Editing then
-writes the morph.
+A control with a morph shows three dots. Pick a morph source in the **Morph** card
+at the top of the inspector and every morphed control shows that source's target
+instead. Editing then writes the morph. **Panel**, or **Back to the panel** above
+the sections, shows the panel's own values again.
 
 ## Set lists
 

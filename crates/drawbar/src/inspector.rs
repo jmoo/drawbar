@@ -1,7 +1,9 @@
-//! The right dock: the selection, and the instrument while one is attached.
+//! The right dock: the front program's morph lens, the selection, and the instrument
+//! while one is attached.
 //!
-//! Each part is a card. The selection cards describe the rows selected in the browser;
-//! Room and Info hold what an attached instrument reports, and are absent without one.
+//! Each part is a card. Morph switches the lens of the program in front, and is absent
+//! without one. The selection cards describe the rows selected in the browser; Room and
+//! Info hold what an attached instrument reports, and are absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +16,7 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, Fit};
+use crate::document::field;
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, GAP, GUTTER, INNER_RADIUS};
@@ -60,9 +63,13 @@ const BODY: egui::Margin = egui::Margin {
     bottom: 12,
 };
 
-/// The selection's cards, then the instrument's while one is attached.
+/// The front program's Morph card, the selection's cards, then the instrument's while one
+/// is attached.
+///
+/// `morphs` is the lens of the document in front, from the frame before this one.
 pub fn ui(
     ui: &mut egui::Ui,
+    morphs: Option<&mut field::State>,
     shell: &mut Shell,
     browser: &mut Browser,
     workspace: &Workspace,
@@ -76,6 +83,11 @@ pub fn ui(
         .show(ui, |ui| {
             egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = GUTTER;
+                if let Some(fields) = morphs {
+                    card(ui, Head::fixed(Glyph::Waves, "Morph"), |ui| {
+                        field::lens(ui, fields);
+                    });
+                }
                 let picked = &mut shell.picked;
                 selection(ui, picked, browser, workspace, device, queue, &mut acts);
                 if !device.state.connected() {
@@ -916,7 +928,7 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        super::ui(panel, shell, &mut browser, &workspace, device, &queue);
+                        super::ui(panel, None, shell, &mut browser, &workspace, device, &queue);
                         if let Some((slot, deps)) = answered(&browser, device) {
                             dependencies(panel, slot, deps);
                         }
@@ -1177,7 +1189,7 @@ mod tests {
                         queue,
                         ..
                     } = bench;
-                    super::ui(panel, shell, browser, workspace, device, queue);
+                    super::ui(panel, None, shell, browser, workspace, device, queue);
                 });
         });
         testing::words(&output)
@@ -1360,6 +1372,7 @@ mod tests {
                         .show(ctx, |panel| {
                             acts.extend(super::ui(
                                 panel,
+                                None,
                                 &mut shell,
                                 &mut browser,
                                 &workspace,
@@ -1430,7 +1443,7 @@ mod tests {
                 egui::SidePanel::right("inspector")
                     .exact_width(crate::shell::INSPECTOR)
                     .show(ctx, |panel| {
-                        super::ui(panel, shell, browser, &workspace, &device, &queue);
+                        super::ui(panel, None, shell, browser, &workspace, &device, &queue);
                     });
             });
             testing::painted(&output)

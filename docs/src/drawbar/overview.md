@@ -11,7 +11,7 @@ desktop app.
 | **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
 | **Keyboard** (center) | The instrument's slots, bank by bank, once connected. |
-| **Inspector** (right) | What is selected and what you can do with it. |
+| **Inspector** (right) | What is selected and what you can do with it, and the morph sources of a program in front. |
 | **Status line** | The last thing that happened. Click it for the activity log. |
 
 ⌘K (Ctrl+K) jumps to the search box. The buttons at the two ends of the row of
