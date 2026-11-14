@@ -3667,7 +3667,7 @@ const CAPABILITIES: Stands = [
     (Cap::ReadOnly, "per file"),
     (
         Cap::Editable,
-        "File › New › Piano library… builds one from WAVs; a template is optional",
+        "File › New › Piano library (.npno)… builds one from WAVs; a template is optional",
     ),
     (Cap::Editable, "strokes are self-contained"),
     (Cap::Editable, "one stroke at a time, on request"),
