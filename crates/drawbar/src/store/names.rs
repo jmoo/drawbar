@@ -67,6 +67,19 @@ pub fn windows_refusal(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Why this computer cannot open the library path `path`, naming the first name in it
+/// that [`windows_refusal`] refuses, or `None` when it can. Only Windows refuses one.
+pub fn refused_here(path: &str) -> Option<String> {
+    cfg!(windows).then(|| windows_refused(path)).flatten()
+}
+
+fn windows_refused(path: &str) -> Option<String> {
+    path.split('/').find_map(|part| {
+        let why = windows_refusal(part)?;
+        Some(format!("{part:?} is not a name Windows holds, since {why}"))
+    })
+}
+
 fn is_device(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end();
     DEVICES
@@ -296,6 +309,19 @@ mod tests {
         ] {
             assert_eq!(windows_refusal(name), None, "{name:?}");
         }
+    }
+
+    #[test]
+    fn a_path_windows_cannot_open_is_refused_by_its_first_such_name() {
+        assert_eq!(
+            windows_refused("Live/dotdir./tdot.ne5p."),
+            Some(r#""dotdir." is not a name Windows holds, since it ends with a dot, which Windows drops"#.into())
+        );
+        assert_eq!(
+            windows_refused("spacedir /a.ne5p"),
+            Some(r#""spacedir " is not a name Windows holds, since it ends with a space, which Windows drops"#.into())
+        );
+        assert_eq!(windows_refused("Live/Organ.ne5p"), None);
     }
 
     #[test]
