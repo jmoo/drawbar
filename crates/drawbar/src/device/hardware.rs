@@ -1494,7 +1494,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
         origin.label()
     );
     assert!(
-        matches!(rig.store.key(kept), Some(crate::store::Key::Entity(_))),
+        rig.store.entity(kept).is_some(),
         "an entity says where it came from"
     );
     assert!(body_difference(&rig.library.at(&name), &piano).is_none());

@@ -129,12 +129,8 @@ pub struct Restored {
 /// they are in it, or why it is not a copy drawbar could have saved.
 pub fn restorable(mut entries: Vec<Stored>, directory: u64) -> Result<Vec<Restored>, String> {
     entries.sort_by_key(|entry| entry.at);
-    let ends: Vec<u64> = entries
-        .iter()
-        .skip(1)
-        .map(|entry| entry.at)
-        .chain([directory])
-        .collect();
+    let ends = entries.iter().skip(1).map(|entry| entry.at);
+    let ends: Vec<u64> = ends.chain([directory]).collect();
     let mut seen = BTreeSet::new();
     let mut restored = Vec::with_capacity(entries.len());
     for (entry, end) in entries.into_iter().zip(ends) {
@@ -475,18 +471,10 @@ async fn write<F: Fs>(
             .await
             .map_err(|e| format!("reading {path} from the copy: {e}"))?;
         crc.update(&bytes);
-        let (root, to) = (Root::Folder, path.clone());
+        let (root, path) = (Root::Folder, path.clone());
         let io = match at {
-            0 => Io::Create {
-                root,
-                path: to,
-                bytes,
-            },
-            _ => Io::Append {
-                root,
-                path: to,
-                bytes,
-            },
+            0 => Io::Create { root, path, bytes },
+            _ => Io::Append { root, path, bytes },
         };
         fs.perform(io).await.map_err(failed)?;
         at += len;

@@ -72,8 +72,12 @@
 //! with how many entities hold it ([`View::values`]), each by a visit of every
 //! entity shown; and the entity bound to a file ([`View::at`]), by a search. Values
 //! compare by the JSON toshokan writes for them. Searching names or derived
-//! metadata is the app's. [`View::changed_since`] gives the entities and files that
-//! differ from an earlier view, so an app can redraw only those.
+//! metadata is the app's.
+//!
+//! [`View::rows`] lists every file as a [`Row`] with a [`FileId`] that names it from
+//! look to look: by this instance's own effects, else by its entity's binding,
+//! else by its path. [`View::changes_since`] says what changed of each row since an
+//! earlier view, and who changed each entity's.
 //!
 //! ## Scans
 //!
@@ -94,11 +98,11 @@
 //! ## Commits and undo
 //!
 //! An intent can also save, rename and trash a file nothing is said about, by its
-//! path, without making it an entity, and [`Committed::paths`] says where such
-//! files went, an undo's included. A save takes bytes or a source the driver
-//! streams into staging a chunk at a time, such as a [`Splice`](plan::Splice) of
-//! the file being rewritten, so a file of hundreds of megabytes is never held
-//! whole.
+//! path, without making it an entity, and [`Committed::files`] names the row of
+//! each file a commit wrote or moved, an undo's included. A save takes bytes or a
+//! source the driver streams into staging a chunk at a time, such as a
+//! [`Splice`](plan::Splice) of the file being rewritten, so a file of hundreds of
+//! megabytes is never held whole.
 //!
 //! A commit whose file effects fail logs nothing and fails. The next write, or the
 //! next open, finishes them first, and where it cannot, the library is read-only
@@ -192,6 +196,7 @@ pub mod reader;
 #[doc(hidden)]
 pub mod recovery;
 pub mod report;
+pub mod rows;
 pub mod schema;
 #[doc(hidden)]
 pub mod simulator;
@@ -215,5 +220,6 @@ pub use layout::Layout;
 pub use path::RelPath;
 pub use plan::{Expect, Plan};
 pub use report::{Committed, Lag, Local, Opened, Outcome};
+pub use rows::{FileId, Row, RowChanges, RowState};
 pub use schema::{Field, Keyed, Members, Raw, Register, Schema, Set, Value};
-pub use view::{Changed, Counts, EntityView, FileRef, FileState, Listed, View};
+pub use view::{Counts, EntityView, FileRef, FileState, Listed, View};

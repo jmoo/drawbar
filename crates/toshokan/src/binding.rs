@@ -5,6 +5,7 @@
 //! [`pins`] gives the moves a commit logs. Scans never write. The rules are those
 //! of Binding in `spec/protocol.md`.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
@@ -19,16 +20,33 @@ use crate::path::RelPath;
 use crate::report::{Ambiguous, Joined, Moved, ScanReport};
 use crate::view::{FileRef, FileState};
 
-/// A surviving write of an entity's file register that says where its file is.
+/// The surviving writes of an entity's file register that say one file is its:
+/// equal in path, identity and length, whatever modification time each gives.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Fact {
+    /// The latest of the writes.
     pub value: FileFact,
-    /// The entry that wrote it, which a pin replaces.
-    pub entry: Ref,
+    /// The entries that wrote it, oldest first, which a pin replaces.
+    pub entries: Vec<Ref>,
+    /// Each modification time the writes give, once.
+    pub times: Vec<Option<u64>>,
 }
 
-/// Every entity's surviving file-register writes that say where its file is,
-/// oldest first, as the merge gives them. More than one is a conflict.
+impl Fact {
+    /// Whether `file` holds what the fact says: its identity, or, without one read,
+    /// its length and a time one of the writes gives.
+    fn holds(&self, file: &Scanned) -> bool {
+        file.len == self.value.len
+            && match file.identity {
+                Some(identity) => identity == self.value.identity,
+                None => self.times.contains(&file.modified),
+            }
+    }
+}
+
+/// Every entity's surviving file-register writes that say where its file is, as
+/// the merge gives them, in order of each fact's latest write. More than one is a
+/// conflict.
 pub type Facts = BTreeMap<EntityId, Box<[Fact]>>;
 
 /// One library file as a scan found it.
@@ -44,18 +62,69 @@ pub struct Scanned {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Scan {
     pub files: BTreeMap<RelPath, Scanned>,
+    /// The directories below the root it found, empty ones included.
+    pub dirs: BTreeSet<RelPath>,
+}
+
+impl Scan {
+    /// Adds each file of `missed` that `entries`, what listing `dir` again found,
+    /// holds.
+    pub(crate) fn relisted(
+        &mut self,
+        dir: &RelPath,
+        entries: Vec<(String, Meta)>,
+        missed: &BTreeSet<RelPath>,
+    ) {
+        let files = entries
+            .into_iter()
+            .filter(|(_, meta)| meta.kind == Kind::File);
+        for (name, meta) in files {
+            let Some(path) = dir.join(&name).ok().filter(|path| missed.contains(path)) else {
+                continue;
+            };
+            let file = Scanned {
+                len: meta.len,
+                modified: meta.modified,
+                identity: None,
+            };
+            self.files.insert(path, file);
+        }
+    }
+
+    /// Keeps `path`'s directories, which hold what a listing found at it.
+    fn holding(&mut self, path: &RelPath) {
+        let mut dir = path.parent();
+        while let Some(at) = dir.filter(|at| !at.is_root()) {
+            if !self.dirs.insert(at.clone()) {
+                break;
+            }
+            dir = at.parent();
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Bindings {
     /// Every entity with a file fact, with where its file is, but those
-    /// [`ScanReport::joined`] names.
+    /// [`ScanReport::joined`] and `alike` name.
     pub bound: BTreeMap<EntityId, FileRef>,
+    /// Each entity whose facts name the file another's do, holding none's or found
+    /// nowhere, with the lowest of them, which alone is bound. It is shown on that
+    /// one's row and never reported joined: stale facts name one file for two.
+    pub alike: BTreeMap<EntityId, EntityId>,
     /// Library files no entity is bound to. Shared between the bindings a change
     /// makes of one another, so a change copies only what it touches.
     pub unbound: BTreeSet<RelPath>,
     /// What binding found, but for [`ScanReport::arrived`], which `unbound` holds.
     pub report: ScanReport,
+}
+
+impl Bindings {
+    /// Each entity shown on another's row, joined or alike, with that one.
+    pub(crate) fn shown_on(&self) -> impl Iterator<Item = (EntityId, EntityId)> + '_ {
+        let joined = self.report.joined.iter().map(|j| (j.entity, j.into));
+        joined.chain(self.alike.iter().map(|(entity, into)| (*entity, *into)))
+    }
 }
 
 /// One identity as `identities.json` keeps it: of the file at a path, length and
@@ -89,6 +158,7 @@ impl Scan {
         });
         Some(Self {
             files: files.collect(),
+            dirs: BTreeSet::new(),
         })
     }
 }
@@ -172,7 +242,7 @@ fn bound(facts: &Facts, scan: &Scan, names: &dyn Names) -> Progress {
         progress.candidate(scan, names, *entity, written);
     }
     while let Some((path, claimants)) = progress.claims.pop_first() {
-        progress.claim(facts, scan, path, claimants);
+        progress.claim(facts, scan, names, path, claimants);
     }
     for (path, file) in &scan.files {
         progress.free(path, file);
@@ -183,6 +253,8 @@ fn bound(facts: &Facts, scan: &Scan, names: &dyn Names) -> Progress {
     while let Some((entity, fact, matches)) = progress.moves.pop_front() {
         progress.moved(facts, entity, fact, matches);
     }
+    progress.uncontested();
+    progress.twins(facts, names);
     for path in scan.files.keys() {
         progress.unbound(path);
     }
@@ -319,6 +391,11 @@ impl Walk {
         }
     }
 
+    /// Whether the walk listed `dir`.
+    pub fn lists(&self, dir: &RelPath) -> bool {
+        self.listed.contains_key(dir)
+    }
+
     /// Lists again what may have changed at `paths`: each one's nearest listed
     /// directory, and each directory at or under it.
     pub fn forget(&mut self, paths: &[RelPath]) {
@@ -351,9 +428,12 @@ impl Walk {
         }
     }
 
-    /// Every file listed, its identity unread.
+    /// Every file and directory listed, identities unread. A directory the walk
+    /// could not list is there all the same.
     pub fn found(&self) -> Scan {
         let mut scan = Scan::default();
+        let dirs = self.listed.keys().chain(&self.unlistable);
+        scan.dirs = dirs.filter(|dir| !dir.is_root()).cloned().collect();
         for (dir, entries) in &self.listed {
             let files = entries.iter().filter(|(_, meta)| meta.kind == Kind::File);
             for (name, meta) in files {
@@ -384,27 +464,30 @@ fn subtree<'a, V>(
 }
 
 /// `previous` with each of `paths` listed again, without identities: the file at
-/// a path, the files under a directory, or nothing. Requests only
-/// [`crate::Io::Stat`] and [`crate::Io::ListStat`].
+/// a path, the files under a directory, or nothing, each under the spelling its
+/// directories list, which `names` compares. Requests only [`crate::Io::Stat`],
+/// [`crate::Io::List`] and [`crate::Io::ListStat`].
 pub(crate) fn relist<'a>(
     layout: &Layout,
     previous: &Scan,
     paths: Vec<RelPath>,
+    names: &Rc<dyn Names>,
 ) -> flow::Fallible<'a, Scan> {
     let touched: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
     let mut scan = previous.clone();
     scan.files.retain(|path, _| !under(path, &touched));
-    let layout = Rc::new(layout.clone());
+    scan.dirs.retain(|path| !under(path, &touched));
+    let (layout, names) = (Rc::new(layout.clone()), Rc::clone(names));
     let visited = fold(
         paths.into_iter(),
         (scan, flow::Listings::default()),
-        move |(scan, listings), path| visit(Rc::clone(&layout), path, scan, listings),
+        move |(scan, listings), path| visit(Rc::clone(&layout), &names, path, scan, listings),
     );
     visited.map_ok(|(scan, _)| scan)
 }
 
 /// Whether `path` is one of `paths` or under one of them.
-fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
+pub(crate) fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
     let text = path.as_str();
     paths.contains(RelPath::ROOT.as_str())
         || paths.contains(text)
@@ -414,8 +497,8 @@ fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
 }
 
 /// Gives each file of `scan` without an identity the one known for its path,
-/// length and time: from `previous`, an earlier scan, else from the last of
-/// `facts` that names them. Returns the files left without one whose identities
+/// length and time: from `previous`, an earlier scan, else from `facts` where those
+/// that name them agree. Returns the files left without one whose identities
 /// decide something, which must be read: one at an entity's path of its length,
 /// and one of the length of an entity that may have moved ([`Away`]).
 pub(crate) fn resolve(
@@ -431,21 +514,26 @@ pub(crate) fn resolve(
     let away = away(facts, &FileKeys::of(scan, names), names);
     let mut logged: HashMap<&RelPath, Vec<Said>> = HashMap::new();
     for written in facts.values() {
-        for fact in written.iter().map(|fact| &fact.value) {
-            if unknown.binary_search(&fact.path).is_ok() {
-                let said = (fact.len, fact.modified, fact.identity);
-                logged.entry(&fact.path).or_default().push(said);
+        for fact in written {
+            let value = &fact.value;
+            if unknown.binary_search(&value.path).is_ok() {
+                let said = fact.times.iter().map(|at| (value.len, *at, value.identity));
+                logged.entry(&value.path).or_default().extend(said);
             }
         }
     }
     let mut needed = Vec::new();
     for path in &unknown {
         let file = scan.files.get_mut(path).expect("listed in the scan");
-        let said: Vec<_> = logged.get(path).into_iter().flatten().rev().collect();
-        let same = said
+        let said: Vec<_> = logged.get(path).into_iter().flatten().collect();
+        let mut same = said
             .iter()
-            .find(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
-        file.identity = same.map(|(_, _, identity)| *identity);
+            .filter(|(len, modified, _)| (*len, *modified) == (file.len, file.modified))
+            .map(|(.., identity)| *identity);
+        // Two files written within the volume's time resolution keep one length and
+        // time, so facts that disagree there leave the identity to be read.
+        let first = same.next();
+        file.identity = first.filter(|first| same.all(|identity| identity == *first));
         // A file of an entity's length at its path, at another time, is in sync
         // only where it holds its identity.
         let sized = said.iter().any(|(len, ..)| *len == file.len);
@@ -585,11 +673,12 @@ pub(crate) fn identified<'a>(
     })
 }
 
-/// `scan` with what is at `path`: a file, every file under a directory, or
-/// nothing. `listings` saves listing a directory an earlier visit of the same
-/// scan listed.
+/// `scan` with what is at `path`, under the spelling its directories list: a file,
+/// every file under a directory, or nothing. `listings` saves listing a directory
+/// an earlier visit of the same scan listed.
 fn visit<'a>(
     layout: Rc<Layout>,
+    names: &Rc<dyn Names>,
     path: RelPath,
     scan: Scan,
     listings: flow::Listings,
@@ -597,21 +686,27 @@ fn visit<'a>(
     if !path.is_root() && !layout.holds(&path) {
         return ok((scan, listings));
     }
+    let names = Rc::clone(names);
     flow::stat(Root::Folder, &path).and_then(move |meta| {
         let Some(meta) = meta else {
             return ok((scan, listings));
         };
-        // A volume that ignores case finds the file by another spelling of its path too,
-        // which a listing would never give.
-        flow::spelled_in(Root::Folder, path.clone(), listings).and_then(
-            move |(exactly, listings)| match exactly {
-                false => ok((scan, listings)),
-                true if meta.kind == Kind::Directory => {
+        // A volume that ignores case or normalization finds the file by another
+        // spelling of its path too, which a listing would never give.
+        flow::listed_as(Root::Folder, &path, names, listings).and_then(move |(listed, listings)| {
+            let Some(path) = listed.filter(|path| path.is_root() || layout.holds(path)) else {
+                return ok((scan, listings));
+            };
+            let mut scan = scan;
+            scan.holding(&path);
+            match meta.kind {
+                Kind::Directory => {
+                    scan.dirs.insert(path.clone());
                     walk(layout, path, scan).map_ok(|scan| (scan, listings))
                 }
-                true => ok((found(scan, path, meta), listings)),
-            },
-        )
+                Kind::File => ok((found(scan, path, meta), listings)),
+            }
+        })
     })
 }
 
@@ -621,7 +716,11 @@ fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, 
             let path = dir.join(&name).expect("a listed name is one component");
             match meta.kind {
                 _ if !layout.holds(&path) => ok(scan),
-                Kind::Directory => walk(Rc::clone(&layout), path, scan),
+                Kind::Directory => {
+                    let mut scan = scan;
+                    scan.dirs.insert(path.clone());
+                    walk(Rc::clone(&layout), path, scan)
+                }
                 Kind::File => ok(found(scan, path, meta)),
             }
         })
@@ -658,7 +757,7 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
 /// File-register writes for the moves `facts` do not already say: a file found in
 /// sync at a path the volume does not take for the logged one. A new modification
 /// time alone is not pinned; it only saves reading an identity. Conflicted
-/// registers, changed files and missing ones are left for the user.
+/// registers, changed files and missing ones are not pinned.
 pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan, names: &dyn Names) -> Vec<Op> {
     let mut ops = Vec::new();
     for (&entity, file) in &bindings.bound {
@@ -693,7 +792,7 @@ fn pin(
     Some(Op::Pin {
         entity,
         file: pinned,
-        replaces: vec![written.entry],
+        replaces: written.entries.clone(),
         take: None,
     })
 }
@@ -740,6 +839,10 @@ struct Progress {
     /// How many departed entities each free file holds the identity of.
     wanted: BTreeMap<RelPath, usize>,
     moves: VecDeque<(EntityId, usize, Vec<RelPath>)>,
+    /// The entities step 3 left missing, by the fact whose identity was looked for.
+    missing: Vec<(EntityId, usize)>,
+    /// Each file several entities name that holds none's facts, with them.
+    contested: Vec<(RelPath, Vec<EntityId>)>,
     pins: Vec<Op>,
 }
 
@@ -763,15 +866,13 @@ impl Progress {
     /// Finds the files `entity`'s facts name: by path, else by the name the
     /// volume takes for it.
     fn candidate(&mut self, scan: &Scan, names: &dyn Names, entity: EntityId, written: &[Fact]) {
-        let Some(first) = written.first() else {
+        if written.is_empty() {
             return;
-        };
+        }
         let Self {
             by_key,
             claims,
             departed,
-            bindings,
-            bound,
             ..
         } = self;
         let gone = written
@@ -791,57 +892,96 @@ impl Progress {
                 }
             }
         }
-        candidates.sort_by(|a, b| a.0.cmp(b.0));
-        candidates.dedup_by(|a, b| a.0 == b.0);
-        match candidates.as_slice() {
-            [] => departed.push_back((entity, 0)),
-            [(path, index)] => claims
-                .entry((*path).clone())
+        // Of a conflicted register, the latest fact whose file holds it names its file,
+        // else the latest.
+        let holds = |(path, index): &&(&RelPath, usize)| written[*index].holds(&scan.files[*path]);
+        let found = candidates.iter().rev().find(holds).or(candidates.last());
+        match found {
+            None => departed.push_back((entity, 0)),
+            Some(&(path, index)) => claims
+                .entry(path.clone())
                 .or_default()
-                .push((entity, *index)),
-            several => {
-                bindings.report.ambiguous.push(Ambiguous {
-                    entity,
-                    candidates: several.iter().map(|(path, _)| (*path).clone()).collect(),
-                });
-                bound.insert(entity, missing(&first.value));
-            }
+                .push((entity, index)),
         }
     }
 
     /// Entities naming one file: the lowest whose fact it holds has it, and the
-    /// others whose facts it holds are joined into that one. The rest, or all when
-    /// several name it and it holds none's, are bound by identity like entities
-    /// whose path is gone.
+    /// others whose facts it holds are joined into that one. Where it holds none's
+    /// and all their facts name one file, the lowest has it, changed outside, and the
+    /// others are alike. The rest, or all where their facts name several files, are
+    /// bound by identity like entities whose path is gone.
     fn claim(
         &mut self,
         facts: &Facts,
         scan: &Scan,
+        names: &dyn Names,
         path: RelPath,
         claimants: Vec<(EntityId, usize)>,
     ) {
         let file = &scan.files[&path];
         let (holders, others): (Vec<_>, Vec<_>) = claimants
             .into_iter()
-            .partition(|(entity, index)| holds(&facts[entity][*index].value, file));
-        let (entity, state) = match (holders.iter().min(), others.as_slice()) {
-            (Some(&(lowest, _)), _) => (lowest, FileState::InSync),
-            (None, [(only, _)]) => (*only, FileState::ChangedOutside),
-            (None, _) => {
+            .partition(|(entity, index)| facts[entity][*index].holds(file));
+        let one_file = |others: &[(EntityId, usize)]| {
+            let mut files = others.iter().map(|other| named_file(facts, names, *other));
+            let first = files.next();
+            files.all(|file| Some(file) == first)
+        };
+        let (taking, state, departing) = match holders.is_empty() {
+            false => (holders, FileState::InSync, others),
+            true if one_file(&others) => (others, FileState::ChangedOutside, Vec::new()),
+            true => {
+                let named = others.iter().map(|(entity, _)| *entity).collect();
+                self.contested.push((path, named));
                 self.departed.extend(others);
                 return;
             }
         };
-        let joined = holders.into_iter().filter(|(holder, _)| *holder != entity);
-        let joined = joined.map(|(holder, _)| Joined {
-            entity: holder,
-            into: entity,
-        });
-        self.bindings.report.joined.extend(joined);
-        let others = others.into_iter().filter(|(other, _)| *other != entity);
-        self.departed.extend(others);
+        let &(entity, _) = taking.iter().min().expect("a file is named by a claimant");
+        let rest = taking.into_iter().filter(|(taker, _)| *taker != entity);
+        match state {
+            FileState::InSync => {
+                let joined = rest.map(|(taker, _)| Joined {
+                    entity: taker,
+                    into: entity,
+                });
+                self.bindings.report.joined.extend(joined);
+            }
+            _ => {
+                let alike = rest.map(|(taker, _)| (taker, entity));
+                self.bindings.alike.extend(alike);
+            }
+        }
+        self.departed.extend(departing);
         self.taken.insert(path.clone());
         self.bound.insert(entity, FileRef { path, state });
+    }
+
+    /// Makes each entity left missing alike to the lowest missing one whose fact
+    /// names the same file.
+    fn twins(&mut self, facts: &Facts, names: &dyn Names) {
+        let mut missing = std::mem::take(&mut self.missing);
+        missing.sort_unstable();
+        let mut first: BTreeMap<(String, Identity, u64), EntityId> = BTreeMap::new();
+        for (entity, index) in missing {
+            let state = self.bound.get(&entity).map(|file| file.state);
+            if state != Some(FileState::Missing) {
+                continue;
+            }
+            match first.entry(named_file(facts, names, (entity, index))) {
+                Entry::Vacant(vacant) => _ = vacant.insert(entity),
+                Entry::Occupied(into) => {
+                    self.bound.remove(&entity);
+                    self.bindings.alike.insert(entity, *into.get());
+                }
+            }
+        }
+        let alike = &self.bindings.alike;
+        let report = &mut self.bindings.report;
+        report.departed.retain(|entity| !alike.contains_key(entity));
+        report
+            .ambiguous
+            .retain(|ambiguous| !alike.contains_key(&ambiguous.entity));
     }
 
     fn free(&mut self, path: &RelPath, file: &Scanned) {
@@ -884,6 +1024,7 @@ impl Progress {
             [] => {
                 bindings.report.departed.push(entity);
                 bound.insert(entity, missing(fact));
+                self.missing.push((entity, index));
             }
             _ => {
                 bindings.report.ambiguous.push(Ambiguous {
@@ -891,7 +1032,32 @@ impl Progress {
                     candidates: matches,
                 });
                 bound.insert(entity, missing(fact));
+                self.missing.push((entity, index));
             }
+        }
+    }
+
+    /// Binds a file several entities named, holding none's facts, changed outside to
+    /// the one of them found nowhere, once the others were found elsewhere.
+    fn uncontested(&mut self) {
+        for (path, named) in std::mem::take(&mut self.contested) {
+            let departed = &self.bindings.report.departed;
+            let left = named.iter().filter(|entity| departed.contains(entity));
+            let [entity] = left.collect::<Vec<_>>()[..] else {
+                continue;
+            };
+            let found = |other: &EntityId| self.bound.get(other).is_some_and(|f| f.path != path);
+            if self.taken.contains(&path) || !named.iter().filter(|o| *o != entity).all(found) {
+                continue;
+            }
+            let entity = *entity;
+            self.bindings
+                .report
+                .departed
+                .retain(|other| *other != entity);
+            self.taken.insert(path.clone());
+            let state = FileState::ChangedOutside;
+            self.bound.insert(entity, FileRef { path, state });
         }
     }
 
@@ -913,8 +1079,19 @@ impl Progress {
     }
 }
 
+/// The file the fact `index` of `entity` names: its path as the volume takes it,
+/// its identity and its length.
+fn named_file(
+    facts: &Facts,
+    names: &dyn Names,
+    (entity, index): (EntityId, usize),
+) -> (String, Identity, u64) {
+    let fact = &facts[&entity][index].value;
+    (names.key(fact.path.as_str()), fact.identity, fact.len)
+}
+
 /// Every file of `scan` by the name the volume takes for its path.
-fn keyed(scan: &Scan, names: &dyn Names) -> BTreeMap<String, Vec<RelPath>> {
+pub(crate) fn keyed(scan: &Scan, names: &dyn Names) -> BTreeMap<String, Vec<RelPath>> {
     let mut by_key: BTreeMap<String, Vec<RelPath>> = BTreeMap::new();
     for path in scan.files.keys() {
         by_key
@@ -959,12 +1136,13 @@ mod tests {
 
     fn written(fact: FileFact, entry: u128) -> Fact {
         Fact {
+            times: vec![fact.modified],
             value: fact,
-            entry: Ref {
+            entries: vec![Ref {
                 writer: WriterId::from_u128(1),
                 n: 1,
                 hash: EntryHash::from_u128(entry),
-            },
+            }],
         }
     }
 
@@ -989,7 +1167,10 @@ mod tests {
                 (path(at), file)
             })
             .collect();
-        Scan { files }
+        Scan {
+            files,
+            dirs: BTreeSet::new(),
+        }
     }
 
     fn holding(scan: &Scan, fact: &FileFact) -> Vec<RelPath> {
@@ -1077,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_takes_the_identity_an_earlier_scan_else_the_last_fact_gives() {
+    fn a_file_takes_the_identity_an_earlier_scan_else_the_facts_that_agree_give() {
         use crate::env::{Random, SeededRandom};
         let mut random = SeededRandom::new(12);
         for (mut facts, scan, _) in random_worlds(11, 1000) {
@@ -1110,14 +1291,19 @@ mod tests {
                 }
             }
             let mut expected = fresh.clone();
-            let mut known: BTreeMap<(RelPath, u64, Option<u64>), Identity> = BTreeMap::new();
+            let mut known: BTreeMap<(RelPath, u64, Option<u64>), Option<Identity>> =
+                BTreeMap::new();
             for fact in facts.values().flat_map(|written| written.iter()) {
                 let key = (fact.value.path.clone(), fact.value.len, fact.value.modified);
-                known.insert(key, fact.value.identity);
+                let said = Some(fact.value.identity);
+                let agreed = *known.entry(key.clone()).or_insert(said) == said;
+                if !agreed {
+                    known.insert(key, None);
+                }
             }
             for (path, file) in &previous.files {
                 if let Some(identity) = file.identity {
-                    known.insert((path.clone(), file.len, file.modified), identity);
+                    known.insert((path.clone(), file.len, file.modified), Some(identity));
                 }
             }
             let keys = FileKeys::of(&fresh, &ExactNames);
@@ -1131,7 +1317,8 @@ mod tests {
             let mut needed = Vec::new();
             for (path, file) in &mut expected.files {
                 if file.identity.is_none() {
-                    file.identity = known.get(&(path.clone(), file.len, file.modified)).copied();
+                    let key = (path.clone(), file.len, file.modified);
+                    file.identity = known.get(&key).copied().flatten();
                     let decides = at_path(path, file.len) || away.contains(&file.len);
                     if file.identity.is_none() && decides {
                         needed.push((path.clone(), file.len));
@@ -1357,8 +1544,16 @@ mod tests {
                 );
                 assert!(holds(fact, &scan.files[&file.path]), "{shown}: {entity}");
             }
+            for (entity, into) in &bindings.alike {
+                let file = &bindings.bound[into];
+                let (fact, theirs) = (&facts[entity][0].value, &facts[into][0].value);
+                assert!(into < entity, "{shown}: {entity} alike a higher id");
+                assert_ne!(file.state, FileState::InSync, "{shown}: {entity} alike");
+                let named = |fact: &FileFact| (fact.path.clone(), fact.identity, fact.len);
+                assert_eq!(named(fact), named(theirs), "{shown}: {entity} alike {into}");
+            }
             assert_eq!(
-                bindings.bound.len() + bindings.report.joined.len(),
+                bindings.bound.len() + bindings.report.joined.len() + bindings.alike.len(),
                 facts.len(),
                 "{shown}: an entity is unaccounted for"
             );
@@ -1375,12 +1570,11 @@ mod tests {
             let by_path = |b: &Bindings,
                            rename: &dyn Fn(&EntityId) -> EntityId|
              -> BTreeMap<EntityId, FileRef> {
-                let joined = b.report.joined.iter();
-                let joined = joined.map(|joined| (&joined.entity, &b.bound[&joined.into]));
-                b.bound
-                    .iter()
+                let joined = b.shown_on().map(|(entity, into)| (entity, &b.bound[&into]));
+                let bound = b.bound.iter().map(|(entity, file)| (*entity, file));
+                bound
                     .chain(joined)
-                    .map(|(id, f)| (rename(id), f.clone()))
+                    .map(|(id, f)| (rename(&id), f.clone()))
                     .collect()
             };
             assert_eq!(
@@ -1430,6 +1624,7 @@ mod tests {
                 .into_iter()
                 .map(|(at, len)| (path(at), listed(len)))
                 .collect(),
+            dirs: BTreeSet::new(),
         };
         let needed = resolve(&mut scan, &facts, &Scan::default(), &Folding);
         assert_eq!(
@@ -1539,18 +1734,55 @@ mod tests {
     }
 
     #[test]
-    fn a_conflicted_file_register_binds_only_where_one_survivor_is_found() {
+    fn of_entities_naming_a_file_holding_none_of_theirs_the_one_found_nowhere_takes_it() {
+        let [moved, left] = [1, 2].map(EntityId::from_u128);
+        let facts = Facts::from([
+            (moved, vec![written(fact("a", 0), 1)].into()),
+            (left, vec![written(fact("a", 1), 2)].into()),
+        ]);
+        let found = bind(&facts, &scanned(&[("a", 2), ("b", 0)], &facts), &ExactNames);
+        let at = |at: &str, state| FileRef {
+            path: path(at),
+            state,
+        };
+        assert_eq!(found.bound[&moved], at("b", FileState::InSync));
+        assert_eq!(found.bound[&left], at("a", FileState::ChangedOutside));
+        assert_eq!(found.report.departed, []);
+        assert_eq!(found.unbound, BTreeSet::new());
+
+        let neither = bind(&facts, &scanned(&[("a", 2)], &facts), &ExactNames);
+        assert_eq!(neither.bound[&moved], at("a", FileState::Missing));
+        assert_eq!(neither.bound[&left], at("a", FileState::Missing));
+        assert_eq!(neither.unbound, [path("a")].into());
+    }
+
+    #[test]
+    fn a_conflicted_file_register_binds_the_latest_write_whose_file_holds_it() {
         let e = EntityId::from_u128(1);
         let facts = Facts::from([(
             e,
-            vec![written(fact("a", 0), 1), written(fact("b", 0), 2)].into(),
+            vec![written(fact("a", 0), 1), written(fact("b", 1), 2)].into(),
         )]);
         let found = |files: &[(&str, usize)]| bind(&facts, &scanned(files, &facts), &ExactNames);
-        assert_eq!(found(&[("b", 0)]).bound[&e].path, path("b"));
-        let both = found(&[("a", 0), ("b", 0)]);
-        assert_eq!(both.bound[&e].state, FileState::Missing);
-        assert_eq!(both.report.ambiguous[0].candidates, [path("a"), path("b")]);
-        let scan = scanned(&[("b", 0)], &facts);
+        let bound = |files: &[(&str, usize)]| {
+            let bound = &found(files).bound[&e];
+            (bound.path.as_str().to_string(), bound.state)
+        };
+        assert_eq!(bound(&[("a", 0)]), ("a".into(), FileState::InSync));
+        assert_eq!(
+            bound(&[("a", 0), ("b", 1)]),
+            ("b".into(), FileState::InSync)
+        );
+        assert_eq!(found(&[("a", 0), ("b", 1)]).unbound, [path("a")].into());
+        assert_eq!(
+            bound(&[("a", 0), ("b", 0)]),
+            ("a".into(), FileState::InSync)
+        );
+        assert_eq!(
+            bound(&[("a", 1), ("b", 0)]),
+            ("b".into(), FileState::ChangedOutside)
+        );
+        let scan = scanned(&[("b", 1)], &facts);
         assert!(
             pins(
                 &facts,
@@ -1559,7 +1791,7 @@ mod tests {
                 &ExactNames
             )
             .is_empty(),
-            "the user resolves it"
+            "a conflicted register is never pinned"
         );
     }
 
@@ -1587,7 +1819,7 @@ mod tests {
         };
         assert_eq!(
             (*entity, moved.path.as_str(), replaces.as_slice()),
-            (e, "b", &[written(fact("a", 0), 1).entry][..])
+            (e, "b", &written(fact("a", 0), 1).entries[..])
         );
         assert!(pins_for(&[("a", 0)]).is_empty(), "a new time");
         assert!(pins_for(&[("a", 1)]).is_empty(), "changed outside");

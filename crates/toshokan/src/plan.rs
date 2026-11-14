@@ -105,6 +105,14 @@ pub enum FileChange {
     },
     /// Moves the entity's file to this writer's trash.
     Trash { entity: EntityId, expect: Expect },
+    /// Moves the entity's file to this writer's trash, its file register left
+    /// saying `leaves`, a file the binding finds nowhere: as undoing a save does
+    /// that gave a file to an entity whose file was nowhere.
+    TrashLeaving {
+        entity: EntityId,
+        expect: Expect,
+        leaves: FileFact,
+    },
     /// Renames the entity's file. Refused when something is at `to`.
     Rename {
         entity: EntityId,
@@ -159,11 +167,13 @@ pub enum FileChange {
     /// Moves the file at `path`, which is no entity's, to this writer's trash.
     TrashFile { path: RelPath, expect: Expect },
     /// Brings displaced bytes back from this writer's trash to `to`, as no entity's
-    /// file.
+    /// file. `found` is an entity the binding found in the file at `to` by its
+    /// identity alone, which the bytes brought back leave missing.
     RestoreFile {
         item: Nonce,
         to: RelPath,
         expect: Expect,
+        found: Option<EntityId>,
     },
 }
 

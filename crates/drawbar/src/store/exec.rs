@@ -4,6 +4,8 @@
 use std::io;
 use std::sync::Arc;
 
+use toshokan::FileId;
+
 use super::{Event, Failure, Fingerprint, Found, LibPath, Stat};
 use crate::ondisk::OnDisk;
 
@@ -27,12 +29,13 @@ pub trait Fs {
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
-    /// The file at `path` indexed and left on disk, to be read by range, where this
-    /// backend reads files that way and the file is a piano or sample instrument. `None`
-    /// has it read whole. `known` is its fingerprint where its [`Stat`] has not moved
-    /// since, so its CRC need not be taken again.
+    /// The file at `path`, the row `file`, indexed and left on disk, to be read by range,
+    /// where this backend reads files that way and the file is a piano or sample
+    /// instrument. `None` has it read whole. `known` is its fingerprint where its
+    /// [`Stat`] has not moved since, so its CRC need not be taken again.
     async fn rest(
         &self,
+        _file: FileId,
         _path: &str,
         _known: Option<Fingerprint>,
     ) -> io::Result<Option<Arc<OnDisk>>> {
@@ -48,12 +51,12 @@ pub trait Fs {
 /// The files [`super::Cmd::Read`] asks for, read in order until `room` runs out.
 pub async fn read_all(
     fs: &impl Fs,
-    files: Vec<(u64, LibPath, Option<Fingerprint>)>,
+    files: Vec<(u64, FileId, LibPath, Option<Fingerprint>)>,
     mut room: u64,
 ) -> Vec<(u64, Result<Found, Failure>)> {
     let mut answers = Vec::new();
-    for (id, path, print) in files {
-        let answer = read_one(fs, path, print, room).await;
+    for (id, file, path, print) in files {
+        let answer = read_one(fs, file, path, print, room).await;
         if let Ok(found) = &answer {
             let read = found.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
             room = room.saturating_sub(read);
@@ -65,6 +68,7 @@ pub async fn read_all(
 
 async fn read_one(
     fs: &impl Fs,
+    row: FileId,
     path: LibPath,
     print: Option<Fingerprint>,
     room: u64,
@@ -76,7 +80,7 @@ async fn read_one(
     let stat = fs.stat(path.as_str()).await.map_err(io)?;
     let stat = stat.ok_or(Failure::Moved)?;
     let unmoved = print.filter(|print| print.stat() == stat);
-    let file = fs.rest(path.as_str(), unmoved).await.map_err(io)?;
+    let file = fs.rest(row, path.as_str(), unmoved).await.map_err(io)?;
     let (bytes, identity) = match file {
         Some(_) => (None, fs.identity(&path).await.map_err(io)?),
         None if stat.len > room => return Err(Failure::Room(stat.len)),
@@ -113,14 +117,14 @@ pub async fn rest_landed(fs: &impl Fs, event: Event) -> Event {
     }
 }
 
-async fn rested(fs: &impl Fs, found: Result<Found, Failure>) -> Result<Found, Failure> {
+async fn rested(
+    fs: &impl Fs,
+    found: Result<(FileId, Found), Failure>,
+) -> Result<(FileId, Found), Failure> {
     let io = |e: io::Error| Failure::Io(e.to_string());
-    let mut found = found?;
-    found.file = fs.rest(found.path.as_str(), None).await.map_err(io)?;
-    if found.file.is_some() {
-        found.identity = fs.identity(&found.path).await.map_err(io)?;
-    }
-    Ok(found)
+    let (file, mut found) = found?;
+    found.file = fs.rest(file, found.path.as_str(), None).await.map_err(io)?;
+    Ok((file, found))
 }
 
 /// Why a read [`Failure::Room`] refused did not run.
@@ -173,6 +177,7 @@ mod tests {
         }
         async fn rest(
             &self,
+            _: FileId,
             path: &str,
             _: Option<Fingerprint>,
         ) -> io::Result<Option<Arc<OnDisk>>> {
@@ -194,6 +199,10 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
+    fn row(n: u64) -> FileId {
+        serde_json::from_str(&n.to_string()).unwrap()
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_read_leaves_an_instrument_in_place_and_stops_at_the_room_left() {
@@ -210,7 +219,7 @@ mod tests {
         let asked = ["Marimba.nsmp", "Small.ne5p", "Large.ne5p"]
             .into_iter()
             .enumerate()
-            .map(|(id, at)| (id as u64, path(at), None))
+            .map(|(id, at)| (id as u64, row(id as u64), path(at), None))
             .collect();
         let read = now(read_all(&fs, asked, 25));
         let what: Vec<(u64, &str)> = read

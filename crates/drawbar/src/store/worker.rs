@@ -73,29 +73,22 @@ extern "C" {
     static GLUE: String;
 }
 
-/// What a worker is started for, as its failures name it.
+/// What a worker is started for: what its failures name it, and the name the browser's
+/// tools show for it.
 #[derive(Clone, Copy)]
-enum Role {
-    Library,
-    Rescues,
+struct Role {
+    name: &'static str,
+    label: &'static str,
 }
 
-impl Role {
-    fn name(self) -> &'static str {
-        match self {
-            Role::Library => "drawbar's work on the library",
-            Role::Rescues => "drawbar's keeping of rescued sounds",
-        }
-    }
-
-    /// The name the browser's tools show for it.
-    fn label(self) -> &'static str {
-        match self {
-            Role::Library => "drawbar library",
-            Role::Rescues => "drawbar rescues",
-        }
-    }
-}
+const LIBRARY: Role = Role {
+    name: "drawbar's work on the library",
+    label: "drawbar library",
+};
+const RESCUES: Role = Role {
+    name: "drawbar's keeping of rescued sounds",
+    label: "drawbar rescues",
+};
 
 /// One request of a worker started by [`Worker::rescues`], on the file of this name in
 /// its directory. [`Worker::rescue`] answers [`RescueIo::Free`] with whether no file has
@@ -189,7 +182,7 @@ impl Worker {
             ("local", local.as_str().into()),
         ];
         let glue = GLUE.with(String::clone);
-        let started = Worker::spawn(Role::Library, &glue, &start).await;
+        let started = Worker::spawn(LIBRARY, &glue, &start).await;
         started.map_err(|e| e.to_string())
     }
 
@@ -204,14 +197,11 @@ impl Worker {
     #[doc(hidden)]
     pub async fn rescues_from(dir: &RelPath, glue: &str) -> io::Result<Worker> {
         let start = [("kind", "rescues".into()), ("folder", dir.as_str().into())];
-        Worker::spawn(Role::Rescues, glue, &start).await
+        Worker::spawn(RESCUES, glue, &start).await
     }
 
     /// Do `io` in the directory of a worker started by [`Worker::rescues`].
     pub async fn rescue(&self, io: RescueIo) -> Result<bool, String> {
-        if let Some(why) = &*self.replies.failed.borrow() {
-            return Err(why.clone());
-        }
         let reply = self.reply(&io).await?;
         from_js(&reply).and_then(wire::decode::<Result<bool, String>>)?
     }
@@ -227,7 +217,7 @@ impl Worker {
         let url = Url::create_object_url_with_blob(&blob).map_err(js)?;
         let options = WorkerOptions::new();
         options.set_type(WorkerType::Module);
-        options.set_name(role.label());
+        options.set_name(role.label);
         let worker = web_sys::Worker::new_with_options(&url, &options).map_err(js)?;
 
         let replies = Rc::new(Replies::default());
@@ -253,7 +243,7 @@ impl Worker {
                         let _ = answer.call1(&JsValue::NULL, &data);
                     }
                     (None, Some(_)) => {
-                        replies.fail(format!("{} stopped unexpectedly", role.name()));
+                        replies.fail(format!("{} stopped unexpectedly", role.name));
                     }
                     (None, None) => {}
                 }
@@ -262,7 +252,7 @@ impl Worker {
         let fail = {
             let replies = Rc::clone(&replies);
             Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
-                replies.fail(format!("{} stopped unexpectedly", role.name()));
+                replies.fail(format!("{} stopped unexpectedly", role.name));
             })
         };
         worker.set_onmessage(Some(hear.as_ref().unchecked_ref()));
@@ -335,9 +325,6 @@ impl Worker {
 
     /// Run `cmd` in the worker, and every answer it gave.
     pub async fn run(&self, cmd: Cmd) -> Result<Vec<Event>, Unrun> {
-        if let Some(why) = &*self.replies.failed.borrow() {
-            return Err(Unrun::Failed(why.clone()));
-        }
         let reply = self.reply(&cmd).await.map_err(Unrun::Failed)?;
         let decoded = match self.unread.take() {
             true => Err("the page was made unable to read it".to_string()),
@@ -349,6 +336,9 @@ impl Worker {
 
     /// The worker's reply to `cmd`, as it came.
     async fn reply(&self, cmd: &impl Serialize) -> Result<JsValue, String> {
+        if let Some(why) = self.stopped() {
+            return Err(why);
+        }
         let (message, transfer) = to_js(wire::encode(cmd)?);
         let id = self.replies.next.get();
         self.replies.next.set(id.wrapping_add(1));
@@ -400,10 +390,8 @@ impl Drop for Worker {
 pub async fn serve(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let signs = Arc::new(Signs::default());
-    let served = match field(&start, "kind")
-        .and_then(|kind| kind.as_string())
-        .as_deref()
-    {
+    let kind = field(&start, "kind").and_then(|kind| kind.as_string());
+    let served = match kind.as_deref() {
         Some("rescues") => rescues(&start).await.map(Served::Rescues),
         _ => keeper(&start, signs.clone())
             .await
@@ -459,10 +447,7 @@ async fn keeper(start: &JsValue, signs: Arc<Signs>) -> Result<Keeper<Counted<Exe
         .map_err(|e| e.to_string())?;
     let volume = match picked {
         true => probe(&executor).await,
-        false => Volume {
-            folds_case: false,
-            folds_form: false,
-        },
+        false => Volume::default(),
     };
     let env = keeper::env(
         Box::new(DateClock),
@@ -632,9 +617,7 @@ impl Queue {
             }
             let served = self.served.take();
             let Some(mut served) = served else {
-                let id = field(&message, "id").unwrap_or(JsValue::NULL);
-                let closed = object(&[("id", id), ("failed", "the library is closed".into())]);
-                let _ = self.scope.post_message(&closed);
+                self.reply(&message, Err("the library is closed".into()));
                 continue;
             };
             if field(&message, "close").is_some() {
@@ -654,26 +637,14 @@ impl Queue {
     }
 
     async fn rescued(&self, fs: &Executor, message: &JsValue) {
-        let id = field(message, "id").unwrap_or(JsValue::NULL);
         let done = match from_js(message).and_then(wire::decode::<RescueIo>) {
             Ok(io) => rescue(fs, io).await,
             Err(why) => Err(format!("the rescue worker was sent {why}")),
         };
-        let posted = wire::encode(&done).and_then(|message| {
-            let (reply, transfer) = to_js(message);
-            let _ = Reflect::set(&reply, &"id".into(), &id);
-            self.scope
-                .post_message_with_transfer(&reply, &transfer)
-                .map_err(js)
-        });
-        if let Err(why) = posted {
-            let failed = object(&[("id", id), ("failed", why.into())]);
-            let _ = self.scope.post_message(&failed);
-        }
+        self.reply(message, wire::encode(&done));
     }
 
     async fn answer(&self, keeper: &mut Keeper<Counted<Executor>>, message: &JsValue) {
-        let id = field(message, "id").unwrap_or(JsValue::NULL);
         if field(message, "whole").is_some() {
             keeper.forget_shown();
         }
@@ -685,21 +656,28 @@ impl Queue {
             }
             Err(_) => Err("drawbar could not pass the change on to the library".to_string()),
         };
-        let posted = match answered {
-            Ok(message) => {
-                let (reply, transfer) = to_js(message);
-                let _ = Reflect::set(&reply, &"id".into(), &id);
-                self.scope
-                    .post_message_with_transfer(&reply, &transfer)
-                    .map_err(js)
-            }
-            Err(why) => Err(why),
-        };
-        if let Err(why) = posted {
+        if !self.reply(message, answered) {
             keeper.forget_shown();
-            let failed = object(&[("id", id), ("failed", why.into())]);
-            let _ = self.scope.post_message(&failed);
         }
+    }
+
+    /// Post `answered` as the reply to `message`, or why there is none; whether the
+    /// reply was posted.
+    fn reply(&self, message: &JsValue, answered: Result<Message, String>) -> bool {
+        let id = field(message, "id").unwrap_or(JsValue::NULL);
+        let posted = answered.and_then(|answered| {
+            let (reply, transfer) = to_js(answered);
+            let _ = Reflect::set(&reply, &"id".into(), &id);
+            self.scope
+                .post_message_with_transfer(&reply, &transfer)
+                .map_err(js)
+        });
+        let Err(why) = posted else {
+            return true;
+        };
+        let failed = object(&[("id", id), ("failed", why.into())]);
+        let _ = self.scope.post_message(&failed);
+        false
     }
 }
 
@@ -757,10 +735,8 @@ fn object(fields: &[(&str, JsValue)]) -> JsValue {
 fn deferred() -> (Promise, Function) {
     let mut resolve = None;
     let promise = Promise::new(&mut |done, _| resolve = Some(done));
-    (
-        promise,
-        resolve.expect("a promise runs its executor at once"),
-    )
+    let resolve = resolve.expect("a promise runs its executor at once");
+    (promise, resolve)
 }
 
 fn js(error: JsValue) -> String {

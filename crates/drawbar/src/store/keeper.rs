@@ -4,34 +4,30 @@
 //! toshokan stages it.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging};
 use toshokan::error::{Refusal, Why};
-use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
-use toshokan::log::Settlement;
+use toshokan::io::{Io, IoError, Lock, Range, Reply, Root};
+use toshokan::log::{FileFact, Settlement};
 use toshokan::plan::FactChange;
 use toshokan::report::{
-    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, ScanReport, Start, TrashItem, What,
+    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, Start, TrashItem, What,
 };
-use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
+use toshokan::{EntryHash, Env, Error, Expect, FileId, Nonce, RelPath, Set, View, WriterId};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
-use super::shown::Change;
+use super::shown::{Change, Changes};
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
-    Part, Source, Stat, Unwritable, Viewed, Waiting,
+    Part, Source, Stat, Tagged, Unwritable, Viewed, Waiting,
 };
 use crate::rewrite::{self, Pieces};
-
-/// The most entries a listing of the library's folders looks at: a guard against a
-/// folder no library is, such as a whole disk.
-const MOST_ENTRIES: usize = 1_000_000;
 
 /// What other writers see this one called. The folder may be shared, so it says no
 /// more than which app wrote.
@@ -87,13 +83,16 @@ pub struct Keeper<F> {
     /// Whether the app was told the entities two drawbars made of one file could not
     /// be joined.
     told_unjoined: bool,
-    /// The entities whose file the app was told could be any of several, as the last
-    /// scan found them.
-    told_ambiguous: BTreeSet<toshokan::EntityId>,
     /// The files of other drawbars' history the app was told could not be read.
     told_unread: BTreeSet<RelPath>,
     /// The lock this window holds while it has the library open.
     window: Option<RelPath>,
+    /// Whether the unsaved edits an earlier session kept were read.
+    drafts_read: bool,
+    /// The row each file the last answer named as written went to, by its asset.
+    sent: Vec<(u64, FileId)>,
+    /// Those of an answer the app lost, which the next view carries.
+    owed: Vec<(u64, FileId)>,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -114,9 +113,11 @@ impl<F: Fs> Keeper<F> {
             writer: None,
             told_unemptied: false,
             told_unjoined: false,
-            told_ambiguous: BTreeSet::new(),
             told_unread: BTreeSet::new(),
             window: None,
+            drafts_read: false,
+            sent: Vec::new(),
+            owed: Vec::new(),
         }
     }
 
@@ -124,10 +125,27 @@ impl<F: Fs> Keeper<F> {
     #[cfg(any(target_arch = "wasm32", test))]
     pub fn forget_shown(&mut self) {
         self.shown = None;
+        self.owed.append(&mut self.sent);
     }
 
-    /// Run a command on the library, and answer it.
+    /// Run a command on the library, and answer it. The first view answered carries the
+    /// rows of the files written in an answer the app lost.
     pub async fn run(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+        let mut owed = std::mem::take(&mut self.owed);
+        let mut sent = Vec::new();
+        self.answer(cmd, &mut |mut event| {
+            sent.extend(written(&event));
+            if let Some(viewed) = viewed_in(&mut event) {
+                sent.extend(owed.iter().copied());
+                viewed.wrote.append(&mut owed);
+            }
+            answer(event);
+        })
+        .await;
+        (self.sent, self.owed) = (sent, owed);
+    }
+
+    async fn answer(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
         if let Ok(fs) = storage_of(&self.library) {
             let _ = self.unsaved.let_go_of_ended(fs).await;
         }
@@ -167,14 +185,11 @@ impl<F: Fs> Keeper<F> {
                 let committed = self.commit(intent, answer).await;
                 self.made(label, finished, committed, false, answer).await;
             }
-            Cmd::Undo => {
-                let (undone, forgot) = self.undone(false).await;
-                self.made("Undo".to_string(), finished, undone, forgot, answer)
-                    .await;
-            }
-            Cmd::Redo => {
-                let (redone, forgot) = self.undone(true).await;
-                self.made("Redo".to_string(), finished, redone, forgot, answer)
+            Cmd::Undo | Cmd::Redo => {
+                let again = matches!(cmd, Cmd::Redo);
+                let (done, forgot) = self.undone(again).await;
+                let label = if again { "Redo" } else { "Undo" };
+                self.made(label.to_string(), finished, done, forgot, answer)
                     .await;
             }
             Cmd::Settle { orphan, how } => {
@@ -338,22 +353,6 @@ impl<F: Fs> Keeper<F> {
         (!told).then_some(Event::Unjoined(why))
     }
 
-    /// The files `scan` found could each be the file of an entity whose file is gone,
-    /// for those not told since the scan before: where that file was, and the files.
-    fn ambiguous(&mut self, scan: &ScanReport, view: &View) -> Vec<(LibPath, Vec<LibPath>)> {
-        let told = std::mem::take(&mut self.told_ambiguous);
-        self.told_ambiguous = scan.ambiguous.iter().map(|found| found.entity).collect();
-        let new = scan.ambiguous.iter();
-        let new = new.filter(|found| !told.contains(&found.entity));
-        let new = new.filter_map(|found| {
-            let was = view.entity(found.entity)?.file()?.path;
-            let candidates = found.candidates.iter();
-            let candidates = candidates.filter_map(|path| LibPath::parse(path.as_str()));
-            Some((LibPath::parse(was.as_str())?, candidates.collect()))
-        });
-        new.collect()
-    }
-
     /// Say once a session each file of other drawbars' history the last read could not
     /// read.
     fn tell_unread(&mut self, answer: &mut impl FnMut(Event)) {
@@ -463,8 +462,8 @@ impl<F: Fs> Keeper<F> {
         }
     }
 
-    /// The unsaved edits of assets an earlier session kept, each with whether its file
-    /// still holds what it was made over, as `view` places it and a read of it now finds,
+    /// The unsaved edits of assets an earlier session kept, each with the row of its file
+    /// in `view` and whether the file holds what it was made over, by a read of it now,
     /// or `Err` where the edit or its file does not read.
     async fn drafts(&mut self, view: &View) -> io::Result<Vec<Result<Kept, String>>> {
         let fs = storage_of(&self.library)?;
@@ -476,15 +475,28 @@ impl<F: Fs> Keeper<F> {
                     base: Base::File(base),
                     at,
                     bytes,
-                }) => match file_holds(fs, view, &of, base).await {
-                    Ok(holds) => Ok(Kept {
-                        of,
-                        at,
-                        holds,
-                        bytes,
-                    }),
-                    Err(e) => Err(format!("its file could not be read: {e}")),
-                },
+                }) => {
+                    let row = row_kept(view, &of);
+                    match file_holds(fs, row, base).await {
+                        Ok(holds) => Ok(Kept {
+                            row: row
+                                .filter(|_| holds || matches!(of, Key::Entity(_)))
+                                .map(|row| row.file),
+                            path: match &of {
+                                Key::Entity(_) => {
+                                    row.and_then(|row| LibPath::parse(row.path.as_str()))
+                                }
+                                Key::File(path) | Key::Copy(path, _) => Some(path.clone()),
+                            },
+                            of,
+                            at,
+                            holds,
+                            base,
+                            bytes,
+                        }),
+                        Err(e) => Err(format!("its file could not be read: {e}")),
+                    }
+                }
                 Ok(unsaved::Unsaved {
                     of: Of::Slot(_), ..
                 }) => continue,
@@ -565,7 +577,6 @@ impl<F: Fs> Keeper<F> {
             ) => Err(Unwritable::ReadOnly(read_only(why))),
         };
         self.told_read_only = writable.is_err();
-        let view = library.view();
         self.library = Some(library);
         // After settling, which may need what the trash holds.
         if writable.is_ok() {
@@ -573,15 +584,10 @@ impl<F: Fs> Keeper<F> {
                 trouble.push(format!("emptying the trash: {why}"));
             }
         }
-        let drafts = self.drafts(&view).await.unwrap_or_else(|e| {
-            trouble.push(format!("reading the unsaved edits kept: {e}"));
-            Vec::new()
-        });
         Ok(Opened {
             writable,
             opening_copy,
             viewed,
-            drafts,
             ignored: opened.ignored.len(),
             trouble,
         })
@@ -638,22 +644,19 @@ impl<F: Fs> Keeper<F> {
             false => None,
         };
         let view = library.view();
-        let joined = match joined {
-            Some(Ok(committed)) => {
-                refreshed.changes.extend(committed.changes);
-                joined_files(&refreshed.scan.joined, &view)
-            }
-            Some(Err(e)) => {
-                answer_some(answer, self.unjoined(told(&e)));
-                Vec::new()
-            }
-            None => Vec::new(),
+        match joined {
+            Some(Ok(committed)) => refreshed.changes.extend(committed.changes),
+            Some(Err(e)) => answer_some(answer, self.unjoined(told(&e))),
+            None => {}
+        }
+        let drafts = match whole && !std::mem::replace(&mut self.drafts_read, true) {
+            true => Some(self.drafts(&view).await.map_err(|e| e.to_string())),
+            false => None,
         };
-        let ambiguous = self.ambiguous(&refreshed.scan, &view);
+        let drafts = drafts.map(|drafts| drafts.unwrap_or_else(|e| vec![Err(e)]));
         let library = self.library.as_ref().ok_or("the library is not open")?;
         Ok(Viewed {
-            ambiguous,
-            joined,
+            drafts,
             ..viewed(library, &mut self.shown, refreshed, unfinishable)
         })
     }
@@ -671,10 +674,7 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            // A step another drawbar changed since, or whose trash item went, can
-            // never be taken back; any other refusal may pass once the files are
-            // looked at again.
-            Err(e @ Error::Refused(Refusal::ChangedSince { .. } | Refusal::Emptied)) => {
+            Err(e) if matches!(&e, Error::Refused(refusal) if never(refusal)) => {
                 match again {
                     true => library.forget_redo(),
                     false => library.forget_undo(),
@@ -684,9 +684,9 @@ impl<F: Fs> Keeper<F> {
             Err(e) => return (Err(told(&e)), false),
         };
         let viewed = Viewed {
-            followed: Some(followed(&committed)),
-            dirs: folders(library.fs()).await,
+            quiet: true,
             left: shown_paths(&committed.left),
+            rewritten: wrote(&committed),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         (
@@ -704,8 +704,8 @@ impl<F: Fs> Keeper<F> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = library.settle(orphan, how).await.map_err(|e| told(&e))?;
         let viewed = Viewed {
-            followed: Some(followed(&committed)),
-            dirs: folders(library.fs()).await,
+            quiet: true,
+            rewritten: wrote(&committed),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some((committed.intent, committed.undoable)), viewed))
@@ -734,17 +734,37 @@ impl<F: Fs> Keeper<F> {
                 Err(e) => return Err(not_made(intent, told(&e), answer)),
             }
         }
+        let tags = new_tags(&intent);
+        if !tags.is_empty() && library.view().with(TAG_NAMES).is_empty() {
+            // ⚠️ Undoing the list's making would delete the tags other drawbars add to it.
+            let values = tags.into_iter().map(|name| (TAG_NAMES, name)).collect();
+            match facts(library, label, |built, view| {
+                Ok(on_list(built, view, values))
+            })
+            .await
+            {
+                Ok(listed) => looked.extend(listed.changes),
+                Err(why) => return Err(not_made(intent, why, answer)),
+            }
+            library.forget_undo();
+        }
         let changes = match intent {
             Intent::Tag { files, name, make } => {
                 // ⚠️ A file another drawbar made an entity of since the last refresh would
                 // be adopted twice, as two entities the next scan joins. Reading what others
                 // wrote first leaves that only to one that adopts it in the moment between.
                 let mut changes = Vec::new();
-                if files.iter().any(|key| matches!(key, Key::File(_))) {
+                let view = library.view();
+                let untagged = |file: &Tagged| match file {
+                    Tagged::Row(file) => view.row(*file).is_some_and(|row| row.entity.is_none()),
+                    Tagged::Saved(_) => false,
+                };
+                if files.iter().any(untagged) {
                     changes = library.refresh().await.map_err(|e| told(&e))?.changes;
                 }
+                let rows = rows_tagged(&files)?;
                 let mut committed = facts(library, label, |built, view| {
-                    let built = tag(built, view, &files, &name)?;
+                    let built = tag(built, view, &rows, &name)?;
                     Ok(match make {
                         true => list_tag(built, view, name),
                         false => built,
@@ -835,9 +855,11 @@ impl<F: Fs> Keeper<F> {
         let left = changes
             .as_ref()
             .map(|committed| shown_paths(&committed.left));
+        let rewritten = changes.as_ref().map(wrote);
         looked.extend(changes.into_iter().flat_map(|committed| committed.changes));
         let viewed = Viewed {
             left: left.unwrap_or_default(),
+            rewritten: rewritten.unwrap_or_default(),
             ..committed_view(library, &mut self.shown, looked)
         };
         Ok((intent, viewed))
@@ -860,28 +882,60 @@ async fn join<F: Fs>(
     built.commit().await
 }
 
-/// Where the file of each entity `joined` into another is in `view`, with the entities.
-fn joined_files(joined: &[Joined], view: &View) -> Vec<(LibPath, Joined)> {
-    let files = joined.iter().filter_map(|joined| {
-        let path = view.entity(joined.into)?.file()?.path;
-        Some((LibPath::parse(path.as_str())?, *joined))
-    });
-    files.collect()
-}
-
-/// What `committed` moved, for the app to follow without a word: each tree, then each
-/// file no entity is bound to that it made, moved or trashed, from and to.
-fn followed(committed: &toshokan::report::Committed) -> Vec<(Option<LibPath>, Option<LibPath>)> {
-    let path = |path: Option<&RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
-    let trees = committed.trees.iter();
-    let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
-    let paths = committed.paths.iter();
-    let paths = paths.map(|moved| (path(moved.from.as_ref()), path(moved.to.as_ref())));
-    trees.chain(paths).collect()
-}
-
 /// The entry that logged a change, and whether the change joined this session's undo.
 type Made = (EntryHash, bool);
+
+/// Each file `committed` put in place, by its path: its row and what was found there.
+fn put(committed: &toshokan::Committed) -> BTreeMap<&str, (FileId, &FileFact)> {
+    let files = committed.files.iter().rev();
+    let files: BTreeMap<&RelPath, FileId> = files.map(|(at, file)| (at, *file)).collect();
+    let put = committed.wrote.iter().filter_map(|fact| {
+        let file = files.get(&fact.path)?;
+        Some((fact.path.as_str(), (*file, fact)))
+    });
+    put.collect()
+}
+
+/// The row of each file `committed` wrote, with the identity written.
+fn wrote(committed: &toshokan::Committed) -> Vec<(FileId, Option<toshokan::Identity>)> {
+    let put = put(committed).into_values();
+    put.map(|(file, fact)| (file, Some(fact.identity)))
+        .collect()
+}
+
+/// The asset and the row of the file `event` says was written.
+fn written(event: &Event) -> Option<(u64, FileId)> {
+    match event {
+        Event::Saved {
+            id,
+            result: Ok((file, _)),
+            ..
+        }
+        | Event::Rewritten {
+            id,
+            result: Ok((file, _)),
+            ..
+        }
+        | Event::Imported {
+            id,
+            result: Ok((file, _)),
+            ..
+        } => Some((*id, *file)),
+        _ => None,
+    }
+}
+
+/// The view `event` answers with.
+fn viewed_in(event: &mut Event) -> Option<&mut Viewed> {
+    match event {
+        Event::Opened(Ok(opened)) => Some(&mut opened.viewed),
+        Event::Scanned(Ok(viewed))
+        | Event::Committed {
+            result: Ok(viewed), ..
+        } => Some(viewed),
+        _ => None,
+    }
+}
 
 /// `paths` as the app names library paths.
 fn shown_paths(paths: &[RelPath]) -> Vec<LibPath> {
@@ -919,33 +973,46 @@ fn storage_of<F: Fs>(library: &Option<Library<F>>) -> io::Result<&F> {
         .ok_or_else(|| io::Error::other("the library is not open"))
 }
 
-/// Whether the file `of` names in `view` holds the file of identity `base`, by its
-/// identity read now.
+/// The row in `view` of the file a draft kept by `of` is of: its entity's, or that of
+/// the entity it was joined into, else the row at its path.
+fn row_kept<'v>(view: &'v View, of: &Key) -> Option<&'v toshokan::Row> {
+    match of {
+        Key::Entity(entity) => {
+            let mut entity = *entity;
+            for _ in 0..=view.joined().len() {
+                let joined = view.joined().iter().find(|joined| joined.entity == entity);
+                let Some(joined) = joined else { break };
+                entity = joined.into;
+            }
+            view.row_of(entity)
+        }
+        Key::File(path) | Key::Copy(path, _) => view.row_at(&relative(path)?),
+    }
+}
+
+/// Whether `row` is of a file the scan listed that holds the file of identity `base`, by
+/// its identity read now.
 async fn file_holds<F: Fs>(
     fs: &F,
-    view: &View,
-    of: &Key,
+    row: Option<&toshokan::Row>,
     base: toshokan::Identity,
 ) -> io::Result<bool> {
-    let at = match of {
-        Key::Entity(entity) => view
-            .entity(*entity)
-            .and_then(|entity| entity.file())
-            .filter(|file| file.state != toshokan::FileState::Missing)
-            .map(|file| file.path),
-        Key::File(path) => relative(path),
-    };
-    let Some(at) = at else {
+    let Some(row) = row.filter(|row| matches!(row.state, toshokan::RowState::Present { .. }))
+    else {
         return Ok(false);
     };
-    let Some(stat) = storage::stat(fs, &at).await? else {
+    let at = &row.path;
+    let Some(stat) = storage::stat(fs, at).await? else {
         return Ok(false);
     };
-    let read = async |range| storage::read(fs, Root::Folder, &at, range).await;
-    Ok(storage::identity(&at, stat.len, read).await? == base)
+    let read = async |range| storage::read(fs, Root::Folder, at, range).await;
+    Ok(storage::identity(at, stat.len, read).await? == base)
 }
 
 type Built<'l, F> = toshokan::intent::Intent<&'l mut Library<F>>;
+
+/// A change to the folder at a path, built into an intent.
+type OnDir<'l, F> = fn(Built<'l, F>, &RelPath) -> Built<'l, F>;
 
 /// Commit an intent labeled `label` that `build` makes against the view as it stands,
 /// and return what it changed.
@@ -957,6 +1024,18 @@ async fn facts<'a, F: Fs + 'a>(
     let view = library.view();
     let built = build(library.intent(label), &view)?;
     built.commit().await.map_err(|e| told(&e))
+}
+
+/// The tag names `intent` adds to the library's list of tags.
+fn new_tags(intent: &Intent) -> Vec<String> {
+    match intent {
+        Intent::Tag {
+            name, make: true, ..
+        }
+        | Intent::MakeTag { name } => vec![name.clone()],
+        Intent::Batch(parts) => parts.iter().flat_map(new_tags).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Add the tag `name` to the library's list of tags.
@@ -987,34 +1066,34 @@ fn on_list<'l, F: Fs + 'l>(
     }
 }
 
-/// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`
-/// where another writer made one since the app looked, or a new one that adopts it.
+/// The rows of `files`, none of which a save in the same change makes.
+fn rows_tagged(files: &[Tagged]) -> Result<Vec<FileId>, String> {
+    let rows = files.iter().map(|file| match file {
+        Tagged::Row(file) => Ok(*file),
+        Tagged::Saved(path) => Err(format!("tagging {path}: it is not saved")),
+    });
+    rows.collect()
+}
+
+/// Put a tag on the file of each row of `files`: on the entity bound to it in `view`, or
+/// a new one that adopts it.
 fn tag<'l, F: Fs + 'l>(
     mut built: Built<'l, F>,
     view: &View,
-    files: &[Key],
+    files: &[FileId],
     name: &str,
 ) -> Result<Built<'l, F>, String> {
-    for key in files {
-        let path = match key {
-            Key::Entity(entity) => {
-                built = built.add(*entity, TAGS, name.to_string());
-                continue;
-            }
-            Key::File(path) => path,
-        };
-        let at = relative(path).ok_or_else(|| no_path(path))?;
-        if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
+    for file in files {
+        let row = view.row(*file).ok_or("a file to tag is gone")?;
+        if let Some(entity) = row.entity {
             built = built.add(entity, TAGS, name.to_string());
             continue;
         }
-        let listed = view
-            .listed(&at)
-            .ok_or_else(|| format!("{path} is not listed"))?;
-        let expect = Expect::Listed {
-            len: listed.len,
-            modified: listed.modified,
+        let toshokan::RowState::Present { len, modified } = row.state else {
+            return Err(format!("{} is not listed", row.path));
         };
+        let at = row.path.clone();
+        let expect = Expect::Listed { len, modified };
         let (next, _) = built.create(|e| {
             e.adopt(&at, expect).add(TAGS, name.to_string());
         });
@@ -1023,21 +1102,23 @@ fn tag<'l, F: Fs + 'l>(
     Ok(built)
 }
 
-/// Where a write goes, what it expects to find there, and where a new file came from.
+/// Where a write goes, what it expects to find there, where a new file came from, and
+/// the row of the file it writes, where it names one.
 #[derive(Clone, Copy)]
 struct To<'p> {
     path: &'p LibPath,
     expect: Expect,
     came: Option<Came>,
+    row: Option<FileId>,
 }
 
 /// What a fill that failed found, kept to say why its write did not land.
 type FillFailure = Rc<RefCell<Option<io::Error>>>;
 
-/// `built` with the write of the file `to` names from `fill`: as the file of the
-/// entity bound there, as a new entity's file where `to` says where it came from, or
-/// as one no entity is bound to, unless `tags` are to go on it, which makes it an
-/// entity's.
+/// `built` with the write of the file `to` names from `fill`: as the file of the entity
+/// of its row, else of the entity bound there, as a new entity's file where `to` says
+/// where it came from, or as one no entity is bound to, unless `tags` are to go on it,
+/// which makes it an entity's.
 fn save_part<'l, F: Fs + 'l>(
     built: Built<'l, F>,
     view: &View,
@@ -1046,7 +1127,9 @@ fn save_part<'l, F: Fs + 'l>(
     fill: Fill,
     tags: &[String],
 ) -> (Built<'l, F>, FillFailure) {
-    let To { expect, came, .. } = to;
+    let To {
+        expect, came, row, ..
+    } = to;
     let failed = Rc::new(RefCell::new(None));
     let source = || -> Box<dyn Filler<F> + 'l> {
         Box::new(Filling {
@@ -1054,30 +1137,21 @@ fn save_part<'l, F: Fs + 'l>(
             failed: failed.clone(),
         })
     };
-    let entity = view
-        .at(at)
-        .map(|entity| entity.id())
-        .or_else(|| missing_at(view, at));
+    let entity = row.and_then(|row| view.row(row)?.entity);
+    let entity = entity.or_else(|| Some(view.at(at)?.id()));
     let built = match (entity, came) {
         (Some(entity), _) => {
             let built = built.save_from(entity, at, source(), expect);
             tags.iter()
                 .fold(built, |built, name| built.add(entity, TAGS, name.clone()))
         }
-        (None, Some(came)) => {
-            let source = source();
-            let (built, _) = built.create(|e| {
-                e.set(ORIGIN, came).save_from(at, source, expect);
-                for name in tags {
-                    e.add(TAGS, name.clone());
-                }
-            });
-            built
-        }
         (None, None) if tags.is_empty() => built.save_file_from(at, source(), expect),
-        (None, None) => {
+        (None, came) => {
             let source = source();
             let (built, _) = built.create(|e| {
+                if let Some(came) = came {
+                    e.set(ORIGIN, came);
+                }
                 e.save_from(at, source, expect);
                 for name in tags {
                     e.add(TAGS, name.clone());
@@ -1102,9 +1176,7 @@ enum Answering {
     Saved {
         id: u64,
         path: LibPath,
-        len: u64,
         crc: u32,
-        identity: Option<toshokan::Identity>,
     },
     Rewritten {
         id: u64,
@@ -1150,38 +1222,49 @@ impl Answering {
         })
     }
 
-    /// The event that says the part landed; none for one answered only on failure.
-    async fn landed<F: Fs>(self, fs: &F) -> Option<Event> {
+    /// The event that says the part landed, with the row of the file it wrote and what
+    /// that file holds, as the files a commit `put` name them; none for one answered only
+    /// on failure.
+    fn landed(self, put: &BTreeMap<&str, (FileId, &FileFact)>) -> Option<Event> {
+        // A commit names every file it wrote: one it does not is answered as a lost
+        // answer, which a look at the folder recovers.
+        let wrote = |path: &LibPath| {
+            let (file, fact) = put.get(path.as_str()).ok_or(Failure::Unheard)?;
+            let stat = Stat {
+                len: fact.len,
+                modified: fact.modified,
+            };
+            let found = Found {
+                identity: Some(fact.identity),
+                ..Found::unread(path.clone(), stat)
+            };
+            Ok((*file, found))
+        };
         Some(match self {
-            Answering::Saved {
-                id,
-                path,
-                len,
-                crc,
-                identity,
-            } => {
-                // The commit landed: a stat that fails now leaves what it wrote, with no
-                // time, which the next scan reads the identity again for.
-                let stat = stat_at(fs, &path).await;
-                let stat = stat.unwrap_or(Stat {
-                    len,
-                    modified: None,
-                });
-                let result = Ok(Fingerprint {
-                    crc: Some(crc),
-                    identity,
-                    ..Fingerprint::unread(stat)
-                });
+            Answering::Saved { id, path, crc } => {
+                let print = |(file, found): (FileId, Found)| {
+                    let print = found.fingerprint();
+                    (
+                        file,
+                        Fingerprint {
+                            crc: Some(crc),
+                            ..print
+                        },
+                    )
+                };
+                let result = wrote(&path).map(print);
                 Event::Saved { id, path, result }
             }
-            Answering::Rewritten { id, path } => {
-                let result = landed(fs, &path).await;
-                Event::Rewritten { id, path, result }
-            }
-            Answering::Imported { id, path } => {
-                let result = landed(fs, &path).await;
-                Event::Imported { id, path, result }
-            }
+            Answering::Rewritten { id, path } => Event::Rewritten {
+                result: wrote(&path),
+                id,
+                path,
+            },
+            Answering::Imported { id, path } => Event::Imported {
+                result: wrote(&path),
+                id,
+                path,
+            },
             Answering::Moved { from, to } => Event::Moved {
                 from,
                 to,
@@ -1205,34 +1288,23 @@ async fn batch<F: Fs>(
     loop {
         let again = parts.iter().any(Intent::reads).then(|| parts.clone());
         let tried = attempt(library, label, parts).await;
-        let unread: BTreeSet<usize> = tried
-            .owed
-            .iter()
-            .filter(|owed| {
-                owed.failed
-                    .as_ref()
-                    .is_some_and(|failed| failed.borrow().is_some())
-            })
-            .map(|owed| owed.part)
-            .collect();
+        let unread = tried.owed.iter().filter_map(|owed| {
+            let failed = owed.failed.as_ref()?;
+            failed.borrow().is_some().then_some(owed.part)
+        });
+        let unread: BTreeSet<usize> = unread.collect();
         let retry = again.filter(|_| tried.changes.is_none() && !unread.is_empty());
         let Some(again) = retry else {
-            return tried.answer(library.fs(), answer).await;
+            return tried.answer(answer);
         };
         for owed in tried
             .owed
             .into_iter()
             .filter(|owed| unread.contains(&owed.part))
         {
-            let filled = owed
-                .failed
-                .and_then(|failed| failed.take())
-                .map(fill_failure);
-            answer_some(
-                answer,
-                owed.answer
-                    .refused(filled.unwrap_or(Failure::Io("not read".into()))),
-            );
+            let filled = owed.failed.and_then(|failed| failed.take());
+            let failure = filled.map_or_else(|| Failure::Io("not read".into()), fill_failure);
+            answer_some(answer, owed.answer.refused(failure));
         }
         parts = again
             .into_iter()
@@ -1326,11 +1398,7 @@ struct Tried {
 
 impl Tried {
     /// Answer each part, and return what the commit changed.
-    async fn answer<F: Fs>(
-        self,
-        fs: &F,
-        answer: &mut impl FnMut(Event),
-    ) -> Option<toshokan::Committed> {
+    fn answer(self, answer: &mut impl FnMut(Event)) -> Option<toshokan::Committed> {
         let Tried {
             owed,
             refused,
@@ -1340,15 +1408,16 @@ impl Tried {
         for event in refused {
             answer(event);
         }
+        let put = changes.as_ref().map(put);
         for Owed {
             failed,
             answer: answering,
             ..
         } in owed
         {
-            let event = match changes.is_some() {
-                true => answering.landed(fs).await,
-                false => {
+            let event = match &put {
+                Some(put) => answering.landed(put),
+                None => {
                     let filled = failed.and_then(|failed| failed.take()).map(fill_failure);
                     let failure = filled.or_else(|| why.clone());
                     answering.refused(failure.unwrap_or(Failure::Io("not made".to_string())))
@@ -1362,20 +1431,18 @@ impl Tried {
 
 async fn attempt<F: Fs>(library: &mut Library<F>, label: &str, parts: Vec<Intent>) -> Tried {
     let view = library.view();
-    let saved: BTreeSet<LibPath> = parts
-        .iter()
-        .filter_map(|part| match part {
-            Intent::Save { path, .. } | Intent::Import { path, .. } => Some(path.clone()),
-            _ => None,
-        })
-        .collect();
+    let saved = parts.iter().filter_map(|part| match part {
+        Intent::Save { path, .. } | Intent::Import { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    let saved: BTreeSet<LibPath> = saved.collect();
     let mut tags: BTreeMap<LibPath, Vec<String>> = BTreeMap::new();
     for part in &parts {
         let Intent::Tag { files, name, .. } = part else {
             continue;
         };
-        for key in files {
-            if let Key::File(path) = key {
+        for file in files {
+            if let Tagged::Saved(path) = file {
                 if saved.contains(path) {
                     tags.entry(path.clone()).or_default().push(name.clone());
                 }
@@ -1437,9 +1504,8 @@ async fn checked<F: Fs>(part: &Intent, fs: &F) -> Result<(), Box<Event>> {
         path: path.clone(),
     };
     let changed = Failure::Io("the file it copies changed on disk".into());
-    Err(Box::new(
-        answering.refused(changed).expect("a copy answers"),
-    ))
+    let refused = answering.refused(changed).expect("a copy answers");
+    Err(Box::new(refused))
 }
 
 fn answer_some(answer: &mut impl FnMut(Event), event: Option<Event>) {
@@ -1463,9 +1529,21 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
     /// Build `part` into the intent, or say at once why it cannot be.
     fn add(&mut self, part: Intent) -> Result<(), Box<Event>> {
         let at = |path: &LibPath| relative(path).ok_or_else(|| no_path(path));
+        let moved = |from: &LibPath, to: &LibPath| Answering::Moved {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        let ends = |from: &LibPath, to: &LibPath| match (at(from), at(to)) {
+            (Ok(from), Ok(to)) => Ok((from, to)),
+            (Err(why), _) | (_, Err(why)) => {
+                let refused = moved(from, to).refused(Failure::Io(why));
+                Err(Box::new(refused.expect("a move answers")))
+            }
+        };
         match part {
             Intent::Save {
                 id,
+                row,
                 path,
                 bytes,
                 expect,
@@ -1473,15 +1551,14 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
             } => {
                 let answering = Answering::Saved {
                     id,
-                    len: bytes.len() as u64,
                     crc: nord_format::crc::crc32(&bytes),
-                    identity: keys::identity_of_bytes(&path, &bytes),
                     path: path.clone(),
                 };
                 let to = To {
                     path: &path,
                     expect,
                     came,
+                    row,
                 };
                 self.save(to, Fill::Bytes(bytes), answering)
             }
@@ -1499,6 +1576,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     path: &path,
                     expect,
                     came: None,
+                    row: None,
                 };
                 self.save(to, Fill::Edited(path.clone(), pieces), answering)
             }
@@ -1525,22 +1603,14 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     path: &path,
                     expect,
                     came,
+                    row: None,
                 };
                 self.save(to, fill, answering)
             }
             Intent::Move { moves } => {
                 for moving in moves {
-                    let answering = Answering::Moved {
-                        from: moving.from.clone(),
-                        to: moving.to.clone(),
-                    };
-                    let (from, to) = match (at(&moving.from), at(&moving.to)) {
-                        (Ok(from), Ok(to)) => (from, to),
-                        (Err(why), _) | (_, Err(why)) => {
-                            let refused = answering.refused(Failure::Io(why));
-                            return Err(Box::new(refused.expect("a move answers")));
-                        }
-                    };
+                    let answering = moved(&moving.from, &moving.to);
+                    let (from, to) = ends(&moving.from, &moving.to)?;
                     let built = self.take();
                     self.built = Some(match self.view.at(&from).map(|entity| entity.id()) {
                         Some(entity) => built.rename(entity, &to, moving.expect),
@@ -1551,18 +1621,8 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                 Ok(())
             }
             Intent::MoveFolder { from, to } => {
-                let answering = Answering::Moved {
-                    from: from.clone(),
-                    to: to.clone(),
-                };
-                let (from, to) = match (at(&from), at(&to)) {
-                    (Ok(from), Ok(to)) => (from, to),
-                    (Err(why), _) | (_, Err(why)) => {
-                        return Err(Box::new(
-                            answering.refused(Failure::Io(why)).expect("a move answers"),
-                        ));
-                    }
-                };
+                let answering = moved(&from, &to);
+                let (from, to) = ends(&from, &to)?;
                 self.built = Some(self.take().move_tree(&from, &to));
                 self.owe(None, answering);
                 Ok(())
@@ -1582,40 +1642,30 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                 }
                 Ok(())
             }
-            Intent::MakeDir { path } => {
-                let at = at(&path)
-                    .map_err(|why| Box::new(Event::Failed(format!("making {path}: {why}"))))?;
-                self.built = Some(self.take().make_dir(&at));
-                let doing = Answering::Quiet(format!("making {path}"));
-                self.owe(None, doing);
-                Ok(())
-            }
-            Intent::RemoveDir { path } => {
-                let at = at(&path)
-                    .map_err(|why| Box::new(Event::Failed(format!("removing {path}: {why}"))))?;
-                self.built = Some(self.take().remove_dir(&at));
-                let doing = Answering::Quiet(format!("removing {path}"));
-                self.owe(None, doing);
-                Ok(())
-            }
+            Intent::MakeDir { path } => self.dir(&path, "making", Built::make_dir),
+            Intent::RemoveDir { path } => self.dir(&path, "removing", Built::remove_dir),
             Intent::Tag { files, name, make } => {
                 // A file this batch saves wears the tag as it is made.
-                let rest: Vec<Key> = files
+                let rest: Vec<Tagged> = files
                     .into_iter()
-                    .filter(|key| !matches!(key, Key::File(path) if self.tags.contains_key(path)))
+                    .filter(
+                        |file| !matches!(file, Tagged::Saved(path) if self.tags.contains_key(path)),
+                    )
                     .collect();
-                let taggable = |key: &Key| match key {
-                    Key::Entity(_) => true,
-                    Key::File(path) => relative(path).is_some_and(|at| {
-                        self.view.at(&at).is_some() || self.view.listed(&at).is_some()
-                    }),
+                let tagging =
+                    |why: String| Box::new(Event::Failed(format!("tagging with “{name}”: {why}")));
+                let rows = rows_tagged(&rest).map_err(tagging)?;
+                let taggable = |file: &FileId| {
+                    let row = self.view.row(*file);
+                    row.is_some_and(|row| {
+                        row.entity.is_some()
+                            || matches!(row.state, toshokan::RowState::Present { .. })
+                    })
                 };
-                if let Some(Key::File(path)) = rest.iter().find(|key| !taggable(key)) {
-                    return Err(Box::new(Event::Failed(format!(
-                        "tagging {path}: it is not listed"
-                    ))));
+                if !rows.iter().all(taggable) {
+                    return Err(tagging("a file it names is not listed".to_string()));
                 }
-                let built = tag(self.take(), self.view, &rest, &name)
+                let built = tag(self.take(), self.view, &rows, &name)
                     .expect("every file it tags is listed");
                 self.built = Some(match make {
                     true => list_tag(built, self.view, name.clone()),
@@ -1642,9 +1692,8 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
     fn save(&mut self, to: To<'_>, fill: Fill, answering: Answering) -> Result<(), Box<Event>> {
         let Some(at) = relative(to.path) else {
             let failure = Failure::Io(no_path(to.path));
-            return Err(Box::new(
-                answering.refused(failure).expect("a write answers"),
-            ));
+            let refused = answering.refused(failure).expect("a write answers");
+            return Err(Box::new(refused));
         };
         let tags = self.tags.get(to.path).map_or(&[][..], Vec::as_slice);
         let built = self.take();
@@ -1654,14 +1703,22 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
         Ok(())
     }
 
+    /// Make or remove, as `doing` says, the folder at `path`.
+    fn dir(&mut self, path: &LibPath, doing: &str, change: OnDir<'l, F>) -> Result<(), Box<Event>> {
+        let failed = |why| Box::new(Event::Failed(format!("{doing} {path}: {why}")));
+        let at = relative(path).ok_or_else(|| failed(no_path(path)))?;
+        self.built = Some(change(self.take(), &at));
+        self.owe(None, Answering::Quiet(format!("{doing} {path}")));
+        Ok(())
+    }
+
     fn take(&mut self) -> Built<'l, F> {
         self.built.take().expect("each part puts the intent back")
     }
 
     fn owe(&mut self, failed: Option<FillFailure>, answer: Answering) {
-        let part = self.part;
         self.owed.push(Owed {
-            part,
+            part: self.part,
             failed,
             answer,
         });
@@ -1699,6 +1756,9 @@ async fn holds(
     Ok(storage::identity(at, stat.len, read).await? == identity)
 }
 
+/// Why an undo or a redo of a change to an entity whose file has not arrived waits.
+pub(super) const NO_FILE: &str = "it has no file";
+
 /// Why a change is refused that is too large for the library to log as one.
 const TOO_LARGE: &str = "it is too large a change to make at once; change fewer files at a time";
 
@@ -1719,30 +1779,6 @@ fn fill_failure(e: io::Error) -> Failure {
         true => Failure::Moved,
         false => Failure::Io(e.to_string()),
     }
-}
-
-/// The entity whose file is missing from `path`: one whose file a save writes back.
-fn missing_at(view: &View, path: &RelPath) -> Option<toshokan::EntityId> {
-    let mut entities = view.entities().into_iter();
-    let missing = entities.find(|entity| {
-        entity
-            .file()
-            .is_some_and(|file| file.path == *path && file.state == toshokan::FileState::Missing)
-    });
-    missing.map(|entity| entity.id())
-}
-
-/// The file just written at `path`, as a listing finds it, with nothing read: the
-/// backend, which reads files, looks at what it holds.
-async fn landed<F: Fs>(fs: &F, path: &LibPath) -> Result<Found, Failure> {
-    Ok(Found::unread(path.clone(), stat_at(fs, path).await?))
-}
-
-async fn stat_at<F: Fs>(fs: &F, path: &LibPath) -> Result<Stat, Failure> {
-    let gone = || Failure::Io("the file was gone as soon as it was written".into());
-    let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
-    let stat = storage::stat(fs, &at).await.map_err(|_| gone())?;
-    stat.ok_or_else(gone)
 }
 
 /// What a file toshokan stages is filled from.
@@ -1897,20 +1933,21 @@ fn committed_view<F: Fs>(
     shown: &mut Option<View>,
     changes: Vec<toshokan::report::Change>,
 ) -> Viewed {
+    let shows = show(shown, library.view());
     Viewed {
-        shown: show(shown, library.view()),
-        dirs: None,
+        shown: shows.change,
+        rows: shows.rows,
         changes,
-        moves: Vec::new(),
-        followed: None,
+        quiet: false,
         unlisted: None,
         unfinished: None,
         kept: kept(library),
         retired: false,
         left: Vec::new(),
         finishing: shown_paths(&library.finishing()),
-        ambiguous: Vec::new(),
-        joined: Vec::new(),
+        drafts: None,
+        wrote: Vec::new(),
+        rewritten: Vec::new(),
     }
 }
 
@@ -1937,12 +1974,9 @@ fn listed(item: &Item, view: &View) -> Vec<Listed> {
     let held = files.filter(|(made, _)| view.entity(*made).is_none());
     let held = held.filter_map(|(made, path)| Some((made, view.at(path)?.id())));
     let onto: BTreeMap<toshokan::EntityId, toshokan::EntityId> = held.collect();
-    let made: BTreeSet<toshokan::EntityId> = item
-        .changes
-        .iter()
-        .filter(|change| change.what == What::Created)
-        .map(|change| change.entity)
-        .collect();
+    let made = item.changes.iter();
+    let made = made.filter(|change| change.what == What::Created);
+    let made: BTreeSet<toshokan::EntityId> = made.map(|change| change.entity).collect();
     let listed = item.changes.iter().filter_map(|change| {
         let own = || Listed {
             change: change.clone(),
@@ -1972,27 +2006,17 @@ fn listed(item: &Item, view: &View) -> Vec<Listed> {
 /// `change` made to the same field of `to`; `None` where it makes, ends or places an
 /// entity rather than changing a field.
 fn field_onto(change: &FactChange, to: toshokan::EntityId) -> Option<FactChange> {
-    Some(match change.clone() {
-        FactChange::Set { key, value, .. } => FactChange::Set {
-            entity: to,
-            key,
-            value,
-        },
-        FactChange::Clear { key, .. } => FactChange::Clear { entity: to, key },
-        FactChange::Add { key, value, .. } => FactChange::Add {
-            entity: to,
-            key,
-            value,
-        },
-        FactChange::Remove { key, value, .. } => FactChange::Remove {
-            entity: to,
-            key,
-            value,
-        },
+    let mut moved = change.clone();
+    match &mut moved {
+        FactChange::Set { entity, .. }
+        | FactChange::Clear { entity, .. }
+        | FactChange::Add { entity, .. }
+        | FactChange::Remove { entity, .. } => *entity = to,
         FactChange::Delete { .. } | FactChange::Revive { .. } | FactChange::File { .. } => {
             return None
         }
-    })
+    }
+    Some(moved)
 }
 
 /// What of `writer`'s trash to keep, where emptying it would remove anything: the items
@@ -2003,10 +2027,9 @@ fn keeping(
     held: &[TrashItem],
     writer: WriterId,
     reached: impl Fn(&EntryHash) -> bool,
-    room: u64,
+    mut room: u64,
 ) -> Option<BTreeSet<Nonce>> {
     let held: Vec<&TrashItem> = held.iter().filter(|item| item.writer == writer).collect();
-    let mut room = room;
     let kept: BTreeSet<Nonce> = held
         .iter()
         .rev()
@@ -2159,11 +2182,29 @@ fn unfinished(label: &str, path: &RelPath, error: &IoError) -> String {
     }
 }
 
+/// Whether `refusal` of an undo or a redo stands whatever the folder comes to hold:
+/// another writer changed the step's facts since, its entity or trash item is gone, or
+/// it changes nothing. A refusal over what the folder holds now may pass once that
+/// moves.
+fn never(refusal: &Refusal) -> bool {
+    use toshokan::Invalid;
+    matches!(
+        refusal,
+        Refusal::ChangedSince { .. }
+            | Refusal::Emptied
+            | Refusal::Nothing
+            | Refusal::Invalid(Invalid::NoEntity(_) | Invalid::TooLong | Invalid::Empty)
+    )
+}
+
 /// Why a change was refused before anything was written, in the user's words.
 fn refused(refusal: &Refusal) -> String {
     use toshokan::{Invalid, Unbindable};
     match refusal {
-        Refusal::Changed(mismatch) => format!("“{}” is not as drawbar last saw it", mismatch.path),
+        Refusal::Changed(mismatch) => match mismatch.expected {
+            Expect::Absent => format!("“{}” is taken", mismatch.path),
+            _ => format!("“{}” is not as drawbar last saw it", mismatch.path),
+        },
         Refusal::Directory(path) => format!("“{path}” is a folder"),
         Refusal::ChangedSince { .. } => "another drawbar has changed it since".to_string(),
         Refusal::Nothing => "there is nothing to do".to_string(),
@@ -2192,7 +2233,7 @@ fn refused(refusal: &Refusal) -> String {
             format!("the file at {path} cannot be taken: {why}")
         }
         Refusal::Invalid(Invalid::NoEntity(_)) => "it is no longer in the library".to_string(),
-        Refusal::Invalid(Invalid::NoFile(_)) => "it has no file".to_string(),
+        Refusal::Invalid(Invalid::NoFile(_)) => NO_FILE.to_string(),
         Refusal::Invalid(Invalid::Bound(path)) => format!("“{path}” is another asset's file"),
         Refusal::Invalid(Invalid::ReservedPath(path)) => format!("“{path}” is drawbar's own"),
         Refusal::Invalid(Invalid::NotEmpty(path)) => format!("“{path}” holds files"),
@@ -2221,17 +2262,14 @@ fn kept<F: Fs>(library: &Library<F>) -> Vec<super::KeptApart> {
     items.map(|item| super::KeptApart::of(&item)).collect()
 }
 
-/// What the answer to a scan shows, with every folder where it scanned every file.
+/// What the answer to a scan shows, with the folders it could not list where it scanned
+/// every file.
 fn viewed<F: Fs>(
     library: &Library<F>,
     shown: &mut Option<View>,
     refreshed: Refreshed,
     unfinishable: Vec<Leftover>,
 ) -> Viewed {
-    let moves = refreshed.scan.moved.iter().filter_map(|moved| {
-        let from = LibPath::parse(moved.from.as_str())?;
-        Some((from, LibPath::parse(moved.to.as_str())?))
-    });
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     let theirs = refreshed.orphaned.into_iter().filter(|orphan| !orphan.ours);
@@ -2239,33 +2277,24 @@ fn viewed<F: Fs>(
         orphan,
         unfinishable: None,
     });
-    let dirs = refreshed.dirs.map(|dirs| {
-        let shown = dirs.iter().filter_map(|dir| LibPath::parse(dir.as_str()));
-        shown.collect::<Vec<_>>()
-    });
+    let view = library.view();
+    let rows = refreshed.rewritten.iter().filter_map(|at| view.row_at(at));
+    let rewritten = rows.map(|row| (row.file, None)).collect();
     Viewed {
-        shown: show(shown, library.view()),
-        unlisted: dirs.is_some().then(|| unlisted.collect()),
-        dirs,
-        moves: moves.collect(),
-        changes: refreshed.changes,
-        followed: None,
+        unlisted: refreshed.dirs.is_some().then(|| unlisted.collect()),
+        rewritten,
         unfinished: Some(theirs.chain(unfinishable).collect()),
-        kept: kept(library),
         retired: refreshed.retired.is_some(),
-        left: Vec::new(),
-        finishing: shown_paths(&library.finishing()),
-        ambiguous: Vec::new(),
-        joined: Vec::new(),
+        ..committed_view(library, shown, refreshed.changes)
     }
 }
 
-/// What `view` changed of what the app was last `shown`: everything where it was shown
-/// nothing yet.
-fn show(shown: &mut Option<View>, view: View) -> Change {
-    let change = Change::since(&view, shown.as_ref());
+/// What `view` changed of what the app was last `shown`, and who changed each row:
+/// everything where it was shown nothing yet.
+fn show(shown: &mut Option<View>, view: View) -> Changes {
+    let changes = Change::since(&view, shown.as_ref());
     *shown = Some(view);
-    change
+    changes
 }
 
 fn relative(path: &LibPath) -> Option<RelPath> {
@@ -2274,36 +2303,6 @@ fn relative(path: &LibPath) -> Option<RelPath> {
 
 fn no_path(path: &LibPath) -> String {
     format!("{path} is no library path")
-}
-
-/// Every folder below the root drawbar lists, in path order: none whose name starts with
-/// a dot, none reached through a link, and none past [`MOST_ENTRIES`] entries. `None`
-/// where a folder could not be listed.
-async fn folders<F: Fs>(fs: &F) -> Option<Vec<LibPath>> {
-    let mut found = Vec::new();
-    let mut waiting = VecDeque::from([RelPath::ROOT]);
-    let mut looked = 0;
-    while let Some(dir) = waiting.pop_front() {
-        let entries = storage::list(fs, Root::Folder, &dir).await.ok()?;
-        for (name, meta) in entries {
-            looked += 1;
-            if looked > MOST_ENTRIES {
-                break;
-            }
-            if meta.kind != Kind::Directory || name.starts_with('.') {
-                continue;
-            }
-            let Ok(at) = dir.join(&name) else {
-                continue;
-            };
-            if let Some(path) = LibPath::parse(at.as_str()) {
-                found.push(path);
-                waiting.push_back(at);
-            }
-        }
-    }
-    found.sort();
-    Some(found)
 }
 
 #[cfg(test)]
@@ -2369,6 +2368,15 @@ mod tests {
         }
     }
 
+    impl<F: Fs> super::Keeper<F> {
+        /// The file at `path`, as a tag names it.
+        fn tagged(&self, path: &str) -> Tagged {
+            let view = self.library.as_ref().unwrap().view();
+            let row = view.row_at(&RelPath::new(path).unwrap()).expect(path);
+            Tagged::Row(row.file)
+        }
+    }
+
     fn path(text: &str) -> LibPath {
         LibPath::parse(text).unwrap()
     }
@@ -2392,6 +2400,7 @@ mod tests {
         let answers = keeper.run_one(Cmd::Intent(Intent::Batch(vec![
             Intent::Save {
                 id: 1,
+                row: None,
                 path: path("a.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: a,
@@ -2429,15 +2438,15 @@ mod tests {
         assert_eq!(keeper.trash_now(), []);
     }
 
-    /// A save to the path of a tagged file deleted outside drawbar writes that entity's
+    /// A save naming the row of a tagged file deleted outside drawbar writes that entity's
     /// file, in sync, rather than a file of its own the entity then finds changed.
     #[test]
-    fn a_save_where_a_tagged_file_went_missing_is_its_entitys_file() {
+    fn a_save_naming_the_row_of_a_tagged_file_gone_missing_is_its_entitys_file() {
         let root = Temp::new();
         fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
         let mut keeper = keeper(&root);
         keeper.run_one(Cmd::Intent(Intent::Tag {
-            files: vec![Key::File(path("Grand.ne5p"))],
+            files: vec![keeper.tagged("Grand.ne5p")],
             name: "Sunday".into(),
             make: false,
         }));
@@ -2449,8 +2458,10 @@ mod tests {
             view.entity(entity).unwrap().file().unwrap().state,
             toshokan::FileState::Missing
         );
+        let row = view.row_of(entity).map(|row| row.file);
         keeper.run_one(Cmd::Intent(Intent::Save {
             id: 1,
+            row,
             path: path("Grand.ne5p"),
             bytes: b"grand, saved again".to_vec(),
             expect: Expect::Absent,
@@ -2480,6 +2491,24 @@ mod tests {
         (saved, at)
     }
 
+    /// A copy, as [`saved`] keeps it, of a library holding `files`.
+    fn holding(files: &[(&str, &[u8])]) -> (Temp, std::path::PathBuf) {
+        let from = Temp::new();
+        for (path, bytes) in files {
+            fs::write(from.at(path), bytes).unwrap();
+        }
+        saved(&from)
+    }
+
+    /// Why a copy opened into the library at `to` was refused.
+    fn refused_into(to: &Temp, copy: std::path::PathBuf) -> String {
+        let answers = unopened(to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        why.clone()
+    }
+
     #[test]
     fn a_copy_opened_into_an_empty_library_brings_its_files_and_their_tags() {
         let from = Temp::new();
@@ -2487,7 +2516,7 @@ mod tests {
         fs::write(from.at("Set/Grand.ne5p"), b"grand").unwrap();
         let mut keeper = keeper(&from);
         keeper.run_one(Cmd::Intent(Intent::Tag {
-            files: vec![Key::File(path("Set/Grand.ne5p"))],
+            files: vec![keeper.tagged("Set/Grand.ne5p")],
             name: "Live".into(),
             make: false,
         }));
@@ -2513,34 +2542,23 @@ mod tests {
 
     #[test]
     fn a_copy_is_not_opened_into_a_library_that_holds_files() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"a").unwrap();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[("a.ne5p", b"a")]);
         let to = Temp::new();
         fs::write(to.at("b.ne5p"), b"b").unwrap();
-        let answers = unopened(&to).run_one(Cmd::Restore(copy));
-        let [Event::Restored(Err(why))] = &answers[..] else {
-            panic!("{answers:?}")
-        };
+        let why = refused_into(&to, copy);
         assert!(why.contains("already holds files"), "{why}");
         assert_eq!(to.names(""), ["b.ne5p"]);
     }
 
     #[test]
     fn a_damaged_copy_takes_back_what_it_wrote() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"first").unwrap();
-        fs::write(from.at("b.ne5p"), b"second").unwrap();
-        let (saved, copy) = saved(&from);
+        let (saved, copy) = holding(&[("a.ne5p", b"first"), ("b.ne5p", b"second")]);
         let mut bytes = fs::read(&copy).unwrap();
         let at = bytes.windows(6).position(|run| run == b"second").unwrap();
         bytes[at] ^= 1;
         fs::write(&copy, bytes).unwrap();
         let to = Temp::new();
-        let answers = unopened(&to).run_one(Cmd::Restore(copy));
-        let [Event::Restored(Err(why))] = &answers[..] else {
-            panic!("{answers:?}")
-        };
+        let why = refused_into(&to, copy);
         assert!(why.contains("damaged"), "{why}");
         assert!(to.names("").is_empty(), "{:?}", to.names(""));
         drop(saved);
@@ -2550,18 +2568,14 @@ mod tests {
     /// written nothing, and what that window saves meanwhile stays.
     #[test]
     fn a_copy_is_not_opened_into_a_library_another_window_has_open() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"a").unwrap();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[("a.ne5p", b"a")]);
         let to = Temp::new();
         let mut other = keeper(&to);
-        let answers = unopened(&to).run_one(Cmd::Restore(copy.clone()));
-        let [Event::Restored(Err(why))] = &answers[..] else {
-            panic!("{answers:?}")
-        };
+        let why = refused_into(&to, copy.clone());
         assert!(why.contains("another tab or window"), "{why}");
         other.run_one(Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("theirs.ne5p"),
             bytes: b"theirs".to_vec(),
             expect: Expect::Absent,
@@ -2570,10 +2584,7 @@ mod tests {
         assert_eq!(to.read("theirs.ne5p"), b"theirs");
         nord_usb::block_on(other.close());
         drop(other);
-        let answers = unopened(&to).run_one(Cmd::Restore(copy));
-        let [Event::Restored(Err(why))] = &answers[..] else {
-            panic!("{answers:?}")
-        };
+        let why = refused_into(&to, copy);
         assert!(why.contains("already holds files"), "once it closes: {why}");
         assert_eq!(to.read("theirs.ne5p"), b"theirs");
     }
@@ -2605,12 +2616,8 @@ mod tests {
 
     #[test]
     fn a_copy_is_not_opened_while_another_window_opens_one() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"a").unwrap();
-        let (_saved, copy) = saved(&from);
-        let other = Temp::new();
-        fs::write(other.at("b.ne5p"), b"b").unwrap();
-        let (_other_saved, other_copy) = saved(&other);
+        let (_saved, copy) = holding(&[("a.ne5p", b"a")]);
+        let (_other_saved, other_copy) = holding(&[("b.ne5p", b"b")]);
         let to = Temp::new();
         let (fs, _) = unopened(&to).unopened.take().unwrap();
         let (second, _) = unopened(&to).unopened.take().unwrap();
@@ -2631,6 +2638,7 @@ mod tests {
     fn new_file(name: &str) -> Cmd {
         Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path(name),
             bytes: name.as_bytes().to_vec(),
             expect: Expect::Absent,
@@ -2843,49 +2851,6 @@ mod tests {
         assert!(root.at("Bulk/a.ne5p").exists(), "nothing moved");
     }
 
-    /// An undo whose look at the folders fails says nothing of them, rather than leave
-    /// out the folders it could not list.
-    #[test]
-    fn an_undo_whose_folders_cannot_be_listed_leaves_them_unsaid() {
-        let root = Temp::new();
-        fs::create_dir(root.at("Set")).unwrap();
-        fs::write(root.at("Set/a.ne5p"), b"a").unwrap();
-        let mut native = native::keeper(
-            &root.0,
-            &root.local(),
-            Arc::default(),
-            Box::new(SystemClock),
-        );
-        let (fs, env) = native.unopened.take().unwrap();
-        let failing = Rc::new(std::cell::Cell::new(false));
-        let unlisted = Unlisted {
-            fs,
-            failing: Rc::clone(&failing),
-            fails: |dir| !dir.as_str().starts_with(super::super::keys::DIR),
-        };
-        let mut keeper = super::Keeper::new(unlisted, env);
-        let mut answers = Vec::new();
-        let mut run = |keeper: &mut super::Keeper<Unlisted>, cmd| {
-            nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
-        };
-        run(&mut keeper, Cmd::Open);
-        run(&mut keeper, Cmd::Rescan);
-        run(
-            &mut keeper,
-            Cmd::Intent(Intent::MakeTag {
-                name: "Live".into(),
-            }),
-        );
-        failing.set(true);
-        run(&mut keeper, Cmd::Undo);
-        let Some(Event::Committed { label, result, .. }) = answers.last() else {
-            panic!("{answers:?}")
-        };
-        assert_eq!(label, "Undo");
-        let viewed = result.as_ref().expect("the undo lands");
-        assert_eq!(viewed.dirs, None, "no folders said");
-    }
-
     /// Where the library folder never makes a change durable, the library turns
     /// read-only once a second history of drawbar's fails, and says to move it.
     #[test]
@@ -2906,19 +2871,21 @@ mod tests {
         let mut run = |keeper: &mut super::Keeper<Unsynced>, cmd| {
             nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
         };
-        let tag = |name: &str| {
+        let tag = |file: Tagged, name: &str| {
             Cmd::Intent(Intent::Tag {
-                files: vec![Key::File(path("Grand.ne5p"))],
+                files: vec![file],
                 name: name.into(),
                 make: true,
             })
         };
         run(&mut keeper, Cmd::Open);
         run(&mut keeper, Cmd::Rescan);
-        run(&mut keeper, tag("Sunday"));
+        let sunday = tag(keeper.tagged("Grand.ne5p"), "Sunday");
+        run(&mut keeper, sunday);
         failing.set(true);
         for n in 0..4 {
-            run(&mut keeper, tag(&format!("Monday {n}")));
+            let monday = tag(keeper.tagged("Grand.ne5p"), &format!("Monday {n}"));
+            run(&mut keeper, monday);
         }
         let told: Vec<&String> = answers
             .iter()
@@ -2959,8 +2926,7 @@ mod tests {
 
     #[test]
     fn a_copy_is_not_opened_into_a_library_already_open() {
-        let from = Temp::new();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[]);
         let to = Temp::new();
         let answers = keeper(&to).run_one(Cmd::Restore(copy));
         assert!(
@@ -2972,9 +2938,7 @@ mod tests {
     /// A library whose files are all gone holds only its history, which a copy replaces.
     #[test]
     fn a_copy_opens_over_the_history_of_a_library_whose_files_are_gone() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"first").unwrap();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[("a.ne5p", b"first")]);
         let to = Temp::new();
         let old = to.at(".drawbar/library/writers.2/old");
         fs::create_dir_all(&old).unwrap();
@@ -3010,9 +2974,7 @@ mod tests {
     /// read-only until it is opened again, not writable over half that history.
     #[test]
     fn a_copy_that_cannot_clear_the_old_history_leaves_the_library_read_only() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"first").unwrap();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[("a.ne5p", b"first")]);
         let to = Temp::new();
         let old = to.at(".drawbar/library/writers.2/old");
         fs::create_dir_all(&old).unwrap();
@@ -3029,9 +2991,7 @@ mod tests {
 
     #[test]
     fn a_copy_stopped_partway_leaves_the_library_read_only_until_it_is_opened_again() {
-        let from = Temp::new();
-        fs::write(from.at("a.ne5p"), b"first").unwrap();
-        let (_saved, copy) = saved(&from);
+        let (_saved, copy) = holding(&[("a.ne5p", b"first")]);
         let to = Temp::new();
         fs::create_dir_all(to.at(".drawbar")).unwrap();
         fs::write(to.at(super::super::copy::OPENING), b"").unwrap();
@@ -3083,6 +3043,7 @@ mod tests {
             let expect = keeper.listed("c3.ne5p");
             let answers = keeper.run_one(Cmd::Intent(Intent::Save {
                 id: 1,
+                row: None,
                 path: path("c3.ne5p"),
                 bytes: bytes.to_vec(),
                 expect,
@@ -3159,6 +3120,7 @@ mod tests {
             let expect = keeper.listed("c3.ne5p");
             keeper.run_one(Cmd::Intent(Intent::Save {
                 id: 1,
+                row: None,
                 path: path("c3.ne5p"),
                 bytes: bytes.to_vec(),
                 expect,
@@ -3204,6 +3166,58 @@ mod tests {
     }
 
     #[test]
+    fn the_view_after_an_answer_the_app_lost_names_the_row_of_each_file_it_wrote() {
+        let root = Temp::new();
+        let mut keeper = keeper(&root);
+        let save = Intent::Save {
+            id: 7,
+            row: None,
+            path: path("a.ne5p"),
+            bytes: b"a".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        };
+        let saved = keeper.run_one(Cmd::Intent(save));
+        let file = saved.iter().find_map(|event| match event {
+            Event::Saved {
+                result: Ok((file, _)),
+                ..
+            } => Some(*file),
+            _ => None,
+        });
+        let file = file.expect("the save landed");
+        let wrote = |answers: Vec<Event>| match &answers[..] {
+            [Event::Scanned(Ok(viewed))] => viewed.wrote.clone(),
+            _ => panic!("{answers:?}"),
+        };
+        assert_eq!(wrote(keeper.run_one(Cmd::Rescan)), [], "nothing was lost");
+        let saved = keeper.run_one(Cmd::Intent(Intent::Save {
+            id: 8,
+            row: None,
+            path: path("b.ne5p"),
+            bytes: b"b".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }));
+        assert!(
+            matches!(saved[0], Event::Saved { result: Ok(_), .. }),
+            "{saved:?}"
+        );
+        keeper.forget_shown();
+        keeper.forget_shown();
+        let owed = wrote(keeper.run_one(Cmd::Rescan));
+        assert_eq!(owed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [8]);
+        assert!(owed.iter().all(|(_, row)| *row != file), "{owed:?}");
+        keeper.forget_shown();
+        assert_eq!(
+            wrote(keeper.run_one(Cmd::Rescan)),
+            owed,
+            "until one is heard"
+        );
+        assert_eq!(wrote(keeper.run_one(Cmd::Rescan)), []);
+    }
+
+    #[test]
     fn the_scan_that_first_lists_many_files_shows_the_whole_view() {
         let root = Temp::new();
         for i in 0..1100 {
@@ -3224,7 +3238,7 @@ mod tests {
         };
         assert!(!matches!(viewed.shown, Change::Whole(_)), "one more file");
         let tagged = keeper.run_one(Cmd::Intent(Intent::Tag {
-            files: vec![Key::File(path("new.ne5p"))],
+            files: vec![keeper.tagged("new.ne5p")],
             name: "Live".into(),
             make: true,
         }));
@@ -3243,7 +3257,8 @@ mod tests {
         let Change::Whole(whole) = &viewed.shown else {
             panic!("most of it changed")
         };
-        let shown = (whole.files.len(), whole.others().len());
+        let files = whole.class(super::super::shown::Class::File).count();
+        let shown = (files, whole.others().len());
         assert_eq!(shown, (1101, 2300), "every file, those before included");
     }
 
@@ -3319,6 +3334,7 @@ mod tests {
         fs::write(root.at("c3.ne5p"), b"changed!").unwrap();
         let saved = keeper.run_one(Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("c3.ne5p"),
             bytes: b"mine".to_vec(),
             expect: read,
@@ -3339,38 +3355,6 @@ mod tests {
         }));
         assert!(matches!(deleted[0], Event::Failed(_)), "{deleted:?}");
         assert_eq!(root.read("c3.ne5p"), b"changed!");
-    }
-
-    #[test]
-    fn a_landed_save_that_cannot_be_looked_at_after_is_saved_with_what_it_wrote() {
-        struct Unstated(toshokan::MemDisk);
-        impl Fs for Unstated {
-            fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
-                self.0.capabilities(root)
-            }
-
-            async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
-                match io {
-                    toshokan::Io::Stat { .. } => Err(IoError::Denied),
-                    io => Fs::perform(&self.0, io).await,
-                }
-            }
-        }
-        let answering = Answering::Saved {
-            id: 1,
-            path: path("c3.ne5p"),
-            len: 3,
-            crc: 7,
-            identity: None,
-        };
-        let landed = nord_usb::block_on(answering.landed(&Unstated(toshokan::MemDisk::new())));
-        let Some(Event::Saved {
-            result: Ok(print), ..
-        }) = landed
-        else {
-            panic!("{landed:?}")
-        };
-        assert_eq!((print.len, print.modified, print.crc), (3, None, Some(7)));
     }
 
     /// Storage that runs `meddle` once, right after the first read of `at` in the folder
@@ -3471,6 +3455,7 @@ mod tests {
         let intents = [
             Intent::Save {
                 id: 1,
+                row: None,
                 path: path("Linked/new.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: Expect::Absent,
@@ -3478,6 +3463,7 @@ mod tests {
             },
             Intent::Save {
                 id: 2,
+                row: None,
                 path: path("Linked/x.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: x,

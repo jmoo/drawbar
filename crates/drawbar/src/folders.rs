@@ -178,6 +178,9 @@ pub struct Folders {
     pub place: Option<Where>,
     /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
     pub others: Vec<LibPath>,
+    /// Where files are that drawbar shows nowhere and expects back, as one another
+    /// drawbar moved there whose file has not arrived: no new name takes one.
+    pub held: Vec<LibPath>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
@@ -325,19 +328,29 @@ impl Folders {
     /// The name of the hidden file in `dir` named `name` in any case, as it is spelled.
     pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> Option<String> {
         let key = names::key(name);
-        self.entries(dir, workspace)
-            .into_iter()
-            .find(|(named, _, what)| *named == key && *what == Occupant::Other)
-            .map(|(_, spelled, _)| spelled)
+        let mut hidden = self.hidden(dir, workspace);
+        hidden
+            .find(|(named, _)| *named == key)
+            .map(|(_, spelled)| spelled)
     }
 
     /// The hidden files directly in `dir`.
     pub fn hidden_in(&self, dir: &LibPath, workspace: &Workspace) -> Vec<LibPath> {
-        self.entries(dir, workspace)
-            .into_iter()
-            .filter(|(_, _, what)| *what == Occupant::Other)
-            .map(|(_, name, _)| dir.join(&name))
-            .collect()
+        let hidden = self.hidden(dir, workspace);
+        hidden.map(|(_, name)| dir.join(&name)).collect()
+    }
+
+    /// The files drawbar does not open directly in `dir`, each with its key. A path a file
+    /// is expected back at only takes its name.
+    fn hidden<'a>(
+        &'a self,
+        dir: &'a LibPath,
+        workspace: &Workspace,
+    ) -> impl Iterator<Item = (String, String)> + 'a {
+        let entries = self.entries(dir, workspace).into_iter();
+        let others = entries.filter(|(_, _, what)| *what == Occupant::Other);
+        let others = others.filter(|(_, name, _)| !self.held.contains(&dir.join(name)));
+        others.map(|(key, name, _)| (key, name))
     }
 
     /// The assets whose file is gone, which the library keeps tags for.
@@ -426,9 +439,8 @@ impl Folders {
             let path = &lost.path;
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
-        let others = self
-            .others
-            .iter()
+        let others = self.others.iter().chain(&self.held);
+        let others = others
             .filter(|path| path.parent() == *dir)
             .filter(|path| !held.contains(path.leaf()))
             .map(|path| (path.leaf(), Occupant::Other));
@@ -796,6 +808,23 @@ mod tests {
         assert_eq!(count("Pianos/Old"), 1);
         assert_eq!(count("Pianos/Empty"), 0);
         assert_eq!(folders.count(None, &workspace), 3, "the whole library");
+    }
+
+    /// A path a file is expected back at takes its name, and is no hidden file a folder
+    /// holds.
+    #[test]
+    fn a_path_a_file_is_expected_back_at_only_takes_its_name() {
+        let (workspace, _) = workspace();
+        let mut folders = Folders::default();
+        let live = LibPath::parse("Live").unwrap();
+        folders.sync(std::slice::from_ref(&live));
+        folders.held = vec![live.join("Grand.ne5p")];
+        assert_eq!(folders.hidden_in(&live, &workspace), Vec::<LibPath>::new());
+        assert_eq!(folders.hides(&live, "grand.ne5p", &workspace), None);
+        assert_eq!(
+            folders.free(&live, "Grand.ne5p", &workspace),
+            "Grand 2.ne5p"
+        );
     }
 
     /// The counts and the members are taken once for each change to where the assets

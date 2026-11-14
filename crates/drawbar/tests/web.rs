@@ -7,16 +7,16 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use drawbar::store::shown::{Change, Shown};
+use drawbar::store::shown::{Change, Class, Shown};
 use drawbar::store::{
-    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Outdated, Picked,
-    RescueIo, Root, Slot, Source, Unrun, Worker, RESCUED,
+    Backend, Cmd, Event, Failure, Fault, Found, Intent, Kept, Key, LibPath, Moving, Outdated,
+    Picked, RescueIo, Root, Slot, Source, Tagged, Unrun, Worker, RESCUED,
 };
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nord_format::formats::nsmp;
 use toshokan::web::{private_dir, Folder, Hint, Hints};
-use toshokan::{Expect, RelPath};
+use toshokan::{Expect, FileId, RelPath};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -114,15 +114,21 @@ struct Tab {
 }
 
 impl Tab {
-    async fn open(root: Root) -> (Tab, Event) {
+    /// The library at `root`, open and listed, with what opening it answered and the
+    /// drafts its first scan found.
+    async fn open(root: Root) -> (Tab, Event, Vec<Result<Kept, String>>) {
         let backend = Backend::start(&egui::Context::default(), root);
         let mut tab = Tab {
             backend,
             shown: Shown::default(),
         };
         let mut answers = tab.ask(Cmd::Open).await;
-        tab.ask(Cmd::Rescan).await;
-        (tab, answers.remove(0))
+        let scanned = tab.ask(Cmd::Rescan).await;
+        let drafts = scanned.into_iter().find_map(|event| match event {
+            Event::Scanned(Ok(viewed)) => viewed.drafts,
+            _ => None,
+        });
+        (tab, answers.remove(0), drafts.unwrap_or_default())
     }
 
     /// Run `cmd`, and every answer it gave.
@@ -160,20 +166,45 @@ impl Tab {
         drop(self.backend);
     }
 
-    fn key_of(&self, at: &str) -> Key {
-        let files = self.shown.files.iter();
-        let mut found = files.filter(|(_, (path, _))| path.as_str() == at);
-        found.next().map(|(key, _)| key.clone()).expect(at)
+    /// The row of the file at `at`, where the view shows one.
+    fn row(&self, at: &str) -> Option<FileId> {
+        let mut files = self.shown.class(Class::File);
+        files
+            .find(|(_, row)| row.path.as_str() == at)
+            .map(|(file, _)| file)
     }
+
+    /// What an unsaved edit of the file at `at` is kept by.
+    fn key_of(&self, at: &str) -> Key {
+        let row = self.row(at).expect(at);
+        match self.shown.entity(row) {
+            Some(entity) => Key::Entity(entity),
+            None => Key::File(path(at)),
+        }
+    }
+
+    /// The file at `at`, as a tag names it.
+    fn tagged(&self, at: &str) -> Tagged {
+        Tagged::Row(self.row(at).expect(at))
+    }
+}
+
+/// The file at `at` that `shown` shows, as a tag names it.
+fn row_in(shown: &Shown, at: &str) -> Tagged {
+    let mut files = shown.class(Class::File);
+    let row = files.find(|(_, row)| row.path.as_str() == at);
+    Tagged::Row(row.expect(at).0)
 }
 
 fn found(answers: &[Event]) -> Found {
     let found = answers.iter().find_map(|event| match event {
         Event::Imported {
-            result: Ok(found), ..
+            result: Ok((_, found)),
+            ..
         }
         | Event::Rewritten {
-            result: Ok(found), ..
+            result: Ok((_, found)),
+            ..
         } => Some(found.clone()),
         _ => None,
     });
@@ -195,7 +226,9 @@ fn committed(answers: &[Event]) {
 }
 
 async fn read(tab: &mut Tab, at: &str) -> Result<Vec<u8>, Failure> {
-    let files = vec![(1, path(at), None)];
+    // A read of a path the view shows no file at finds none.
+    let unshown = || serde_json::from_str("0").expect("a FileId is a number");
+    let files = vec![(1, tab.row(at).unwrap_or_else(unshown), path(at), None)];
     let answers = tab
         .ask(Cmd::Read {
             files,
@@ -219,7 +252,7 @@ async fn read(tab: &mut Tab, at: &str) -> Result<Vec<u8>, Failure> {
 /// Open, list, read, tag, save, copy in, rewrite a resting sample by its pieces, move,
 /// delete, undo, redo, keep drafts and slot edits, and open again, in `root`.
 async fn the_whole_workflow_in(root: Root) {
-    let (mut tab, opened) = Tab::open(root.clone()).await;
+    let (mut tab, opened, _) = Tab::open(root.clone()).await;
     let Event::Opened(Ok(opened)) = opened else {
         panic!("{opened:?}")
     };
@@ -230,6 +263,7 @@ async fn the_whole_workflow_in(root: Root) {
             Intent::MakeDir { path: path("Set") },
             Intent::Save {
                 id: 1,
+                row: None,
                 path: path("Set/a.ne5p"),
                 bytes: b"a program".to_vec(),
                 expect: Expect::Absent,
@@ -242,7 +276,7 @@ async fn the_whole_workflow_in(root: Root) {
 
     let tagged = tab
         .ask(Cmd::Intent(Intent::Tag {
-            files: vec![Key::File(path("Set/a.ne5p"))],
+            files: vec![tab.tagged("Set/a.ne5p")],
             name: "Live".into(),
             make: true,
         }))
@@ -353,17 +387,13 @@ async fn the_whole_workflow_in(root: Root) {
     assert_eq!((*held, bytes.as_slice()), (hash, &b"a slot's edit"[..]));
     tab.close().await;
 
-    let (again, opened) = Tab::open(root).await;
-    let Event::Opened(Ok(opened)) = opened else {
+    let (again, opened, drafts) = Tab::open(root).await;
+    let Event::Opened(Ok(_)) = opened else {
         panic!("{opened:?}")
     };
-    assert_eq!(opened.drafts.len(), 1, "{:?}", opened.drafts);
-    let shown: Vec<&str> = again
-        .shown
-        .files
-        .values()
-        .map(|(at, _)| at.as_str())
-        .collect();
+    assert_eq!(drafts.len(), 1, "{drafts:?}");
+    let shown = again.shown.class(Class::File);
+    let shown: Vec<&str> = shown.map(|(_, row)| row.path.as_str()).collect();
     assert_eq!(shown, ["Set/b.ne5p"], "{shown:?}");
     assert_eq!(again.shown.wearing("Live").len(), 1);
     let mut listed = 0;
@@ -451,6 +481,7 @@ async fn two_tabs_of_one_install_each_write_and_show_the_others_commits() {
         &mut shown,
         Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("c3.ne5p"),
             bytes: b"c3".to_vec(),
             expect: Expect::Absent,
@@ -460,12 +491,13 @@ async fn two_tabs_of_one_install_each_write_and_show_the_others_commits() {
     .await;
     committed(&saved);
     for (at, name) in [(0, "Gig"), (1, "Live")] {
+        let file = row_in(&shown[at], "c3.ne5p");
         let tagged = run(
             &tabs[at],
             at,
             &mut shown,
             Cmd::Intent(Intent::Tag {
-                files: vec![Key::File(path("c3.ne5p"))],
+                files: vec![file],
                 name: name.into(),
                 make: true,
             }),
@@ -548,12 +580,13 @@ async fn the_answer_after_one_the_page_lost_shows_the_whole_view() {
 #[wasm_bindgen_test]
 async fn a_change_whose_answers_are_lost_is_unheard_not_refused() {
     wipe(&opfs().await).await;
-    let (mut tab, opened) = Tab::open(Root::Private).await;
+    let (mut tab, opened, _) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
     tab.backend.fault(Fault::Unread);
     let answers = tab
         .ask(Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("c3.ne5p"),
             bytes: b"c3".to_vec(),
             expect: Expect::Absent,
@@ -616,7 +649,7 @@ async fn a_rescue_written_through_a_worker_is_found_at_the_next_look_and_a_parti
     ask(RescueIo::Create(cut.into())).await;
     drop(writer);
 
-    let (mut tab, opened) = Tab::open(Root::Private).await;
+    let (mut tab, opened, _) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
     tab.backend.look_for_rescues();
     let mut offered = Vec::new();
@@ -666,7 +699,7 @@ async fn a_rescue_another_tab_is_writing_is_let_be_until_it_lets_go() {
         .await;
     }
 
-    let (mut tab, opened) = Tab::open(Root::Private).await;
+    let (mut tab, opened, _) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
     let look = async |tab: &mut Tab| {
         tab.backend.look_for_rescues();
@@ -708,7 +741,7 @@ async fn a_rescue_worker_whose_bundle_is_gone_says_drawbar_was_updated() {
 #[wasm_bindgen_test]
 async fn a_worker_that_stalls_shows_no_life_and_is_let_go() {
     wipe(&opfs().await).await;
-    let (mut tab, opened) = Tab::open(Root::Private).await;
+    let (mut tab, opened, _) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
     assert_eq!(tab.backend.waiting(), None, "nothing runs");
     tab.backend.fault(Fault::Stall);
@@ -718,7 +751,7 @@ async fn a_worker_that_stalls_shows_no_life_and_is_let_go() {
     assert!(waited.as_millis() >= 500, "{waited:?}");
     tab.backend.abandon();
     drop(tab);
-    let (again, opened) = Tab::open(Root::Private).await;
+    let (again, opened, _) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
     again.close().await;
 }
@@ -733,6 +766,7 @@ async fn a_folder_moves_with_what_another_install_put_in_it_since() {
     let save = |at: &str| {
         Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path(at),
             bytes: at.as_bytes().to_vec(),
             expect: Expect::Absent,
@@ -764,8 +798,8 @@ async fn a_folder_moves_with_what_another_install_put_in_it_since() {
             shown.apply(viewed.shown);
         }
     }
-    let mut at: Vec<String> = shown.files.values().map(|(at, _)| at.to_string()).collect();
-    at.extend(shown.others.values().map(|at| at.to_string()));
+    let files = shown.class(Class::File).chain(shown.class(Class::Other));
+    let mut at: Vec<String> = files.map(|(_, row)| row.path.to_string()).collect();
     at.sort();
     assert_eq!(at, ["Gig/a.ne5p", "Gig/b.ne5p"]);
     first.close().await;
@@ -785,6 +819,7 @@ async fn a_folder_a_move_cannot_empty_is_answered_as_left() {
     worker
         .run(Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("Set/a.ne5p"),
             bytes: b"a".to_vec(),
             expect: Expect::Absent,
@@ -850,6 +885,7 @@ async fn two_installs_see_each_others_changes() {
         &mut shown,
         Cmd::Intent(Intent::Save {
             id: 1,
+            row: None,
             path: path("c3.ne5p"),
             bytes: b"c3".to_vec(),
             expect: Expect::Absent,
@@ -857,12 +893,13 @@ async fn two_installs_see_each_others_changes() {
         }),
     )
     .await;
+    let file = row_in(&shown[0], "c3.ne5p");
     let tagged = run(
         &first,
         0,
         &mut shown,
         Cmd::Intent(Intent::Tag {
-            files: vec![Key::File(path("c3.ne5p"))],
+            files: vec![file],
             name: "Gig".into(),
             make: true,
         }),
@@ -896,26 +933,34 @@ async fn a_copy_saved_of_a_library_opens_into_an_empty_one() {
         .await
         .unwrap();
     saved.run(Cmd::Open).await.unwrap();
-    let made = [
+    let made = Intent::Batch(vec![
         Intent::MakeDir {
             path: path("Empty"),
         },
         Intent::Save {
             id: 1,
+            row: None,
             path: path("c3.ne5p"),
             bytes: b"c3".to_vec(),
             expect: Expect::Absent,
             came: None,
         },
-        Intent::Tag {
-            files: vec![Key::File(path("c3.ne5p"))],
-            name: "Gig".into(),
-            make: true,
-        },
-    ];
-    for intent in made {
-        committed(&saved.run(Cmd::Intent(intent)).await.unwrap());
-    }
+    ]);
+    let made = saved.run(Cmd::Intent(made)).await.unwrap();
+    committed(&made);
+    let row = made.iter().find_map(|event| match event {
+        Event::Saved {
+            result: Ok((row, _)),
+            ..
+        } => Some(*row),
+        _ => None,
+    });
+    let tag = Intent::Tag {
+        files: vec![Tagged::Row(row.expect("saved"))],
+        name: "Gig".into(),
+        make: true,
+    };
+    committed(&saved.run(Cmd::Intent(tag)).await.unwrap());
     saved.close().await;
 
     let copy = drawbar::store::copy_of(&RelPath::new("Saved").unwrap())
@@ -982,6 +1027,7 @@ async fn a_copy_is_not_opened_into_a_library_open_in_another_tab() {
     );
     let save = Intent::Save {
         id: 1,
+        row: None,
         path: path("theirs.ne5p"),
         bytes: b"theirs".to_vec(),
         expect: Expect::Absent,

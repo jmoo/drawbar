@@ -348,6 +348,7 @@ mod tests {
                 done_after: 2,
                 pin: false,
                 replaces: Vec::new(),
+                leaves: None,
             }],
             unbound: Vec::new(),
             trees: Vec::new(),

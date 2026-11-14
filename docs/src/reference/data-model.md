@@ -146,7 +146,11 @@ of a resting file, streams a chunk at a time.
 Undo reaches only this session's intents. It is refused where another drawbar
 changed the same thing since
 ([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#undo-and-redo)),
-and drawbar then lets go of that step, so the next undo reaches the one before.
+or where its files are not as the intent left them. A step another drawbar changed
+since, or whose trash item went, can never be taken back, and drawbar lets go of
+it, so the next undo reaches the one before. A step refused for what the folder
+holds now stays, and goes through once that is out of the way, or back as the step
+left it.
 An intent too large for one log entry is refused before it writes anything.
 
 The trash holds what a delete or a save displaced, for this session's undo and
@@ -226,17 +230,61 @@ A rescan lists every file by name, length and time, and reads a file's identity
 only where that decides which file is an entity's, so an asset renamed or moved
 outside drawbar keeps its tags and its origin
 ([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
-A file with no entity is known by its path alone, so its rename reads as one file
-gone and another arrived, with nothing lost.
+Each file the view shows is a row with a number of its own, which continues by
+drawbar's own changes, by its entity's binding, or at the same path
+([Rows](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#rows)),
+and each asset stands for one row. A file with no entity is known by its path
+alone, so its rename outside drawbar or by another drawbar ends its row, and the
+file at the new path is a new asset. Logs only say who changed a row.
+
+A file that keeps its length and time is read again only where another drawbar's
+log says it wrote or moved a file there, once, at the next scan. A rewrite whose
+file arrives after the scan of the refresh that read its entry shows at the file's
+next change, or when a save of it is tried. A save of a file drawbar has read
+compares its contents, so that save is refused: drawbar says the file changed on
+disk, keeps the edit and asks whose to keep. A save of a file drawbar has not read
+compares only its length and time. Where another file lands over a save before
+drawbar looks, drawbar shows that file, unless it has the save's length and, where
+the folder keeps a moved file's time, its time. A save drawbar finishes after
+restarting, which it left part done, takes the file it finds there for its own.
 
 Where several files could each be an entity's moved file, or one file several
-entities', none is bound, and drawbar says so once in the activity log.
+entities', none is bound, and an entity with tags shows as a lost row. Where two
+drawbars moved or rewrote one entity's file before either saw the other's change
+and both files are there, the entity's file is the one the later change names
+that still holds what it says; the other is a file with no entity.
 
-A file that is gone, and that no new file matches, leaves the list if it held
-nothing precious. One with tags, an unsaved edit, a slot it came off or a place
-in the send queue stays, marked missing, and saving it writes the file anew.
-After a restart, an entity with tags whose file is gone shows as a lost row
-until the user forgets it.
+An asset whose row ends, or whose entity's file is nowhere, leaves the list unless
+it holds work no file does: an unsaved edit, a save not yet written, a slot it came
+off, a place in the send queue, or a kept edit waiting for its file. Such an asset
+stays, marked missing, in the nearest folder still there, and saving it writes it
+there anew, beside any file that took its name. One whose row ended is an
+unsaved copy: a file that arrives at its path is read, and is its file again only
+where it holds what the copy's edit was made over; otherwise saving the copy writes
+it anew, beside any file that took its name, even where it holds what another file
+does. An entity with tags whose file is nowhere shows as a lost row
+until its file is back or the user forgets it. A path a row whose file is nowhere
+holds is taken: a new or renamed file is given another name, so a file still in
+transit never becomes the new file's entity. Where two rows meet on one file and
+both assets hold an unsaved edit, the older edit is kept apart as an unsaved copy
+with no file.
+
+drawbar names nothing a file with no entity went through. Of an entity's file,
+the activity log says when another drawbar deleted it, and when another drawbar
+moved it and the file has not arrived. Of an asset holding an unsaved edit whose
+file is gone, it says that drawbar still holds the edit. Tagged files gone with
+no word of why are counted in one line.
+
+An unsaved edit is kept by the entity of its file, else by its path. At open the
+backend gives it the row of that entity, following a join, or of the file at that
+path where the file holds what the edit was made over, and it is put back over that
+row's asset. Any other, and the older of
+two that meet on one asset, comes back as an unsaved copy at its last path, or
+beside it where another file holds that name.
+
+Each answer that writes a file names the file's row. Where the app loses an answer,
+the next view names the row of each file that answer wrote, and the asset takes that
+row and reads its file again quietly; drawbar never takes a file by its path alone.
 
 A file changed on disk under an unsaved edit becomes the new baseline, and the
 edit stays over it. The user then chooses which to keep

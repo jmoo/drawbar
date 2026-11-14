@@ -144,12 +144,20 @@ mod suite {
             };
             let new = vec![Fill::Bytes(b"new".to_vec())];
             let refused = commit(d, &[save], new, &bound(&[]), &mut env(1)).unwrap_err();
-            let expected = Refusal::Changed(Box::new(Mismatch {
-                path: path("a.syx"),
-                expected: expect,
-                found: Some(identity(b"theirs")),
-            }));
-            assert_eq!(refused, expected);
+            let Refusal::Changed(mismatch) = refused else {
+                panic!("{refused:?}");
+            };
+            let Mismatch {
+                path: at,
+                expected,
+                found,
+                listed,
+            } = *mismatch;
+            let len = listed.map(|listed| listed.len);
+            assert_eq!(
+                (at, expected, found, len),
+                (path("a.syx"), expect, Some(identity(b"theirs")), Some(6))
+            );
             assert_eq!(
                 sorted(d),
                 Folder {
@@ -388,7 +396,7 @@ fn run_effects(
     let sources: Vec<Box<dyn blocking::Source<Refusing>>> = vec![Box::new(saved.to_vec())];
     blocking::run_with(backend, sources, prepare)?.unwrap();
     let apply = effects::apply(&layout(), plan.record, Rc::clone(&record), 0, identify());
-    let applied = blocking::run(backend, apply)?;
+    let applied = blocking::run(backend, apply).map_err(|stopped| stopped.error)?;
     Ok((record, applied))
 }
 
@@ -1155,7 +1163,7 @@ fn where_renames_may_replace_a_file_made_at_a_destination_after_the_checks_is_ke
         .unwrap()
         .unwrap();
     let apply = effects::apply(&layout(), plan.record, record, 0, identify());
-    let applied = blocking::run(&mut intruder, apply);
+    let applied = blocking::run(&mut intruder, apply).map_err(|stopped| stopped.error);
     assert!(
         matches!(
             &applied,

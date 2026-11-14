@@ -11,16 +11,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use toshokan::report::{By, What};
+use toshokan::rows::{How, RowChange, RowWhat, Who};
+use toshokan::FileId;
 
 use super::diff;
 use super::drafts::Draft;
 use super::exec::too_much;
 use super::ids::Ids;
 use super::keys::{Came, TAGS, TAG_NAMES};
-use super::shown::Shown;
+use super::shown::{self, Class, Shown};
 use super::{
     names, older, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
+    LibPath, Moving, Opened, Rescue, Source, Stat, Tagged, Unwritable, Viewed, Waiting, MOST_BYTES,
     TAKE_IN,
 };
 use crate::browser::{Browser, Rescuing};
@@ -32,7 +34,6 @@ use crate::workspace::{
     library_filename, precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
 };
 
-/// How far opening has got.
 /// How long a command may go without a sign of life, as an answer or a file found,
 /// before the user is asked whether to close and reopen the library.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -87,9 +88,6 @@ struct Record {
     saved: u64,
     /// A save has been sent and not answered.
     saving: bool,
-    /// The file went missing outside drawbar. Nothing writes it again until the asset
-    /// is saved.
-    missing: bool,
     /// How drawbar holds what the file holds, while nothing has been saved over it.
     holds: Holds,
 }
@@ -195,7 +193,7 @@ pub struct Store {
     backend: Backend,
     phase: Phase,
     records: BTreeMap<u64, Record>,
-    /// The key the library knows each asset's file by.
+    /// The row of the library's view each asset stands for.
     ids: Ids,
     /// What the library shows, as the answers so far changed it.
     shown: Option<Shown>,
@@ -215,8 +213,8 @@ pub struct Store {
     /// The projection in hand follows this session's undo or redo, and says nothing of
     /// what it finds moved or changed.
     quiet: bool,
-    /// Assets read again after an undo or redo changed their files, which take what the
-    /// files hold now without a word.
+    /// Assets whose files the view in hand found written by a change whose answer was
+    /// lost, which a read takes in without a word.
     quietly: BTreeSet<u64>,
     /// The paths a change of drawbar's own names that its next change finishes.
     finishing: BTreeSet<LibPath>,
@@ -226,9 +224,9 @@ pub struct Store {
     history: History,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
-    /// Assets whose file changed outside drawbar while they held it, read again to see
-    /// what it holds now.
-    rechecking: BTreeSet<u64>,
+    /// Assets whose file changed while they held it, read again to see what it holds now,
+    /// each with whether it takes that in without a word.
+    rechecking: BTreeMap<u64, bool>,
     /// The assets whose files the rescan in flight found moved or changed.
     moved: BTreeSet<u64>,
     /// The unsaved edits kept as drafts, by asset: the key each is kept under, the stamp
@@ -245,6 +243,15 @@ pub struct Store {
     /// older of two drafts of one asset, each let go of once this instance keeps the
     /// edit itself.
     superseded: BTreeMap<u64, Vec<Key>>,
+    /// The unsaved copies, assets with no row that hold work no file does: the key each
+    /// is kept by, and the identity of the file its work was made over, where known.
+    copies: BTreeMap<u64, (Key, Option<toshokan::Identity>)>,
+    /// The copies given the row of a file that arrived at their path, until a read
+    /// says whether the file holds what their work was made over.
+    pub(super) claiming: BTreeSet<u64>,
+    /// Assets kept apart from a file that left, said to be once no claim of a file at
+    /// their path, which may be theirs, waits for its read.
+    pub(super) unsaid: BTreeSet<u64>,
     /// The instrument attached, as [`super::Slot::instrument`] names it.
     instrument: Option<String>,
     /// Each view of a slot seen, with what its unsaved edit is kept by.
@@ -277,9 +284,6 @@ pub struct Store {
     asked_stalled: bool,
     /// The runs of changes kept apart the log has told of.
     kept_runs: BTreeSet<toshokan::log::Run>,
-    /// The unsaved edits an earlier session kept, taken up once a scan lists the files
-    /// they were made over.
-    drafts_found: Vec<Result<super::Kept, String>>,
     /// Whether a scan of every file has listed the files since the library opened.
     listed: bool,
     /// The changes other drawbars left unfinished that the last read found, by writer
@@ -312,10 +316,10 @@ pub struct Store {
     reading: bool,
     /// Each rename sent that has not answered, from and to.
     moving: Vec<(LibPath, LibPath)>,
-    /// The files deleted while a change is in flight, with the key each was known by,
+    /// The rows of the files deleted while a change is in flight, with where each was,
     /// each kept until none is: the answer to a change sent before the delete still lists
     /// the file.
-    deleting: BTreeMap<LibPath, Key>,
+    deleting: BTreeSet<FileId>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
     /// How many files have been asked of the backend to read.
@@ -380,12 +384,15 @@ impl Store {
             awaiting: BTreeSet::new(),
             history: History::default(),
             answering: VecDeque::new(),
-            rechecking: BTreeSet::new(),
+            rechecking: BTreeMap::new(),
             moved: BTreeSet::new(),
             drafted: BTreeMap::new(),
             drafting: VecDeque::new(),
             restoring: BTreeMap::new(),
             superseded: BTreeMap::new(),
+            copies: BTreeMap::new(),
+            claiming: BTreeSet::new(),
+            unsaid: BTreeSet::new(),
             instrument: None,
             views: BTreeMap::new(),
             keeping: VecDeque::new(),
@@ -398,7 +405,6 @@ impl Store {
             patience: PATIENCE,
             asked_stalled: false,
             kept_runs: BTreeSet::new(),
-            drafts_found: Vec::new(),
             listed: false,
             unfinished: BTreeMap::new(),
             looked: 0.0,
@@ -413,7 +419,7 @@ impl Store {
             fetching: BTreeSet::new(),
             reading: false,
             moving: Vec::new(),
-            deleting: BTreeMap::new(),
+            deleting: BTreeSet::new(),
             budget: MOST_BYTES,
             #[cfg(test)]
             asked_files: 0,
@@ -560,11 +566,28 @@ impl Store {
         lost.map(|entity| entity.name.clone()).collect()
     }
 
-    /// What a draft of an asset's unsaved edit is made over: the identity of its file, as
-    /// drawbar last read or wrote it, with no write over it in flight.
+    /// What a draft of an asset's unsaved edit is kept by: the key of the unsaved copy it
+    /// is, else the entity bound to its file, else the path it is at.
+    fn draft_key(&self, id: u64) -> Option<Key> {
+        if let Some((copy, _)) = self.copies.get(&id) {
+            return Some(copy.clone());
+        }
+        if let Some(entity) = self.entity(id) {
+            return Some(Key::Entity(entity));
+        }
+        let path = self.records.get(&id)?.path.clone()?;
+        Some(Key::File(path))
+    }
+
+    /// What a draft of an asset's unsaved edit is made over: for a copy, what its work
+    /// was made over, and else the identity of its file as drawbar last read or wrote it,
+    /// with no write over it in flight.
     fn base(&self, id: u64) -> Option<toshokan::Identity> {
+        if let Some((_, base)) = self.copies.get(&id) {
+            return *base;
+        }
         let record = self.records.get(&id).filter(|record| !record.saving)?;
-        record.fingerprint?.identity
+        record.fingerprint.and_then(|print| print.identity)
     }
 
     /// Keep each unsaved edit as a draft where it changed since it was last kept, and let
@@ -573,10 +596,12 @@ impl Store {
         if !self.opened() {
             return;
         }
+        self.copies.retain(|id, _| workspace.get(*id).is_some());
         for (id, kept) in std::mem::take(&mut self.drafted) {
             let unsaved = workspace.get(id).is_some_and(|entity| self.unsaved(entity));
             let saving = self.records.get(&id).is_some_and(|record| record.saving);
-            match (unsaved || saving, self.ids.key(id) == Some(&kept.0)) {
+            let same = self.draft_key(id).as_ref() == Some(&kept.0);
+            match (unsaved || saving, same) {
                 (true, true) => _ = self.drafted.insert(id, kept),
                 // The draft under the key it went by goes once the one under its new
                 // key is kept.
@@ -584,42 +609,31 @@ impl Store {
                 (false, _) => self.send(Cmd::Discard(kept.0)),
             }
         }
-        let held = |id: &u64| workspace.get(*id).is_some();
-        let gone: Vec<u64> = self
-            .restoring
-            .keys()
-            .copied()
-            .filter(|id| !held(id))
-            .collect();
-        for id in gone {
-            if let Some((kept, ..)) = self.restoring.remove(&id) {
-                self.send(Cmd::Discard(kept));
-            }
-        }
+        let (held, gone) = std::mem::take(&mut self.restoring)
+            .into_iter()
+            .partition(|(id, _)| workspace.get(*id).is_some());
+        self.restoring = held;
+        let superseded = std::mem::take(&mut self.superseded);
         let unsaved = |id: &u64| {
             workspace
                 .get(*id)
                 .is_some_and(|entity| self.unsaved(entity))
         };
         let saving = |id: &u64| self.records.get(id).is_some_and(|record| record.saving);
-        let settled: Vec<u64> = self
-            .superseded
-            .keys()
-            .copied()
-            .filter(|id| !unsaved(id) && !saving(id))
-            .collect();
-        for id in settled {
-            for kept in self.superseded.remove(&id).unwrap_or_default() {
-                self.send(Cmd::Discard(kept));
-            }
+        let (settled, superseded) = superseded
+            .into_iter()
+            .partition(|(id, _)| !unsaved(id) && !saving(id));
+        self.superseded = superseded;
+        let discarded = gone.into_values().map(|(kept, ..)| kept);
+        for kept in discarded.chain(settled.into_values().flatten()) {
+            self.send(Cmd::Discard(kept));
         }
         let unsaved: Vec<&LocalEntity> = workspace
             .listed()
             .filter(|entity| self.unsaved(entity))
             .collect();
         for entity in unsaved {
-            let (Some(key), Some(base)) = (self.ids.key(entity.id).cloned(), self.base(entity.id))
-            else {
+            let (Some(key), Some(base)) = (self.draft_key(entity.id), self.base(entity.id)) else {
                 continue;
             };
             let (draft, stamp) = match workspace.kept_edit(entity.id) {
@@ -813,82 +827,176 @@ impl Store {
         }
     }
 
-    /// Take in the drafts an earlier session kept: each is put back over its asset once
-    /// the asset's file is read, which is asked for now.
+    /// Take in the drafts an earlier session kept: each is put back over the asset of its
+    /// row once the asset's file is read, which is asked for now. Any other, and of two of
+    /// one asset the older or a copy's, is an unsaved document of its own.
     fn take_drafts(
         &mut self,
         drafts: Vec<Result<super::Kept, String>>,
         workspace: &mut Workspace,
         log: &mut Log,
     ) {
+        // By the asset of each draft's row, else by the row no asset stands for.
+        let mut held: BTreeMap<Result<u64, FileId>, Vec<(super::Kept, Draft)>> = BTreeMap::new();
         for draft in drafts {
-            let Ok(super::Kept {
-                of: key,
-                at: kept_at,
-                holds,
-                bytes,
-            }) = draft
-            else {
+            let Ok(kept) = draft else {
                 log.trouble("An unsaved edit drawbar kept could not be read.");
                 continue;
             };
-            let changed = match holds {
+            let draft = match Draft::decode(&kept.bytes) {
+                Ok(draft) => draft,
+                Err(why) => {
+                    log.trouble(format!(
+                        "An unsaved edit drawbar kept could not be read: {why}."
+                    ));
+                    continue;
+                }
+            };
+            let id = kept.row.and_then(|row| self.ids.id(row));
+            let key = match (id.filter(|id| workspace.get(*id).is_some()), kept.row) {
+                (Some(id), _) => Ok(id),
+                (None, Some(row)) => Err(row),
+                (None, None) => {
+                    self.unsaved_document(kept, draft, true, workspace, log);
+                    continue;
+                }
+            };
+            held.entry(key).or_default().push((kept, draft));
+        }
+        for (key, mut drafts) in held {
+            drafts.sort_by_key(|(kept, _)| (!matches!(kept.of, Key::Copy(..)), kept.at));
+            let Some((newest, draft)) = drafts.pop() else {
+                continue;
+            };
+            for (older, draft) in drafts {
+                let path = key.ok().and_then(|id| workspace.get(id)?.path.clone());
+                let older = super::Kept {
+                    path: path.or(older.path),
+                    row: None,
+                    ..older
+                };
+                let alone = older.of != newest.of;
+                self.unsaved_document(older, draft, alone, workspace, log);
+            }
+            let Ok(id) = key else {
+                self.unsaved_document(newest, draft, true, workspace, log);
+                continue;
+            };
+            let since = match newest.holds {
                 true => Since::Same,
                 false => Since::Changed,
             };
-            // A file whose draft was kept by its path may have become an entity since.
-            let at = |path: &LibPath| {
-                let mut listed = workspace.listed();
-                listed
-                    .find(|entity| entity.path.as_ref() == Some(path))
-                    .map(|entity| entity.id)
-            };
-            let id = match &key {
-                Key::File(path) => self.ids.id(&key).or_else(|| at(path)),
-                Key::Entity(_) => self.ids.id(&key),
-            };
-            let Some(id) = id.filter(|id| workspace.get(*id).is_some()) else {
-                log.trouble(
-                    "An unsaved edit drawbar kept is of a file no longer in the library \
-                     folder. It is kept for when the file is back.",
-                );
-                continue;
-            };
-            match Draft::decode(&bytes) {
-                Ok(draft) => {
-                    let restoring = (key.clone(), draft, changed, kept_at);
-                    let older = match self.restoring.remove(&id) {
-                        Some(earlier) if earlier.3 > restoring.3 => {
-                            self.restoring.insert(id, earlier);
-                            Some(restoring.0)
-                        }
-                        earlier => {
-                            self.restoring.insert(id, restoring);
-                            earlier.map(|earlier| earlier.0)
-                        }
-                    };
-                    if let Some(older) = older {
-                        // ⚠️ Let go only once this instance keeps the newer: until
-                        // then the older may be the only copy left.
-                        self.superseded.entry(id).or_default().push(older);
-                        let name = workspace.get(id).map(|entity| entity.name.clone());
-                        log.say(format!(
-                            "Two drawbar windows kept unsaved edits of “{}”: the newer is \
-                             shown, and the older was let go.",
-                            name.unwrap_or_default()
-                        ));
-                    }
-                    workspace.hurry(id);
-                }
-                Err(why) => {
-                    let name = workspace.get(id).map(|entity| entity.name.clone());
-                    let name = name.unwrap_or_default();
-                    log.trouble(format!(
-                        "The unsaved edit of “{name}” could not be read: {why}."
-                    ));
-                }
+            self.restoring
+                .insert(id, (newest.of, draft, since, newest.at));
+            workspace.hurry(id);
+        }
+    }
+
+    /// Show the draft `kept`, which no asset holds, as an unsaved copy at its last path.
+    /// An edit of a piano or sample instrument, which has no bytes without its file,
+    /// waits to be put back over the file. Any other of a row is that row's asset, and
+    /// any other is kept at once under a key of its own, letting go of `kept` where
+    /// `alone`, as no other asset holds the edit's key; a copy shown under that key
+    /// already is this edit.
+    fn unsaved_document(
+        &mut self,
+        kept: super::Kept,
+        draft: Draft,
+        alone: bool,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) {
+        let path = kept
+            .path
+            .clone()
+            .unwrap_or_else(|| LibPath::root().join("untitled"));
+        if let (Draft::Bytes(bytes), Key::Entity(_) | Key::File(_), None) =
+            (&draft, &kept.of, kept.row)
+        {
+            let key = copy_key(&path, bytes);
+            if self.copies.values().any(|(held, _)| *held == key) {
+                return;
             }
         }
+        let id = workspace.next_id();
+        let (content, unsaved) = match &draft {
+            Draft::Bytes(bytes) => (Content::whole(Vec::new()), Some(bytes.clone())),
+            Draft::Edit(_) => (Content::found(None, None, 0), None),
+        };
+        let document = Saved {
+            id,
+            name: path.leaf().to_string(),
+            path: Some(path.clone()),
+            origin: Origin::File(path.leaf().to_string()),
+            content,
+            unsaved,
+        };
+        workspace.restore(vec![document], None, log);
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        let (stamp, name) = (entity.stamp, entity.name.clone());
+        // Its file's length and time are not known until a read finds it.
+        let base = Fingerprint {
+            identity: Some(kept.base),
+            ..Fingerprint::unread(Stat {
+                len: 0,
+                modified: None,
+            })
+        };
+        self.records.insert(
+            id,
+            Record {
+                saved: entity.saved.stamp(),
+                ..Record::of_file(path.clone(), kept.row.map(|_| base))
+            },
+        );
+        let Draft::Bytes(bytes) = draft else {
+            let key = kept.of.clone();
+            self.restoring
+                .insert(id, (kept.of, draft, Since::Same, kept.at));
+            return self.keep_copy(id, key, Some(kept.base));
+        };
+        if let Some(row) = kept.row {
+            // Only the id of a lost row, which no asset holds, can stand for it now.
+            self.ids.insert(id, row);
+            return log.theirs(still_held(&name));
+        }
+        let key = match &kept.of {
+            Key::Copy(..) => kept.of.clone(),
+            Key::Entity(_) | Key::File(_) => copy_key(&path, &bytes),
+        };
+        self.keep_copy(id, key.clone(), Some(kept.base));
+        let replaces = match alone && kept.of != key {
+            true => vec![kept.of],
+            false => Vec::new(),
+        };
+        if let Ok(bytes) = Draft::Bytes(bytes).encode() {
+            self.send(Cmd::Draft {
+                of: key.clone(),
+                base: kept.base,
+                bytes,
+                replaces,
+            });
+            self.drafting.push_back((id, key, stamp, kept.base));
+        }
+        log.theirs(still_held(&name));
+    }
+
+    /// Keep asset `id`, which holds work no file does, apart from every file as an unsaved
+    /// copy kept by `key`, made over the file of identity `base`: shown missing until it
+    /// is saved as a new file, removed, or its file is back.
+    fn keep_copy(&mut self, id: u64, key: Key, base: Option<toshokan::Identity>) {
+        self.ids.remove(id);
+        self.copies.insert(id, (key, base));
+    }
+
+    /// Whether asset `id`'s file is missing: it is a copy, or its row's file is nowhere.
+    /// Nothing writes the file again until the asset is saved.
+    fn missing(&self, id: u64) -> bool {
+        let row = self.ids.file(id);
+        let gone = |shown: &Shown| row.is_some_and(|row| shown.gone(row));
+        self.copies.contains_key(&id) || self.shown.as_ref().is_some_and(gone)
     }
 
     /// Put back the draft kept of an asset whose file is read now, and ask what to do
@@ -925,7 +1033,7 @@ impl Store {
         }
         // This instance keeps the edit by the key the asset goes by now, and then lets
         // go of the draft it came from, where that is another.
-        if self.ids.key(id) != Some(&key) {
+        if self.draft_key(id).as_ref() != Some(&key) {
             self.superseded.entry(id).or_default().push(key);
         }
         match changed {
@@ -1217,8 +1325,10 @@ impl Store {
         for id in workspace.take_wanted() {
             let record = self.records.get(&id);
             let unread = record.filter(|record| record.holds == Holds::Unread);
-            match unread.and_then(|record| Some((record.path.clone()?, record.fingerprint))) {
-                Some((path, print)) => files.push((id, path, print)),
+            let file = self.ids.file(id);
+            match unread.and_then(|record| Some((file?, record.path.clone()?, record.fingerprint)))
+            {
+                Some((file, path, print)) => files.push((id, file, path, print)),
                 None => {
                     let why = "drawbar knows no file that holds it".to_string();
                     workspace.unreadable(id, why, log);
@@ -1270,7 +1380,8 @@ impl Store {
             .iter()
             .filter(|(id, record)| {
                 let saved = workspace.get(**id).map(|entity| entity.saved.stamp());
-                saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
+                let missing = browser.folders.missing.contains(id);
+                saved.is_some_and(|saved| record.rereadable(saved, &self.moving, missing))
                     && !queue.holds(**id)
             })
             .filter_map(|(id, _)| {
@@ -1312,10 +1423,8 @@ impl Store {
         self.backend.send(cmd);
     }
 
-    /// Rename a folder. A file the library knows by its path is known by the new one from
-    /// now on.
+    /// Rename a folder.
     fn rename_folder(&mut self, from: LibPath, to: LibPath) {
-        self.ids.moved(&from, &to);
         self.moving.push((from.clone(), to.clone()));
         self.part(Intent::MoveFolder { from, to });
     }
@@ -1338,7 +1447,6 @@ impl Store {
                 record.path = Some(back);
             }
         }
-        self.ids.moved(to, from);
         // ⚠️ The folder changes not yet sent have moved the workspace on already. Those
         // after a folder's rename name the folder by its new name, and are moved back
         // with it; a file's rename is undone where those changes have put the file.
@@ -1360,9 +1468,10 @@ impl Store {
         sent.map(|at| self.moving.remove(at)).is_some()
     }
 
-    /// Take in the files read for the assets that asked. Each comes back as it is now: a
-    /// file whose length or time moved is held as what it holds, and its fingerprint
-    /// keeps the CRC known before only where the contents are the same.
+    /// Take in the files read for the assets that asked, and return whether each was
+    /// read again for a file that changed. Each comes back as it is now: a file whose
+    /// length or time moved is held as what it holds, and its fingerprint keeps the CRC
+    /// known before only where the contents are the same.
     fn took(
         &mut self,
         answers: Vec<(u64, Result<Found, Failure>)>,
@@ -1370,13 +1479,20 @@ impl Store {
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
-    ) {
-        let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
+    ) -> bool {
+        let rechecked = answers
+            .iter()
+            .all(|(id, _)| self.rechecking.contains_key(id));
         let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
-            if self.rechecking.remove(&id) {
+            if self.claiming.remove(&id) {
+                self.rechecking.remove(&id);
+                self.claimed(id, answer, workspace, browser, log);
+                continue;
+            }
+            if let Some(quietly) = self.rechecking.remove(&id) {
                 match answer {
-                    Ok(found) => self.changed(id, found, workspace, browser, log),
+                    Ok(found) => self.changed(id, found, quietly, workspace, browser, log),
                     Err(_) => self.rescan(),
                 }
                 continue;
@@ -1440,16 +1556,15 @@ impl Store {
         for id in self.restoring.keys().copied().collect::<Vec<_>>() {
             self.restore_draft(id, workspace, browser, log);
         }
-        if rechecked {
-            return;
-        }
-        match background {
-            true => self.next_fetches(workspace),
-            false => {
+        match (rechecked, background) {
+            (true, _) => {}
+            (false, true) => self.next_fetches(workspace),
+            (false, false) => {
                 self.reading = false;
                 self.ask(workspace, browser, queue, log);
             }
         }
+        rechecked
     }
 
     /// Whether a rescan is waiting for its answer.
@@ -1463,22 +1578,10 @@ impl Store {
         matches!(self.phase, Phase::Opening) || self.first_scan
     }
 
-    /// The key the library knows an asset's file by.
-    #[cfg(test)]
-    pub fn key(&self, id: u64) -> Option<Key> {
-        self.ids.key(id).cloned()
-    }
-
     /// Whether a change to the facts waits to be sent or answered.
     #[cfg(test)]
     pub fn deciding(&self) -> bool {
         !self.asked.is_empty() || self.committing > 0
-    }
-
-    /// Whether a send is held for a rescan or check still in flight.
-    #[cfg(test)]
-    pub fn holds_send(&self) -> bool {
-        self.send_waits
     }
 
     /// Whether nothing may be written, and why.
@@ -1548,13 +1651,13 @@ impl Store {
                 ));
                 self.phase = Phase::Failed(why);
             }
-            Event::Scanned(Ok(viewed)) => {
-                let whole = viewed.dirs.is_some();
+            Event::Scanned(Ok(mut viewed)) => {
+                let drafts = viewed.drafts.take();
                 let moved = self.viewed(viewed, workspace, browser, queue, log);
                 self.moved.extend(moved);
                 self.first_scan = false;
-                if whole && !self.listed {
-                    self.listed_whole(workspace, browser, log);
+                if let Some(drafts) = drafts {
+                    self.listed_whole(drafts, workspace, browser, queue, log);
                 }
                 return self.scanned(queue, workspace, log);
             }
@@ -1618,6 +1721,14 @@ impl Store {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
                         None if refused => {}
                         None if told => log.error(format!("{label}: {why}")),
+                        None if why == super::keeper::NO_FILE => {
+                            log.error(format!("{label}: {why}"));
+                            let steps = [&self.history.done, &self.history.undone];
+                            let step = steps[usize::from(label == "Redo")].last();
+                            if let Some((step, _)) = step {
+                                log.say(format!("{label} of {step} waits for its file."));
+                            }
+                        }
                         None => {
                             log.error(format!("{label}: {why}"));
                             log.trouble(format!("The library did not change as asked: {why}."));
@@ -1627,11 +1738,11 @@ impl Store {
                 if let Some(shown) = self.shown.take() {
                     // A file whose delete failed or was undone is listed again, unless the
                     // next write finishes the delete.
-                    let finishing = |key: &Key| {
-                        let path = shown.files.get(key).map(|(path, _)| path);
+                    let finishing = |file: &FileId| {
+                        let path = shown.path(*file);
                         path.is_some_and(|path| self.finishing.contains(path))
                     };
-                    deleted.retain(|key| !finishing(key));
+                    deleted.retain(|file| !finishing(file));
                     let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
                     if failed || back > 0 {
                         self.project_tags(&shown, browser);
@@ -1662,8 +1773,7 @@ impl Store {
                 self.rescan();
             }
             Event::Read(answers) => {
-                let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
-                self.took(answers, workspace, browser, queue, log);
+                let rechecked = self.took(answers, workspace, browser, queue, log);
                 if rechecked && self.scan == Scan::Rechecking {
                     return self.scanned(queue, workspace, log);
                 }
@@ -1684,13 +1794,13 @@ impl Store {
                 }
             },
             Event::Saved { id, path, result } => {
-                self.saved(id, path, result, workspace, browser, log)
+                self.saved(id, path, result, workspace, queue, log)
             }
             Event::Imported { id, path, result } => {
-                self.imported(id, path, result, workspace, browser, log)
+                self.imported(id, path, result, workspace, queue, log)
             }
             Event::Rewritten { id, path, result } => {
-                self.rewritten(id, path, result, workspace, browser, log)
+                self.rewritten(id, path, result, workspace, queue, log)
             }
             Event::Trimmed(entries) => {
                 if let Some(change) = self.history.trim(&entries) {
@@ -1801,12 +1911,12 @@ impl Store {
         false
     }
 
-    /// A change, an undo or a redo answered: once none is in flight, the keys of the files
+    /// A change, an undo or a redo answered: once none is in flight, the rows of the files
     /// deleted since one was.
-    fn uncommit(&mut self) -> BTreeSet<Key> {
+    fn uncommit(&mut self) -> BTreeSet<FileId> {
         self.committing = self.committing.saturating_sub(1);
         match self.committing {
-            0 => std::mem::take(&mut self.deleting).into_values().collect(),
+            0 => std::mem::take(&mut self.deleting),
             _ => BTreeSet::new(),
         }
     }
@@ -2055,7 +2165,6 @@ impl Store {
             writable,
             opening_copy,
             viewed,
-            drafts,
             ignored,
             trouble,
         } = opened;
@@ -2088,18 +2197,30 @@ impl Store {
             }
         };
         self.viewed(viewed, workspace, browser, queue, log);
-        self.drafts_found = drafts;
         if self.opened() {
             self.first_scan = true;
             self.rescan();
         }
     }
 
-    /// Take in that a scan of every file listed them for the first time since opening.
-    fn listed_whole(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
+    /// Take in that a scan of every file listed them for the first time since opening, and
+    /// the drafts an earlier session kept, which it found.
+    fn listed_whole(
+        &mut self,
+        drafts: Vec<Result<super::Kept, String>>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
         self.listed = true;
-        let drafts = std::mem::take(&mut self.drafts_found);
         self.take_drafts(drafts, workspace, log);
+        if let Some(shown) = self.shown.take() {
+            let mut gone = BTreeSet::new();
+            self.place_missing(&shown, &mut gone, workspace, browser, queue);
+            workspace.drop_gone(&gone);
+            self.shown = Some(shown);
+        }
         // The count This computer's badge shows, said even at 0 to replace the last library's.
         log.say(match browser.folders.count(None, workspace) {
             0 => "No files on this computer.".to_string(),
@@ -2185,9 +2306,7 @@ impl Store {
         if !self.open() {
             return;
         }
-        let intent = Intent::Take { run, changes };
-        self.awaits(Step::Change(intent.describe()), intent.doing());
-        self.send(Cmd::Intent(intent));
+        self.commit(Intent::Take { run, changes });
     }
 
     /// Never show or merge the changes the library keeps apart in `run` again.
@@ -2195,9 +2314,7 @@ impl Store {
         if !self.open() {
             return;
         }
-        let intent = Intent::Dismiss { run };
-        self.awaits(Step::Change(intent.describe()), intent.doing());
-        self.send(Cmd::Intent(intent));
+        self.commit(Intent::Dismiss { run });
     }
 
     /// Show what the library keeps apart, and say once when new runs of it appear.
@@ -2209,7 +2326,7 @@ impl Store {
         log: &mut Log,
     ) {
         let held = |entity| {
-            let id = self.ids.id(&Key::Entity(entity))?;
+            let id = self.asset_of(entity)?;
             let asset = workspace.get(id)?;
             Some(Held {
                 id,
@@ -2275,41 +2392,80 @@ impl Store {
     ) -> BTreeSet<u64> {
         let Viewed {
             shown: change,
-            dirs,
             changes,
-            moves: _,
-            followed,
+            rows,
+            quiet,
             unlisted,
             unfinished,
             kept,
             retired,
             left,
             finishing,
-            ambiguous,
-            joined,
+            drafts: _,
+            wrote,
+            rewritten,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
+        // Each file written whose answer was lost is its asset's, read again quietly.
+        for (id, file) in wrote {
+            if self.records.contains_key(&id) && self.ids.file(id) != Some(file) {
+                self.give_row(id, file, workspace, queue);
+                self.copies.remove(&id);
+                self.quietly.insert(id);
+            }
+        }
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
         // Until a scan has listed every file, what a view adds is what was there.
         let first = !self.listed;
-        self.quiet = followed.is_some();
-        for (from, to) in followed.into_iter().flatten() {
-            if let (Some(from), Some(to)) = (from, to) {
-                self.follow_own(&from, &to, workspace);
-            }
-        }
+        self.quiet = quiet;
         let mut shown = self.shown.take().unwrap_or_default();
-        let reach = shown.apply(change);
-        if reach.as_ref().is_none_or(|keys| !keys.is_empty()) {
+        let tags = What::Field(TAGS.name().to_string());
+        let retagged = changes.iter().filter(|change| change.what == tags);
+        let worn_before =
+            retagged.map(|change| (change.entity, worn(&shown, change.entity).cloned()));
+        let worn_before: BTreeMap<_, _> = worn_before.collect();
+        let reached = shown.apply(change);
+        if reached.rows.as_ref().is_none_or(|rows| !rows.is_empty()) {
             browser.folders.others = shown.others();
+            browser.folders.held = shown.held();
         }
-        let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
-        if let Some(said) = said.filter(|_| !first && !self.quiet) {
-            log.say(said);
+        let report = Report::of(rows, first || self.quiet);
+        let (touched, said) = self.project(
+            &shown,
+            reached.rows.as_ref(),
+            &report,
+            workspace,
+            browser,
+            queue,
+            log,
+        );
+        if let Some(said) = said {
+            log.theirs(said);
         }
-        if let Some(dirs) = dirs {
+        for (file, identity) in rewritten {
+            let record = self
+                .ids
+                .id(file)
+                .and_then(|id| Some((id, self.records.get(&id)?)));
+            let Some((id, record)) = record else { continue };
+            let held = record.fingerprint.and_then(|print| print.identity);
+            let row = shown.row(file, Class::File);
+            let Some((path, Some(stat))) = row.map(|row| (&row.path, row.stat())) else {
+                continue;
+            };
+            if identity.is_some_and(|written| held == Some(written))
+                || self.rechecking.contains_key(&id)
+            {
+                continue;
+            }
+            self.recheck(id, path.clone(), stat, self.quiet(id), workspace);
+        }
+        // A scan of every file looks at the folders too, which a change the folder did
+        // not take may have left shown.
+        if reached.dirs || unlisted.is_some() {
+            let dirs: Vec<LibPath> = shown.dirs.iter().cloned().collect();
             browser.folders.sync(&dirs);
         }
         if let Some(unlisted) = unlisted {
@@ -2351,89 +2507,74 @@ impl Store {
                 },
             ));
         }
-        for (was, candidates) in &ambiguous {
-            log.trouble(match candidates.as_slice() {
-                [one] => format!(
-                    "drawbar cannot tell whether “{one}” is the file that was at “{was}”, so \
-                     it does not give “{one}” that file's tags."
-                ),
-                several => format!(
-                    "drawbar cannot tell which of {} is the file that was at “{was}”, so it \
-                     gives none of them that file's tags.",
-                    crate::strings::quoted_some(several, 3)
-                ),
-            });
-        }
-        for (file, joined) in &joined {
-            log.info(format!(
-                "“{file}”: joined the tags of entity {} into entity {}",
-                joined.entity, joined.into
-            ));
-        }
+        self.shown = Some(shown);
         self.keep_apart(kept, workspace, browser, log);
         if !first {
-            self.attribute(&changes, workspace, log);
+            self.attribute(&changes, &worn_before, workspace, log);
         }
-        self.shown = Some(shown);
         self.quiet = false;
+        self.quietly.clear();
         touched
     }
 
-    /// Follow a tree, or a file no entity is bound to, that this session's undo, redo or
-    /// settling moved from `from` to `to`: each asset in it keeps its id, and moves with it.
-    fn follow_own(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
-        self.ids.moved(from, to);
-        for record in self.records.values_mut() {
-            if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(from, to)) {
-                record.path = Some(moved);
-            }
-        }
-        workspace.relocate(from, to);
+    /// Whether the view in hand reads asset `id`'s file again without a word.
+    fn quiet(&self, id: u64) -> bool {
+        self.quiet || self.quietly.contains(&id)
     }
 
-    /// Bring the workspace level with the files the view lists. Each file keeps the id it
-    /// had: by its entity, or by its path, or as the file drawbar wrote there. Returns
-    /// the assets whose files moved or changed, and what to say of the files that changed
-    /// outside drawbar.
+    /// The asset the file of `entity`'s row is.
+    fn asset_of(&self, entity: toshokan::EntityId) -> Option<u64> {
+        let shown = self.shown.as_ref()?;
+        self.ids.id(shown.row_of(entity)?)
+    }
+
+    /// The entity bound to the file of the asset `id`.
+    pub(crate) fn entity(&self, id: u64) -> Option<toshokan::EntityId> {
+        self.shown.as_ref()?.entity(self.ids.file(id)?)
+    }
+
+    /// Bring the workspace level with the rows the view shows. Each asset keeps the row it
+    /// stands for, wherever the row goes. Returns the assets whose files moved or changed,
+    /// and what to say of the tagged files gone from the folder with no word of why.
+    #[allow(clippy::too_many_arguments)]
     fn project(
         &mut self,
         listed: &Shown,
-        reach: Option<&BTreeSet<Key>>,
+        reach: Option<&BTreeSet<FileId>>,
+        report: &Report,
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
     ) -> (BTreeSet<u64>, Option<String>) {
-        self.rekey(listed, reach);
         let mut touched = BTreeSet::new();
-        let (mut moved, mut deleted, mut missing) = (0, 0, 0);
+        let (mut unsaid, mut dropped) = (0, BTreeSet::new());
         let deferred = std::mem::take(&mut self.deferred);
-        let known: Vec<(u64, Key)> = match reach {
-            None => self.ids.iter().map(|(id, key)| (id, key.clone())).collect(),
-            Some(keys) => {
-                let ids = keys.iter().filter_map(|key| self.ids.id(key));
+        let known: Vec<u64> = match reach {
+            None => self.ids.iter().map(|(id, _)| id).collect(),
+            Some(files) => {
+                let ids = files.iter().filter_map(|file| self.ids.id(*file));
                 let ids: BTreeSet<u64> = ids.chain(deferred).collect();
-                let keyed = ids
-                    .into_iter()
-                    .filter_map(|id| Some((id, self.ids.key(id)?.clone())));
-                keyed.collect()
+                ids.into_iter().collect()
             }
         };
-        for (id, key) in known {
-            // A lost row keeps its id while the library keeps its entity.
-            let shown = key
-                .entity()
-                .is_some_and(|entity| listed.lost.contains_key(&entity));
-            if workspace.get(id).is_none() && !self.records.contains_key(&id) && !shown {
-                self.ids.remove(id);
+        for id in &known {
+            self.merge(*id, listed, report, workspace, queue);
+        }
+        for id in known {
+            let Some(file) = self.ids.file(id) else {
                 continue;
-            }
-            let Some(record) = self.records.get(&id) else {
+            };
+            let Some(record) = self.records.get_mut(&id) else {
+                // A lost row keeps its id while the library keeps its entity.
+                if workspace.get(id).is_none() && listed.row(file, Class::Lost).is_none() {
+                    self.ids.remove(id);
+                }
                 continue;
             };
             let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
-            if record
-                .path
+            let at = record.path.clone();
+            if at
                 .as_ref()
                 .is_some_and(|path| self.finishing.contains(path))
             {
@@ -2441,26 +2582,36 @@ impl Store {
                 self.awaiting.insert(id);
                 continue;
             }
-            if let (true, Some(path)) = (self.awaiting.remove(&id), record.path.clone()) {
+            if let (true, Some(path)) = (self.awaiting.remove(&id), at.clone()) {
                 if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
                     log.say(format!("Finished saving “{}”.", entity.name));
                 }
                 self.read_unheard(id, path, workspace);
                 continue;
             }
-            if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
+            if record.saving || at.as_ref().is_some_and(unsettled_at) {
                 self.deferred.insert(id);
                 continue;
             }
-            let Some((path, stat)) = listed.files.get(&key) else {
+            // An asset may hold a file drawbar lists only by its name, as one it copied in.
+            let shown = listed
+                .row(file, Class::File)
+                .map(|row| (&row.path, row.stat()));
+            let other = || listed.row(file, Class::Other).map(|row| (&row.path, None));
+            let Some((path, stat)) = shown.or_else(other) else {
                 touched.insert(id);
-                match self.vanished(id, workspace, browser, queue, log) {
-                    Vanished::Deleted => {
-                        deleted += 1;
-                        self.ids.remove(id);
+                let gone = &mut dropped;
+                let vanished = self.vanished(
+                    id, file, listed, report, gone, workspace, browser, queue, log,
+                );
+                unsaid += usize::from(vanished);
+                // A row with no file is where its file is to be.
+                let at = listed.path(file).filter(|_| self.ids.id(file) == Some(id));
+                if let (Some(at), Some(record)) = (at, self.records.get_mut(&id)) {
+                    if record.path.as_ref() != Some(at) {
+                        record.path = Some(at.clone());
+                        workspace.follow(id, browser.folders.ahead(at));
                     }
-                    Vanished::Missing => missing += 1,
-                    Vanished::Untouched => {}
                 }
                 continue;
             };
@@ -2468,128 +2619,303 @@ impl Store {
                 self.deferred.insert(id);
                 continue;
             }
-            let Some(record) = self.records.get_mut(&id) else {
-                continue;
-            };
-            if std::mem::take(&mut record.missing) {
-                browser.folders.missing.remove(&id);
-            }
-            if record.path.as_ref() != Some(path) {
+            // An asset shown missing was placed where its file would be, not at its row.
+            let placed = browser.folders.missing.contains(&id);
+            if record.path.as_ref() != Some(path) || placed {
                 touched.insert(id);
-                moved += 1;
                 record.path = Some(path.clone());
-                let before = workspace.get(id).map(|entity| entity.name.clone());
                 workspace.follow(id, browser.folders.ahead(path));
-                if let Some(before) = before.filter(|_| !self.quiet) {
-                    log.say(format!(
-                        "“{before}” was moved to {path} outside drawbar; its tags went with it."
-                    ));
-                }
             }
-            let Some(record) = self.records.get_mut(&id) else {
-                continue;
-            };
             let known = record.fingerprint.map(|print| print.stat());
             if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
                 touched.insert(id);
-                if self.quiet {
-                    self.quietly.insert(id);
-                }
-                self.recheck(id, path.clone(), stat, workspace);
+                self.recheck(id, path.clone(), stat, self.quiet(id), workspace);
             }
         }
-        let appeared = self.arrive(listed, reach, workspace, browser, log);
-        // A file gone missing keeps the status line, which asks for it to be saved.
-        let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
+        self.arrive(listed, reach, workspace, browser, log);
+        self.place_missing(listed, &mut dropped, workspace, browser, queue);
+        workspace.drop_gone(&dropped);
+        let ready = self.unsaid.difference(&self.claiming).copied();
+        for id in ready.collect::<Vec<_>>() {
+            self.say_held(id, workspace, browser, log);
+        }
+        let said = (unsaid > 0).then(|| {
+            let files = crate::strings::counted(unsaid, "tagged file is", "tagged files are");
+            format!("{files} no longer in the library folder.")
+        });
         (touched, said)
     }
 
-    /// Give each asset the key the library knows its file by now, where that changed: a
-    /// file an intent made an entity of, an entity whose file was let go of, or a file
-    /// drawbar wrote that the view lists for the first time.
-    fn rekey(&mut self, listed: &Shown, reach: Option<&BTreeSet<Key>>) {
-        let reached = |key: &Key| reach.is_none_or(|keys| keys.contains(key));
-        let by_path: BTreeMap<&LibPath, &Key> = listed
-            .files
-            .iter()
-            .filter(|(key, _)| reached(key))
-            .map(|(key, (path, _))| (path, key))
-            .collect();
-        let unlisted: Vec<u64> = match reach {
-            None => self.ids.iter().map(|(id, _)| id).collect(),
-            Some(keys) => keys.iter().filter_map(|key| self.ids.id(key)).collect(),
-        };
-        let unlisted = unlisted.into_iter().filter(|id| {
-            let key = self.ids.key(*id);
-            key.is_some_and(|key| !listed.files.contains_key(key))
-        });
-        let unkeyed = self
-            .records
-            .keys()
-            .copied()
-            .filter(|id| self.ids.key(*id).is_none());
-        let mut rekeyed = Vec::new();
-        for id in unlisted.chain(unkeyed) {
-            let path = self
-                .records
-                .get(&id)
-                .and_then(|record| record.path.as_ref());
-            let key = path.and_then(|path| by_path.get(path));
-            if let Some(key) = key.filter(|key| self.ids.id(key).is_none()) {
-                rekeyed.push((id, (*key).clone()));
+    /// Let go of each asset shown missing that no longer holds work no file does, into
+    /// `gone`, and show each other where its file would be, at its row's path or a
+    /// copy's own: in the nearest folder the view lists, and for a copy, beside what
+    /// holds its name, where a save writes it as a file of its own.
+    fn place_missing(
+        &mut self,
+        listed: &Shown,
+        gone: &mut BTreeSet<u64>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+    ) {
+        let gone_rows = listed
+            .missing(Class::Lost)
+            .chain(listed.missing(Class::Absent));
+        let rowed = gone_rows.filter_map(|(row, _)| self.ids.id(row));
+        let missing = self.copies.keys().copied().chain(rowed);
+        let missing = missing.filter(|id| self.records.contains_key(id));
+        browser.folders.missing = missing.collect();
+        for id in browser.folders.missing.clone() {
+            if !self.holds_work(id, workspace, queue) {
+                browser.folders.missing.remove(&id);
+                self.records.remove(&id);
+                self.copies.remove(&id);
+                gone.insert(id);
+                continue;
             }
-        }
-        for (id, key) in rekeyed {
-            self.ids.insert(id, key);
+            let row = self.ids.file(id).and_then(|row| listed.path(row));
+            let home = || {
+                self.records
+                    .get(&id)
+                    .and_then(|record| record.path.as_ref())
+            };
+            let Some(at) = row.or_else(home).cloned() else {
+                continue;
+            };
+            let to = nearest(listed, &at).join(at.leaf());
+            let to = match self.copies.contains_key(&id) {
+                true => beside(listed, None, to),
+                false => to,
+            };
+            if workspace.get(id).and_then(|entity| entity.path.as_ref()) != Some(&to) {
+                workspace.follow(id, to);
+            }
         }
     }
 
-    /// Take in each file the view lists that no asset stands for. Returns how many.
+    /// Where the row of asset `id` ended merged into another, the asset that stands for
+    /// that row: the one that holds what no file holds, else the one that knows the file
+    /// as it is, else the other's. Of two that each hold such work, the one with the
+    /// older edit keeps it apart, with no file.
+    fn merge(
+        &mut self,
+        id: u64,
+        listed: &Shown,
+        report: &Report,
+        workspace: &mut Workspace,
+        queue: &Queue,
+    ) {
+        let Some(file) = self
+            .ids
+            .file(id)
+            .filter(|file| listed.path(*file).is_none())
+        else {
+            return;
+        };
+        let Some(into) = report.merged.get(&file).copied() else {
+            return;
+        };
+        let Some(other) = self.ids.id(into) else {
+            self.ids.insert(id, into);
+            return;
+        };
+        let holds = |id: u64| self.holds_work(id, workspace, queue);
+        // Of two that hold nothing more, the one that knows the file as it is now.
+        let stat = listed.row(into, Class::File).and_then(shown::Row::stat);
+        let current = |id: u64| {
+            let print = self.records.get(&id).and_then(|record| record.fingerprint);
+            stat.is_some() && print.map(|print| print.stat()) == stat
+        };
+        let (keeps, apart) = match (holds(id), holds(other)) {
+            (false, false) if current(id) && !current(other) => (id, None),
+            (false, _) => (other, None),
+            (true, false) => (id, None),
+            (true, true) => match edited(workspace, id) < edited(workspace, other) {
+                true => (other, Some(id)),
+                false => (id, Some(other)),
+            },
+        };
+        let going = [id, other].into_iter().filter(|held| *held != keeps);
+        for going in going.collect::<Vec<_>>() {
+            self.ids.remove(going);
+            self.let_row_go(going, Some(going) == apart, workspace);
+            if Some(going) == apart {
+                self.unsaid.insert(going);
+            }
+        }
+        self.ids.insert(keeps, into);
+    }
+
+    /// Give asset `id` the row `file`. The asset that stood for it is kept as an unsaved
+    /// copy where it holds work no file does, and goes otherwise.
+    fn give_row(&mut self, id: u64, file: FileId, workspace: &mut Workspace, queue: &Queue) {
+        if let Some(had) = self.ids.insert(id, file) {
+            self.let_row_go(had, self.holds_work(had, workspace, queue), workspace);
+        }
+    }
+
+    fn let_row_go(&mut self, id: u64, keep: bool, workspace: &mut Workspace) {
+        if keep {
+            return self.copy_of_row(id, workspace);
+        }
+        self.records.remove(&id);
+        workspace.drop_gone(&BTreeSet::from([id]));
+    }
+
+    /// Say asset `id` is still held apart from its file, where that is still to say, and
+    /// under its own name where another file holds the name it had.
+    fn say_held(&mut self, id: u64, workspace: &Workspace, browser: &Browser, log: &mut Log) {
+        let unsaid = self.unsaid.remove(&id);
+        let apart = self.copies.contains_key(&id) || browser.folders.missing.contains(&id);
+        let Some(entity) = workspace.get(id).filter(|_| unsaid && apart) else {
+            return;
+        };
+        let home = self
+            .records
+            .get(&id)
+            .and_then(|record| record.path.as_ref());
+        let taken = home.map(LibPath::leaf).filter(|home| *home != entity.name);
+        log.theirs(match taken {
+            Some(home) => format!(
+                "“{home}” on disk is another file; drawbar still holds your changes as “{}”.",
+                entity.name
+            ),
+            None => still_held(&entity.name),
+        });
+    }
+
+    /// Keep asset `id`, whose row ended, as an unsaved copy at its file's last path.
+    fn copy_of_row(&mut self, id: u64, workspace: &Workspace) {
+        let path = self
+            .records
+            .get(&id)
+            .and_then(|record| record.path.as_ref());
+        let (Some(path), Some(entity)) = (path, workspace.get(id)) else {
+            return;
+        };
+        let key = copy_key(path, &entity.bytes);
+        self.keep_copy(id, key, self.base(id));
+    }
+
+    /// Take in each file the view lists that no asset stands for. A file at the path of
+    /// an unsaved copy whose work's base is known is read for the copy, which it may be.
     fn arrive(
         &mut self,
         listed: &Shown,
-        reach: Option<&BTreeSet<Key>>,
+        reach: Option<&BTreeSet<FileId>>,
         workspace: &mut Workspace,
-        browser: &Browser,
+        browser: &mut Browser,
         log: &mut Log,
     ) -> usize {
-        let files: Vec<(&Key, &(LibPath, Option<Stat>))> = match reach {
-            None => listed.files.iter().collect(),
-            Some(keys) => keys
+        let files: Vec<(FileId, &shown::Row)> = match reach {
+            None => listed.class(Class::File).collect(),
+            Some(files) => files
                 .iter()
-                .filter_map(|key| listed.files.get_key_value(key))
+                .filter_map(|file| Some((*file, listed.row(*file, Class::File)?)))
                 .collect(),
         };
-        let mut arrived: Vec<(LibPath, Key, Stat)> = Vec::new();
-        for (key, (path, stat)) in files {
-            if self.ids.id(key).is_some() {
+        let mut arrived = Vec::new();
+        for (file, shown) in files {
+            if self.ids.id(file).is_some() || self.deleting.contains(&file) {
                 continue;
             }
-            if let Some(id) = self.renaming(path) {
-                self.ids.insert(id, key.clone());
+            let Some(stat) = shown.stat() else {
                 continue;
-            }
-            if self.deleting.contains_key(path) {
-                continue;
-            }
-            if let Some(stat) = stat {
-                arrived.push((path.clone(), key.clone(), *stat));
+            };
+            if !self.claim(file, &shown.path) {
+                arrived.push((file, Found::unread(shown.path.clone(), stat), shown.came));
             }
         }
+        self.arrived(arrived, workspace, browser, log)
+    }
+
+    /// Give the row `file`, at `path`, to the unsaved copy there whose work's base is
+    /// known, if one is, and read the file to tell whether it holds that base.
+    fn claim(&mut self, file: FileId, path: &LibPath) -> bool {
+        let at = |id: &u64| self.records.get(id).and_then(|record| record.path.as_ref());
+        let copies = self.copies.iter().filter(|(_, (_, base))| base.is_some());
+        let mut copies = copies.filter(|(id, _)| !self.claiming.contains(*id));
+        let Some(id) = copies
+            .find(|(id, _)| at(id) == Some(path))
+            .map(|(id, _)| *id)
+        else {
+            return false;
+        };
+        self.ids.insert(id, file);
+        self.claiming.insert(id);
+        self.rechecking.insert(id, true);
+        let files = vec![(id, file, path.clone(), None)];
+        let room = self.budget;
+        self.send(Cmd::Read { files, room });
+        true
+    }
+
+    /// Take in what a read found of the file a copy claimed: the copy's own where it holds
+    /// what the copy's work was made over, which the copy goes back onto, and else a file
+    /// of its own.
+    fn claimed(
+        &mut self,
+        id: u64,
+        answer: Result<Found, Failure>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let Some(file) = self.ids.file(id) else {
+            return self.say_held(id, workspace, browser, log);
+        };
+        let base = self.copies.get(&id).and_then(|(_, base)| *base);
+        let found = match answer {
+            Ok(found) if found.identity.is_some() && found.identity == base => {
+                self.unsaid.remove(&id);
+                self.copies.remove(&id);
+                if let Some(record) = self.records.get_mut(&id) {
+                    record.path = Some(found.path.clone());
+                }
+                workspace.follow(id, found.path.clone());
+                return self.changed(id, found, true, workspace, browser, log);
+            }
+            Ok(found) => found,
+            Err(_) => {
+                let shown = self.shown.as_ref();
+                let shown = shown.and_then(|shown| shown.row(file, Class::File));
+                let Some((path, Some(stat))) = shown.map(|row| (&row.path, row.stat())) else {
+                    self.ids.remove(id);
+                    return;
+                };
+                Found::unread(path.clone(), stat)
+            }
+        };
+        self.ids.remove(id);
+        self.say_held(id, workspace, browser, log);
+        self.arrived(vec![(file, found, None)], workspace, browser, log);
+        if let Some(shown) = &self.shown {
+            self.project_tags(shown, browser);
+        }
+    }
+
+    /// Make each of `arrived`, a row and what was found of its file, an asset of its own,
+    /// with where it came from where its entity says.
+    fn arrived(
+        &mut self,
+        mut arrived: Vec<(FileId, Found, Option<Came>)>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) -> usize {
         if arrived.is_empty() {
             return 0;
         }
-        arrived.sort_by(|a, b| a.0.cmp(&b.0));
+        arrived.sort_by(|a, b| a.1.path.cmp(&b.1.path));
         let mut next = workspace.next_id();
         let mut back = Vec::new();
-        for (path, key, stat) in arrived {
-            let came = key.entity().and_then(|entity| listed.came.get(&entity));
-            let mut saved = newcomer(next, Found::unread(path, stat), &mut self.records);
+        for (file, found, came) in arrived {
+            let mut saved = newcomer(next, found, &mut self.records);
             if let Some(came) = came {
                 saved.origin = came.origin();
             }
             back.push(saved);
-            self.ids.insert(next, key);
+            self.ids.insert(next, file);
             next = next.saturating_add(1);
         }
         let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
@@ -2601,35 +2927,25 @@ impl Store {
         ids.len()
     }
 
-    /// The asset known by where a rename sent from `path` and not answered yet puts it:
-    /// a listing taken before the rename landed lists that asset's file at `path`.
-    fn renaming(&self, path: &LibPath) -> Option<u64> {
-        let to = self
-            .moving
-            .iter()
-            .find_map(|(from, to)| path.moved(from, to))?;
-        self.ids.id(&Key::File(to))
-    }
-
-    /// Show each entity whose file is nowhere, which no asset stands for, as lost, with
-    /// its tags, until the user lets it go.
+    /// Show each lost row, of an entity wearing tags whose file is nowhere, which no asset
+    /// stands for, until the user lets it go.
     fn lose(&mut self, listed: &Shown, workspace: &mut Workspace, browser: &mut Browser) {
         let mut lost = Vec::new();
-        for (entity, path) in &listed.lost {
-            let key = Key::Entity(*entity);
-            let id = match self.ids.id(&key) {
+        for (file, row) in listed.missing(Class::Lost) {
+            let path = &row.path;
+            let id = match self.ids.id(file) {
                 Some(id) if workspace.get(id).is_some() => continue,
                 Some(id) => id,
                 None => {
                     let id = workspace.next_id();
                     workspace.reserve(id.saturating_add(1));
-                    self.ids.insert(id, key);
+                    self.ids.insert(id, file);
                     id
                 }
             };
             lost.push(crate::folders::Lost {
                 id,
-                path: path.clone(),
+                path: nearest(listed, path).join(path.leaf()),
             });
         }
         browser.folders.set_lost(lost);
@@ -2641,32 +2957,42 @@ impl Store {
         if self.asked.is_empty() && self.committing == 0 {
             browser.tags.settle();
         }
-        let worn_names = shown.worn.values().flatten().cloned();
+        let worn_names = shown.tagged().flat_map(|(_, row)| row.worn.iter().cloned());
         let names = worn_names.chain(shown.names.iter().cloned());
-        let worn = shown.worn.iter().filter_map(|(entity, worn)| {
-            let id = self.ids.id(&Key::Entity(*entity))?;
-            Some((id, worn.iter().cloned().collect()))
+        let worn = shown.tagged().filter_map(|(file, row)| {
+            Some((self.ids.id(file)?, row.worn.iter().cloned().collect()))
         });
         browser.tags.project(names.collect(), worn.collect());
     }
 
-    /// Say which tags another drawbar changed.
+    /// Say whose tags another drawbar changed from what they were, `before`.
     fn attribute(
         &self,
         changes: &[toshokan::report::Change],
+        before: &BTreeMap<toshokan::EntityId, Option<BTreeSet<String>>>,
         workspace: &Workspace,
         log: &mut Log,
     ) {
-        let tags = What::Field(TAGS.name().to_string());
-        for change in changes.iter().filter(|change| change.what == tags) {
+        let Some(shown) = &self.shown else {
+            return;
+        };
+        let mut said = BTreeSet::new();
+        for change in changes {
             let By::Writer { label, .. } = &change.by else {
                 continue;
             };
-            let id = self.ids.id(&Key::Entity(change.entity));
+            let Some(was) = before.get(&change.entity) else {
+                continue;
+            };
+            // A writer whose history no longer reads is no known drawbar.
+            if label.is_empty() || worn(shown, change.entity) == was.as_ref() {
+                continue;
+            }
+            let id = self.asset_of(change.entity).filter(|id| said.insert(*id));
             let Some(entity) = id.and_then(|id| workspace.get(id)) else {
                 continue;
             };
-            log.say(format!(
+            log.theirs(format!(
                 "Another {label} changed the tags of “{}”.",
                 entity.name
             ));
@@ -2710,6 +3036,15 @@ impl Store {
         }
     }
 
+    /// Whether asset `id` holds work no file does: an unsaved edit, a queue place, the
+    /// slot it came off, a save not yet written, or a draft waiting to be put back.
+    fn holds_work(&self, id: u64, workspace: &Workspace, queue: &Queue) -> bool {
+        let entity = workspace.get(id);
+        let held =
+            entity.is_some_and(|entity| precious(entity, queue) || entity.origin.slot().is_some());
+        held || self.restoring.contains_key(&id) || self.writes(id, workspace)
+    }
+
     /// Whether the file of a kept asset is still to be written: placed and saved, or
     /// copied in, with nothing to stop it.
     fn writes(&self, id: u64, workspace: &Workspace) -> bool {
@@ -2727,7 +3062,7 @@ impl Store {
         let Asked::Tag { assets, name, .. } = asked else {
             return;
         };
-        let missed = assets.iter().filter(|id| self.ids.key(**id).is_none());
+        let missed = assets.iter().filter(|id| self.ids.file(**id).is_none());
         let names: Vec<String> = missed
             .filter_map(|id| workspace.get(*id))
             .map(|entity| format!("“{}”", entity.name))
@@ -2748,29 +3083,23 @@ impl Store {
         shown: &Shown,
         workspace: &Workspace,
     ) -> Option<Option<Intent>> {
-        let entities = |assets: &[u64]| -> Vec<toshokan::EntityId> {
-            let keys = assets.iter().filter_map(|id| self.ids.key(*id));
-            keys.filter_map(Key::entity).collect()
-        };
-        let wearing = |name: &String| shown.wearing(name);
+        let entity = |id: &u64| shown.entity(self.ids.file(*id)?);
         let wear = |name: &String| -> BTreeSet<toshokan::EntityId> {
             shown.wearing(name).into_iter().collect()
         };
         let intent = match asked {
             Asked::Tag { assets, name, make } => {
-                let waits = |id: &u64| self.ids.key(*id).is_none() && self.writes(*id, workspace);
+                let waits = |id: &u64| self.ids.file(*id).is_none() && self.writes(*id, workspace);
                 if assets.iter().any(waits) {
                     return None;
                 }
                 let listed = shown.names.contains(name);
                 let wear = wear(name);
-                let files: Vec<Key> = assets
+                let worn = |id: &&u64| entity(id).is_some_and(|entity| wear.contains(&entity));
+                let files: Vec<Tagged> = assets
                     .iter()
-                    .filter_map(|id| self.ids.key(*id).cloned())
-                    .filter(|key| match key {
-                        Key::Entity(entity) => !wear.contains(entity),
-                        Key::File(_) => true,
-                    })
+                    .filter(|id| !worn(id))
+                    .filter_map(|id| Some(Tagged::Row(self.ids.file(*id)?)))
                     .collect();
                 let make = *make && !listed;
                 match (files.is_empty(), make) {
@@ -2785,10 +3114,8 @@ impl Store {
             }
             Asked::Untag { assets, name } => {
                 let wear = wear(name);
-                let entities: Vec<_> = entities(assets)
-                    .into_iter()
-                    .filter(|entity| wear.contains(entity))
-                    .collect();
+                let entities = assets.iter().filter_map(entity);
+                let entities: Vec<_> = entities.filter(|entity| wear.contains(entity)).collect();
                 (!entities.is_empty()).then(|| Intent::Untag {
                     entities,
                     name: name.clone(),
@@ -2799,7 +3126,7 @@ impl Store {
                 (!listed).then(|| Intent::MakeTag { name: name.clone() })
             }
             Asked::Rename { from, to } => {
-                let entities = wearing(from);
+                let entities = shown.wearing(from);
                 let listed = shown.names.contains(from);
                 (listed || !entities.is_empty()).then(|| Intent::RenameTag {
                     entities,
@@ -2808,17 +3135,14 @@ impl Store {
                 })
             }
             Asked::Remove(name) => {
-                let entities = wearing(name);
+                let entities = shown.wearing(name);
                 let listed = shown.names.contains(name);
                 (listed || !entities.is_empty()).then(|| Intent::RemoveTag {
                     entities,
                     name: name.clone(),
                 })
             }
-            Asked::Forget(id) => match self.ids.key(*id) {
-                Some(Key::Entity(entity)) => Some(Intent::Forget { entity: *entity }),
-                _ => None,
-            },
+            Asked::Forget(id) => entity(id).map(|entity| Intent::Forget { entity }),
         };
         Some(intent)
     }
@@ -2841,17 +3165,23 @@ impl Store {
         let Some(print) = self.records.get(&id).and_then(|record| record.fingerprint) else {
             return;
         };
-        self.quietly.insert(id);
         let stat = Stat {
             len: print.len,
             modified: print.modified,
         };
-        self.recheck(id, path, stat, workspace);
+        self.recheck(id, path, stat, true, workspace);
     }
 
     /// A file drawbar knew changed on disk: an unread one is only known to be another,
-    /// and one drawbar holds is read again to see what it holds now.
-    fn recheck(&mut self, id: u64, path: LibPath, stat: Stat, workspace: &mut Workspace) {
+    /// and one drawbar holds is read again to see what it holds now, `quietly` or not.
+    fn recheck(
+        &mut self,
+        id: u64,
+        path: LibPath,
+        stat: Stat,
+        quietly: bool,
+        workspace: &mut Workspace,
+    ) {
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -2860,8 +3190,11 @@ impl Store {
             workspace.stale(id);
             return;
         }
-        self.rechecking.insert(id);
-        let files = vec![(id, path, record.fingerprint)];
+        let Some(file) = self.ids.file(id) else {
+            return;
+        };
+        self.rechecking.insert(id, quietly);
+        let files = vec![(id, file, path, record.fingerprint)];
         let room = self.budget;
         self.send(Cmd::Read { files, room });
     }
@@ -2993,7 +3326,7 @@ impl Store {
             self.part(Intent::MakeDir { path: path.clone() });
             dirs.push(path);
         }
-        let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
+        let mut worn: BTreeMap<&str, Vec<Tagged>> = BTreeMap::new();
         let mut ids = BTreeSet::new();
         let (mut placed, mut edited) = (Vec::new(), Vec::new());
         let (mut hidden, mut apart) = (0, String::new());
@@ -3021,7 +3354,9 @@ impl Store {
                 .free(dir, &library_filename(entity), workspace);
             let path = dir.join(&name);
             for tag in &asset.tags {
-                worn.entry(tag).or_default().push(Key::File(path.clone()));
+                worn.entry(tag)
+                    .or_default()
+                    .push(Tagged::Saved(path.clone()));
             }
             if !super::opens(&name) {
                 hidden += 1;
@@ -3044,6 +3379,7 @@ impl Store {
                 for (id, path, bytes) in files {
                     self.part(Intent::Save {
                         id,
+                        row: None,
                         path: path.clone(),
                         bytes,
                         expect: toshokan::Expect::Absent,
@@ -3161,7 +3497,7 @@ impl Store {
                 let unsaved = workspace.get(*id).is_some_and(LocalEntity::is_unsaved);
                 self.restoring.contains_key(id) || unsaved
             };
-            let key = held.and_then(|id| Some((id, self.ids.key(id)?.clone())));
+            let key = held.and_then(|id| Some((id, self.draft_key(id)?)));
             match (held, key) {
                 (Some(id), _) if edited(&id) => _ = self.brought.insert(id),
                 (_, Some((id, key))) => {
@@ -3411,11 +3747,11 @@ impl Store {
         &mut self,
         id: u64,
         found: Found,
+        quietly: bool,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let quietly = self.quietly.remove(&id);
         if !found.read() {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
@@ -3434,7 +3770,8 @@ impl Store {
         let unsaved = entity.is_unsaved();
         let holds = found.holds();
         // A copy, or a browser's move, gives a file a new time over the same bytes.
-        let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
+        let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes))
+            || found.identity.is_some() && found.identity == self.base(id);
         match (unsaved, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
@@ -3444,10 +3781,13 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now, and one that file already holds leaves nothing to choose between.
-        match !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        // This drawbar's own undo or redo under an edit keeps the edit over what it put
+        // back.
+        match !same && !quietly && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved)
+        {
             true => conflict(id, workspace, browser, log),
             false if quietly || same => {}
-            false => log.say(format!(
+            false => log.theirs(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
         }
@@ -3456,64 +3796,86 @@ impl Store {
         if let (Some(record), Some(saved)) = (self.records.get_mut(&id), saved) {
             record.fingerprint = Some(print);
             record.saved = saved;
-            record.missing = false;
             record.holds = holds;
         }
     }
 
-    /// A file drawbar knew is gone, and nothing on disk holds what it held.
+    /// The row asset `id` stood for has no file drawbar opens now. The asset stays, shown
+    /// missing, where it holds work no file does, and goes otherwise, into `gone` for the
+    /// workspace to let go of, though a row lost with its tags keeps its id. Says what
+    /// `report` says became of the file, unless it was shown missing already, and whether
+    /// that is left to the line that counts tagged files gone with no word of why.
+    #[allow(clippy::too_many_arguments)]
     fn vanished(
         &mut self,
         id: u64,
+        file: FileId,
+        listed: &Shown,
+        report: &Report,
+        gone: &mut BTreeSet<u64>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
-    ) -> Vanished {
-        let Some(record) = self.records.get_mut(&id) else {
-            return Vanished::Untouched;
+    ) -> bool {
+        let Some(name) = workspace.get(id).map(|entity| entity.name.clone()) else {
+            return false;
         };
-        if record.missing {
-            return Vanished::Untouched;
+        let holds = self.holds_work(id, workspace, queue);
+        let shown = browser.folders.missing.contains(&id);
+        let ended = report.ended.get(&file);
+        let said = match ended {
+            _ if shown => None,
+            Some(Ended::Own) => None,
+            Some(Ended::Deleted) => Some(format!("Another drawbar deleted “{name}”.")),
+            // A file at its destination may be it, which drawbar cannot tell.
+            Some(Ended::Moved(to)) if listed.class(Class::File).any(|(_, row)| row.path == *to) => {
+                None
+            }
+            Some(Ended::Moved(to)) => Some(format!(
+                "Another drawbar moved “{name}” to {}; it isn't here yet.",
+                moved_to(&name, to)
+            )),
+            Some(Ended::Theirs | Ended::Outside) | None => {
+                if holds {
+                    self.unsaid.insert(id);
+                }
+                None
+            }
+        };
+        if let Some(said) = said {
+            log.theirs(said);
         }
-        let Some(entity) = workspace.get(id) else {
-            return Vanished::Untouched;
-        };
-        let name = entity.name.clone();
-        let keep = precious(entity, queue)
-            || !browser.tags.worn(id).is_empty()
-            || entity.origin.slot().is_some();
-        if keep {
-            record.missing = true;
-            browser.folders.missing.insert(id);
-            log.trouble(format!(
-                "“{name}” is missing from the library folder. drawbar still holds it; save \
-                 it to write it back."
-            ));
-            return Vanished::Missing;
+        let lost = listed.row(file, Class::Lost).is_some();
+        if holds {
+            if listed.path(file).is_none() {
+                self.copy_of_row(id, workspace);
+            }
+            return false;
+        }
+        // A lost row keeps the asset's id.
+        if !lost {
+            self.ids.remove(id);
         }
         self.records.remove(&id);
-        workspace.forget(id);
-        if !self.quiet {
-            log.say(format!("“{name}” was deleted outside drawbar."));
-        }
-        // The draft stays in this install's own state, and an open that finds the file
-        // again puts it back.
-        if self.restoring.remove(&id).is_some() {
-            log.say(format!(
-                "The unsaved edit of “{name}” is still kept, for when its file is back."
-            ));
-        }
-        Vanished::Deleted
+        gone.insert(id);
+        // A file where it is shown, which drawbar cannot tell is its file, is not gone.
+        let held = || {
+            let at = listed.path(file)?;
+            let place = nearest(listed, at).join(at.leaf());
+            let mut files = listed.class(Class::File);
+            Some(files.any(|(_, row)| row.path == *at || row.path == place))
+        };
+        !shown && lost && ended == Some(&Ended::Outside) && held() == Some(false)
     }
 
     fn saved(
         &mut self,
         id: u64,
         path: LibPath,
-        result: Result<Fingerprint, Failure>,
+        result: Result<(FileId, Fingerprint), Failure>,
         workspace: &mut Workspace,
-        browser: &mut Browser,
+        queue: &Queue,
         log: &mut Log,
     ) {
         self.deleted_with(id, result.is_ok());
@@ -3525,15 +3887,12 @@ impl Store {
         if let Some(leaving) = workspace.saved_over(id, record.saved, result.is_ok()) {
             leave(&mut self.left, leaving, workspace, log);
         }
-        let name = workspace
-            .get(id)
-            .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
         let why = match result {
-            Ok(print) => {
+            Ok((file, print)) => {
                 record.fingerprint = Some(print);
-                record.missing = false;
                 record.holds = Holds::Whole;
-                browser.folders.missing.remove(&id);
+                self.copies.remove(&id);
+                self.give_row(id, file, workspace, queue);
                 self.saved_draft(id, workspace);
                 return;
             }
@@ -3558,13 +3917,10 @@ impl Store {
         if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
             record.saved = entity.saved.stamp();
         }
-        let Some(why) = why else {
-            return self.read_unheard(id, path, workspace);
-        };
-        log.error(format!("saving {path}: {why}"));
-        log.trouble(format!(
-            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-        ));
+        match why {
+            Some(why) => not_saved(id, &path, &why, workspace, log),
+            None => self.read_unheard(id, path, workspace),
+        }
     }
 
     /// Take in what the save of an edit of a file resting in the library wrote: the asset
@@ -3573,9 +3929,9 @@ impl Store {
         &mut self,
         id: u64,
         path: LibPath,
-        result: Result<Found, Failure>,
+        result: Result<(FileId, Found), Failure>,
         workspace: &mut Workspace,
-        browser: &mut Browser,
+        queue: &Queue,
         log: &mut Log,
     ) {
         let Some(record) = self.records.get_mut(&id) else {
@@ -3583,11 +3939,10 @@ impl Store {
         };
         record.saving = false;
         let why = match result {
-            Ok(found) => {
+            Ok((file, found)) => {
                 record.fingerprint = Some(found.fingerprint());
-                record.missing = false;
                 record.holds = found.holds();
-                browser.folders.missing.remove(&id);
+                self.give_row(id, file, workspace, queue);
                 match found.file {
                     Some(file) => {
                         workspace.edit_saved(id, file);
@@ -3614,13 +3969,7 @@ impl Store {
             }
         };
         workspace.edit_not_saved(id);
-        let name = workspace
-            .get(id)
-            .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
-        log.error(format!("saving {path}: {why}"));
-        log.trouble(format!(
-            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-        ));
+        not_saved(id, &path, &why, workspace, log);
     }
 
     /// Send the saves asked for of edits of files resting in the library, each once the
@@ -3630,10 +3979,11 @@ impl Store {
     /// its save is refused here.
     fn send_edits(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) {
         for id in workspace.edits_to_save() {
+            let missing = self.missing(id);
             let record = self.records.get_mut(&id);
             let file = record.and_then(|record| {
                 let (path, expect) = (record.path.clone()?, record.fingerprint?);
-                (!record.missing).then_some((record, path, expect))
+                (!missing).then_some((record, path, expect))
             });
             let Some((record, path, expect)) = file else {
                 workspace.edit_not_saved(id);
@@ -3666,9 +4016,9 @@ impl Store {
         &mut self,
         id: u64,
         path: LibPath,
-        result: Result<Found, Failure>,
+        result: Result<(FileId, Found), Failure>,
         workspace: &mut Workspace,
-        browser: &mut Browser,
+        queue: &Queue,
         log: &mut Log,
     ) {
         let from = workspace.arrived(id);
@@ -3679,11 +4029,10 @@ impl Store {
         record.saving = false;
         let name = path.leaf().to_string();
         let why = match result {
-            Ok(found) => {
+            Ok((file, found)) => {
                 record.fingerprint = Some(found.fingerprint());
-                record.missing = false;
                 record.holds = found.holds();
-                browser.folders.missing.remove(&id);
+                self.give_row(id, file, workspace, queue);
                 workspace.took(id, None, found.file);
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(shelved) = self.shelved.remove(&id) {
@@ -3896,8 +4245,9 @@ impl Store {
                 .records
                 .get(&id)
                 .filter(|record| record.holds == Holds::Unread);
-            let Some((path, print)) =
-                unread.and_then(|record| Some((record.path.clone()?, record.fingerprint)))
+            let file = self.ids.file(id);
+            let Some((file, path, print)) =
+                unread.and_then(|record| Some((file?, record.path.clone()?, record.fingerprint)))
             else {
                 continue;
             };
@@ -3909,7 +4259,7 @@ impl Store {
             }
             bytes += len;
             self.fetching.insert(id);
-            files.push((id, path, print));
+            files.push((id, file, path, print));
         }
         if files.is_empty() {
             return;
@@ -4058,8 +4408,8 @@ impl Store {
         };
         let Some(files) = assets
             .iter()
-            .map(|id| made.get(id).map(|path| Key::File(path.clone())))
-            .collect::<Option<Vec<Key>>>()
+            .map(|id| made.get(id).map(|path| Tagged::Saved(path.clone())))
+            .collect::<Option<Vec<Tagged>>>()
         else {
             return;
         };
@@ -4086,6 +4436,7 @@ impl Store {
         };
         let stamp = entity.saved.stamp();
         let bytes = || entity.saved.bytes().to_vec();
+        let (missing, row) = (self.missing(id), self.ids.file(id));
         let Some(record) = self.records.get_mut(&id) else {
             self.records.insert(
                 id,
@@ -4097,6 +4448,7 @@ impl Store {
             );
             self.part(Intent::Save {
                 id,
+                row: None,
                 path,
                 bytes: bytes(),
                 expect: toshokan::Expect::Absent,
@@ -4107,7 +4459,11 @@ impl Store {
         if record.saving {
             return false;
         }
-        let at = record.path.clone().unwrap_or(path);
+        // A copy or a missing file is saved where it is shown, beside what took its name.
+        let at = match (&self.shown, self.copies.contains_key(&id) || missing) {
+            (Some(listed), true) => beside(listed, row, path),
+            _ => record.path.clone().unwrap_or(path),
+        };
         if unsettled(self.moving.iter().chain(held), &at) {
             return false;
         }
@@ -4116,10 +4472,10 @@ impl Store {
             record.saved = stamp;
             return true;
         }
-        if record.saved == stamp && !record.missing {
+        if record.saved == stamp && !missing {
             return true;
         }
-        let expect = match (record.missing, record.fingerprint) {
+        let expect = match (missing, record.fingerprint) {
             (false, Some(print)) => print.expect(),
             _ => toshokan::Expect::Absent,
         };
@@ -4128,6 +4484,7 @@ impl Store {
         record.path = Some(at.clone());
         self.part(Intent::Save {
             id,
+            row,
             path: at,
             bytes: bytes(),
             expect,
@@ -4147,7 +4504,7 @@ impl Store {
             return;
         };
         let (Some(path), Some(print), false) =
-            (record.path.clone(), record.fingerprint, record.missing)
+            (record.path.clone(), record.fingerprint, self.missing(from))
         else {
             return;
         };
@@ -4171,6 +4528,7 @@ impl Store {
     /// or a rename it is under waits for its answer.
     fn relocate(&mut self, id: u64, workspace: &Workspace, held: &[(LibPath, LibPath)]) -> bool {
         let to = workspace.get(id).and_then(|entity| entity.path.clone());
+        let missing = self.missing(id);
         let (Some(to), Some(record)) = (to, self.records.get_mut(&id)) else {
             return true;
         };
@@ -4186,12 +4544,9 @@ impl Store {
         }
         record.path = Some(to.clone());
         let expect = record.fingerprint.map(|print| print.expect());
-        let (Some(expect), false) = (expect, record.missing) else {
+        let (Some(expect), false) = (expect, missing) else {
             return true;
         };
-        if let Some(file) = self.ids.id(&Key::File(at.clone())) {
-            self.ids.insert(file, Key::File(to.clone()));
-        }
         self.moving.push((at.clone(), to.clone()));
         self.part(Intent::Move {
             moves: vec![Moving {
@@ -4226,24 +4581,24 @@ impl Store {
         if record.saving || workspace.copies_of(id).next().is_some() || waits {
             return false;
         }
+        let missing = self.missing(id);
         let Some(record) = self.records.remove(&id) else {
             return true;
         };
         // A missing file's entity goes with its tags, as a lost row's does.
-        if record.missing && matches!(self.ids.key(id), Some(Key::Entity(_))) {
+        if missing && self.entity(id).is_some() {
             self.asked.push(Asked::Forget(id));
             return true;
         }
-        let key = self.ids.remove(id);
+        let file = self.ids.remove(id);
         let Some(at) = record.path else {
             return true;
         };
-        if let (Some(print), false) = (record.fingerprint, record.missing) {
+        if let (Some(print), false) = (record.fingerprint, missing) {
             self.part(Intent::Delete {
                 files: vec![(at.clone(), print.expect())],
             });
-            let key = key.unwrap_or_else(|| Key::File(at.clone()));
-            self.deleting.insert(at, key);
+            self.deleting.extend(file);
         }
         true
     }
@@ -4277,6 +4632,7 @@ impl Store {
                 }
             }
         };
+        let missing = self.missing(entity.id);
         let record = self
             .records
             .entry(entity.id)
@@ -4287,7 +4643,7 @@ impl Store {
         record.saving = true;
         record.saved = entity.saved.stamp();
         let path = record.path.get_or_insert_with(|| path.clone()).clone();
-        let expect = match (record.missing, record.fingerprint) {
+        let expect = match (missing, record.fingerprint) {
             (false, Some(print)) => print.expect(),
             _ => toshokan::Expect::Absent,
         };
@@ -4419,21 +4775,20 @@ impl Record {
             fingerprint: fingerprint.into(),
             saved: 0,
             saving: false,
-            missing: false,
             holds: Holds::Whole,
         }
     }
 
     /// Whether drawbar holds its file whole as last read or written, under the baseline
     /// stamped `saved`, with no save or rename over it: what it holds can be read again
-    /// from the file.
-    fn rereadable(&self, saved: u64, moving: &[(LibPath, LibPath)]) -> bool {
+    /// from the file, unless it is `missing`.
+    fn rereadable(&self, saved: u64, moving: &[(LibPath, LibPath)], missing: bool) -> bool {
         let still = self.saved == saved && self.fingerprint.is_some();
         let settled = self
             .path
             .as_ref()
             .is_some_and(|path| !unsettled(moving, path));
-        let idle = !self.saving && !self.missing;
+        let idle = !self.saving && !missing;
         self.holds == Holds::Whole && still && settled && idle
     }
 
@@ -4500,38 +4855,134 @@ fn unsettled<'a>(moving: impl IntoIterator<Item = &'a (LibPath, LibPath)>, path:
         .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
 }
 
-/// What became of an asset whose file a rescan found gone.
-enum Vanished {
-    Deleted,
-    /// Kept, since it holds something its file did not, and shown missing.
-    Missing,
-    /// Already known to be missing, or no longer held.
-    Untouched,
+/// What the rows an answer reached went through, as far as drawbar says anything of it.
+#[derive(Default)]
+struct Report {
+    /// Each row that ended merged into another, with the row it ended in.
+    merged: BTreeMap<FileId, FileId>,
+    /// Who ended or emptied each row of an entity, and how, as far as that is known.
+    ended: BTreeMap<FileId, Ended>,
 }
 
-/// What a rescan found changed outside drawbar, in one line: `None` where nothing changed,
-/// or where the one change was a delete or a move that its own line has said.
-fn changed_outside(appeared: usize, deleted: usize, moved: usize) -> Option<String> {
-    let changes = [
-        (appeared, "appeared", "appeared"),
-        (deleted, "was deleted", "were deleted"),
-        (moved, "was moved", "were moved"),
-    ];
-    let said: Vec<String> = changes
-        .into_iter()
-        .filter(|(n, ..)| *n > 0)
-        .enumerate()
-        .map(|(at, (n, one, many))| match at {
-            0 => crate::strings::counted(n, &format!("file {one}"), &format!("files {many}")),
-            _ => crate::strings::counted(n, one, many),
-        })
-        .collect();
-    let said = crate::strings::listed(&said);
-    match (appeared, deleted + moved) {
-        (0, 0 | 1) => None,
-        (_, 0) => Some(format!("{said} in the library folder.")),
-        _ => Some(format!("Outside drawbar, {said}.")),
+/// Who ended or emptied the row of an entity's file, and how.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Ended {
+    /// This drawbar, or what it follows without a word.
+    Own,
+    /// Another drawbar deleted it.
+    Deleted,
+    /// Another drawbar moved it here, and its file has not arrived.
+    Moved(LibPath),
+    /// Another drawbar did something else.
+    Theirs,
+    /// Nothing logged: something outside drawbar, or a drawbar whose word has not
+    /// arrived.
+    Outside,
+}
+
+impl Report {
+    /// The report of `rows`, all of them this drawbar's own where `quiet`.
+    fn of(rows: Vec<RowChange>, quiet: bool) -> Report {
+        let mut report = Report::default();
+        for change in rows {
+            if let RowWhat::Merged { into } = change.what {
+                report.merged.insert(change.file, into);
+            }
+            let ended = match (change.by, change.how) {
+                _ if quiet => Ended::Own,
+                (None, _) => continue,
+                (Some(Who::This), _) => Ended::Own,
+                (Some(Who::Writer(_)), Some(How::Trashed)) => Ended::Deleted,
+                (Some(Who::Writer(_)), Some(How::Moved)) => {
+                    match LibPath::parse(change.path.as_str()) {
+                        Some(to) => Ended::Moved(to),
+                        None => Ended::Theirs,
+                    }
+                }
+                (Some(Who::Writer(_)), _) => Ended::Theirs,
+                (Some(Who::Outside), _) => Ended::Outside,
+            };
+            let stronger = report
+                .ended
+                .get(&change.file)
+                .is_none_or(|had| ended < *had);
+            if stronger {
+                report.ended.insert(change.file, ended);
+            }
+        }
+        report
     }
+}
+
+/// `at`, or a free name beside it where a folder or a row other than `own` holds its name.
+fn beside(listed: &Shown, own: Option<FileId>, at: LibPath) -> LibPath {
+    let dir = at.parent();
+    let rows = listed.rows.iter().filter(|(file, _)| Some(**file) != own);
+    let held = rows.map(|(_, row)| &row.path).chain(&listed.dirs);
+    let held = held.filter(|path| path.parent() == dir);
+    let taken: BTreeSet<String> = held.map(|path| names::key(path.leaf())).collect();
+    dir.join(&names::free(at.leaf(), |key| taken.contains(key)))
+}
+
+/// The nearest folder of `path` that `listed` lists, the root at the last.
+fn nearest(listed: &Shown, path: &LibPath) -> LibPath {
+    let mut dir = path.parent();
+    while !dir.is_root() && !listed.dirs.contains(&dir) {
+        dir = dir.parent();
+    }
+    dir
+}
+
+/// Where a file named `name` went to `to`: the folder, where its name stays.
+fn moved_to(name: &str, to: &LibPath) -> String {
+    match (to.leaf() == name, to.parent()) {
+        (false, _) => format!("“{to}”"),
+        (true, dir) if dir.is_root() => "the top level".to_string(),
+        (true, dir) => format!("“{dir}”"),
+    }
+}
+
+/// The tags `shown` puts on the file of `entity`.
+fn worn(shown: &Shown, entity: toshokan::EntityId) -> Option<&BTreeSet<String>> {
+    shown.rows.get(&shown.row_of(entity)?).map(|row| &row.worn)
+}
+
+/// Say the save of asset `id` at `path` did not land, for `why`, and its edit is kept.
+fn not_saved(id: u64, path: &LibPath, why: &str, workspace: &Workspace, log: &mut Log) {
+    let name = workspace.get(id).map_or(path.leaf(), |entity| &entity.name);
+    log.error(format!("saving {path}: {why}"));
+    log.trouble(format!(
+        "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
+    ));
+}
+
+/// What drawbar says of an asset that holds work and whose file is no longer in the folder.
+fn still_held(name: &str) -> String {
+    format!("“{name}” is no longer in the library folder; drawbar still holds your changes.")
+}
+
+/// The key of an unsaved copy at `path` holding `bytes`: two such copies of one edit
+/// are one.
+fn copy_key(path: &LibPath, bytes: &[u8]) -> Key {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.as_str().as_bytes());
+    hasher.update(&[0]);
+    hasher.update(bytes);
+    let hash = hasher.finalize();
+    let mut number = [0; 16];
+    number.copy_from_slice(&hash.as_bytes()[..16]);
+    Key::Copy(path.clone(), u128::from_le_bytes(number))
+}
+
+/// When the unsaved edit asset `id` holds was made, as the workspace's stamps order
+/// edits: 0 for none.
+fn edited(workspace: &Workspace, id: u64) -> u64 {
+    let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) else {
+        return 0;
+    };
+    workspace
+        .kept_edit(id)
+        .map_or(entity.stamp, |(_, stamp)| stamp)
 }
 
 /// A file drawbar did not know, recorded under `id`, and the asset it becomes.
@@ -4748,6 +5199,14 @@ mod tests {
 
     fn entry(n: u128) -> toshokan::EntryHash {
         toshokan::EntryHash::from_u128(n)
+    }
+
+    #[test]
+    fn a_move_elsewhere_names_the_folder_where_the_name_stays() {
+        let to = |path: &str| moved_to("Sound 3.ne5p", &LibPath::parse(path).unwrap());
+        assert_eq!(to("Live/Sound 3.ne5p"), "“Live”");
+        assert_eq!(to("Sound 3.ne5p"), "the top level");
+        assert_eq!(to("Live/Grand.ne5p"), "“Live/Grand.ne5p”");
     }
 
     /// A step whose undo needs what the trash let go goes, with every step behind it,

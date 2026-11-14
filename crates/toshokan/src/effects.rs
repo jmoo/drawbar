@@ -2,7 +2,7 @@
 //! [`apply`], the writer's append, then [`finish`]; recovery resumes [`apply`]
 //! where an interrupted run stopped.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::Bindings;
 use crate::env::{Env, Identify};
-use crate::error::{Invalid, Mismatch, Refusal, Result};
-use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
+use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
+use crate::flow::{self, each, fold, ok, Fallible, Flow, Held, Observed};
 use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
@@ -20,7 +20,7 @@ use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{Content, Expect, FileChange};
 use crate::report::{Outcome, PartialReport};
-use crate::view::FileState;
+use crate::view::{FileState, Listed};
 
 /// One step of an intent's file effects, as its pending record lists it. Paths
 /// are library paths; items and staged files are this writer's.
@@ -174,6 +174,10 @@ pub struct FileEnd {
     /// that carries the effects out knew them when it wrote the record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<Ref>,
+    /// Where `path` is none, what the entity's file register says all the same: a
+    /// file nowhere, as before an intent gave the entity one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaves: Option<FileFact>,
 }
 
 /// Where a file no entity is bound to is once the first `done_after` steps are
@@ -269,14 +273,47 @@ pub struct Applied {
     /// Each file no entity is bound to that the effects done moved: where it was,
     /// and where it is and what it holds.
     pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
-    /// Each tree the effects done moved, from and to.
-    pub trees: Vec<(RelPath, RelPath)>,
+    /// Each file of those that a step done put in place, staged or from the trash,
+    /// rather than only moved.
+    pub wrote: Vec<FileFact>,
+    /// Each tree the effects done moved.
+    pub trees: Vec<MovedTree>,
     /// Each directory the effects done made, or removed, as the folder shows it.
     pub dirs: Vec<(RelPath, bool)>,
     /// Each directory a step done was to remove that the folder still holds, as
     /// a file the plan did not know of keeps one.
     pub left: Vec<RelPath>,
+    /// Each path a step put a staged file at where another file is now: what it
+    /// wrote names the staged bytes, as they were before they went into place.
+    pub replaced: Vec<RelPath>,
+    /// What each staged file held before it went into place, by where it went: for
+    /// a later resume of the same record, which finds those files gone.
+    pub(crate) staged: SeenStaged,
 }
+
+/// A tree the effects done moved.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MovedTree {
+    pub from: RelPath,
+    pub to: RelPath,
+    /// Whether its directory moved, and every file under it with it, rather than
+    /// only the files the plan knew of.
+    pub whole: bool,
+}
+
+/// Steps that stopped part way.
+#[derive(Debug)]
+pub struct Stopped {
+    pub error: Error,
+    /// What the steps before the one that failed did; `None` where the folder could
+    /// not show it.
+    pub applied: Option<Applied>,
+    /// As [`Applied::staged`], kept where `applied` is `None` too.
+    pub(crate) staged: SeenStaged,
+}
+
+/// What staged files held before they went into place, by where each went.
+pub(crate) type SeenStaged = BTreeMap<RelPath, Observed>;
 
 /// Resolves `changes` into checks and steps. `bindings` says where existing
 /// entities' files are. Moves copy where `capabilities` declares no file renames,
@@ -411,22 +448,27 @@ impl Resolver<'_> {
                 self.end(entity, Some(path));
             }
             FileChange::Trash { entity, expect } => {
-                let path = self.current(*entity)?;
-                self.claim(*entity, &path, env)?;
-                self.check(&path, *expect);
-                self.step(EffectStep::ToTrash {
-                    path,
-                    item: env.nonce(),
-                });
+                self.trash(*entity, *expect, env)?;
                 self.end(*entity, None);
+            }
+            FileChange::TrashLeaving {
+                entity,
+                expect,
+                leaves,
+            } => {
+                self.trash(*entity, *expect, env)?;
+                self.end_leaving(*entity, None, Some(leaves.clone()));
             }
             FileChange::Rename { entity, to, expect } => {
                 let from = self.current(*entity)?;
                 let to = self.library(to)?;
                 self.claim(*entity, &from, env)?;
-                self.touch_destination(&from, &to, env)?;
                 self.check(&from, *expect);
-                self.rename(&from, &to, env)?;
+                // A file already at `to`, as one moved back outside, moves nowhere.
+                if from != to {
+                    self.touch_destination(&from, &to, env)?;
+                    self.rename(&from, &to, env)?;
+                }
                 self.end(*entity, Some(to));
             }
             FileChange::MoveTree { from, to } => {
@@ -482,6 +524,7 @@ impl Resolver<'_> {
                     done_after: 0,
                     pin: true,
                     replaces: Vec::new(),
+                    leaves: None,
                 });
             }
             FileChange::Restore {
@@ -510,7 +553,7 @@ impl Resolver<'_> {
                 content,
                 expect,
             } => {
-                let path = self.unbound(path, env)?;
+                let path = self.unbound(path, None, env)?;
                 self.check(&path, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -525,7 +568,7 @@ impl Resolver<'_> {
                 self.end_unbound(from, Some(path));
             }
             FileChange::RenameFile { from, to, expect } => {
-                let from = self.unbound(from, env)?;
+                let from = self.unbound(from, None, env)?;
                 let to = self.library(to)?;
                 self.touch_destination(&from, &to, env)?;
                 self.check(&from, *expect);
@@ -533,7 +576,7 @@ impl Resolver<'_> {
                 self.end_unbound(Some(from), Some(to));
             }
             FileChange::TrashFile { path, expect } => {
-                let path = self.unbound(path, env)?;
+                let path = self.unbound(path, None, env)?;
                 self.check(&path, *expect);
                 self.step(EffectStep::ToTrash {
                     path: path.clone(),
@@ -541,8 +584,13 @@ impl Resolver<'_> {
                 });
                 self.end_unbound(Some(path), None);
             }
-            FileChange::RestoreFile { item, to, expect } => {
-                let to = self.unbound(to, env)?;
+            FileChange::RestoreFile {
+                item,
+                to,
+                expect,
+                found,
+            } => {
+                let to = self.unbound(to, *found, env)?;
                 self.check(&to, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -728,13 +776,19 @@ impl Resolver<'_> {
         });
     }
 
-    /// Takes `path` for one effect on a file no entity is bound to: refused where
-    /// an entity's file is, by the volume's names.
-    fn unbound(&mut self, path: &RelPath, env: &Env) -> std::result::Result<RelPath, Refusal> {
+    /// Takes `path` for one effect on a file no entity but `found` is bound to:
+    /// refused where another entity's file is, by the volume's names.
+    fn unbound(
+        &mut self,
+        path: &RelPath,
+        found: Option<EntityId>,
+        env: &Env,
+    ) -> std::result::Result<RelPath, Refusal> {
         let path = self.library(path)?;
         let key = env.names.key(path.as_str());
-        let bound = self.bindings.bound.values();
-        if let Some(file) = bound.into_iter().find(|file| {
+        let bound = self.bindings.bound.iter();
+        let mut bound = bound.filter(|(entity, _)| Some(**entity) != found);
+        if let Some((_, file)) = bound.find(|(_, file)| {
             file.state != FileState::Missing && env.names.key(file.path.as_str()) == key
         }) {
             return Err(invalid(Invalid::Bound(file.path.clone())));
@@ -837,6 +891,10 @@ impl Resolver<'_> {
     }
 
     fn end(&mut self, entity: EntityId, path: Option<RelPath>) {
+        self.end_leaving(entity, path, None);
+    }
+
+    fn end_leaving(&mut self, entity: EntityId, path: Option<RelPath>, leaves: Option<FileFact>) {
         let done_after = self.plan.steps.len();
         self.plan.files.push(FileEnd {
             entity,
@@ -844,7 +902,25 @@ impl Resolver<'_> {
             done_after,
             pin: false,
             replaces: Vec::new(),
+            leaves,
         });
+    }
+
+    /// Moves `entity`'s file to this writer's trash.
+    fn trash(
+        &mut self,
+        entity: EntityId,
+        expect: Expect,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        let path = self.current(entity)?;
+        self.claim(entity, &path, env)?;
+        self.check(&path, expect);
+        self.step(EffectStep::ToTrash {
+            path,
+            item: env.nonce(),
+        });
+        Ok(())
     }
 }
 
@@ -1120,6 +1196,10 @@ fn mismatch<'a>(
                     true => identities.next().expect("an identity for each file"),
                     false => None,
                 };
+                let listed = meta.as_ref().map(|meta| Listed {
+                    len: meta.len,
+                    modified: meta.modified,
+                });
                 let holds = match (check.expect, meta, found) {
                     (Expect::Absent, None, _) => true,
                     (Expect::Holds(expected), _, Some(found)) => expected == found,
@@ -1135,6 +1215,7 @@ fn mismatch<'a>(
                         path: check.path,
                         expected: check.expect,
                         found,
+                        listed,
                     }))
                 })
             })
@@ -1144,23 +1225,133 @@ fn mismatch<'a>(
 
 /// Carries out `record`'s steps from `start`, each destination durable before its
 /// source is gone, then reports what the folder shows. A step that fails stops the
-/// run with its error, and the record stays open to settle. The pending record
-/// `name` stays until [`finish`].
+/// run with its error and what the steps before it did, and the record stays open
+/// to settle. The pending record `name` stays until [`finish`].
 pub fn apply(
     layout: &Layout,
     name: Nonce,
     record: Rc<PendingRecord>,
     start: usize,
     identify: Rc<dyn Identify>,
-) -> Task<'static, Result<Applied>> {
-    let layout = layout.clone();
-    let runs = runs(&record.steps, start, record.moves);
-    let running = (layout.clone(), Rc::clone(&record));
-    each(runs.into_iter(), move |run| {
-        run_steps(&running.0, name, &running.1, run)
+) -> Task<'static, std::result::Result<Applied, Stopped>> {
+    apply_seen(layout, name, record, start, identify, SeenStaged::new())
+}
+
+/// [`apply`], knowing what an earlier run of the record read of staged files it put in
+/// place: `seen`.
+pub(crate) fn apply_seen(
+    layout: &Layout,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    start: usize,
+    identify: Rc<dyn Identify>,
+    seen: SeenStaged,
+) -> Task<'static, std::result::Result<Applied, Stopped>> {
+    let layout = Rc::new(layout.clone());
+    let runs = runs(&record.steps, start, record.moves).into();
+    observe_staged(&layout, &record, start, &identify)
+        .then(move |observed| {
+            let mut staged = seen;
+            staged.extend(observed);
+            run_all(Rc::clone(&layout), name, Rc::clone(&record), runs).then(move |ran| {
+                let (done, error) = match ran {
+                    Ok(()) => (record.steps.len(), None),
+                    Err((done, error)) => (done, Some(error)),
+                };
+                let kept = staged.clone();
+                account(&layout, record, identify, done, staged).then(move |applied| {
+                    Flow::Done(match error {
+                        None => applied.map_err(|error| Stopped {
+                            error,
+                            applied: None,
+                            staged: kept,
+                        }),
+                        Some(error) => Err(Stopped {
+                            error,
+                            applied: applied.ok(),
+                            staged: kept,
+                        }),
+                    })
+                })
+            })
+        })
+        .task()
+}
+
+/// What each staged file the steps of `record` from `start` place where a file op
+/// logs it holds, by where it goes and identified as there. Where one cannot be
+/// read, each is read where it lands instead.
+fn observe_staged<'a>(
+    layout: &Layout,
+    record: &PendingRecord,
+    start: usize,
+    identify: &Rc<dyn Identify>,
+) -> Flow<'a, BTreeMap<RelPath, Observed>> {
+    let ends = record.files.iter().filter_map(|end| end.path.as_ref());
+    let ends: BTreeSet<&RelPath> = ends
+        .chain(record.unbound.iter().filter_map(|end| end.path.as_ref()))
+        .collect();
+    let staged = record.steps[start..].iter().filter_map(|step| match step {
+        EffectStep::Place { staged, path } if ends.contains(path) => {
+            Some((layout.staged(record.writer, *staged, path), path.clone()))
+        }
+        _ => None,
+    });
+    let at: BTreeMap<RelPath, RelPath> = staged.collect();
+    let paths = at.keys().cloned().collect();
+    let as_placed: Rc<dyn Identify> = Rc::new(AsPlaced {
+        identify: Rc::clone(identify),
+        at: at.clone(),
+    });
+    flow::observe_all(Root::Folder, paths, &as_placed).then(move |seen| {
+        let seen = seen.unwrap_or_default().into_iter();
+        let placed = at.into_values().zip(seen);
+        Flow::Done(
+            placed
+                .filter_map(|(path, seen)| Some((path, seen?)))
+                .collect(),
+        )
     })
-    .and_then(move |()| account(layout, record, identify))
-    .task()
+}
+
+/// Identifies a staged file as the file it is to be where it is placed.
+struct AsPlaced {
+    identify: Rc<dyn Identify>,
+    at: BTreeMap<RelPath, RelPath>,
+}
+
+impl AsPlaced {
+    fn placed<'p>(&'p self, path: &'p RelPath) -> &'p RelPath {
+        self.at.get(path).unwrap_or(path)
+    }
+}
+
+impl Identify for AsPlaced {
+    fn ranges(&self, path: &RelPath, len: u64) -> Vec<crate::io::Range> {
+        self.identify.ranges(self.placed(path), len)
+    }
+
+    fn digest(&self, path: &RelPath, len: u64) -> Box<dyn crate::env::Digest> {
+        self.identify.digest(self.placed(path), len)
+    }
+}
+
+/// Carries out `runs` in order; where one fails, with how many steps were done
+/// before it.
+fn run_all<'a>(
+    layout: Rc<Layout>,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    mut runs: VecDeque<Range<usize>>,
+) -> Flow<'a, std::result::Result<(), (usize, Error)>> {
+    let Some(run) = runs.pop_front() else {
+        return Flow::Done(Ok(()));
+    };
+    let start = run.start;
+    run_steps(&layout, name, &record, run).then(move |ran| match ran {
+        Ok(()) => run_all(layout, name, record, runs),
+        Err(error) => Flow::Done(Err((start, error))),
+    })
 }
 
 /// The steps from `start` in runs carried out together: consecutive `place`
@@ -1293,29 +1484,62 @@ pub(crate) fn relocate<'a>(moves: Moves, from: &RelPath, to: &RelPath) -> Fallib
     }
 }
 
-/// What the steps did, every one of them done.
+/// The ends of `ends` the first `done` steps reach, as `after` says when each is.
+fn done_by<E: Clone>(ends: &[E], done: usize, after: fn(&E) -> usize) -> Vec<E> {
+    ends.iter()
+        .filter(|end| after(end) <= done)
+        .cloned()
+        .collect()
+}
+
+/// What the first `done` steps did, where `staged` holds what each staged file was
+/// before it went into place.
 fn account<'a>(
-    layout: Layout,
+    layout: &Layout,
     record: Rc<PendingRecord>,
     identify: Rc<dyn Identify>,
+    done: usize,
+    staged: BTreeMap<RelPath, Observed>,
 ) -> Fallible<'a, Applied> {
     let writer = record.writer;
-    let items: Vec<(Nonce, RelPath)> = record
-        .steps
+    let steps = &record.steps[..done];
+    let items: Vec<(Nonce, RelPath)> = steps
         .iter()
         .filter_map(|step| match step {
             EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
             _ => None,
         })
         .collect();
-    let ends = record.files.clone();
-    let unbound = record.unbound.clone();
-    let trees: Vec<(RelPath, RelPath)> = record
-        .trees
+    let placed: BTreeSet<RelPath> = steps
         .iter()
-        .map(|end| (end.from.clone(), end.to.clone()))
+        .filter_map(|step| match step {
+            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
         .collect();
-    let dirs = record.dirs.clone();
+    let ends: Vec<FileEnd> = done_by(&record.files, done, |end| end.done_after);
+    let unbound: Vec<UnboundEnd> = done_by(&record.unbound, done, |end| end.done_after);
+    let dirs: Vec<DirEnd> = done_by(&record.dirs, done, |end| end.done_after);
+    // A tree moves whole by one step that takes its directory.
+    let whole = |tree: &RelPath| {
+        steps.iter().any(|step| match step {
+            EffectStep::Rename { from, .. } | EffectStep::ToTrash { path: from, .. } => {
+                from == tree
+            }
+            _ => false,
+        })
+    };
+    let trees = done_by(&record.trees, done, |end| end.done_after).into_iter();
+    let trees: Vec<MovedTree> = trees
+        .map(|TreeEnd { from, to, .. }| MovedTree {
+            whole: whole(&from),
+            from,
+            to,
+        })
+        .collect();
+    let layout = layout.clone();
     let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
     flow::observe_all(Root::Folder, paths.collect(), &identify)
         .map_ok(move |seen| {
@@ -1353,12 +1577,14 @@ fn account<'a>(
         .and_then(move |(displaced, dirs, left)| {
             let paths = ends.iter().map(|end| end.path.clone());
             let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
-            let paths = paths.flatten();
-            flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+            let paths = paths.flatten().collect();
+            let keeps_time = record.moves == Moves::Rename;
+            let kept = staged.clone();
+            observe_ends(paths, staged, keeps_time, identify).map_ok(move |(seen, replaced)| {
                 let mut seen = seen.into_iter();
                 let files = ends.into_iter().filter_map(|end| {
                     let Some(path) = end.path else {
-                        return Some((end.entity, None));
+                        return Some((end.entity, end.leaves));
                     };
                     let seen = seen.next().expect("an observation for each path")?;
                     let fact = FileFact {
@@ -1369,7 +1595,7 @@ fn account<'a>(
                     };
                     Some((end.entity, Some(fact)))
                 });
-                let files = files.collect();
+                let files: Vec<(EntityId, Option<FileFact>)> = files.collect();
                 let unbound = unbound.into_iter().filter_map(|end| {
                     let Some(path) = end.path else {
                         return Some((end.from, None));
@@ -1383,16 +1609,68 @@ fn account<'a>(
                     };
                     Some((end.from, Some(fact)))
                 });
+                let unbound: Vec<(Option<RelPath>, Option<FileFact>)> = unbound.collect();
+                let facts = files.iter().map(|(_, fact)| fact);
+                let facts = facts.chain(unbound.iter().map(|(_, fact)| fact)).flatten();
+                let wrote = facts.filter(|fact| placed.contains(&fact.path)).cloned();
                 Applied {
+                    wrote: wrote.collect(),
                     displaced,
                     files,
-                    unbound: unbound.collect(),
+                    unbound,
                     trees,
                     dirs,
                     left,
+                    replaced,
+                    staged: kept,
                 }
             })
         })
+}
+
+/// What is at each of `paths`: a file another step put in place is the staged file
+/// `placed` holds, where the path shows a file of its length, and its time where
+/// placement keeps it; else, another file, a directory or none there, the staged file
+/// as it was, and its path is among those replaced. Every other path is read.
+fn observe_ends<'a>(
+    paths: Vec<RelPath>,
+    placed: BTreeMap<RelPath, Observed>,
+    keeps_time: bool,
+    identify: Rc<dyn Identify>,
+) -> Fallible<'a, (Vec<Option<Observed>>, Vec<RelPath>)> {
+    let unplaced = paths.iter().filter(|path| !placed.contains_key(*path));
+    let unplaced = unplaced.cloned().collect();
+    flow::observe_all(Root::Folder, unplaced, &identify).and_then(move |seen| {
+        let mut seen = seen.into_iter();
+        let found = (Vec::new(), Vec::new());
+        fold(
+            paths.into_iter(),
+            found,
+            move |(mut found, mut replaced), path| {
+                let Some(ours) = placed.get(&path).copied() else {
+                    found.push(seen.next().expect("an observation for each unplaced path"));
+                    return ok((found, replaced));
+                };
+                flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                    let file = meta.filter(|meta| meta.kind == Kind::File);
+                    let time = |meta: &Meta| !keeps_time || meta.modified == ours.modified;
+                    let landed = match file {
+                        Some(meta) if meta.len == ours.len && time(&meta) => Observed {
+                            len: meta.len,
+                            modified: meta.modified,
+                            ..ours
+                        },
+                        _ => {
+                            replaced.push(path);
+                            ours
+                        }
+                    };
+                    found.push(Some(landed));
+                    (found, replaced)
+                })
+            },
+        )
+    })
 }
 
 /// Removes the pending record `name` once the intent's entry is durable, after its

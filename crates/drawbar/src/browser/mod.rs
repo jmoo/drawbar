@@ -714,6 +714,15 @@ impl Browser {
         Some((ask.title.clone(), answers))
     }
 
+    /// The title of every question showing or waiting to show.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn questions(&self) -> impl Iterator<Item = &str> {
+        self.ask
+            .iter()
+            .chain(&self.later)
+            .map(|ask| ask.title.as_str())
+    }
+
     /// The answer that question draws as the one expected.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn expected(&self) -> Option<&'static str> {

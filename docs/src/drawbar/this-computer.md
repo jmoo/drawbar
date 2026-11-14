@@ -76,14 +76,13 @@ folder, so none overwrites another's. Several drawbars can therefore use one
 library at once: on two computers, in two windows, in two browser tabs, or in
 the browser and the desktop app on one folder. A tab shows another tab's changes
 as soon as they are made. Otherwise drawbar shows what the others changed when
-you come back to the window, and the activity log says so.
+you come back to the window.
 
 If two drawbars tag the same file before either sees the other's tags, as while
 a sync is paused, the file wears every tag either gave it once the sync catches
-up. The activity log of the drawbar that brought them together names the file. A
-file of another drawbar's record that a sync client keeps only online, or that
-this computer may not read, is named in the activity log once, and its changes
-show once drawbar can read it.
+up. A file of another drawbar's record that a sync client keeps only online, or
+that this computer may not read, is named in the activity log once, and its
+changes show once drawbar can read it.
 
 In the browser, and on a desktop disk that cannot refuse to move a file onto one
 already there, drawbar checks that a name is free before a saved, copied or
@@ -164,9 +163,13 @@ writing over a sound, removing a folder with what is in it, or making a tag and
 naming it, is one undo. An action on more files than the library can keep as one
 step is refused whole and changes nothing; do it in smaller parts. That is tens of
 thousands of files with short names, and about ten thousand with names hundreds
-of characters long. If another drawbar has changed what an undo would take
-back, that undo is refused, and Undo goes on to the change before it. An edit
-you have not saved is taken back with **Revert** instead.
+of characters long. If another drawbar has since changed what an undo would take
+back, that undo is refused, and Undo goes on to the change before it. If a file
+is in the way, or not as the change left it, the undo waits: the activity log
+names the file, and Undo takes the change back once the file is out of the way
+or back as the change left it. An undo of a file a sync client has not delivered
+yet waits the same way. An edit you have not saved is taken back with **Revert**
+instead.
 
 Undo and Redo are off while a change is being written. A change that takes more
 than two seconds shows what it is doing over the window.
@@ -213,7 +216,17 @@ slot. The activity log lists anything the bundle had to leave out.
 
 You can rename, move, edit and delete your files in Finder or any other app.
 drawbar notices when you come back to its window or tab, and a renamed or moved
-sound keeps its tags and where it came from.
+sound keeps its tags and where it came from. A file with no tags that is renamed
+or moved shows as a new file under its new name. The activity log names a file
+drawbar has read that changed on disk, and a file whose unsaved edit drawbar
+still holds after the file went or another took its name. It counts the tagged
+files that left the library folder. Other changes show without a word.
+
+Another drawbar's changes show the same way, at the next refresh. Its renames,
+moves and new files show without a word. The activity log names the tagged files
+it deleted and the files whose tags it changed. A file it moved that a sync
+client has not delivered yet shows at its new place once it arrives, and the
+activity log says so meanwhile.
 
 drawbar never writes over a change made outside it without asking. If a file
 changed while you had unsaved edits to it, drawbar asks what to do:
@@ -326,15 +339,16 @@ bring back any you deleted.
   bringing the folder's files, changes can disappear the same way and come back
   once they arrive. A change you make meanwhile is kept: at worst it shows beside
   the one the sync brings.
-- **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
-  edits, or came from your keyboard. Save it to bring the file back, or delete
-  it. After a restart, a missing file with tags shows as lost, with its tags,
-  until you let it go.
-- **Two files that could each be one.** A tagged file was moved or copied
-  outside drawbar, and now two files hold what it held, neither where it was.
-  drawbar cannot tell which is the file, so it gives neither the tags, keeps
-  them with the missing file, and says so once in the activity log. Move the
-  right one back, or delete the other, and drawbar finds it.
+- **Missing.** The file is gone from the library folder, but you have unsaved
+  edits to it, it waits to be sent, or it came from your keyboard. Save it to
+  write it anew, beside any file that took its name, or delete it. If the file
+  comes back as it was, drawbar takes it up again; a different file under its
+  name shows beside it. An unsaved edit whose file was gone by the next start
+  shows missing too, as does the older of two edits of one file kept in two
+  windows. An unsaved edit of a piano or sample file stays missing until its
+  file is back; delete it to let the edit go.
+- **Lost.** A file with tags is gone from the library folder. It shows with its
+  tags until the file is back or you let it go.
 - **A write to the instrument left a file.** If drawbar stopped, or could not
   put the old sound back, while it replaced a sound on your keyboard, the sound
   that was there may now be only on this computer. drawbar puts it in the
