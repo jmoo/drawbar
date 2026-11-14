@@ -569,7 +569,8 @@ impl Column {
     }
 
     /// Whether the column's right edge can be dragged. Needs, the last, keeps its share so
-    /// the columns always fill the width.
+    /// the columns always fill the width; while it is hidden, the name keeps its share in
+    /// its place and cannot be dragged either.
     fn resizable(self) -> bool {
         !matches!(self, Column::Glyph | Column::Needs)
     }
@@ -622,7 +623,8 @@ const NAME_LEAST: f32 = 100.0;
 /// dragged to, the secondary columns are hidden in turn, least needed first, until it is
 /// not. A hidden column's track is empty, at the end of the one before it. Needs shows
 /// only while an instrument is `attached`, since only an instrument names what a sound
-/// plays.
+/// plays. While Needs is hidden, the name takes its own share whatever it was dragged to,
+/// so the columns still fill the width.
 pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
@@ -644,9 +646,13 @@ pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
 
 /// The `shown` columns laid out across `width`, and the others empty.
 fn lay(width: f32, wanted: &[Track; 8], shown: &[bool; 8]) -> [Range<f32>; 8] {
+    let fills = !shown[Column::Needs as usize];
     let kept: Vec<Track> = (0..8)
         .filter(|&at| shown[at])
-        .map(|at| wanted[at])
+        .map(|at| match fills && at == Column::Name as usize {
+            true => Column::Name.track(),
+            false => wanted[at],
+        })
         .collect();
     let mut held = crate::panel::tracks(width, &kept, GAP).into_iter();
     let mut end = 0.0;
@@ -1127,8 +1133,9 @@ impl Library {
     ///
     /// ⚠️ Added after the head, so a press on a grip drags it instead of sorting.
     fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 8]) {
+        let fills = tracks[Column::Needs as usize].is_empty();
         for (column, track) in Column::ALL.iter().zip(tracks) {
-            if !column.resizable() || track.is_empty() {
+            if !column.resizable() || track.is_empty() || (fills && *column == Column::Name) {
                 continue;
             }
             let edge = content.left() + track.end + GAP / 2.0;
@@ -1746,6 +1753,27 @@ mod tests {
             width_of(&alone, Column::Name) > width_of(&attached, Column::Name),
             "the name takes the room: {alone:?}"
         );
+    }
+
+    #[test]
+    fn a_dragged_name_fills_the_width_while_needs_is_hidden() {
+        let mut widths = [None; 8];
+        widths[Column::Name as usize] = Some(200.0);
+        let name = |tracks: &[Range<f32>; 8]| tracks[Column::Name as usize].clone();
+        let end =
+            |tracks: &[Range<f32>; 8]| tracks.iter().map(|track| track.end).fold(0.0, f32::max);
+
+        let attached = tracks(900.0, &widths, true);
+        assert_eq!(
+            name(&attached).end - name(&attached).start,
+            200.0,
+            "{attached:?}"
+        );
+        assert_eq!(end(&attached), 900.0, "{attached:?}");
+
+        let alone = tracks(900.0, &widths, false);
+        assert!(name(&alone).end - name(&alone).start > 200.0, "{alone:?}");
+        assert_eq!(end(&alone), 900.0, "{alone:?}");
     }
 
     #[test]
