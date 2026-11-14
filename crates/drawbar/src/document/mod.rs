@@ -378,7 +378,11 @@ impl Document {
         };
         if let Some(open) = self.open.as_mut() {
             let basic = shape == Shape::Fields && face == Face::Basic;
-            open.fields.publish(doc.as_ref().filter(|_| basic));
+            // ⚠️ The Morph card is drawn before the document, so it shows a change only in
+            // a frame of its own.
+            if open.fields.publish(doc.as_ref().filter(|_| basic)) {
+                ui.ctx().request_repaint();
+            }
         }
         let pending = match (doc.is_some(), self.open.as_ref()) {
             (true, Some(open)) => open.fields.pending().len(),

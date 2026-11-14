@@ -108,11 +108,12 @@ impl State {
     }
 
     /// Record what the Morph card shows: `doc` is the body the Basic face is drawing, or
-    /// `None` while no Basic face draws one.
-    pub fn publish(&mut self, doc: Option<&Doc<'_>>) {
-        self.stored = doc
+    /// `None` while no Basic face draws one. True when that differs from what it showed.
+    pub fn publish(&mut self, doc: Option<&Doc<'_>>) -> bool {
+        let stored = doc
             .filter(|doc| doc.slots > 0)
             .map(|doc| std::array::from_fn(|slot| stored_targets(doc, slot)));
+        std::mem::replace(&mut self.stored, stored) != stored
     }
 
     /// Whether the Basic face last drew a body with morph slots.

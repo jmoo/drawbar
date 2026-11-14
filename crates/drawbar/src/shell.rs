@@ -2740,6 +2740,28 @@ mod tests {
         assert!(morph(&mut app).is_none(), "with the library in front");
     }
 
+    /// Without another frame, the card would wait for the next input to catch up with
+    /// a program just opened.
+    #[test]
+    fn the_morph_card_catches_up_with_no_further_input() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let _ = settled(&ctx, &mut app, LARGE);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Stage4Program, &mut app.log)
+            .unwrap();
+        app.tabs.open(id);
+        let mut painted = frame_of(&ctx, &mut app, LARGE, Vec::new());
+        for _ in 0..8 {
+            if in_inspector(&painted, "Morph").is_some() || !ctx.has_requested_repaint() {
+                break;
+            }
+            painted = frame_of(&ctx, &mut app, LARGE, Vec::new());
+        }
+        assert!(in_inspector(&painted, "Morph").is_some());
+    }
+
     #[test]
     fn a_morph_source_clicked_in_the_card_turns_the_programs_lens() {
         let ctx = egui::Context::default();
