@@ -217,17 +217,17 @@ fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>, recent: &mu
                 let resting = label(*command);
                 match checkable(*command) {
                     true => {
-                        let item = CheckMenuItem::new(resting, true, false, None);
+                        let item = CheckMenuItem::new(&resting, true, false, None);
                         let _ = item.set_key_accelerator(accelerator(*command));
                         append(submenu, &item);
                         lines.push(Line {
                             command: *command,
                             item: Item::Check(item),
                             shown: None,
-                            resting: resting.to_string(),
+                            resting,
                         });
                     }
-                    false => append(submenu, &plain(lines, *command, resting)),
+                    false => append(submenu, &plain(lines, *command, &resting)),
                 }
             }
         }

@@ -46,8 +46,8 @@ trims in whole decibels and cannot boost. **Per key** paints a fine tune across 
 
 ## A new library
 
-**New ▸ Piano library…** takes one WAV per stroke: 16-bit PCM, mono or stereo,
-at any sample rate. A file named like `060-b0-l00.wav` fills in its root (MIDI
+**New ▸ Piano library (.npno)…** takes one WAV per stroke: 16-bit PCM, mono or
+stereo, at any sample rate. A file named like `060-b0-l00.wav` fills in its root (MIDI
 note 60), bank and layer for you. Otherwise set them in the dialog. **Template** builds on a library you already
 have.
 
