@@ -169,7 +169,7 @@ fn named(name: &str, mismatch: IoError) -> Option<IoError> {
         "NotFoundError" => IoError::NotFound,
         "TypeMismatchError" => mismatch,
         "QuotaExceededError" => IoError::NoSpace,
-        "NotAllowedError" => IoError::Denied,
+        "NotAllowedError" | "NoModificationAllowedError" => IoError::Denied,
         _ => return None,
     })
 }
@@ -207,6 +207,7 @@ mod tests {
         assert_eq!(named("TypeMismatchError"), Some(IoError::IsDirectory));
         assert_eq!(named("QuotaExceededError"), Some(IoError::NoSpace));
         assert_eq!(named("NotAllowedError"), Some(IoError::Denied));
+        assert_eq!(named("NoModificationAllowedError"), Some(IoError::Denied));
         assert_eq!(named("InvalidStateError"), None);
     }
 

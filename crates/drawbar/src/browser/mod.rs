@@ -714,6 +714,12 @@ impl Browser {
         Some((ask.title.clone(), answers))
     }
 
+    /// The note under the question showing or next to show.
+    #[cfg(test)]
+    pub(crate) fn asking_note(&self) -> Option<&str> {
+        self.ask.as_ref().or(self.later.front())?.note.as_deref()
+    }
+
     /// The answer that question draws as the one expected.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn expected(&self) -> Option<&'static str> {
@@ -997,15 +1003,16 @@ impl Browser {
                 cancel: "Later",
                 strong: Answer::Cancel,
             },
-            Some(why) => Ask {
+            Some(_) => Ask {
                 title: format!(
                     "A write to the instrument left “{}”, which does not read",
                     rescue.name
                 ),
-                note: Some(format!(
-                    "It is not a whole Nord file ({why}), so it is no copy of what that \
-                     slot held, and cannot be sent back."
-                )),
+                note: Some(
+                    "It is not a whole Nord file, so it is no copy of what that slot held, \
+                     and cannot be sent back."
+                        .into(),
+                ),
                 verb: Verb::Discard,
                 acts: act(Rescuing::Discard),
                 others,

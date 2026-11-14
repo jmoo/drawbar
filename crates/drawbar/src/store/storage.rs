@@ -23,6 +23,34 @@ pub fn failed(error: IoError) -> io::Error {
     }
 }
 
+/// The kinds of I/O error toshokan has words of its own for, which the app says in
+/// those words rather than the system's.
+fn named(kind: io::ErrorKind) -> Option<IoError> {
+    match kind {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+            Some(IoError::Denied)
+        }
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => Some(IoError::NoSpace),
+        _ => None,
+    }
+}
+
+/// What `error` says to the user: toshokan's words for a kind it names, and the error's
+/// own otherwise.
+pub fn said(error: &io::Error) -> String {
+    named(error.kind()).map_or_else(|| error.to_string(), |named| named.to_string())
+}
+
+/// An error of `kind`, in toshokan's words where it names the kind, and in `fallback`
+/// otherwise.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn plain(kind: io::ErrorKind, fallback: impl FnOnce() -> String) -> io::Error {
+    io::Error::new(
+        kind,
+        named(kind).map_or_else(fallback, |named| named.to_string()),
+    )
+}
+
 async fn ask<F: Fs>(fs: &F, io: Io) -> io::Result<Reply> {
     fs.perform(io).await.map_err(failed)
 }
@@ -193,6 +221,21 @@ mod tests {
                 replied => replied,
             }
         }
+    }
+
+    #[test]
+    fn a_volume_that_will_not_be_written_is_said_in_toshokans_words() {
+        let denied = IoError::Denied.to_string();
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ReadOnlyFilesystem,
+        ] {
+            assert_eq!(said(&io::Error::from(kind)), denied, "{kind:?}");
+        }
+        let full = io::Error::from(io::ErrorKind::StorageFull);
+        assert_eq!(said(&full), IoError::NoSpace.to_string());
+        let other = io::Error::other("the disk went away");
+        assert_eq!(said(&other), "the disk went away");
     }
 
     #[test]

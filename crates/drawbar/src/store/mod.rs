@@ -396,8 +396,8 @@ pub struct Rescue {
     /// The file, as the browser gives it.
     #[cfg(target_arch = "wasm32")]
     pub file: web_sys::File,
-    /// Why it does not read as one whole Nord file, where it does not. It is then no copy
-    /// of what the slot held, and is offered only to be discarded.
+    /// Why it does not read as one whole Nord file, for the activity log, where it does
+    /// not. It is then no copy of what the slot held, and is offered only to be discarded.
     pub broken: Option<String>,
 }
 
