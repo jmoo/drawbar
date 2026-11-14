@@ -620,14 +620,16 @@ const NAME_LEAST: f32 = 100.0;
 ///
 /// Where the name would be narrower than about 16 characters, or than a width it was
 /// dragged to, the secondary columns are hidden in turn, least needed first, until it is
-/// not. A hidden column's track is empty, at the end of the one before it.
-pub fn tracks(width: f32, widths: &Widths) -> [Range<f32>; 8] {
+/// not. A hidden column's track is empty, at the end of the one before it. Needs shows
+/// only while an instrument is `attached`, since only an instrument names what a sound
+/// plays.
+pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
         None => column.track(),
     });
     let least = widths[Column::Name as usize].map_or(NAME_LEAST, |px| px.min(NAME_LEAST));
-    let mut shown = [true; 8];
+    let mut shown = Column::ALL.map(|column| attached || column != Column::Needs);
     let mut laid = lay(width, &wanted, &shown);
     for column in YIELDING {
         let name = &laid[Column::Name as usize];
@@ -1061,7 +1063,11 @@ impl Library {
         );
         let items = &table.items;
         let width = list_width(ui, items.len(), ROW + ROW_GAP, HEAD + ABOVE);
-        let tracks = tracks((width - 2.0 * CELL_PAD).max(0.0), &self.widths);
+        let tracks = tracks(
+            (width - 2.0 * CELL_PAD).max(0.0),
+            &self.widths,
+            device.state.connected(),
+        );
         self.head(ui, width, &tracks);
         ui.add_space(ABOVE);
         if items.is_empty() {
@@ -1641,7 +1647,7 @@ mod tests {
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
-            let tracks = tracks(width, &[None; 8]);
+            let tracks = tracks(width, &[None; 8], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(
                     track.start >= 0.0 && track.end >= track.start,
@@ -1659,7 +1665,7 @@ mod tests {
                 );
             }
         }
-        let wide = tracks(900.0, &[None; 8]);
+        let wide = tracks(900.0, &[None; 8], true);
         for (column, track) in Column::ALL.iter().zip(&wide) {
             assert!(track.end - track.start > 0.0, "{column:?} vanished at 900");
         }
@@ -1670,7 +1676,7 @@ mod tests {
     fn a_narrow_table_hides_secondary_columns_before_the_name_shrinks() {
         let mut hidden_before = Vec::new();
         for width in (130..=900).rev().step_by(10).map(|width| width as f32) {
-            let tracks = tracks(width, &[None; 8]);
+            let tracks = tracks(width, &[None; 8], true);
             let name = &tracks[Column::Name as usize];
             assert!(
                 name.end - name.start >= NAME_LEAST,
@@ -1700,14 +1706,14 @@ mod tests {
             track.end - track.start
         };
 
-        let wide = tracks(900.0, &[None; 8]);
+        let wide = tracks(900.0, &[None; 8], true);
         assert!(
             (width_of(&wide, Column::Kind) - 120.0).abs() < 0.01,
             "at 900 the kind holds the longest word: {}",
             width_of(&wide, Column::Kind)
         );
 
-        let narrow = tracks(430.0, &[None; 8]);
+        let narrow = tracks(430.0, &[None; 8], true);
         assert!(
             width_of(&narrow, Column::Name) >= 40.0,
             "at 430 the name is unreadable: {}",
@@ -1716,6 +1722,24 @@ mod tests {
         assert!(
             width_of(&narrow, Column::Kind) > 0.0,
             "at 430 the kind vanished"
+        );
+    }
+
+    #[test]
+    fn needs_is_hidden_until_an_instrument_is_attached() {
+        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
+            let track = &tracks[column as usize];
+            track.end - track.start
+        };
+        let (attached, alone) = (
+            tracks(900.0, &[None; 8], true),
+            tracks(900.0, &[None; 8], false),
+        );
+        assert!(width_of(&attached, Column::Needs) > 0.0, "{attached:?}");
+        assert_eq!(width_of(&alone, Column::Needs), 0.0, "{alone:?}");
+        assert!(
+            width_of(&alone, Column::Name) > width_of(&attached, Column::Name),
+            "the name takes the room: {alone:?}"
         );
     }
 
@@ -1732,7 +1756,7 @@ mod tests {
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
-            let tracks = tracks(width, &[None; 8]);
+            let tracks = tracks(width, &[None; 8], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(track.start >= 0.0, "{column:?} at {width}: {track:?}");
                 assert!(track.end >= track.start, "{column:?} at {width}: {track:?}");
