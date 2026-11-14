@@ -13,7 +13,12 @@ can connect to an instrument or hear a MIDI controller.
 
 ## On the desktop
 
-With [Nix](https://nixos.org/download/) and flakes enabled:
+On Windows, download `drawbar-<version>-x86_64-windows.exe` from the newest
+[drawbar release](https://github.com/jmoo/drawbar/releases?q=drawbar-v&expanded=true)
+and run it. It is not signed, so Windows may ask before running it the first
+time.
+
+Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
 
 ```sh
 nix run github:jmoo/drawbar#drawbar
@@ -27,12 +32,16 @@ cargo install drawbar
 
 ## The `nord` command
 
+On Windows, download `nord-<version>-x86_64-windows.exe` from the newest
+[nord-cli release](https://github.com/jmoo/drawbar/releases?q=nord-cli-v&expanded=true),
+rename it to `nord.exe`, and put it in a folder on your `PATH`.
+
 ```sh
 cargo install nord-cli                           # installs `nord`
 nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
 ```
 
-There are no prebuilt downloads yet. To build either from a source checkout, see
+To build either from a source checkout, see
 [Building from source](../reference/building.md).
 
 ## If drawbar does not load
