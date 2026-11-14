@@ -1,9 +1,9 @@
-//! The right dock: the front program's morph lens, the selection, and the instrument
+//! The right dock: the selection, the front program's morph lens, and the instrument
 //! while one is attached.
 //!
-//! Each part is a card. Morph switches the lens of the program in front, and is absent
-//! without one. The selection cards describe the document in front, or the rows selected
-//! in the browser while no document is; Room and Info hold what an attached instrument
+//! Each part is a card. The selection cards describe the document in front, or the rows
+//! selected in the browser while no document is. Morph switches the lens of the program
+//! in front, and is absent without one. Room and Info hold what an attached instrument
 //! reports, and are absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
@@ -64,8 +64,8 @@ const BODY: egui::Margin = egui::Margin {
     bottom: 12,
 };
 
-/// The front program's Morph card, the selection's cards, then the instrument's while one
-/// is attached.
+/// The selection's cards, the front program's Morph card, then the instrument's while one
+/// is attached. The cards that come and go sit below the selection's, so it stays put.
 ///
 /// `front` is the document in front, which the selection's cards describe alone in place
 /// of the browser's selection; a view of a slot is not on this computer, so they describe
@@ -88,13 +88,13 @@ pub fn ui(
         .show(ui, |ui| {
             egui::Frame::new().inner_margin(GUTTER).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = GUTTER;
+                let shown = shell.picked.now(front, browser, workspace, device, queue);
+                selection(ui, shown, browser, device, &mut acts);
                 if let Some(fields) = morphs {
                     card(ui, Head::fixed(Glyph::Waves, "Morph"), |ui| {
                         field::lens(ui, fields);
                     });
                 }
-                let shown = shell.picked.now(front, browser, workspace, device, queue);
-                selection(ui, shown, browser, device, &mut acts);
                 if !device.state.connected() {
                     return;
                 }

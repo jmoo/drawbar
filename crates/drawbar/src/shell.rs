@@ -2778,6 +2778,23 @@ mod tests {
         assert!(morph(&mut app).is_none(), "with the library in front");
     }
 
+    #[test]
+    fn the_selection_card_stays_put_as_the_morph_card_comes_and_goes_below_it() {
+        use crate::workspace::Fresh;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let at = |painted: &Painted, title: &str| {
+            in_inspector(painted, title).unwrap_or_else(|| panic!("{title} is missing"))
+        };
+        let alone = at(&settled(&ctx, &mut app, LARGE), "Selection");
+
+        front(&ctx, &mut app, Fresh::Stage4Program);
+        let painted = settled(&ctx, &mut app, LARGE);
+        let selection = at(&painted, "Selection");
+        assert_eq!(selection.top(), alone.top(), "where it was");
+        assert!(at(&painted, "Morph").top() > selection.top(), "below it");
+    }
+
     /// Without another frame, the card would wait for the next input to catch up with
     /// a program just opened.
     #[test]
