@@ -26,6 +26,7 @@ use crate::queue::{Queue, Queued};
 use crate::store::LibPath;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
+use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
 /// A menu item that runs `act` and closes the menu.
@@ -1300,8 +1301,8 @@ impl Browser {
 
     /// The menu a row offers, in the tree or in the library table.
     ///
-    /// A row inside a checked set of several offers what the Selection card offers,
-    /// because the menu acts on the whole set.
+    /// A row inside a checked set of several offers what the Selection card offers, and
+    /// Tag, because the menu acts on the whole set.
     ///
     /// Folders and tags appear only in the tree, so the rows that draw them build their
     /// menus.
@@ -1317,9 +1318,11 @@ impl Browser {
         self.aim(item);
         let checked: Vec<Item> = self.selection.items().collect();
         if checked.len() > 1 && self.selection.holds(item) {
-            for action in Bulk::ALL {
+            for action in [Bulk::Queue, Bulk::Copy, Bulk::Export, Bulk::Bundle] {
                 self.bulk_item(ui, action, &checked, workspace, &device.state, acts);
             }
+            self.tag_menu(ui, &self.selection.locals(), acts);
+            self.bulk_item(ui, Bulk::Delete, &checked, workspace, &device.state, acts);
             return;
         }
         match item {
@@ -1341,7 +1344,6 @@ impl Browser {
             return;
         };
         let item = Item::Local(id);
-        let picked = self.selection.locals();
         offer(ui, "Open", None, Act::Open(item), acts);
         self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
         offer(ui, "Export…", None, Act::Export(id), acts);
@@ -1352,7 +1354,7 @@ impl Browser {
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(entity), acts);
-        menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
+        self.tag_menu(ui, &self.selection.locals(), acts);
         ui.separator();
         if ui.button("Delete…").clicked() {
             self.ask_delete(&entity.name, Act::Remove(id));
@@ -1385,25 +1387,15 @@ impl Browser {
         });
     }
 
-    /// Every tag, checked where it is on everything selected, then New tag.
-    ///
-    /// Only the items, so the row's menu and the Selection card can each give them their
-    /// own label.
-    pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
-        for tag in self.tags.all() {
-            let on = self.tags.on_all(picked, tag.id);
-            if marked(ui, &tag.name, on) {
-                let ids = picked.to_vec();
-                acts.push(match on {
-                    true => Act::Untag { ids, tag: tag.id },
-                    false => Act::Tag { ids, tag: tag.id },
-                });
-            }
+    /// Tag, opening [`tag_items`] for `picked`, or disabled when nothing picked is
+    /// on this computer.
+    fn tag_menu(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
+        if picked.is_empty() {
+            ui.add_enabled(false, egui::Button::new("Tag"))
+                .on_disabled_hover_text("nothing checked is on this computer");
+            return;
         }
-        if !self.tags.all().is_empty() {
-            ui.separator();
-        }
-        offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
+        menu::button(ui, "Tag", |ui| tag_items(ui, &self.tags, picked, acts));
     }
 
     fn instrument_row(
@@ -1938,6 +1930,24 @@ fn mark(
 /// Where a queued asset is going, for the note that says so.
 fn destination(held: &Queued) -> String {
     format!("→ {}", place(held.class, held.at))
+}
+
+/// Every tag, checked where it is on everything `picked`, then New tag.
+pub fn tag_items(ui: &mut egui::Ui, tags: &Tags, picked: &[u64], acts: &mut Vec<Act>) {
+    for tag in tags.all() {
+        let on = tags.on_all(picked, tag.id);
+        if marked(ui, &tag.name, on) {
+            let ids = picked.to_vec();
+            acts.push(match on {
+                true => Act::Untag { ids, tag: tag.id },
+                false => Act::Tag { ids, tag: tag.id },
+            });
+        }
+    }
+    if !tags.all().is_empty() {
+        ui.separator();
+    }
+    offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
 }
 
 #[cfg(test)]

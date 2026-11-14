@@ -40,8 +40,9 @@ shows how many files it has.
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
 or both, with `=` when the two copies match and `≠` when they differ. It turns
-red when a send is waiting. A name in italics with a `*` has unsaved edits. Hover
-anything for an explanation.
+red when a send is waiting. While an instrument is attached, the **Needs** column
+names the sample or piano a sound plays. A name in italics with a `*` has unsaved
+edits. Hover anything for an explanation.
 
 ## Folders and tags
 
@@ -51,9 +52,10 @@ level. If it holds [hidden files](this-computer.md#where-your-library-lives),
 drawbar asks first: **Move them up too** moves them with the rest, and **Show
 them** turns on **Show hidden files** and opens the folder, which stays.
 
-Tags label sounds without moving them, and a sound can have several. **Tag ▸ New
-tag…** in a row's menu tags the selected sounds. Click a tag in the inspector to
-put it on, or take it off, everything selected. Renaming a tag to the name of
+Tags label sounds without moving them, and a sound can have several. **Tag** in a
+row's menu, or **Add tag** in the inspector's Tags card, puts a tag or a new one on
+the selected sounds. Click a tag in the card to put it on, or take it off,
+everything selected. Renaming a tag to the name of
 another merges the two. Removing a tag deletes no sounds.
 
 ## MIDI controllers
