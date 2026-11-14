@@ -1381,7 +1381,8 @@ impl DrawbarApp {
                 .max_rect(strip)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        self.tabs.ui(&mut tabs, &self.workspace, acts);
+        let followed = self.described() == self.tabs.active();
+        self.tabs.ui(&mut tabs, &self.workspace, followed, acts);
         ui.advance_cursor_after_rect(row);
     }
 

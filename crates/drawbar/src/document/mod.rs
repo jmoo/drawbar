@@ -2701,7 +2701,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(PAGE))
                             .with(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace, &mut Vec::new());
+                    tabs.ui(ui, &workspace, true, &mut Vec::new());
                     ui.separator();
                     document.ui(
                         ui,
