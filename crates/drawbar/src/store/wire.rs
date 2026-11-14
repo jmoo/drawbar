@@ -90,6 +90,36 @@ pub mod bytes {
     }
 }
 
+/// Bytes handed over beside a message's text without a copy of them: encoding the
+/// message takes them, so a value holding them encodes once. [`bytes`] copies what it
+/// hands over, which a take's worth of samples cannot spare.
+pub struct Handed(RefCell<Option<Vec<u8>>>);
+
+impl Handed {
+    pub fn new(bytes: Vec<u8>) -> Handed {
+        Handed(RefCell::new(Some(bytes)))
+    }
+
+    /// The bytes, or none once a message has taken them.
+    pub fn into_inner(self) -> Option<Vec<u8>> {
+        self.0.into_inner()
+    }
+}
+
+impl serde::Serialize for Handed {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes = self.0.borrow_mut().take();
+        let bytes = bytes.ok_or_else(|| S::Error::custom("bytes already handed over"))?;
+        attach(Attachment::Bytes(bytes), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Handed {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Handed, D::Error> {
+        bytes::deserialize(deserializer).map(Handed::new)
+    }
+}
+
 /// A file outside the library handed over beside a message's text, for
 /// `#[serde(with)]`.
 pub mod outside {

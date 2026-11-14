@@ -1,0 +1,1038 @@
+//! The picked hit, close up: its own stretch of the take, zoomed down to 50 ms, with each
+//! cut point the file marks for it drawn as a marker over its regions.
+//!
+//! A marker is dragged to move its cut. While it moves both lanes draw the cut where it
+//! is; let go, and the region or loop it belongs to is written to the file's marks, one
+//! edit a drag. A marker stops at the cuts either side of it, so a loop never leaves its
+//! attack and no region turns inside out.
+
+use std::ops::{Range, RangeInclusive};
+
+use eframe::egui;
+use nord_format::formats::npno::encode::LayerTag;
+use nord_format::wav::{self, Audio};
+
+use super::take::{self, Drawn, Hit, Marked, Part, Summary};
+use crate::app;
+
+/// The shortest span the lane zooms to, in seconds.
+const NARROWEST: f64 = 0.05;
+
+/// The height of the lane.
+const HEIGHT: f32 = 160.0;
+
+/// The width of a marker's line and the side of its handle.
+const LINE: f32 = 2.0;
+const HANDLE: f32 = 10.0;
+
+/// How near a marker the pointer must be to name it, in points.
+const NEAR: f32 = 6.0;
+
+/// A cut point of a hit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cut {
+    AttackStart,
+    LoopStart,
+    LoopEnd,
+    /// Where a dying attack's fade to silence starts.
+    FadeFrom,
+    AttackEnd,
+    ReleaseStart,
+    ReleaseEnd,
+}
+
+impl Cut {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cut::AttackStart => "attack start",
+            Cut::LoopStart => "loop start",
+            Cut::LoopEnd => "loop end",
+            Cut::FadeFrom => "fade from",
+            Cut::AttackEnd => "attack end",
+            Cut::ReleaseStart => "release start",
+            Cut::ReleaseEnd => "release end",
+        }
+    }
+
+    /// The cut as a set's path names it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Cut::AttackStart => "attack-start",
+            Cut::LoopStart => "loop-start",
+            Cut::LoopEnd => "loop-end",
+            Cut::FadeFrom => "fade-from",
+            Cut::AttackEnd => "attack-end",
+            Cut::ReleaseStart => "release-start",
+            Cut::ReleaseEnd => "release-end",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Cut> {
+        [
+            Cut::AttackStart,
+            Cut::LoopStart,
+            Cut::LoopEnd,
+            Cut::FadeFrom,
+            Cut::AttackEnd,
+            Cut::ReleaseStart,
+            Cut::ReleaseEnd,
+        ]
+        .into_iter()
+        .find(|cut| cut.slug() == slug)
+    }
+
+    /// Whether the cut ends its span, so a drag from left of two cuts on one frame takes
+    /// the one that ends.
+    fn ends(self) -> bool {
+        matches!(self, Cut::LoopEnd | Cut::AttackEnd | Cut::ReleaseEnd)
+    }
+
+    fn ink(self, visuals: &egui::Visuals) -> egui::Color32 {
+        match self {
+            Cut::AttackStart | Cut::AttackEnd => take::ink(Part::Attack, visuals),
+            Cut::LoopStart | Cut::LoopEnd => app::accent(visuals),
+            Cut::FadeFrom => take::ink(Part::Fade, visuals),
+            Cut::ReleaseStart | Cut::ReleaseEnd => take::ink(Part::Release, visuals),
+        }
+    }
+}
+
+/// A hit's strokes as the file cuts them, each over its frames.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cuts {
+    pub name: String,
+    /// The attack's label as the file holds it, which a set names the hit by.
+    pub label: String,
+    pub attack: Option<Range<u32>>,
+    pub release: Option<Range<u32>>,
+    pub fade: Option<Range<u32>>,
+    /// The loop inside the attack, its end included.
+    pub looped: Option<Range<u32>>,
+}
+
+impl Cuts {
+    pub fn of(marked: &Marked, hit: Hit) -> Cuts {
+        let mut cuts = Cuts::default();
+        for mark in marked.regions.iter().filter(|mark| mark.hit == Some(hit)) {
+            let span = Some(mark.frames.clone());
+            match mark.part {
+                Part::Attack | Part::Resonance if cuts.attack.is_none() => {
+                    cuts.name = mark.text.clone();
+                    cuts.label = mark.label.clone();
+                    cuts.attack = span;
+                }
+                Part::Release if cuts.release.is_none() => cuts.release = span,
+                Part::Fade if cuts.fade.is_none() => cuts.fade = span,
+                _ => {}
+            }
+        }
+        cuts.looped = cuts.attack.as_ref().and_then(|attack| {
+            marked
+                .loops
+                .iter()
+                .find(|found| found.start >= attack.start && found.end <= attack.end)
+                .cloned()
+        });
+        cuts
+    }
+
+    /// Each cut point and the frame it sits at, in take order.
+    pub fn points(&self) -> Vec<(Cut, u32)> {
+        let mut points = Vec::new();
+        let mut both = |span: &Option<Range<u32>>, from: Cut, to: Cut| {
+            if let Some(span) = span {
+                points.push((from, span.start));
+                points.push((to, span.end));
+            }
+        };
+        both(&self.attack, Cut::AttackStart, Cut::AttackEnd);
+        both(&self.looped, Cut::LoopStart, Cut::LoopEnd);
+        both(&self.release, Cut::ReleaseStart, Cut::ReleaseEnd);
+        if let Some(fade) = &self.fade {
+            points.push((Cut::FadeFrom, fade.start));
+        }
+        points.sort_by_key(|(_, at)| *at);
+        points
+    }
+
+    /// The frames from the first cut to the last.
+    fn extent(&self) -> Option<Range<u32>> {
+        let points = self.points();
+        Some(points.first()?.1..points.last()?.1)
+    }
+
+    /// Where `cut` may sit in a take of `total` frames: between the cuts either side of
+    /// it, so each span keeps a frame and the loop two, inside its attack. `None` where
+    /// the hit has no such cut.
+    pub fn room(&self, cut: Cut, total: u32) -> Option<RangeInclusive<u32>> {
+        let attack = self.attack.as_ref();
+        let found = self.looped.as_ref();
+        let fade = self.fade.as_ref();
+        let release = self.release.as_ref();
+        let (low, high) = match cut {
+            Cut::AttackStart => {
+                let attack = attack?;
+                let high = [
+                    Some(attack.end.saturating_sub(1)),
+                    found.map(|found| found.start),
+                    fade.map(|fade| fade.start),
+                ];
+                (0, high.into_iter().flatten().min()?)
+            }
+            Cut::AttackEnd => {
+                let attack = attack?;
+                let low = [
+                    Some(attack.start + 1),
+                    found.map(|found| found.end),
+                    fade.map(|fade| fade.start + 1),
+                ];
+                (low.into_iter().flatten().max()?, total)
+            }
+            Cut::LoopStart => (attack?.start, found?.end.saturating_sub(2)),
+            Cut::LoopEnd => (found?.start + 2, attack?.end),
+            Cut::FadeFrom => (attack?.start, fade?.end.saturating_sub(1)),
+            Cut::ReleaseStart => (0, release?.end.saturating_sub(1)),
+            Cut::ReleaseEnd => (release?.start + 1, total),
+        };
+        Some(low..=high.min(total))
+    }
+}
+
+/// `marks` with `hit`'s `cut` moved to `frame`, in a take of `total` frames: its region,
+/// or its loop, and an attack's fade with the attack's end. Refused where the hit has no
+/// such cut, or `frame` is not in its [`Cuts::room`].
+pub fn moved(
+    marks: &wav::Marks,
+    hit: Hit,
+    cut: Cut,
+    frame: u32,
+    total: u32,
+) -> Result<wav::Marks, String> {
+    let marked = Marked::from_marks(marks);
+    let cuts = Cuts::of(&marked, hit);
+    let room = cuts
+        .room(cut, total)
+        .ok_or_else(|| format!("{}: {} has no {}", cuts.label, cuts.name, cut.name()))?;
+    if !room.contains(&frame) {
+        return Err(format!(
+            "{} {} at frame {frame}: it sits from {} to {}",
+            cuts.name,
+            cut.name(),
+            room.start(),
+            room.end()
+        ));
+    }
+    // The first region of each part, as [`Cuts::of`] takes it; the regions are read in
+    // the order the file holds them.
+    let first = |parts: &[Part]| {
+        marked
+            .regions
+            .iter()
+            .position(|mark| mark.hit == Some(hit) && parts.contains(&mark.part))
+    };
+    let mut out = marks.clone();
+    let start = |region: &mut wav::Region, frame: u32| {
+        let end = region.start + region.frames;
+        region.start = frame;
+        region.frames = end - frame;
+    };
+    let end = |region: &mut wav::Region, frame: u32| region.frames = frame - region.start;
+    let attack = first(&[Part::Attack, Part::Resonance]);
+    let fade = first(&[Part::Fade]);
+    let release = first(&[Part::Release]);
+    match cut {
+        Cut::AttackStart => start(&mut out.regions[attack.unwrap()], frame),
+        Cut::AttackEnd => {
+            end(&mut out.regions[attack.unwrap()], frame);
+            if let Some(fade) = fade {
+                end(&mut out.regions[fade], frame);
+            }
+        }
+        Cut::FadeFrom => start(&mut out.regions[fade.unwrap()], frame),
+        Cut::ReleaseStart => start(&mut out.regions[release.unwrap()], frame),
+        Cut::ReleaseEnd => end(&mut out.regions[release.unwrap()], frame),
+        Cut::LoopStart | Cut::LoopEnd => {
+            let found = cuts.looped.as_ref().unwrap();
+            let at = marked.loops.iter().position(|each| each == found).unwrap();
+            // ⚠️ A loop's end is its last frame, not the one after.
+            match cut {
+                Cut::LoopStart => out.loops[at].start = frame,
+                _ => out.loops[at].end = frame - 1,
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What the hit's lane shows: the hit it was opened on, and the frames in view, or the
+/// whole hit.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Close {
+    hit: Option<Hit>,
+    /// The place clicked where no sample is, where the lane shows one.
+    place: Option<u32>,
+    span: Option<Range<f64>>,
+    /// The cut being dragged, and the frame it is at.
+    dragging: Option<(Cut, u32)>,
+    /// How far from linear toward log the lane's scale is drawn, in steps; kept from one
+    /// hit to the next.
+    depth: i8,
+    /// The name being typed in the name box, while it is.
+    naming: Option<String>,
+}
+
+impl Close {
+    /// Follow the picked hit to `hit`, its new name, keeping the view.
+    pub fn renamed(&mut self, hit: Hit) {
+        (self.hit, self.naming) = (Some(hit), None);
+    }
+
+    /// The cut being dragged on `hit`, and the frame it is at.
+    pub fn dragging(&self, hit: Option<Hit>) -> Option<(Cut, u32)> {
+        self.dragging.filter(|_| hit.is_some() && hit == self.hit)
+    }
+
+    /// The whole hit, with a margin of 50 ms or 10% each side, within the take.
+    fn whole(cuts: &Cuts, total: f64, rate: f64) -> Range<f64> {
+        let Some(extent) = cuts.extent() else {
+            return 0.0..total;
+        };
+        let (from, to) = (f64::from(extent.start), f64::from(extent.end));
+        let margin = ((to - from) * 0.1).max(NARROWEST * rate);
+        (from - margin).max(0.0)..(to + margin).min(total)
+    }
+
+    pub fn shown(&self, cuts: &Cuts, total: f64, rate: f64) -> Range<f64> {
+        self.span
+            .clone()
+            .unwrap_or_else(|| Close::whole(cuts, total, rate))
+    }
+
+    /// Show `from` to `to`, held to the take and to the narrowest span.
+    fn show(&mut self, from: f64, to: f64, total: f64, rate: f64) {
+        let span = (to - from).clamp((NARROWEST * rate).min(total), total);
+        let from = from.clamp(0.0, total - span);
+        self.span = Some(from..from + span);
+    }
+
+    /// What the lane shows about `place`, clicked where no sample is: the frames in
+    /// view, or from half a second before it to six seconds after.
+    pub fn about(&self, place: u32, total: f64, rate: f64) -> Range<f64> {
+        self.span.clone().unwrap_or_else(|| {
+            let at = f64::from(place);
+            (at - PLACE_BEFORE * rate).max(0.0)..(at + PLACE_AFTER * rate).min(total)
+        })
+    }
+
+    fn zoom(&mut self, factor: f64, cuts: &Cuts, total: f64, rate: f64) {
+        let shown = self.shown(cuts, total, rate);
+        self.zoom_shown(factor, shown, total, rate);
+    }
+
+    fn zoom_shown(&mut self, factor: f64, shown: Range<f64>, total: f64, rate: f64) {
+        let middle = (shown.start + shown.end) / 2.0;
+        let half = (shown.end - shown.start) * factor / 2.0;
+        self.show(middle - half, middle + half, total, rate);
+    }
+
+    /// Show the loop, with half its length each side, and at least 20 ms.
+    fn fit_loop(&mut self, cuts: &Cuts, total: f64, rate: f64) {
+        if let Some(found) = &cuts.looped {
+            let (from, to) = (f64::from(found.start), f64::from(found.end));
+            let margin = ((to - from) * 0.5).max(0.02 * rate);
+            self.show(from - margin, to + margin, total, rate);
+        }
+    }
+}
+
+/// The label of the button that shows the loop, and of the one that shows the whole hit.
+pub const LOOP: &str = "Loop";
+pub const WHOLE: &str = "Whole sample";
+
+/// How far a dragged loop cut looks for a zero crossing to snap to, in seconds: a
+/// period of the lowest piano note.
+const SNAP: f64 = 0.04;
+
+/// Where a loop's `cut` dragged to `frame` snaps to: the nearest frame within [`SNAP`]
+/// and `room` where the take rises through zero, the loop's first frame for its start
+/// and the frame after its last for its end, so the join is smooth. `frame` where there
+/// is none, or for any other cut. Alt held drops it where it is.
+pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) -> u32 {
+    let after = match cut {
+        Cut::LoopStart => 0,
+        Cut::LoopEnd => 1,
+        _ => return frame,
+    };
+    let channels = usize::from(audio.channels.max(1));
+    let total = audio.samples.len() / channels;
+    let level = |at: usize| -> f32 {
+        audio.samples[at * channels..(at + 1) * channels]
+            .iter()
+            .sum()
+    };
+    let rises = |at: u32| {
+        let at = at as usize + after;
+        at >= 1 && at < total && level(at - 1) < 0.0 && level(at) >= 0.0
+    };
+    let reach = (SNAP * f64::from(audio.rate.max(1))) as u32;
+    (0..=reach)
+        .flat_map(|off| [frame.checked_sub(off), frame.checked_add(off)])
+        .flatten()
+        .find(|at| room.contains(at) && rises(*at))
+        .unwrap_or(frame)
+}
+
+/// A part of a sample the close lane's Add and Delete menus add or delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// A whole sample: its attack, and on adding, a key-off.
+    Note,
+    Loop,
+    KeyOff,
+}
+
+/// What the close lane's Add and Delete menus, or its Undo, asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wanted {
+    Add(Piece),
+    Delete(Piece),
+    Undo,
+    /// Rename the picked sample to this note and layer.
+    Rename(Hit),
+}
+
+/// What the name box says, on hover.
+pub const RENAME_HINT: &str = "Rename the sample: its note and layer, such as C4 v22";
+
+/// The sample `text` names, as the name box reads it: a note and a layer, `C4 v22` or
+/// `C4 l01`.
+pub fn named(text: &str) -> Result<Hit, String> {
+    let bad = || "write a note and a layer, such as C4 v22".to_string();
+    let mut words = text.split_whitespace();
+    let (Some(root), Some(tag)) = (words.next(), words.next()) else {
+        return Err(bad());
+    };
+    let root = nord_format::note::parse(root).map_err(|_| bad())?;
+    let tag = match (tag.get(..1), tag.get(1..).map(str::parse::<u8>)) {
+        (Some("v" | "V"), Some(Ok(value))) => LayerTag::Value(value),
+        (Some("l" | "L"), Some(Ok(index))) => LayerTag::Index(index),
+        _ => return Err(bad()),
+    };
+    let hit = (root, tag);
+    match take::mark(&super::adding::attack_label(hit), 0..0).hit == Some(hit) {
+        true => Ok(hit),
+        false => Err(bad()),
+    }
+}
+
+/// Undo, at the far right of the row it ends, naming on hover the edit it takes back,
+/// `last`; grayed where there is none.
+fn undo(ui: &mut egui::Ui, last: Option<&str>, wanted: &mut Option<Wanted>) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let button = ui.add_enabled(last.is_some(), egui::Button::new(super::wav::UNDO_LABEL));
+        if let Some(what) = last {
+            if button.on_hover_text(format!("Undo {what}")).clicked() {
+                *wanted = Some(Wanted::Undo);
+            }
+        }
+    });
+}
+
+/// The labels of the close lane's menus and their items.
+pub const ADD: &str = "Add";
+pub const DELETE: &str = "Delete";
+pub const NOTE: &str = "Note";
+pub const LOOP_ITEM: &str = "Loop";
+pub const KEY_OFF: &str = "Key-off";
+
+/// What Add ▸ Note says, on hover, while a sample is picked.
+const NOTE_WHERE: &str = "Click where the take marks no sample to add one there";
+
+/// How much of the take the close lane shows about a place: from before it to after,
+/// in seconds.
+const PLACE_BEFORE: f64 = 0.5;
+const PLACE_AFTER: f64 = 6.0;
+
+/// The Add and Delete menus, for the sample `cuts` describes, or for a place where none
+/// is picked.
+fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, wanted: &mut Option<Wanted>) {
+    let attack = cuts.is_some_and(|cuts| cuts.attack.is_some());
+    let looped = cuts.is_some_and(|cuts| cuts.looped.is_some());
+    let release = cuts.is_some_and(|cuts| cuts.release.is_some());
+    let picked = cuts.is_some();
+    let items = |ui: &mut egui::Ui,
+                 items: [(&str, Piece, bool); 3],
+                 made: fn(Piece) -> Wanted,
+                 wanted: &mut Option<Wanted>| {
+        for (word, piece, there) in items {
+            let item = ui.add_enabled(there, egui::Button::new(word));
+            let item = match (piece, picked, made(piece)) {
+                (Piece::Note, true, Wanted::Add(_)) => item.on_disabled_hover_text(NOTE_WHERE),
+                _ => item,
+            };
+            if item.clicked() {
+                *wanted = Some(made(piece));
+                ui.close();
+            }
+        }
+    };
+    crate::menu::button(ui, ADD, |ui| {
+        items(
+            ui,
+            [
+                (NOTE, Piece::Note, !picked),
+                (LOOP_ITEM, Piece::Loop, attack && !looped),
+                (KEY_OFF, Piece::KeyOff, attack && !release),
+            ],
+            Wanted::Add,
+            wanted,
+        );
+    });
+    ui.add_enabled_ui(picked, |ui| {
+        crate::menu::button(ui, DELETE, |ui| {
+            items(
+                ui,
+                [
+                    (NOTE, Piece::Note, attack),
+                    (LOOP_ITEM, Piece::Loop, looped),
+                    (KEY_OFF, Piece::KeyOff, release),
+                ],
+                Wanted::Delete,
+                wanted,
+            );
+        });
+    });
+}
+
+/// The close lane about a place clicked where no sample is: the take from
+/// [`PLACE_BEFORE`] before it to [`PLACE_AFTER`] after, the place marked, and the menus
+/// to add a sample there.
+#[allow(clippy::too_many_arguments)]
+fn placed(
+    ui: &mut egui::Ui,
+    audio: &Audio,
+    summary: &Summary,
+    drawn: &mut Drawn,
+    place: u32,
+    close: &mut Close,
+    last: Option<&str>,
+    wanted: &mut Option<Wanted>,
+) {
+    let rate = f64::from(audio.rate.max(1));
+    let channels = usize::from(audio.channels.max(1));
+    let total = (audio.samples.len() / channels) as f64;
+    let at = f64::from(place);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::panel::caps("Sample"));
+        ui.label(
+            egui::RichText::new(format!(
+                "none at {}: Add ▸ Note marks one",
+                take::clock(at / rate, 2)
+            ))
+            .size(take::LEGEND_TEXT)
+            .color(app::caption(ui.visuals())),
+        );
+    });
+    // ⚠️ The same row as over a picked sample, so the zoom stays where it was.
+    ui.horizontal(|ui| {
+        let shown = close.about(place, total, rate);
+        if ui.button(take::ZOOM_IN).clicked() {
+            close.zoom_shown(0.5, shown.clone(), total, rate);
+        }
+        if ui.button(take::ZOOM_OUT).clicked() {
+            close.zoom_shown(2.0, shown, total, rate);
+        }
+        ui.add_enabled(false, egui::Button::new(LOOP));
+        if ui
+            .add_enabled(close.span.is_some(), egui::Button::new(WHOLE))
+            .clicked()
+        {
+            close.span = None;
+        }
+        ui.add_space(8.0);
+        menus(ui, None, wanted);
+        undo(ui, last, wanted);
+    });
+    let width = take::lane_width(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
+    let shown = close.about(place, total, rate);
+    if response.dragged() && response.drag_delta().x != 0.0 {
+        let span = shown.end - shown.start;
+        let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
+        close.show(shown.start + shift, shown.end + shift, total, rate);
+    }
+    let shown = close.about(place, total, rate);
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals().clone();
+    let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
+    let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
+    take::level(
+        &painter,
+        rect,
+        drawn.lane(audio, summary, frames, columns),
+        summary.loudest(),
+        close.depth,
+    );
+    let span = (shown.end - shown.start).max(1.0);
+    painter.vline(
+        rect.left() + ((at - shown.start) / span) as f32 * rect.width(),
+        rect.y_range(),
+        egui::Stroke::new(2.0_f32, visuals.text_color()),
+    );
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    take::depth(ui, rect, &mut close.depth);
+    take::times(ui, rect, shown, rate);
+}
+
+/// Draw the picked hit's lane: its caption, legend, zoom and menus, the waveform with
+/// its regions and cut points over it, and the times under it. Where none is picked, the
+/// take about the place clicked, or a prompt where the take marks samples and none is
+/// clicked.
+///
+/// `marked` holds the cut being dragged where it is now. The cut and the frame it was let
+/// go at, once a drag ends, and what the menus asked.
+#[allow(clippy::too_many_arguments)]
+pub fn ui(
+    ui: &mut egui::Ui,
+    audio: &Audio,
+    summary: &Summary,
+    drawn: &mut Drawn,
+    marked: &Result<Marked, String>,
+    picked: Option<Hit>,
+    place: Option<u32>,
+    close: &mut Close,
+    last: Option<&str>,
+) -> (Option<(Cut, u32)>, Option<Wanted>) {
+    let mut wanted = None;
+    let Ok(marks) = marked else {
+        return (None, None);
+    };
+    let place = place.filter(|_| picked.is_none());
+    if close.hit != picked || close.place != place {
+        *close = Close {
+            hit: picked,
+            place,
+            depth: close.depth,
+            ..Close::default()
+        };
+    }
+    let Some(hit) = picked else {
+        match place {
+            Some(place) => placed(ui, audio, summary, drawn, place, close, last, &mut wanted),
+            None if marks.regions.is_empty() => {}
+            None => {
+                ui.horizontal(|ui| {
+                    ui.label(crate::panel::caps("Sample"));
+                    ui.label(
+                        egui::RichText::new("(select from the WAV, above)")
+                            .size(take::LEGEND_TEXT)
+                            .color(app::caption(ui.visuals())),
+                    );
+                    undo(ui, last, &mut wanted);
+                });
+            }
+        }
+        return (None, wanted);
+    };
+    let rate = f64::from(audio.rate.max(1));
+    let channels = usize::from(audio.channels.max(1));
+    let total = (audio.samples.len() / channels) as f64;
+    let cuts = Cuts::of(marks, hit);
+    let shown = close.shown(&cuts, total, rate);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(crate::panel::caps("Sample"));
+        // The name box: the sample is renamed when it is left, unless by Escape.
+        let mut text = close.naming.clone().unwrap_or_else(|| cuts.name.clone());
+        let read = named(&text).and_then(|to| {
+            let taken = to != hit && marks.regions.iter().any(|mark| mark.hit == Some(to));
+            match taken {
+                true => Err(format!("the take already marks {}", take::named(to))),
+                false => Ok(to),
+            }
+        });
+        let mut edit = egui::TextEdit::singleline(&mut text)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(72.0);
+        if read.is_err() {
+            edit = edit.text_color(app::bad(ui.visuals()));
+        }
+        let response = ui.add(edit);
+        let response = match &read {
+            Ok(_) => response.on_hover_text(RENAME_HINT),
+            Err(why) => response.on_hover_text(why),
+        };
+        if response.has_focus() {
+            close.naming = Some(text);
+        }
+        if response.lost_focus() {
+            let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            if let (false, Ok(to)) = (escaped, read) {
+                if to != hit {
+                    wanted = Some(Wanted::Rename(to));
+                }
+            }
+            close.naming = None;
+        }
+        let places = take::decimals(take::step((shown.end - shown.start) / rate)) + 1;
+        ui.label(
+            egui::RichText::new(format!(
+                "{} – {}",
+                take::clock(shown.start / rate, places),
+                take::clock(shown.end / rate, places)
+            ))
+            .size(take::LEGEND_TEXT)
+            .color(app::caption(ui.visuals())),
+        );
+        let visuals = ui.visuals().clone();
+        let spans = [
+            (cuts.attack.is_some(), Part::Attack, "attack"),
+            (cuts.release.is_some(), Part::Release, "release"),
+            (cuts.fade.is_some(), Part::Fade, "fade out"),
+        ];
+        for (_, part, word) in spans.into_iter().filter(|(held, ..)| *held) {
+            let edge = take::ink(part, &visuals);
+            take::legend(ui, edge.gamma_multiply(0.18), edge, word);
+        }
+        if cuts.looped.is_some() {
+            let edge = app::accent(&visuals);
+            take::legend(ui, edge.gamma_multiply(0.18), edge, "loop");
+        }
+    });
+    // ⚠️ The zoom, Add and Delete have a row of their own: beside the legend they
+    // wrapped. Undo sits at its end, for edits are made sample by sample.
+    ui.horizontal(|ui| {
+        if ui.button(take::ZOOM_IN).clicked() {
+            close.zoom(0.5, &cuts, total, rate);
+        }
+        if ui.button(take::ZOOM_OUT).clicked() {
+            close.zoom(2.0, &cuts, total, rate);
+        }
+        if ui
+            .add_enabled(cuts.looped.is_some(), egui::Button::new(LOOP))
+            .clicked()
+        {
+            close.fit_loop(&cuts, total, rate);
+        }
+        if ui
+            .add_enabled(close.span.is_some(), egui::Button::new(WHOLE))
+            .clicked()
+        {
+            close.span = None;
+        }
+        ui.add_space(8.0);
+        menus(ui, Some(&cuts), &mut wanted);
+        undo(ui, last, &mut wanted);
+    });
+
+    let shown = close.shown(&cuts, total, rate);
+    let width = take::lane_width(ui);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
+    let span = (shown.end - shown.start).max(1.0);
+    let x = |frame: f64| rect.left() + ((frame - shown.start) / span) as f32 * rect.width();
+    let frame_at = |at: f32| shown.start + f64::from((at - rect.left()) / rect.width()) * span;
+    let points = cuts.points();
+    // The marker nearest `at`, within reach; of two on one frame, the one that ends its
+    // span when `at` is left of them, and the one that starts it when right.
+    let near = |at: egui::Pos2| {
+        points
+            .iter()
+            .map(|&(cut, frame)| (cut, frame, x(f64::from(frame)) - at.x))
+            .filter(|(.., off)| off.abs() <= NEAR)
+            .min_by(|a, b| {
+                let side = |(cut, _, off): &(Cut, u32, f32)| cut.ends() != (*off > 0.0);
+                a.2.abs().total_cmp(&b.2.abs()).then(side(a).cmp(&side(b)))
+            })
+            .map(|(cut, frame, _)| (cut, frame))
+    };
+    let frames = total as u32;
+    if response.drag_started() {
+        let pressed = ui.input(|input| input.pointer.press_origin());
+        close.dragging = pressed.and_then(near);
+        // ⚠️ The view holds still under a drag: the whole hit's extent moves with the
+        // cut, and the view would move with it.
+        if close.dragging.is_some() {
+            close.span = Some(shown.clone());
+        }
+    }
+    let mut dropped = None;
+    if response.dragged() {
+        match (close.dragging, response.interact_pointer_pos()) {
+            (Some((cut, _)), Some(pointer)) => {
+                if let Some(room) = cuts.room(cut, frames) {
+                    let frame = frame_at(pointer.x).round().max(0.0) as u32;
+                    let frame = frame.max(*room.start()).min(*room.end());
+                    let frame = match ui.input(|input| input.modifiers.alt) {
+                        true => frame,
+                        false => snapped(audio, cut, frame, &room),
+                    };
+                    close.dragging = Some((cut, frame));
+                }
+            }
+            (None, _) if response.drag_delta().x != 0.0 => {
+                let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
+                close.show(shown.start + shift, shown.end + shift, total, rate);
+            }
+            _ => {}
+        }
+    }
+    if response.drag_stopped() {
+        dropped = close.dragging.take();
+    }
+    let held = close
+        .dragging
+        .or_else(|| response.hover_pos().and_then(near));
+    if let Some((cut, frame)) = held {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        let said = format!("{} {}", cut.name(), take::clock(f64::from(frame) / rate, 3));
+        response.clone().on_hover_text_at_pointer(said);
+    }
+
+    let visuals = ui.visuals().clone();
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
+    let spanned = |span: &Range<u32>, top: f32, ink: egui::Color32| {
+        let left = x(f64::from(span.start));
+        let right = x(f64::from(span.end)).max(left + 2.0);
+        let at = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, rect.bottom()));
+        painter.rect_filled(at, 0.0, ink.gamma_multiply(0.18));
+    };
+    if let Some(attack) = &cuts.attack {
+        spanned(attack, rect.top(), take::ink(Part::Attack, &visuals));
+    }
+    // ⚠️ The loop fills the lower half, so the attack it sits in shows over it.
+    if let Some(found) = &cuts.looped {
+        spanned(found, rect.center().y, app::accent(&visuals));
+    }
+    if let Some(release) = &cuts.release {
+        spanned(release, rect.top(), take::ink(Part::Release, &visuals));
+    }
+    if let Some(fade) = &cuts.fade {
+        spanned(fade, rect.center().y, take::ink(Part::Fade, &visuals));
+    }
+
+    let columns = (rect.width() * ui.ctx().pixels_per_point()).round() as usize;
+    let frames = shown.start.floor() as usize..shown.end.ceil() as usize;
+    take::level(
+        &painter,
+        rect,
+        drawn.lane(audio, summary, frames, columns),
+        summary.loudest(),
+        close.depth,
+    );
+
+    for (cut, frame) in &points {
+        let at = x(f64::from(*frame));
+        let ink = cut.ink(&visuals);
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(at - LINE / 2.0, rect.top()),
+                egui::pos2(at + LINE / 2.0, rect.bottom()),
+            ),
+            0.0,
+            ink,
+        );
+        painter.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(at, rect.bottom() - 4.0 - HANDLE / 2.0),
+                egui::Vec2::splat(HANDLE),
+            ),
+            3.0,
+            ink,
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    take::depth(ui, rect, &mut close.depth);
+    take::times(ui, rect, shown, rate);
+    (dropped, wanted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dragged loop cut snaps to where the take rises through zero: its start onto
+    /// the rise, its end onto the frame before it; any other cut stays put.
+    #[test]
+    fn a_loop_cut_snaps_to_a_rising_zero_crossing() {
+        // A 100 Hz square at 1000 frames a second: rises at 10, 20, 30...
+        let audio = Audio {
+            rate: 1000,
+            channels: 1,
+            samples: (0..100)
+                .map(|i| if i % 10 < 5 { 0.5 } else { -0.5 })
+                .collect(),
+        };
+        let room = 0..=99;
+        assert_eq!(snapped(&audio, Cut::LoopStart, 22, &room), 20);
+        assert_eq!(snapped(&audio, Cut::LoopEnd, 22, &room), 19);
+        assert_eq!(snapped(&audio, Cut::AttackEnd, 22, &room), 22);
+        assert_eq!(
+            snapped(&audio, Cut::LoopStart, 22, &(21..=29)),
+            22,
+            "none in room"
+        );
+    }
+    use nord_format::formats::npno::encode::LayerTag;
+
+    fn marked() -> Marked {
+        let region = |start: u32, end: u32, label: &str| take::mark(label, start..end);
+        Marked {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(9000, 9500, "060-b2-v22"),
+                region(20_000, 30_000, "067-b0-v00"),
+                region(26_000, 30_000, "067-b0-v00-fade"),
+            ],
+            loops: vec![5000..7000, 25_000..25_100],
+        }
+    }
+
+    #[test]
+    fn a_hit_s_cuts_are_its_regions_and_the_loop_in_its_attack() {
+        let c4 = Cuts::of(&marked(), (60, LayerTag::Value(22)));
+        assert_eq!(c4.name, "C4 v22");
+        assert_eq!(c4.looped, Some(5000..7000));
+        assert_eq!(
+            c4.points(),
+            [
+                (Cut::AttackStart, 1000),
+                (Cut::LoopStart, 5000),
+                (Cut::LoopEnd, 7000),
+                (Cut::AttackEnd, 9000),
+                (Cut::ReleaseStart, 9000),
+                (Cut::ReleaseEnd, 9500),
+            ]
+        );
+        let g4 = Cuts::of(&marked(), (67, LayerTag::Value(0)));
+        assert_eq!(g4.release, None);
+        assert_eq!(g4.fade, Some(26_000..30_000));
+        assert!(g4.points().contains(&(Cut::FadeFrom, 26_000)));
+        assert_eq!(Cuts::of(&marked(), (61, LayerTag::Value(0))).points(), []);
+    }
+
+    /// `marked()` as the file holds it.
+    fn marks() -> wav::Marks {
+        let region = |start: u32, end: u32, label: &str| wav::Region {
+            start,
+            frames: end - start,
+            label: label.into(),
+        };
+        let looped = |start: u32, end: u32| wav::Loop::forward(start, end - 1);
+        wav::Marks {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(9000, 9500, "060-b2-v22"),
+                region(20_000, 30_000, "067-b0-v00"),
+                region(26_000, 30_000, "067-b0-v00-fade"),
+            ],
+            loops: vec![looped(5000, 7000), looped(25_000, 25_100)],
+        }
+    }
+
+    #[test]
+    fn a_cut_stops_at_the_cuts_either_side_of_it() {
+        let c4 = Cuts::of(&marked(), (60, LayerTag::Value(22)));
+        let total = 100_000;
+        assert_eq!(c4.room(Cut::AttackStart, total), Some(0..=5000));
+        assert_eq!(c4.room(Cut::LoopStart, total), Some(1000..=6998));
+        assert_eq!(c4.room(Cut::LoopEnd, total), Some(5002..=9000));
+        assert_eq!(c4.room(Cut::AttackEnd, total), Some(7000..=total));
+        assert_eq!(c4.room(Cut::ReleaseStart, total), Some(0..=9499));
+        assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=total));
+        assert_eq!(c4.room(Cut::FadeFrom, total), None, "C4 v22 has no fade");
+        let g4 = Cuts::of(&marked(), (67, LayerTag::Value(0)));
+        assert_eq!(
+            g4.room(Cut::AttackEnd, total),
+            Some(26_001..=total),
+            "past its fade's start, and its loop's end"
+        );
+        assert_eq!(g4.room(Cut::FadeFrom, total), Some(20_000..=29_999));
+    }
+
+    #[test]
+    fn a_moved_cut_moves_its_region_or_loop_and_nothing_else() {
+        let c4 = (60, LayerTag::Value(22));
+        let g4 = (67, LayerTag::Value(0));
+        let at = |marks: &wav::Marks, i: usize| {
+            let region = &marks.regions[i];
+            (region.start, region.start + region.frames)
+        };
+        let moved = |hit, cut, frame| super::moved(&marks(), hit, cut, frame, 100_000).unwrap();
+
+        let out = moved(c4, Cut::AttackStart, 800);
+        assert_eq!(at(&out, 0), (800, 9000));
+        assert_eq!(out.regions[1..], marks().regions[1..]);
+        assert_eq!(out.loops, marks().loops);
+
+        let out = moved(c4, Cut::LoopEnd, 8000);
+        assert_eq!((out.loops[0].start, out.loops[0].end), (5000, 7999));
+        assert_eq!(out.regions, marks().regions);
+
+        let out = moved(c4, Cut::ReleaseStart, 8900);
+        assert_eq!(at(&out, 1), (8900, 9500));
+
+        let out = moved(g4, Cut::AttackEnd, 31_000);
+        assert_eq!(at(&out, 2), (20_000, 31_000));
+        assert_eq!(
+            at(&out, 3),
+            (26_000, 31_000),
+            "the fade ends with its attack"
+        );
+
+        let out = moved(g4, Cut::FadeFrom, 27_000);
+        assert_eq!(at(&out, 3), (27_000, 30_000));
+        assert_eq!(at(&out, 2), (20_000, 30_000));
+
+        let past = super::moved(&marks(), c4, Cut::LoopStart, 7500, 100_000);
+        assert!(
+            past.unwrap_err().contains("loop start"),
+            "past the loop's end"
+        );
+        assert!(super::moved(&marks(), c4, Cut::FadeFrom, 5000, 100_000).is_err());
+    }
+
+    #[test]
+    fn a_cut_names_itself_in_a_set_s_path() {
+        for cut in [
+            Cut::AttackStart,
+            Cut::LoopStart,
+            Cut::LoopEnd,
+            Cut::FadeFrom,
+            Cut::AttackEnd,
+            Cut::ReleaseStart,
+            Cut::ReleaseEnd,
+        ] {
+            assert_eq!(Cut::from_slug(cut.slug()), Some(cut));
+        }
+        assert_eq!(Cut::from_slug("attack"), None);
+    }
+
+    #[test]
+    fn the_hit_shows_whole_with_a_margin_and_zooms_to_50_ms() {
+        let (rate, total) = (1000.0, 100_000.0);
+        let cuts = Cuts::of(&marked(), (60, LayerTag::Value(22)));
+        let mut close = Close::default();
+        // 8.5 s of cuts: 10% is 850 frames each side.
+        assert_eq!(close.shown(&cuts, total, rate), 150.0..10_350.0);
+        for _ in 0..20 {
+            close.zoom(0.5, &cuts, total, rate);
+        }
+        let shown = close.shown(&cuts, total, rate);
+        assert_eq!(shown.end - shown.start, NARROWEST * rate);
+        close.fit_loop(&cuts, total, rate);
+        assert_eq!(close.shown(&cuts, total, rate), 4000.0..8000.0);
+    }
+}

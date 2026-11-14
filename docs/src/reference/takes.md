@@ -12,6 +12,11 @@ note's hits within `--min-layer-gap` dB of a louder one are dropped, and the res
 spread evenly in dB. With `--order played`, the first hits played are kept, the
 first the loudest.
 
+A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
+of a folder holds its note for most of its length, so its floor is the mean level of
+its quietest half second instead, and only its loudest hit counts. A folder's hits
+are sorted by pitch before their notes are named, so each has its neighbors to go by.
+
 A hit standing less than 54 dB over the floor is left out: leveled with the others,
 its hiss would come up with it. Each kept hit becomes an attack, from its strike to
 its key-up, and a release from the key-up. A key-off that stands clear of neither

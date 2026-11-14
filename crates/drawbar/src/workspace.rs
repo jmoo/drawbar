@@ -3288,6 +3288,11 @@ impl Workspace {
     }
 
     /// The picked WAVs waiting on their root keys, for the dialog to edit.
+    /// Start a draft of `making` from `files` held already, as if picked from disk.
+    pub fn draft_from(&mut self, making: Making, files: Vec<(String, Vec<u8>)>) {
+        self.draft = Draft::plan(making, files);
+    }
+
     pub fn draft_mut(&mut self) -> Option<&mut Draft> {
         self.draft.as_mut()
     }

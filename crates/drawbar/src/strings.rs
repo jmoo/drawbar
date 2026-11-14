@@ -580,6 +580,7 @@ pub fn fitting(fits: usize, of: usize, product: &str) -> Option<String> {
 /// prefixed.
 pub fn kind_word(kind: Kind, qualifier: Option<Qualifier>) -> String {
     match qualifier {
+        Some(Qualifier::Processed) => format!("{} (processed)", kind.chip()),
         Some(qualifier) => format!("{} {}", qualifier.label(), kind.chip()),
         None => kind.chip().to_string(),
     }

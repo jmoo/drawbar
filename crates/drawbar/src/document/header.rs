@@ -236,6 +236,8 @@ pub enum Click {
     Send(ObjectClass, Location),
     /// Build this project into the instrument it describes.
     Build,
+    /// Mark this take's samples.
+    Detect,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
@@ -253,6 +255,11 @@ pub struct Extras {
     /// naming programs the instrument does not have where the list says.
     pub state: Option<StateLine>,
     pub loud: Option<Loud>,
+    /// The too-quiet limit Detect uses, in dB, beside the loud action of a take.
+    pub limit: Option<f64>,
+    /// A take's **Build piano library…**, right of Detect: whether the take marks
+    /// samples to build from.
+    pub piano: Option<bool>,
 }
 
 /// One cell of the identity row: a MICRO-caps label and the value beside it.
@@ -297,6 +304,11 @@ pub(super) struct Clicked {
     pub export: bool,
     pub send: Option<SendBack>,
     pub build: bool,
+    pub detect: bool,
+    /// Build piano library… was clicked.
+    pub piano: bool,
+    /// The too-quiet limit, where it was changed.
+    pub limit: Option<f64>,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
@@ -347,6 +359,22 @@ pub(super) fn ui(
             ui.data_mut(|data| data.insert_temp(key, learned));
             if restage {
                 ui.ctx().request_discard("header restaged");
+            }
+            // A take's Detect and its limit: a row of their own at the left, so the
+            // top row keeps its name, size and state on one line.
+            if facts.extras.limit.is_some() {
+                let line = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width(), HEIGHT - 8.0),
+                );
+                let mut under = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(line)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                under.spacing_mut().item_spacing.x = GAP;
+                take_row(&mut under, entity, facts, stage, &mut act);
+                ui.advance_cursor_after_rect(under.min_rect().union(line));
             }
             if !cells.is_empty() {
                 row(ui, &cells, stage);
@@ -503,43 +531,9 @@ fn right(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    let own = action(entity, facts.device);
-    let loud = facts.extras.loud.as_ref().unwrap_or(&own);
-    let label = match stage {
-        Stage::Narrow => &loud.short,
-        _ => &loud.label,
-    };
-    let (stroke, mark, ink) = match loud.tone {
-        Tone::Ready => (accent(&visuals), accent(&visuals), visuals.text_color()),
-        Tone::Blocked => (warn(&visuals), warn(&visuals), visuals.text_color()),
-        Tone::Idle => (visuals.widgets.noninteractive.bg_stroke.color, quiet, quiet),
-    };
-    let clicked = pill(
-        ui,
-        Pill {
-            glyph: Some((loud.glyph, LOUD, mark)),
-            label: Some(label),
-            ink,
-            mono: false,
-            stroke,
-            dashed: loud.tone == Tone::Idle,
-            pad: 8.0,
-            height: CONTROL,
-            live: loud.tone == Tone::Ready,
-        },
-    )
-    .on_hover_text(&loud.hint)
-    .clicked();
-    match (clicked, loud.click) {
-        (true, Click::Send(class, at)) => {
-            act.send = Some(SendBack {
-                id: entity.id,
-                class,
-                at,
-            })
-        }
-        (true, Click::Build) => act.build = true,
-        (false, _) | (true, Click::Nothing) => {}
+    // ⚠️ A take's Detect and its limit have a row of their own, under this one.
+    if facts.extras.limit.is_none() {
+        loud(ui, entity, facts, stage, act);
     }
 
     // Right to left: Export is drawn first so that Revert sits to its left.
@@ -592,6 +586,122 @@ fn right(
     if facts.faces.len() > 1 {
         rule(ui);
         act.face = segments(ui, facts, stage);
+    }
+}
+
+/// The label of a take's button that starts a piano library from it.
+pub const BUILD_PIANO: &str = "Build piano library…";
+
+/// A take's row under the strip, left to right: Detect, "Skip notes [54 dB] or less
+/// over noise", and Build piano library….
+fn take_row(
+    ui: &mut egui::Ui,
+    entity: &LocalEntity,
+    facts: &Facts<'_>,
+    stage: Stage,
+    act: &mut Clicked,
+) {
+    let visuals = ui.visuals().clone();
+    let quiet = caption(&visuals);
+    loud(ui, entity, facts, stage, act);
+    if let Some(limit) = facts.extras.limit {
+        let mut held = limit;
+        let hint = "Detect skips a note standing this little over the take's noise: the \
+                    build raises every layer to one level, and a quiet note's hiss rises \
+                    with it";
+        ui.label(egui::RichText::new("Skip notes").color(quiet))
+            .on_hover_text(hint);
+        let changed = ui
+            .add(
+                egui::DragValue::new(&mut held)
+                    .range(0.0..=90.0)
+                    .speed(0.5)
+                    .fixed_decimals(0)
+                    .suffix(" dB"),
+            )
+            .on_hover_text(hint)
+            .changed();
+        ui.label(egui::RichText::new("or less over noise").color(quiet))
+            .on_hover_text(hint);
+        if changed {
+            act.limit = Some(held);
+        }
+    }
+    if let Some(marks) = facts.extras.piano {
+        let why = match marks {
+            true => "opens New ▸ Piano library with this take in it, as it is now",
+            false => "Detect first, or mark the take's samples by hand",
+        };
+        act.piano = pill(
+            ui,
+            Pill {
+                glyph: Some((Glyph::Piano, SMALL, quiet)),
+                label: Some(BUILD_PIANO),
+                ink: match marks {
+                    true => visuals.text_color(),
+                    false => quiet,
+                },
+                mono: false,
+                stroke: visuals.widgets.noninteractive.bg_stroke.color,
+                dashed: !marks,
+                pad: 7.0,
+                height: CONTROL,
+                live: marks,
+            },
+        )
+        .on_hover_text(why)
+        .clicked();
+    }
+}
+
+/// The loud action.
+fn loud(
+    ui: &mut egui::Ui,
+    entity: &LocalEntity,
+    facts: &Facts<'_>,
+    stage: Stage,
+    act: &mut Clicked,
+) {
+    let visuals = ui.visuals().clone();
+    let quiet = caption(&visuals);
+    let own = action(entity, facts.device);
+    let loud = facts.extras.loud.as_ref().unwrap_or(&own);
+    let label = match stage {
+        Stage::Narrow => &loud.short,
+        _ => &loud.label,
+    };
+    let (stroke, mark, ink) = match loud.tone {
+        Tone::Ready => (accent(&visuals), accent(&visuals), visuals.text_color()),
+        Tone::Blocked => (warn(&visuals), warn(&visuals), visuals.text_color()),
+        Tone::Idle => (visuals.widgets.noninteractive.bg_stroke.color, quiet, quiet),
+    };
+    let clicked = pill(
+        ui,
+        Pill {
+            glyph: Some((loud.glyph, LOUD, mark)),
+            label: Some(label),
+            ink,
+            mono: false,
+            stroke,
+            dashed: loud.tone == Tone::Idle,
+            pad: 8.0,
+            height: CONTROL,
+            live: loud.tone == Tone::Ready,
+        },
+    )
+    .on_hover_text(&loud.hint)
+    .clicked();
+    match (clicked, loud.click) {
+        (true, Click::Send(class, at)) => {
+            act.send = Some(SendBack {
+                id: entity.id,
+                class,
+                at,
+            })
+        }
+        (true, Click::Build) => act.build = true,
+        (true, Click::Detect) => act.detect = true,
+        (false, _) | (true, Click::Nothing) => {}
     }
 }
 

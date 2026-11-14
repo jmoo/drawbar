@@ -20,11 +20,14 @@ use crate::strings;
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, VerifyState, Workspace};
 
+mod adding;
 mod advanced;
+pub(crate) mod audition;
 pub mod capability;
 pub mod controls;
 mod field;
 mod header;
+mod hit;
 pub mod keys;
 mod panel;
 pub(crate) mod piano;
@@ -32,6 +35,7 @@ mod project;
 pub(crate) mod sample;
 mod setlist;
 mod table;
+mod take;
 pub(crate) mod text;
 mod verbatim;
 pub(crate) mod wav;
@@ -173,6 +177,8 @@ pub struct Wants {
     pub keep: bool,
     /// The header's build of this project.
     pub build: bool,
+    /// The header's Revert, which asks first.
+    pub revert: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -186,6 +192,8 @@ enum Asked {
     Root(piano::Ask),
     /// Play the open WAV, or stop it.
     Audition,
+    /// Play the open take's picked sample as the instrument will, as its controls ask.
+    Hear(audition::Ask),
     /// The header's Export, offered by a body with nothing to edit.
     Export,
     Open(crate::browser::Item),
@@ -230,7 +238,15 @@ impl Opened {
     ///
     /// ⚠️ Reading a WAV copies every sample, so it happens once here and never per
     /// frame.
-    fn new(asset: Asset<'_>, view: bool, renaming: (Option<String>, Option<String>)) -> Opened {
+    ///
+    /// A WAV left for another tab comes back as `parked`, with its history and the
+    /// noise found for it.
+    fn new(
+        asset: Asset<'_>,
+        view: bool,
+        renaming: (Option<String>, Option<String>),
+        parked: Option<wav::State>,
+    ) -> Opened {
         let entity = asset.entity;
         let (name, variant) = header::boxes(entity, asset.shape, view, renaming);
         Opened {
@@ -241,7 +257,7 @@ impl Opened {
             paths: std::collections::HashMap::new(),
             error: None,
             wav: match asset.shape {
-                Shape::Wav => Some(wav::State::new(entity)),
+                Shape::Wav => Some(parked.unwrap_or_else(|| wav::State::new(entity))),
                 Shape::Fields
                 | Shape::SetList
                 | Shape::Sample
@@ -266,6 +282,10 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
+    /// The WAV documents left for another tab, so their undo and the noise found for
+    /// them outlive the switch. Only those still in a tab are kept; see
+    /// [`Document::keep_wavs`].
+    parked: std::collections::HashMap<u64, wav::State>,
     /// The Advanced table's filter and selected cell. One table serves every tab; see
     /// [`Advanced::leave`].
     advanced: Advanced,
@@ -273,6 +293,8 @@ pub struct Document {
     audio: sample::Cache,
     /// The sounding zones, and the audio backend that plays them.
     player: crate::audio::Player,
+    /// Edits the open document's cards in the dock asked for, applied with its own.
+    pub(crate) docked: Sets,
     /// The piano library's plan, the facts it is based on, and its decoded strokes.
     ///
     /// ⚠️ Not tied to one document. An apply runs on its own thread, and the acts it
@@ -332,7 +354,14 @@ impl Document {
         let shape = asset.shape;
 
         if self.opened() != Some(id) {
-            self.open = Some(Opened::new(asset, viewing, self.renaming(asset.entity)));
+            self.park();
+            let parked = self.parked.remove(&id);
+            self.open = Some(Opened::new(
+                asset,
+                viewing,
+                self.renaming(asset.entity),
+                parked,
+            ));
             self.advanced.leave();
             // ⚠️ Leaving the tab stops playback: a zone still playing over another
             // document has no control on screen to stop it.
@@ -401,12 +430,20 @@ impl Document {
                 },
                 None => header::Extras::default(),
             },
+            Shape::Wav => match self.open.as_ref().and_then(|open| open.wav.as_ref()) {
+                Some(held) if !viewing => header::Extras {
+                    loud: Some(wav::detect_loud(held)),
+                    limit: Some(held.detect.limit),
+                    piano: Some(held.marks_samples()),
+                    ..header::Extras::default()
+                },
+                _ => extras(asset, device, workspace, pending),
+            },
             Shape::Fields
             | Shape::SetList
             | Shape::Sample
             | Shape::Text
             | Shape::Verbatim
-            | Shape::Wav
             | Shape::Undecoded => extras(asset, device, workspace, pending),
         };
 
@@ -433,6 +470,14 @@ impl Document {
             &mut sets,
         );
         self.views.insert(id, act.face.unwrap_or(face));
+        if let Some(held) = open.wav.as_mut() {
+            if let Some(limit) = act.limit {
+                held.detect.limit = limit;
+            }
+            if act.detect {
+                held.start_detect(ui.ctx());
+            }
+        }
 
         let mut wants = Wants {
             send: act.send,
@@ -526,7 +571,13 @@ impl Document {
                 Asked::Export => self.export(ui.ctx(), id, workspace, log),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
-                Asked::Audition => self.audition(id, workspace, log),
+                Asked::Audition => self.audition(id, log),
+                Asked::Hear(ask) => {
+                    let player = &mut self.player;
+                    if let Some(held) = self.open.as_mut().and_then(|open| open.wav.as_mut()) {
+                        refused(audition::hear(ask, held, player, id), log, "sample");
+                    }
+                }
             }
         }
         if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
@@ -544,13 +595,20 @@ impl Document {
         if act.export {
             self.export(ui.ctx(), id, workspace, log);
         }
+        if act.piano {
+            // The take as it is now, unsaved edits and all, as if picked from disk.
+            if let Some(held) = workspace.get(id) {
+                let files = vec![(held.name.clone(), held.bytes.to_vec())];
+                workspace.draft_from(crate::newproject::Making::Piano, files);
+            }
+        }
         if act.revert {
-            workspace.revert(id, log);
-            self.piano.forget(id);
-            // Reopened on the next frame, because every box holds a reverted edit.
-            self.open = None;
+            // Asked first; the revert runs as an act, in [`Document::settle`].
+            wants.revert = true;
             return wants;
         }
+        // The take's cards in the dock ran earlier this frame.
+        sets.append(&mut self.docked);
         if !sets.is_empty() {
             let outcome = self.apply(id, sets, workspace, log);
             if typed {
@@ -647,6 +705,7 @@ impl Document {
     /// Let go of what is kept about an asset that has left the workspace.
     pub fn forget(&mut self, id: u64) {
         self.views.remove(&id);
+        self.parked.remove(&id);
         self.piano.forget(id);
         self.samples.forget(id);
     }
@@ -682,7 +741,14 @@ impl Document {
             // removed, and an edit over them would edit nothing.
             if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
                 self.piano.forget(*id);
+                self.parked.remove(id);
                 self.samples.forget(*id);
+            }
+            // Reopened on the next frame, because every box holds a reverted edit.
+            if let crate::browser::Act::Revert(id) = &act {
+                if self.open.as_ref().is_some_and(|open| open.id == *id) {
+                    self.open = None;
+                }
             }
             let carried = act.carries(queue);
             if let Some(act) = self.save_first(act, &carried, workspace, log) {
@@ -840,8 +906,26 @@ impl Document {
     /// ⚠️ A zone keeps sounding until something stops it, and the stop control is on the
     /// document. With no document there is nothing to click.
     pub fn leave(&mut self) {
-        self.open = None;
+        self.park();
         self.player.stop();
+    }
+
+    /// Close the open document, keeping a WAV's state for when its tab is shown again.
+    fn park(&mut self) {
+        if let Some(Opened {
+            id,
+            wav: Some(held),
+            ..
+        }) = self.open.take()
+        {
+            self.parked.insert(id, held);
+        }
+    }
+
+    /// Let go of the WAV documents whose tabs are closed: each holds its whole take.
+    pub fn keep_wavs(&mut self, open: impl IntoIterator<Item = u64>) {
+        let open: std::collections::HashSet<u64> = open.into_iter().collect();
+        self.parked.retain(|id, _| open.contains(id));
     }
 
     /// The body this shape draws.
@@ -892,31 +976,51 @@ impl Document {
         }
     }
 
-    fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
-        let playing = self.player.sounds((id, 0));
-        let held = self.open.as_mut()?.wav.as_mut()?;
-        wav::ui(ui, held, playing, sets).then_some(Asked::Audition)
+    /// When the open document's own last edit not undone, and its last undo, were, on
+    /// the app's timeline of Undo and Redo, with what Undo and Redo would name them.
+    pub fn timeline(&self) -> (crate::timeline::Held, Option<String>, Option<String>) {
+        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
+            return Default::default();
+        };
+        (
+            held.timeline(),
+            held.last_step().map(|step| format!("Undo {}", step.what)),
+            held.last_redo().map(|step| format!("Redo {}", step.what)),
+        )
     }
 
-    /// Play the open WAV through the app's player, or stop it where it is playing.
-    fn audition(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
-        let Some(pcm) = self
-            .open
-            .as_ref()
-            .and_then(|open| open.wav.as_ref())
-            .and_then(wav::State::pcm)
-        else {
+    /// Undo or redo the open document's own last edit, with this frame's edits.
+    pub fn step(&mut self, redo: bool) {
+        let path = if redo { wav::REDO } else { wav::UNDO };
+        self.docked.push((path.to_string(), String::new()));
+    }
+
+    fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
+        let player = &self.player;
+        let playing = player.sounds((id, 0));
+        let held = self.open.as_mut()?.wav.as_mut()?;
+        match wav::ui(ui, held, playing, |zone| player.played((id, zone)), sets) {
+            (true, _) => Some(Asked::Audition),
+            (false, Some(ask)) => Some(Asked::Hear(ask)),
+            (false, None) => None,
+        }
+    }
+
+    /// Play the open WAV through the app's player, or the hit picked in it, or stop it
+    /// where it is playing.
+    ///
+    /// Played as float, whatever the file stores: a 24-bit take is heard at its own
+    /// depth, not rounded to the 16 bits a library holds.
+    fn audition(&mut self, id: u64, log: &mut Log) {
+        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
             return;
         };
-        hear(
-            &mut self.player,
-            workspace,
-            log,
-            (id, 0),
-            (&pcm.samples, pcm.channels, pcm.rate),
-            Hear::Play,
-            "WAV",
-        );
+        let (Some(audio), Some(heard)) = (held.audio(), held.heard()) else {
+            return;
+        };
+        let clock = audio.rate as f32 / codec::FIELD_RATE as f32;
+        let played = self.player.toggle((id, 0), heard, audio.channels, clock);
+        refused(played, log, "WAV");
     }
 
     fn sample_body(
@@ -1260,6 +1364,9 @@ impl Document {
             return Ok(());
         };
         let (before, edited) = (entity.stamp, shape(entity));
+        let mut gained = None;
+        // A WAV's edit, undo or redo to note.
+        let mut stepped: Option<wav::Stepped> = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
             if let Err(why) = self.samples.take(id, file, index, &sets) {
                 log.error(why.clone());
@@ -1282,16 +1389,52 @@ impl Document {
             Shape::Piano => self.piano.take(&sets).map(|()| None),
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
             Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
-            Shape::Wav => wav::apply(&entity.bytes, &sets).map(|(out, clipped)| {
-                if clipped > 0 {
-                    log.warn(format!(
-                        "{}: {} clipped",
-                        entity.name,
-                        strings::counted(clipped, "sample", "samples")
-                    ));
+            Shape::Wav => {
+                let held = self
+                    .open
+                    .as_ref()
+                    .filter(|open| open.id == id)
+                    .and_then(|open| open.wav.as_ref());
+                let original = held.map_or(&entity.bytes[..], wav::State::original);
+                let asked = |name: &str| sets.iter().any(|(path, _)| path == name);
+                let (undo, redo) = (asked(wav::UNDO), asked(wav::REDO));
+                let applied = held.map_or(0.0, wav::State::applied);
+                let back = match (undo, redo) {
+                    (true, _) => held.and_then(wav::State::last_step),
+                    (_, true) => held.and_then(wav::State::last_redo),
+                    _ => None,
+                };
+                match (undo || redo, back) {
+                    (true, Some(step)) => wav::restored(original, step).map(|out| {
+                        gained = Some(step.gain);
+                        let back = wav::Step::back(&entity.bytes, applied, step);
+                        stepped = Some(match undo {
+                            true => wav::Stepped::Undone(back),
+                            false => wav::Stepped::Redone(back),
+                        });
+                        Some(out)
+                    }),
+                    (true, None) => Err(match undo {
+                        true => "there is no edit to undo".to_string(),
+                        false => "there is no edit to make again".to_string(),
+                    }),
+                    (false, _) => wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
+                        if let (Some(db), Some(Ok(Some(clipped)))) =
+                            (db, held.zip(db).map(|(held, db)| held.clipping(db)))
+                        {
+                            log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
+                        }
+                        // A moved cut keeps the gain the bytes hold.
+                        gained = db.or(Some(applied));
+                        stepped = Some(wav::Stepped::Made(wav::Step::before(
+                            &entity.bytes,
+                            applied,
+                            &sets,
+                        )));
+                        Some(out)
+                    }),
                 }
-                Some(out)
-            }),
+            }
             Shape::Fields | Shape::Verbatim | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
             }
@@ -1309,6 +1452,21 @@ impl Document {
         // bodies are compared.
         if let Some(out) = made {
             workspace.replace_bytes(id, out, log);
+        }
+        if let (Some(db), Some(held)) = (gained, workspace.get(id)) {
+            let stamp = held.stamp;
+            let open = self.open.as_mut().filter(|open| open.id == id);
+            if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
+                state.made(stamp, db);
+                // ⚠️ Only an edit that changed the bytes is one to undo.
+                let undid = matches!(
+                    stepped,
+                    Some(wav::Stepped::Undone(_) | wav::Stepped::Redone(_))
+                );
+                if let Some(step) = stepped.filter(|_| undid || stamp != before) {
+                    state.stepped(step);
+                }
+            }
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
             if let Some(decoded) = held.entity.as_deref() {
@@ -1435,6 +1593,11 @@ fn hear(
             return;
         }
     };
+    refused(played, log, what);
+}
+
+/// Say so where the player refused to sound `what`.
+fn refused(played: Result<(), String>, log: &mut Log, what: &str) {
     if let Err(why) = played {
         crate::telemetry::fault("audio", "refused");
         log.error(why);
@@ -1758,6 +1921,14 @@ mod tests {
         fn twice(&mut self) -> Vec<String> {
             self.frame(Vec::new());
             self.frame(Vec::new())
+        }
+
+        /// Every word one frame of the document puts on screen.
+        fn words(&mut self) -> Vec<String> {
+            self.painted(Vec::new())
+                .into_iter()
+                .map(|word| word.text)
+                .collect()
         }
     }
 
@@ -3264,19 +3435,51 @@ mod tests {
     fn a_wav_document_offers_what_its_audio_allows() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         let said = open.twice();
-        for offered in ["Play", "Gain", wav::APPLY_GAIN, "44100 Hz · mono · 1.000 s"] {
+        for offered in [
+            "Play",
+            "Gain",
+            wav::APPLY_GAIN,
+            "44100 Hz · mono · 16-bit · 1.000 s",
+            "raw: no regions",
+        ] {
             assert!(
                 said.iter().any(|word| word == offered),
                 "{offered}: {said:?}"
             );
         }
 
-        let mut deep = wav_bytes();
-        deep[34] = 24;
-        let mut open = Open::file("Marimba hit.wav", deep);
+        let take = nord_format::wav::Audio {
+            rate: 48_000,
+            channels: 2,
+            samples: vec![0.25; 96_000],
+        };
+        for (encoding, stated) in [
+            (
+                nord_format::wav::Encoding::Int { bits: 24 },
+                "48000 Hz · stereo · 24-bit · 1.000 s",
+            ),
+            (
+                nord_format::wav::Encoding::Float { bits: 32 },
+                "48000 Hz · stereo · 32-bit float · 1.000 s",
+            ),
+        ] {
+            let bytes = nord_format::wav::write(&take, encoding).unwrap();
+            let mut open = Open::file("Wurli take.wav", bytes);
+            let said = open.twice();
+            for offered in ["Play", "Gain", wav::APPLY_GAIN, stated] {
+                assert!(
+                    said.iter().any(|word| word == offered),
+                    "{offered}: {said:?}"
+                );
+            }
+        }
+
+        let mut odd = wav_bytes();
+        odd[34] = 12;
+        let mut open = Open::file("Marimba hit.wav", odd);
         let said = open.twice();
         assert!(
-            said.iter().any(|word| word.contains("24-bit")),
+            said.iter().any(|word| word.contains("12-bit")),
             "it says why: {said:?}"
         );
         for refused in ["Play", "Gain", wav::APPLY_GAIN] {
@@ -3288,7 +3491,7 @@ mod tests {
     }
 
     /// The gain counts what it would clip before it is applied, lands on the working copy
-    /// when applied, and Revert takes it back.
+    /// when applied and stays shown as the total, and Revert takes it back.
     #[test]
     fn an_applied_gain_is_an_edit_that_reverts() {
         let bytes = wav_bytes();
@@ -3300,10 +3503,7 @@ mod tests {
         open.frame(Vec::new());
         open.state().wav.as_mut().unwrap().gain = 24.0;
         let said = open.frame(Vec::new());
-        assert!(
-            said.iter().any(|word| word.ends_with("samples clip")),
-            "{said:?}"
-        );
+        assert!(said.iter().any(|word| word == "it clips"), "{said:?}");
 
         open.state().wav.as_mut().unwrap().gain = 6.0;
         let said = open.painted(Vec::new());
@@ -3315,15 +3515,406 @@ mod tests {
         // 11999 at 10^(6/20) = 1.995 times is 23941.
         assert_eq!(peak(&bytes), Some(11_999));
         assert_eq!(peak(&open.entity().bytes), Some(23_941));
-        assert_eq!(open.state().wav.as_ref().unwrap().gain, 0.0);
+        open.frame(Vec::new());
+        assert_eq!(
+            open.state().wav.as_ref().unwrap().gain,
+            6.0,
+            "the total stays"
+        );
+
+        // A second gain is a new total against the original, not 6 dB more.
+        open.state().wav.as_mut().unwrap().gain = 1.5;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        // 11999 at 10^(1.5/20) = 1.1885 times is 14261.
+        assert_eq!(peak(&open.entity().bytes), Some(14_261));
 
         open.act(vec![crate::browser::Act::Revert(open.id)]);
         assert!(!open.entity().is_unsaved());
         assert!(open.entity().bytes == bytes);
         open.frame(Vec::new());
         let held = open.state().wav.as_ref().unwrap();
-        assert_eq!(held.pcm().map(|pcm| pcm.samples.len()), Some(44_100));
+        assert_eq!(held.audio().map(|audio| audio.samples.len()), Some(44_100));
+        assert_eq!(held.gain, 0.0, "reverted to the original");
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
+    }
+
+    /// A cut point dragged on the hit's lane moves in the file's marks once let go, and
+    /// the samples stay as they were.
+    #[test]
+    fn a_dragged_cut_point_moves_in_the_file() {
+        use nord_format::wav as prep;
+        let rate = 8000;
+        let audio = prep::Audio {
+            rate,
+            channels: 1,
+            samples: vec![0.1; rate as usize * 10],
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let region = |start: u32, frames: u32, label: &str| prep::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = prep::Marks {
+            regions: vec![
+                region(rate, 3 * rate, "060-b0-v22"),
+                region(4 * rate, rate / 2, "060-b2-v22"),
+            ],
+            loops: vec![prep::Loop::forward(2 * rate, 2 * rate + rate / 2 - 1)],
+        };
+        let bytes = prep::with_marks(&bytes, &marks).unwrap();
+        let mut open = Open::file("take.wav", bytes.clone());
+        open.twice();
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(testing::where_(&said, "C4 v22").center()));
+        open.frame(Vec::new());
+
+        // The markers' handles, left to right: the first is the attack's start.
+        let output = open.output(Vec::new());
+        let mut handles: Vec<egui::Rect> = testing::rects(&output)
+            .into_iter()
+            .map(|shape| shape.rect)
+            .filter(|rect| rect.size() == egui::Vec2::splat(10.0))
+            .collect();
+        // Lowest of the 10-point squares: the legend's swatches sit higher, in its caption.
+        let low = handles.iter().map(|rect| rect.top()).fold(0.0, f32::max);
+        handles.retain(|rect| rect.top() == low);
+        handles.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        assert_eq!(handles.len(), 6, "{handles:?}");
+        let from = handles[0].center();
+        let to = from - egui::vec2(30.0, 0.0);
+        open.frame(vec![
+            egui::Event::PointerMoved(from),
+            testing::button(from, true),
+        ]);
+        open.frame(vec![egui::Event::PointerMoved(
+            from - egui::vec2(15.0, 0.0),
+        )]);
+        open.frame(vec![egui::Event::PointerMoved(to)]);
+        assert!(
+            open.state()
+                .wav
+                .as_ref()
+                .unwrap()
+                .close
+                .dragging(Some((
+                    60,
+                    nord_format::formats::npno::encode::LayerTag::Value(22)
+                )))
+                .is_some(),
+            "dragging the attack's start"
+        );
+        assert!(open.entity().bytes == bytes, "nothing written until let go");
+        open.frame(vec![testing::button(to, false)]);
+        open.frame(Vec::new());
+
+        let moved = prep::read_marks(&open.entity().bytes).unwrap();
+        let attack = &moved.regions[0];
+        assert!(attack.start < rate, "moved earlier: {attack:?}");
+        assert_eq!(attack.start + attack.frames, 4 * rate, "its end stays");
+        assert_eq!(moved.regions[1], marks.regions[1]);
+        assert_eq!(moved.loops, marks.loops);
+        assert!(open.entity().is_unsaved());
+        assert!(
+            prep::read(&open.entity().bytes).unwrap().samples
+                == prep::read(&bytes).unwrap().samples
+        );
+
+        // The header's Revert asks first: it reverts nothing itself.
+        let said = open.painted(Vec::new());
+        let wants = open.wants(testing::click(testing::where_(&said, "Revert").center()));
+        assert!(wants.revert);
+        assert_eq!(prep::read_marks(&open.entity().bytes).unwrap(), moved);
+
+        // A gain on top, then Undo twice: the gain goes, then the moved cut.
+        open.state().wav.as_mut().unwrap().gain = -6.0;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        open.frame(Vec::new());
+        let gained = open.entity().bytes.to_vec();
+        assert_eq!(
+            prep::read_marks(&gained).unwrap(),
+            moved,
+            "the gain keeps the cut"
+        );
+        let undo = |open: &mut Open| {
+            let said = open.painted(Vec::new());
+            open.frame(testing::click(
+                testing::where_(&said, wav::UNDO_LABEL).center(),
+            ));
+            open.frame(Vec::new());
+        };
+        undo(&mut open);
+        let held = open.state().wav.as_ref().unwrap();
+        assert_eq!((held.gain, held.applied()), (0.0, 0.0), "the gain undone");
+        assert_eq!(prep::read_marks(&open.entity().bytes).unwrap(), moved);
+        assert!(
+            prep::read(&open.entity().bytes).unwrap().samples
+                == prep::read(&bytes).unwrap().samples
+        );
+        undo(&mut open);
+        assert!(
+            open.entity().bytes == bytes,
+            "the cut undone: the file as it was"
+        );
+        assert!(!open.entity().is_unsaved());
+        assert!(open.state().wav.as_ref().unwrap().last_step().is_none());
+    }
+
+    /// A take's regions are drawn on its lane by note and layer; a click on one picks its
+    /// hit, which Selected zooms to and a gain keeps.
+    #[test]
+    fn a_take_shows_its_regions_and_a_click_picks_a_hit() {
+        use nord_format::wav as prep;
+        let audio = prep::Audio {
+            rate: 35_002,
+            channels: 2,
+            samples: vec![0.1; 2 * 35_002 * 60],
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let region = |start: u32, frames: u32, label: &str| prep::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = prep::Marks {
+            regions: vec![
+                region(35_002 * 10, 35_002 * 15, "060-b0-v22"),
+                region(35_002 * 25, 35_002 / 2, "060-b2-v22"),
+                region(35_002 * 30, 35_002 * 20, "067-b0-v00"),
+            ],
+            loops: Vec::new(),
+        };
+        let bytes = prep::with_marks(&bytes, &marks).unwrap();
+        let mut open = Open::file("Wurli take.wav", bytes);
+        let said = open.twice();
+        for shown in [
+            "TAKE",
+            "C4 v22",
+            "G4 v00",
+            take::WHOLE,
+            "2 samples · 3 regions · 0 loops",
+        ] {
+            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+        }
+
+        assert!(
+            said.iter()
+                .any(|word| word == "(select from the WAV, above)"),
+            "{said:?}"
+        );
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(testing::where_(&said, "G4 v00").center()));
+        let said = open.twice();
+        let held = open.state().wav.as_ref().unwrap();
+        assert_eq!(
+            held.heard().map(<[f32]>::len),
+            Some(2 * 35_002 * 20),
+            "Play plays the picked hit: G4 v00, 20 s of stereo"
+        );
+        for shown in ["SAMPLE", hit::WHOLE, wav::PLAY_HIT] {
+            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+        }
+        assert_eq!(
+            said.iter().filter(|word| *word == "G4 v00").count(),
+            2,
+            "named in the take and over the hit: {said:?}"
+        );
+        let picked = open.state().wav.as_ref().unwrap().view.picked;
+        assert_eq!(
+            picked,
+            Some((67, nord_format::formats::npno::encode::LayerTag::Value(0)))
+        );
+
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, take::ZOOM_IN).center(),
+        ));
+        let rate = 35_002.0;
+        let shown = open.state().wav.as_ref().unwrap().view.shown(rate * 60.0);
+        assert!(shown.end - shown.start < rate * 60.0, "zoomed in");
+
+        open.state().wav.as_mut().unwrap().gain = 6.0;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        open.frame(Vec::new());
+        let view = &open.state().wav.as_ref().unwrap().view;
+        assert_eq!(view.picked, picked, "a gain keeps the pick");
+        assert_eq!(view.shown(rate * 60.0), shown, "and the view");
+    }
+
+    /// Build piano library… starts a piano draft holding the take as it is now; on a
+    /// take that marks no sample it is shown but does nothing.
+    #[test]
+    fn build_piano_library_drafts_a_library_from_the_open_take() {
+        use nord_format::wav as prep;
+        let rate = 35_002u32;
+        let audio = prep::Audio {
+            rate,
+            channels: 1,
+            samples: (0..rate * 8)
+                .map(|i| 0.3 * (i as f32 * 0.05).sin())
+                .collect(),
+        };
+        let raw = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let mut plain = Open::file("Raw take.wav", raw.clone());
+        plain.twice();
+        let said = plain.painted(Vec::new());
+        plain.frame(testing::click(
+            testing::where_(&said, header::BUILD_PIANO).center(),
+        ));
+        assert!(
+            plain.workspace.draft_mut().is_none(),
+            "no samples, no draft"
+        );
+
+        let marks = prep::Marks {
+            regions: vec![prep::Region {
+                start: rate,
+                frames: 4 * rate,
+                label: "060-b0-v22".into(),
+            }],
+            loops: vec![],
+        };
+        let bytes = prep::with_marks(&raw, &marks).unwrap();
+        let mut open = Open::file("Wurli take.wav", bytes);
+        open.twice();
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, header::BUILD_PIANO).center(),
+        ));
+        let draft = open.workspace.draft_mut().expect("a draft");
+        assert_eq!(draft.making, crate::newproject::Making::Piano);
+        assert_eq!(draft.refusal(), None);
+    }
+
+    /// A take shows its category, the kind it is heard and built as, kept across a gain,
+    /// and the picked sample's audition under it. A WAV that marks no sample shows no
+    /// category.
+    #[test]
+    fn the_dock_auditions_the_picked_sample_as_the_take_s_kind() {
+        use nord_format::formats::npno::encode::Kind;
+        use nord_format::wav as prep;
+        let rate = 35_002u32;
+        let audio = prep::Audio {
+            rate,
+            channels: 1,
+            samples: (0..rate * 8)
+                .map(|i| 0.3 * (i as f32 * 0.05).sin())
+                .collect(),
+        };
+        let raw = prep::write(&audio, prep::Encoding::Int { bits: 24 }).unwrap();
+        let mut plain = Open::file("Raw take.wav", raw.clone());
+        plain.twice();
+        assert!(!plain.words().iter().any(|word| word == audition::CATEGORY));
+
+        let marks = prep::Marks {
+            regions: vec![
+                prep::Region {
+                    start: rate,
+                    frames: 4 * rate,
+                    label: "060-b0-v22".into(),
+                },
+                prep::Region {
+                    start: 5 * rate,
+                    frames: rate / 2,
+                    label: "060-b2-v22".into(),
+                },
+            ],
+            loops: vec![prep::Loop::forward(3 * rate, 4 * rate - 1)],
+        };
+        let bytes = prep::with_marks(&raw, &marks).unwrap();
+        let mut open = Open::file("Wurli take.wav", bytes);
+        open.twice();
+        let said = open.words();
+        for shown in [audition::CATEGORY, "Grand"] {
+            assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
+        }
+
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(testing::where_(&said, "C4 v22").center()));
+        open.twice();
+        let before = open.entity().bytes.to_vec();
+        open.document
+            .docked
+            .push((wav::KIND.to_string(), Kind::Wurlitzer.word().to_string()));
+        open.twice();
+        assert!(open.words().iter().any(|word| word == "Reed piano"));
+        let said = open.painted(Vec::new());
+        for shown in [
+            wav::PLAY_HIT,
+            audition::CLEAN_AUDIO,
+            audition::PLAY_SAMPLE,
+            audition::LOOP_WRAP,
+            audition::RELEASE_ALONE,
+        ] {
+            assert!(
+                said.iter().any(|word| word.text == shown),
+                "{shown}: {said:?}"
+            );
+        }
+        assert!(
+            open.entity().is_unsaved(),
+            "the kind is an edit, written on Save"
+        );
+        assert_eq!(
+            prep::read_settings(&open.entity().bytes)
+                .unwrap()
+                .kind
+                .as_deref(),
+            Some("wurlitzer")
+        );
+        assert_eq!(
+            prep::read(&open.entity().bytes).unwrap(),
+            prep::read(&before).unwrap(),
+            "no sample changed"
+        );
+        let held = open.state().wav.as_ref().unwrap();
+        assert_eq!(held.kind(), Kind::Wurlitzer);
+        assert!(held.clean(), "a take is cleaned unless it says not");
+        let sounding = held.sounding(None).expect("the picked sample sounds");
+        assert!(sounding.wrap().is_some(), "it loops");
+        assert!(sounding.release().is_some(), "it has a release");
+
+        open.document
+            .docked
+            .push((wav::CLEAN.to_string(), "off".to_string()));
+        open.twice();
+        assert!(!open.state().wav.as_ref().unwrap().clean());
+        assert!(
+            !open
+                .painted(Vec::new())
+                .iter()
+                .any(|word| word.text.starts_with("finding")),
+            "nothing to find for a take built as recorded"
+        );
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::UNDO_LABEL).center(),
+        ));
+        open.twice();
+        let held = open.state().wav.as_ref().unwrap();
+        assert!(held.clean(), "Undo takes the clean back");
+        assert_eq!(held.kind(), Kind::Wurlitzer, "and only that");
+
+        open.state().wav.as_mut().unwrap().gain = 3.0;
+        let said = open.painted(Vec::new());
+        open.frame(testing::click(
+            testing::where_(&said, wav::APPLY_GAIN).center(),
+        ));
+        open.twice();
+        let said = open.words();
+        assert!(
+            said.iter().any(|word| word == "Reed piano"),
+            "a gain keeps the kind: {said:?}"
+        );
     }
 
     #[test]

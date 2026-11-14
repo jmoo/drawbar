@@ -13,7 +13,8 @@ use crate::wav::{Audio, Loop, Region};
 /// What [`plan`] is told about a take.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlanOptions {
-    /// The notes played, as MIDI notes, in playing order.
+    /// The notes played, as MIDI notes, in playing order. Empty, they are found from the
+    /// hits' pitches: see [`layers::notes_of`].
     pub notes: Vec<u8>,
     /// The layers each note gets.
     pub layers: usize,
@@ -31,6 +32,10 @@ pub struct PlanOptions {
     /// one velocity. Each note's last hit is then that layer, and [`PlanOptions::layers`]
     /// and [`PlanOptions::order`] are not read.
     pub set: Option<SetLayer>,
+    /// Set for a one-note file, one of a sample set's: its floor is read on its
+    /// quietest stretch ([`detect::Floor::OneNote`]), and only its loudest hit is
+    /// planned, the others skipped.
+    pub one_note: bool,
 }
 
 /// A take's place in a set of takes, one per layer.
@@ -42,6 +47,10 @@ pub struct SetLayer {
     pub of: usize,
 }
 
+/// The [`PlanOptions::min_snr_db`] unless a caller says otherwise: soft treble hits
+/// recorded about 30 dB over the floor gave very noisy loops once leveled.
+pub const MIN_SNR_DB: f64 = 54.0;
+
 impl PlanOptions {
     pub fn new(notes: Vec<u8>, layers: usize) -> PlanOptions {
         PlanOptions {
@@ -49,11 +58,12 @@ impl PlanOptions {
             layers,
             order: Order::Loudness,
             skip: Vec::new(),
-            min_layer_gap_db: 2.0,
-            min_snr_db: 54.0,
+            min_layer_gap_db: 1.0,
+            min_snr_db: MIN_SNR_DB,
             cut: CutOptions::default(),
             sustain: SustainOptions::default(),
             set: None,
+            one_note: false,
         }
     }
 }
@@ -95,6 +105,9 @@ pub struct Plan {
     pub hum: Result<Hum, NoHum>,
     /// The take's floor with its hum taken out, in dB under full scale.
     pub floor_db: f64,
+    /// The notes the hits were assigned to, in playing order: the list given, or the one
+    /// found from their pitches.
+    pub notes: Vec<u8>,
     /// Notes of the list no hit was found for.
     pub missing: Vec<u8>,
 }
@@ -109,34 +122,54 @@ pub fn mono(audio: &Audio) -> Vec<f64> {
         .collect()
 }
 
-/// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, chooses
-/// each note's layers and cuts their strokes.
+/// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, or to the
+/// notes their pitches name where none are given, chooses each note's layers and cuts
+/// their strokes.
 ///
 /// Hits, pitch and key-ups are found on the take as recorded, and levels against the
 /// floor on the take with its hum taken out, whose floor is lower. Each attack's loop or
 /// fade is found on the attack as the build cleans it.
 pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
+    let floor_rule = match options.one_note {
+        true => detect::Floor::OneNote,
+        false => detect::Floor::Take,
+    };
     let x = detect::highpassed(mono, rate);
-    let env = Envelope::of(&x, rate);
+    let env = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&x, rate)
+    };
     let hits = detect::hits(&x, rate, &env);
     let hum = hum::find(&x, rate, &env);
     let cleaned = match &hum {
         Ok(found) => found.removed(&x, rate),
         Err(_) => x.clone(),
     };
-    let quiet = Envelope::of(&cleaned, rate);
+    let quiet = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&cleaned, rate)
+    };
     let floor = quiet.floor();
     let noise = Noise::measured(rate, hum.as_ref().ok().cloned(), &cleaned, &quiet);
 
-    let assigned = layers::assign(&hits, &options.notes, |hit| {
-        options.skip.contains(&hit.number)
-    });
+    let loudest = hits
+        .iter()
+        .reduce(|a, b| if b.level_db > a.level_db { b } else { a })
+        .map(|hit| hit.number);
+    let skipped = |hit: &Hit| {
+        options.skip.contains(&hit.number) || (options.one_note && Some(hit.number) != loudest)
+    };
+    let notes = match options.notes.is_empty() {
+        true => layers::notes_of(&hits, skipped),
+        false => options.notes.clone(),
+    };
+    let assigned = layers::assign(&hits, &notes, skipped);
     let mut planned: Vec<Planned> = hits
         .iter()
         .zip(assigned)
         .map(|(hit, assigned)| {
             let (note, warning) = match assigned {
-                Some((j, warning)) => (Some(options.notes[j]), warning),
+                Some((j, warning)) => (Some(notes[j]), warning),
                 None => (None, None),
             };
             let over_db = hit.level_db - floor;
@@ -164,7 +197,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     };
     let mut missing = Vec::new();
     let mut seen = Vec::new();
-    for &note in &options.notes {
+    for &note in &notes {
         if seen.contains(&note) {
             continue;
         }
@@ -231,6 +264,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
         hits: planned,
         hum,
         floor_db: floor,
+        notes,
         missing,
     }
 }
@@ -337,6 +371,55 @@ mod tests {
             ]
         );
         assert!(plan.missing.is_empty());
+
+        let lenient = PlanOptions {
+            min_snr_db: 25.0,
+            ..PlanOptions::new(vec![48, 55], 2)
+        };
+        let fates: Vec<Fate> = super::plan(&x, rate, &lenient)
+            .hits
+            .into_iter()
+            .map(|p| p.fate)
+            .collect();
+        assert!(
+            matches!(fates[4], Fate::Kept { .. }),
+            "a lower limit keeps it: {fates:?}"
+        );
+    }
+
+    #[test]
+    fn a_one_note_file_cut_at_its_strike_is_a_hit_with_its_release() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
+        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        assert_eq!(plan.hits.len(), 1, "{:?}", plan.hits);
+        assert_eq!(plan.hits[0].hit.onset, 0);
+        assert_eq!(plan.notes, [60]);
+        match &plan.hits[0].fate {
+            Fate::Kept { cuts, .. } => assert!(cuts.release.is_some(), "{:?}", cuts.no_release),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_take_with_no_note_list_is_planned_as_with_the_notes_its_pitches_name() {
+        let rate = 35_002;
+        let notes = [
+            (1.0, 48.0, -12.0, 3.0),
+            (4.0, 48.0, -24.0, 6.0),
+            (7.0, 48.0, -24.5, 9.0),
+            (10.0, 55.0, -14.0, 12.0),
+            (13.0, 55.0, -75.0, 15.0),
+        ];
+        let x = take(rate, 16.5, &notes, -110.0);
+        let given = plan(&x, rate, &PlanOptions::new(vec![48, 55], 2));
+        let found = plan(&x, rate, &PlanOptions::new(Vec::new(), 2));
+        assert_eq!(found.notes, [48, 55]);
+        assert_eq!(given.notes, [48, 55]);
+        let fates = |plan: &Plan| plan.hits.iter().map(|p| p.fate.clone()).collect::<Vec<_>>();
+        assert_eq!(fates(&found), fates(&given));
+        assert_eq!(found.regions(), given.regions());
+        assert_eq!(found.loops(), given.loops());
     }
 
     /// The second of a set of three takes names every note's last hit with the second

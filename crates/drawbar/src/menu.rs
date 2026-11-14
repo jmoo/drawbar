@@ -5,6 +5,7 @@
 //! read [`menus`], `DrawbarApp::offer`, and [`shortcut`], so a command is named, bound,
 //! and gated in one place.
 
+use crate::timeline::{self, Side};
 use eframe::egui;
 use nord_usb::ObjectClass;
 
@@ -492,6 +493,21 @@ pub(crate) fn covered(ctx: &egui::Context) -> bool {
 }
 
 impl DrawbarApp {
+    /// Which side of the one timeline Undo or Redo, `command`, steps: the library's
+    /// changes or the open document's own edits, whichever came last.
+    fn stepping(&self, command: Command) -> Option<Side> {
+        let library = self
+            .store
+            .as_ref()
+            .map(crate::store::Store::timeline)
+            .unwrap_or_default();
+        let (document, _, _) = self.document.timeline();
+        match command {
+            Command::Undo => timeline::undoes(library, document),
+            _ => timeline::redoes(library, document),
+        }
+    }
+
     /// What a key or the Mac's menu bar may do with `command` now: its [`Self::offer`],
     /// disabled behind a modal unless it quits or zooms, which act on no part of the
     /// window the modal covers.
@@ -587,9 +603,15 @@ impl DrawbarApp {
             }
             Command::Undo | Command::Redo => {
                 let store = self.store.as_ref();
-                let label = match command {
-                    Command::Undo => store.and_then(crate::store::Store::undo_label),
-                    _ => store.and_then(crate::store::Store::redo_label),
+                let (_, undo, redo) = self.document.timeline();
+                let label = match (command, self.stepping(command)) {
+                    (Command::Undo, Some(Side::Library)) => {
+                        store.and_then(crate::store::Store::undo_label)
+                    }
+                    (_, Some(Side::Library)) => store.and_then(crate::store::Store::redo_label),
+                    (Command::Undo, Some(Side::Document)) => undo,
+                    (_, Some(Side::Document)) => redo,
+                    (_, None) => None,
                 };
                 match label {
                     Some(label) => relabeled(label),
@@ -671,8 +693,19 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Import => acts.push(Act::OpenFiles),
-            Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
-            Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
+            Command::Undo | Command::Redo => {
+                let redo = command == Command::Redo;
+                match (self.stepping(command), redo) {
+                    (Some(Side::Document), _) => self.document.step(redo),
+                    (Some(Side::Library), false) => {
+                        self.store.iter_mut().for_each(crate::store::Store::undo)
+                    }
+                    (Some(Side::Library), true) => {
+                        self.store.iter_mut().for_each(crate::store::Store::redo)
+                    }
+                    (None, _) => {}
+                }
+            }
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
@@ -702,7 +735,7 @@ impl DrawbarApp {
                 folders.all_files = !folders.all_files;
             }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
-            Command::Revert => acts.extend(active.map(Act::Revert)),
+            Command::Revert => acts.extend(active.map(Act::AskRevert)),
             Command::Export => acts.extend(self.exports()),
             Command::CloseTab => acts.push(Act::CloseTab),
             Command::Quit => acts.push(Act::Quit),

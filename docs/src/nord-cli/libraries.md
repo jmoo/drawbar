@@ -84,7 +84,11 @@ template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
 values. Without `--kind`, the kind the takes state, as drawbar's take editor saves
 it, decides, and otherwise grand; takes that state different kinds need `--kind`.
 Each stroke decays from note-on as the instrument's own pianos of that kind do,
-faster on higher keys. In format 6, each layer is trimmed to play at the level of
+faster on higher keys. For a sound that sustains, such as organ, strings or pads,
+`--no-decay` holds every note and loop at its level, so a note has only its
+recording's own decay, and lets each release ring out its recorded tail. The
+instrument has no organ kind: build an organ, a pad or strings with
+`--kind hybrid --no-decay`. In format 6, each layer is trimmed to play at the level of
 its root's loudest layer, softer layers a little louder as that kind's are, up to 6
 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer or release needs more boost than the instrument gives at `--gain`, the whole
@@ -97,17 +101,21 @@ format 5, each stroke's level follows its layer.
 of them:
 
 ```sh
-nord piano prep take.wav --notes B1,D2,F#2,A2 --layers 4 -o regions.wav
+nord piano prep take.wav -o regions.wav
 nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
 ```
 
-Give `prep` the notes in the order you played them. Each note may be hit several
-times, loud to soft or in any order. Each hit goes to the nearest note in the list,
-and each note keeps up to `--layers` hits, spread evenly in level, or the first ones
-played with `--order played`. `--min-layer-gap` drops a hit too close in level to a
-louder one, and `--skip` leaves out hits by their number in the listing. A hit too
-quiet over the take's noise is left out. `--max-seconds` and `--release-seconds`
-limit each attack and release.
+`prep` names each hit's note by its pitch, and lists the notes it found. A note read
+an octave off the notes played either side of it is put back in line. Each note may
+be hit several times, loud to soft or in any order. Where the pitches mislead, give
+the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then goes
+to the nearest note in the list. Each note keeps up to `--layers` hits, spread evenly
+in level, or the first ones played with `--order played`. `--min-layer-gap`, 1 dB
+unless you change it, drops a
+hit too close in level to a louder one, and `--skip` leaves out hits by their number
+in the listing. A hit less than 54 dB over the take's noise is left out as too
+quiet, since the build raises it and its hiss with it; `--min-snr` sets that limit.
+`--max-seconds` and `--release-seconds` limit each attack and release.
 
 The listing shows every hit: its note and pitch, its level, what became of it, and
 how it sustains. A note still sounding at its key-up is looped, with a warning where
@@ -117,13 +125,26 @@ Or record one take per velocity layer, each playing every note once, and give th
 loudest first:
 
 ```sh
-nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
+nord piano prep loud.wav medium.wav soft.wav -o regions/
 nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
 ```
 
 Each take is one layer, whatever its level, so you may raise the gain for the softer
 ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
 12 of the second take.
+
+Or give a folder of one-note files, such as a free sample set, its subfolders too:
+
+```sh
+nord piano prep "Upright Piano/" -o regions/
+```
+
+Each file's loudest hit is its note, named by its pitch across the whole set, so file
+names are never read. A note's files become its layers by level, up to `--layers`,
+and a file within `--min-layer-gap` dB of a louder one, such as a second round-robin,
+is left out. Each file placed is written under `-o` at its own path, with the build
+command for them all. A file with no hit, no pitch, or too little level over its
+own noise is listed and left out.
 
 `prep` never changes a take. A take at another rate is resampled to the instrument's
 35,002 Hz in `-o`, with its other chunks. A take already at 35,002 Hz may be its own
