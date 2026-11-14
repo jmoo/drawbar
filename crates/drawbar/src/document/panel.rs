@@ -12,6 +12,12 @@ use crate::strings;
 /// The field the piano lookup decorates, and so the section it belongs in.
 pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 
+/// The panel's Type dial, which picks the Pianos bank the Model dial counts in.
+pub const PIANO_CATEGORY: &str = "piano_panel.category";
+
+/// The id of the piano the program plays.
+pub const PIANO_ID: &str = "piano_panel.id";
+
 /// What is known about the piano a program plays, and what it would take to know more.
 ///
 /// ⚠️ The file stores the piano's id and, separately, the panel's category and Model dial
