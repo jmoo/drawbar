@@ -11,10 +11,16 @@ use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
 use crate::icon::{painted, sized, Glyph};
+use crate::link::{Held, Keyboard};
+use crate::queue::Queue;
+use crate::workspace::Workspace;
 
 /// Entries kept before the oldest is dropped. A session that opens a hundred files
 /// still fits; a runaway loop cannot grow the app without bound.
 const CAPACITY: usize = 500;
+
+/// The most bytes one entry keeps for its Undo.
+pub const KEPT: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -38,6 +44,64 @@ pub struct Entry {
     pub text: String,
     /// Seconds since the app started.
     pub at: f64,
+    /// What its Undo button takes back, until it is pressed.
+    pub undo: Option<Undo>,
+    /// Counts entries from the session's first, so one can be found after older ones go.
+    serial: u64,
+}
+
+/// What drawbar did on its own, as the one change that takes it back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Undo {
+    /// Files linked on their own: unlink each, and keep it off that keyboard.
+    Unlink { keyboard: Keyboard, ids: Vec<u64> },
+    /// A save that queued a send: take the file out of the queue.
+    Unqueue(u64),
+    /// Files brought in from the keyboard, each with the bytes it was saved as before.
+    Restore(Vec<(u64, Vec<u8>)>),
+    /// A link that followed its sound to another slot: the link it had before.
+    Relink {
+        id: u64,
+        keyboard: Keyboard,
+        held: Held,
+    },
+}
+
+impl Undo {
+    /// Take the change back. A file that is gone is left alone, and so is one that holds
+    /// unsaved edits, which putting its old bytes back would lose.
+    pub fn perform(self, workspace: &mut Workspace, queue: &mut Queue, log: &mut Log) {
+        match self {
+            Undo::Unlink { keyboard, ids } => {
+                for id in ids {
+                    workspace.unlink(id, &keyboard, true);
+                }
+            }
+            Undo::Unqueue(id) => queue.forget(id),
+            Undo::Restore(kept) => {
+                for (id, bytes) in kept {
+                    if workspace.get(id).is_none_or(|entity| entity.is_unsaved()) {
+                        continue;
+                    }
+                    workspace.replace_bytes(id, bytes, log);
+                    workspace.mark_saved(id);
+                }
+            }
+            Undo::Relink { id, keyboard, held } => {
+                if workspace.get(id).is_some() {
+                    workspace.link(id, &keyboard, held);
+                }
+            }
+        }
+    }
+
+    /// The bytes it keeps.
+    pub fn weight(&self) -> usize {
+        match self {
+            Undo::Restore(kept) => kept.iter().map(|(_, bytes)| bytes.len()).sum(),
+            Undo::Unlink { .. } | Undo::Unqueue(_) | Undo::Relink { .. } => 0,
+        }
+    }
 }
 
 pub struct Log {
@@ -49,6 +113,10 @@ pub struct Log {
     clock: f64,
     /// The sentence the status strip shows when nothing is running.
     status: (Level, String),
+    /// The serial the next entry takes.
+    next: u64,
+    /// An Undo pressed in the popover, with the line it was on, until taken.
+    pressed: Option<(Undo, String)>,
 }
 
 impl Default for Log {
@@ -57,6 +125,8 @@ impl Default for Log {
             entries: VecDeque::new(),
             clock: 0.0,
             status: (Level::Info, "Ready.".to_string()),
+            next: 0,
+            pressed: None,
         }
     }
 }
@@ -105,7 +175,47 @@ impl Log {
             level,
             text: text.into(),
             at: self.clock,
+            undo: None,
+            serial: self.next,
         });
+        self.next += 1;
+    }
+
+    /// Give the newest entry an Undo, unless it would keep more than [`KEPT`] bytes.
+    /// Returns the entry's serial, for [`Log::entry_mut`].
+    pub fn offer(&mut self, undo: Undo) -> Option<u64> {
+        let entry = self.entries.back_mut()?;
+        entry.undo = (undo.weight() <= KEPT).then_some(undo);
+        Some(entry.serial)
+    }
+
+    /// The entry [`Log::offer`] returned `serial` for, while the log still holds it.
+    pub fn entry_mut(&mut self, serial: u64) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|entry| entry.serial == serial)
+    }
+
+    /// Take back what the Undo pressed in the popover since the last call undoes, and say
+    /// so.
+    pub fn undo_pressed(&mut self, workspace: &mut Workspace, queue: &mut Queue) {
+        let Some((undo, line)) = self.pressed.take() else {
+            return;
+        };
+        undo.perform(workspace, queue, self);
+        self.say(format!("Undone: {line}"));
+    }
+
+    /// Press the Undo of the newest entry that says `text`, as a click in the popover
+    /// does. Returns whether it had one.
+    #[cfg(test)]
+    pub fn press(&mut self, text: &str) -> bool {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.text.contains(text));
+        let pressed = entry.and_then(|entry| Some((entry.undo.take()?, entry.text.clone())));
+        self.pressed = pressed;
+        self.pressed.is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -184,7 +294,9 @@ impl Log {
                         ui.set_min_size(size);
                         ui.set_max_size(size);
                         open = self.head(ui, problems_only);
-                        self.rows(ui, *problems_only);
+                        if let Some(pressed) = self.rows(ui, *problems_only) {
+                            self.pressed = Some(pressed);
+                        }
                     });
             });
         let (escape, clicked) = ctx.input(|input| {
@@ -253,8 +365,9 @@ impl Log {
         open
     }
 
-    /// The entries, newest first.
-    fn rows(&self, ui: &mut egui::Ui, problems_only: bool) {
+    /// The entries, newest first. Returns the Undo pressed, taken off its entry.
+    fn rows(&mut self, ui: &mut egui::Ui, problems_only: bool) -> Option<(Undo, String)> {
+        let mut pressed = None;
         egui::ScrollArea::vertical()
             .id_salt("activity_rows")
             .auto_shrink([false; 2])
@@ -262,13 +375,15 @@ impl Log {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 let shown = self
                     .entries
-                    .iter()
+                    .iter_mut()
                     .rev()
                     .filter(|entry| !problems_only || entry.level != Level::Info);
                 let mut any = false;
                 for entry in shown {
                     any = true;
-                    row(ui, entry);
+                    if row(ui, entry) {
+                        pressed = entry.undo.take().map(|undo| (undo, entry.text.clone()));
+                    }
                 }
                 if !any {
                     ui.add_space(12.0);
@@ -278,6 +393,7 @@ impl Log {
                     });
                 }
             });
+        pressed
     }
 }
 
@@ -288,16 +404,24 @@ const POPOVER: egui::Vec2 = egui::vec2(640.0, 360.0);
 const TIME: f32 = 62.0;
 const MARK: f32 = 16.0;
 
-/// One entry: when, how it went, and what happened. An error's row is tinted.
-fn row(ui: &mut egui::Ui, entry: &Entry) {
+/// The width kept at a row's right for its Undo button.
+const UNDO: f32 = 56.0;
+
+/// One entry: when, how it went, and what happened, and its Undo where it has one. An
+/// error's row is tinted. Returns whether Undo was pressed.
+fn row(ui: &mut egui::Ui, entry: &Entry) -> bool {
     let visuals = ui.visuals().clone();
     let width = ui.available_width() - 16.0;
     let text_left = TIME + MARK + 16.0;
+    let undo = match entry.undo {
+        Some(_) => UNDO,
+        None => 0.0,
+    };
     let galley = ui.painter().layout(
         entry.text.clone(),
         egui::FontId::proportional(12.5),
         visuals.text_color(),
-        width - text_left - 10.0,
+        width - text_left - 10.0 - undo,
     );
     let height = (galley.size().y + 8.0).max(26.0);
     let (rect, response) = ui.allocate_exact_size(
@@ -336,6 +460,16 @@ fn row(ui: &mut egui::Ui, entry: &Entry) {
         galley,
         visuals.text_color(),
     );
+    if entry.undo.is_none() {
+        return false;
+    }
+    let button = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - UNDO / 2.0, top),
+        egui::vec2(UNDO - 8.0, 22.0),
+    );
+    let label = egui::RichText::new("Undo").size(11.5);
+    ui.put(button, egui::Button::new(label).corner_radius(7.0))
+        .clicked()
 }
 
 /// A segmented control: one segment per choice, the chosen one raised.
