@@ -254,7 +254,7 @@ fn member(
             .map(|info| info.and_then(|info| info.crc32));
         !entity.is_unsaved() && held.is_none_or(|held| held.is_some() && held == saved)
     };
-    let listed = entity.origin.slot().filter(holds);
+    let listed = crate::device::slot_of(device, entity).filter(holds);
     let mut unnamed = None;
     if let Some(needs) = listed.and_then(|(class, at)| device.needs_of(class, at)) {
         item.needs = needs.to_vec();
@@ -531,9 +531,12 @@ mod tests {
             bytes,
             &mut log,
         );
-        let entity = workspace.get(id).unwrap();
-        let saved = entity.saved.crc32().unwrap();
         let mut device = Device::new(ctx);
+        device.pretend_attached();
+        let print = workspace.get(id).unwrap().saved_print().unwrap();
+        crate::device::link_copy(&device.state, &mut workspace, id, class, at, print);
+        let entity = workspace.get(id).unwrap();
+        let saved = print.crc;
         device.pretend_deps(
             class,
             at,

@@ -892,7 +892,7 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
     };
     let unknown = || "—".to_string();
     match view.class {
-        ObjectClass::SetList => plays(at, view.workspace).unwrap_or_else(unknown),
+        ObjectClass::SetList => plays(at, view.workspace, view.device).unwrap_or_else(unknown),
         ObjectClass::Sample => {
             played_by(info.name.trim(), view.workspace, view.device).unwrap_or_else(unknown)
         }
@@ -908,14 +908,11 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
 
 /// The four programs a set list plays.
 ///
-/// ⚠️ Only from a decoded body: a copy kept on this computer, or a slot open as a view.
+/// ⚠️ Only from a decoded body: the copy linked to it, or the slot open as a view.
 /// A walk reports only a slot's name, length, and format, so a set list with no local
 /// copy shows nothing.
-fn plays(at: Location, workspace: &Workspace) -> Option<String> {
-    let entity = workspace
-        .entities()
-        .iter()
-        .find(|held| held.origin.slot() == Some((ObjectClass::SetList, at)))?;
+fn plays(at: Location, workspace: &Workspace, device: &Device) -> Option<String> {
+    let entity = crate::device::standing_on(&device.state, workspace, ObjectClass::SetList, at)?;
     let nord_format::Entity::Song(nord_format::Song::Electro5(song)) = entity.entity.as_deref()?
     else {
         return None;

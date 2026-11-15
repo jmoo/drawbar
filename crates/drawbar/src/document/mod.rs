@@ -167,6 +167,8 @@ pub struct Around<'a> {
 pub struct Wants {
     /// The write the header queued.
     pub send: Option<SendBack>,
+    /// Whether the header queued the document for a free slot.
+    pub pick: bool,
     /// The slot the header asked the panel to play.
     pub load: Option<(ObjectClass, Location)>,
     /// The banner's offer to put a view of a slot on this computer.
@@ -444,6 +446,7 @@ impl Document {
 
         let mut wants = Wants {
             send: act.send,
+            pick: act.pick,
             load: act.load,
             build: act.build,
             ..Wants::default()
@@ -537,7 +540,10 @@ impl Document {
                 Asked::Audition => self.audition(id, workspace, log),
             }
         }
-        if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
+        let slot = workspace
+            .get(id)
+            .and_then(|e| crate::device::slot_of(&device.state, e));
+        if let Some((class, at)) = slot {
             match lookup.asked {
                 true => device.ask_deps_again(class, at, log),
                 false if lookup.wants_a_name() => device.read_deps(class, at, log),
@@ -1393,11 +1399,16 @@ fn extras(
         },
         Shape::Verbatim => {
             // The strip's own write, relabeled for a body that cannot be edited.
-            let mut loud = header::action(entity, &device.state);
-            loud.label = "Send as-is".to_string();
-            loud.short = "Send".to_string();
+            let loud = header::action(entity, &device.state).map(|loud| match loud.click {
+                header::Click::Load(..) => loud,
+                _ => Loud {
+                    label: "Send as-is".to_string(),
+                    short: "Send".to_string(),
+                    ..loud
+                },
+            });
             header::Extras {
-                loud: Some(loud),
+                loud,
                 ..header::Extras::default()
             }
         }
@@ -1505,18 +1516,26 @@ fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
 
 /// The header's loud action for a field document, with the pending count added.
 ///
-/// ⚠️ The count is added only when the header already offers the write. A document
+/// ⚠️ The count is added only when the document is linked to a slot it can be sent to. A document
 /// with nothing to send to says so, and a count beside that message would read as an
 /// offer.
 fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud> {
     if pending == 0 {
         return None;
     }
-    let loud = header::action(entity, &device.state);
+    let loud = header::action(entity, &device.state)?;
+    let click = match loud.click {
+        header::Click::Send(class, at) | header::Click::Load(class, at) => {
+            header::Click::Send(class, at)
+        }
+        _ => return None,
+    };
     if loud.tone != Tone::Ready {
         return None;
     }
     Some(Loud {
+        click,
+        glyph: crate::icon::Glyph::Upload,
         label: format!("Queue send · {pending}"),
         short: format!("Send {pending}"),
         hint: format!("{pending} pending edits. All are applied together, or none are applied."),
@@ -1539,7 +1558,7 @@ fn piano_lookup(
         .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
         .and_then(|field| library_id(&field.value));
     let id = stored.filter(|id| *id != 0);
-    let slot = entity.origin.slot();
+    let slot = crate::device::slot_of(&device.state, entity);
     let name = id
         .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
         .map(str::to_string);
@@ -2038,7 +2057,7 @@ mod tests {
                 let has = |word: &str| said.iter().any(|held| held == word);
                 assert!(has("Basic"), "{kind:?} in {dark}: {said:?}");
                 assert!(has("Advanced"), "{kind:?} in {dark}: {said:?}");
-                assert!(has("Queue send"), "the loud action: {said:?}");
+                assert!(has("Send to…"), "the loud action: {said:?}");
                 assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
             }
         }
@@ -2083,14 +2102,7 @@ mod tests {
         }
         // The controls, and the glyphs painted where their icons would load. The kind
         // glyph at the far left is the only glyph that is not a control.
-        const CONTROLS: [&str; 6] = [
-            "Send",
-            "Queue send",
-            "Basic",
-            "Advanced",
-            "Revert",
-            "Export…",
-        ];
+        const CONTROLS: [&str; 6] = ["Send", "Send to…", "Basic", "Advanced", "Revert", "Export…"];
         type Placed<'a> = Vec<&'a (String, egui::Rect)>;
         let (right, left): (Placed, Placed) = header.iter().partition(|(word, rect)| {
             CONTROLS.contains(&word.as_str()) || (word == "⚠" && rect.left() > 300.0)
@@ -2136,7 +2148,7 @@ mod tests {
                 .find(|word| word.text.ends_with(" kB"))
                 .expect("the size is painted");
             let wrapped = size.rect.top() > row.bottom();
-            let short = !said.iter().any(|word| word.text == "Queue send");
+            let short = !said.iter().any(|word| word.text == "Send to…");
             assert!(
                 !wrapped || short,
                 "at {width} px the size wrapped while the loud action kept its words"
@@ -2157,7 +2169,7 @@ mod tests {
         let full = at(1100.0);
         assert!(full.contains(&"Export…".to_string()), "{full:?}");
         assert!(full.contains(&"Basic".to_string()));
-        assert!(full.contains(&"Queue send".to_string()));
+        assert!(full.contains(&"Send to…".to_string()));
 
         let quiet = at(900.0);
         assert!(!quiet.contains(&"Export…".to_string()), "{quiet:?}");
@@ -2165,14 +2177,14 @@ mod tests {
             quiet.contains(&"Basic".to_string()),
             "the faces keep their labels"
         );
-        assert!(quiet.contains(&"Queue send".to_string()));
+        assert!(quiet.contains(&"Send to…".to_string()));
 
         let faces = at(800.0);
         assert!(!faces.contains(&"Basic".to_string()), "{faces:?}");
-        assert!(faces.contains(&"Queue send".to_string()));
+        assert!(faces.contains(&"Send to…".to_string()));
 
         let narrow = at(700.0);
-        assert!(!narrow.contains(&"Queue send".to_string()), "{narrow:?}");
+        assert!(!narrow.contains(&"Send to…".to_string()), "{narrow:?}");
         assert!(
             narrow.contains(&"Send".to_string()),
             "the loud action is never a bare glyph: {narrow:?}"
@@ -2364,12 +2376,22 @@ mod tests {
 
         let unattached = open.twice();
         assert!(
-            unattached.iter().any(|word| word == "Queue send"),
+            unattached.iter().any(|word| word == "Send to…"),
             "with nothing attached, the action carries no count: {unattached:?}"
         );
 
         open.device
             .pretend_scanned(ObjectClass::Program, 7, &["", "", "", "Africa Split"]);
+        let print = open.workspace.get(open.id).unwrap().saved_print().unwrap();
+        let (class, at) = (ObjectClass::Program, Location { bank: 6, slot: 3 });
+        crate::device::link_copy(
+            &open.device.state,
+            &mut open.workspace,
+            open.id,
+            class,
+            at,
+            print,
+        );
         let attached = open.twice();
         assert!(
             attached.iter().any(|word| word == "Queue send · 1"),
@@ -2843,6 +2865,15 @@ mod tests {
             plays,
             &mut open.log,
         );
+        let print = open.workspace.get(open.id).unwrap().saved_print().unwrap();
+        crate::device::link_copy(
+            &open.device.state,
+            &mut open.workspace,
+            open.id,
+            class,
+            at,
+            print,
+        );
 
         let reads = |open: &Open| {
             open.device
@@ -2993,6 +3024,15 @@ mod tests {
             .find(|field| field.path == panel::PIANO_ID)
             .unwrap();
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
+        let print = workspace.get(id).unwrap().saved_print().unwrap();
+        crate::device::link_copy(
+            &device.state,
+            &mut workspace,
+            id,
+            ObjectClass::Program,
+            at,
+            print,
+        );
 
         let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
         assert_eq!(lookup.names(stored), Some("Royal Grand"));

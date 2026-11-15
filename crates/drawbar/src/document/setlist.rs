@@ -247,7 +247,7 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
         Some(None) => return (None, None, Stands::Vacant),
         None => {}
     }
-    let Some(kept) = stands_on(at, seen.workspace) else {
+    let Some(kept) = stands_on(at, seen.workspace, seen.device) else {
         return (None, None, Stands::Unread);
     };
     (
@@ -257,12 +257,13 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
     )
 }
 
-/// The asset on this computer that stands on `at`, where there is one.
-fn stands_on(at: Location, workspace: &Workspace) -> Option<&LocalEntity> {
-    workspace
-        .entities()
-        .iter()
-        .find(|held| held.spot() == Some((ObjectClass::Program, at)))
+/// The asset linked to the program slot `at` on the attached keyboard, or a view of it.
+fn stands_on<'w>(
+    at: Location,
+    workspace: &'w Workspace,
+    device: &DeviceState,
+) -> Option<&'w LocalEntity> {
+    crate::device::standing_on(device, workspace, ObjectClass::Program, at)
 }
 
 /// Whether the library a resolved program plays has a name.
@@ -886,16 +887,20 @@ mod tests {
 
         /// An asset on this computer that stands on a slot, which is the other place a
         /// name can come from.
+        /// A program here linked to the slot `at` of the keyboard [`Device`] attaches as.
         fn kept(&mut self, at: Location, name: &str, bytes: Vec<u8>) {
-            self.workspace.ingest(
-                name.to_string(),
-                Origin::Device {
-                    class: ObjectClass::Program,
-                    at,
-                },
-                bytes,
-                &mut self.log,
-            );
+            let class = ObjectClass::Program;
+            let print = crate::workspace::print_of(&bytes).unwrap();
+            let origin = Origin::Device { class, at };
+            let id = self
+                .workspace
+                .ingest(name.to_string(), origin, bytes, &mut self.log);
+            let keyboard = crate::link::Keyboard {
+                model: "Nord Electro 5".into(),
+                serial: None,
+            };
+            let held = crate::link::Held::new(class, crate::link::Spot::at(at), print).unwrap();
+            self.workspace.link(id, &keyboard, held);
         }
 
         /// One frame: every word it painted and where, and the sets it asked for.
@@ -968,8 +973,9 @@ mod tests {
             "{said:?}"
         );
 
-        // With nothing scanned, an asset here that stands on the slot names it.
+        // With nothing scanned, the asset here linked to the slot names it.
         let mut alone = Shown::new();
+        alone.device.pretend_attached();
         let bytes = Fresh::Program.bytes().unwrap();
         alone.kept(Location::from_user(1, 3), "Whiter Shade.ne5p", bytes);
         let said = alone.settle();

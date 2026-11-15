@@ -791,11 +791,12 @@ impl DrawbarApp {
         }
     }
 
-    /// The class of the slot the open document came off, for the item that reads that
-    /// folder again. A document that did not come off a slot has none.
+    /// The class of the slot the open document stands for, for the item that reads that
+    /// folder again. A document that stands for no slot has none.
     pub(crate) fn open_class(&self) -> Option<ObjectClass> {
         let id = self.tabs.active()?;
-        let (class, _) = self.workspace.get(id)?.origin.slot()?;
+        let entity = self.workspace.get(id)?;
+        let (class, _) = crate::device::slot_of(&self.device.state, entity)?;
         Some(class)
     }
 

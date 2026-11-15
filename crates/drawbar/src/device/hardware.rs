@@ -832,9 +832,9 @@ fn s1_a_resting_piano_lands_in_an_empty_slot_streamed() {
     assert_streamed(&sending, len);
     let entity = rig.bench.workspace.get(id).unwrap();
     assert_eq!(
-        entity.link,
+        crate::device::slot_of(&rig.bench.device.state, entity),
         Some((class, slot)),
-        "the asset stands on the slot"
+        "the asset is linked to the slot"
     );
     rig.release();
     assert_no_strays(class);
@@ -1133,8 +1133,9 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
 
     let first = send_into_vacant(&mut rig, id, class, slot);
     assert_streamed(&first, file.len);
+    let entity = rig.bench.workspace.get(id).unwrap();
     assert_eq!(
-        rig.bench.workspace.get(id).unwrap().link,
+        crate::device::slot_of(&rig.bench.device.state, entity),
         Some((class, slot))
     );
 

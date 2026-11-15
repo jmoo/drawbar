@@ -2537,7 +2537,8 @@ mod tests {
         let held = app.workspace.get(id).unwrap().saved.crc32().unwrap();
         app.device
             .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
-        app.device.relink(&mut app.workspace);
+        let print = app.workspace.get(id).unwrap().saved_print().unwrap();
+        crate::device::link_copy(&app.device.state, &mut app.workspace, id, class, at, print);
         assert!(
             !settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
             "the slot holds what this is saved as"
@@ -2548,7 +2549,6 @@ mod tests {
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         app.workspace.replace_bytes(id, edited, &mut app.log);
         app.workspace.mark_saved(id);
-        app.device.relink(&mut app.workspace);
         assert!(
             settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
             "one to offer"

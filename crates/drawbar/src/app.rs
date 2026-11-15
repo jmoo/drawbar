@@ -1425,6 +1425,9 @@ impl DrawbarApp {
         if let Some((class, at)) = wants.load {
             acts.push(browser::Act::LoadOnInstrument { class, at });
         }
+        if wants.pick {
+            acts.push(browser::Act::SendChecked(vec![id]));
+        }
         if wants.keep {
             acts.push(browser::Act::Keep(id));
         }
@@ -2288,7 +2291,9 @@ mod tests {
             7,
             &["", "", "", "Africa Split"],
         );
-        app.device.relink(&mut app.workspace);
+        let print = app.workspace.get(id).unwrap().saved_print().unwrap();
+        let class = nord_usb::ObjectClass::Program;
+        crate::device::link_copy(&app.device.state, &mut app.workspace, id, class, at, print);
 
         let frame = |app: &mut DrawbarApp, events: Vec<egui::Event>| {
             let mut acts = Vec::new();

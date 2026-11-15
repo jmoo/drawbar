@@ -402,8 +402,8 @@ struct Frame {
     naming: Naming,
     /// The slots open as views.
     viewed: Vec<(ObjectClass, Location)>,
-    /// How many are waiting to be sent, and how many differ from the instrument.
-    counts: [usize; 2],
+    /// How many are waiting to be sent, are ready to send, and need the user.
+    counts: [usize; 3],
 }
 
 /// Where a row's contents start.
@@ -716,11 +716,8 @@ impl Browser {
             false => Vec::new(),
         };
         let counts = match self.sections.places {
-            true => [
-                queue.len(),
-                crate::queue::changed(workspace, &device.state, queue).len(),
-            ],
-            false => [0, 0],
+            true => crate::library::counts(workspace, &device.state, queue),
+            false => [0; 3],
         };
         Frame {
             naming,
@@ -762,7 +759,7 @@ impl Browser {
             if device.state.connected() {
                 self.instrument_lines(device, &mut below);
             }
-            for (state, count) in [State::Waiting, State::Differs]
+            for (state, count) in [State::Waiting, State::Differs, State::Attention]
                 .into_iter()
                 .zip(frame.counts)
             {
@@ -984,6 +981,7 @@ impl Browser {
                 let count = match state {
                     State::Waiting => frame.counts[0],
                     State::Differs => frame.counts[1],
+                    State::Attention => frame.counts[2],
                 };
                 state_row(ui, state, count, filter, acts);
             }
@@ -1243,7 +1241,7 @@ impl Browser {
                 name: &entity.name,
                 note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: mark(entity, &device.state, queue, ui.visuals()),
+                dot: mark(entity, &device.state, ui.visuals()),
                 tags: wears,
                 child: true,
                 gray: !self.followed,
@@ -1458,7 +1456,9 @@ impl Browser {
         // instrument has refused.
         let waiting = will_write(queue).count();
         // What this row stands for on this computer: every asset that stands for a slot.
-        let off_it = Browser::standing_for(workspace, |entity| entity.spot().is_some());
+        let off_it = Browser::standing_for(workspace, |entity| {
+            crate::device::slot_of(&device.state, entity).is_some()
+        });
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &off_it, workspace, device, acts, |_, ui, acts| {
                 if ui
@@ -1522,7 +1522,7 @@ impl Browser {
         }
         let focus = device.state.focused(class);
         let off_it = Browser::standing_for(workspace, |entity| {
-            entity.spot().is_some_and(|(held, _)| held == class)
+            crate::device::slot_of(&device.state, entity).is_some_and(|(held, _)| held == class)
         });
         drawn.response.context_menu(|ui| {
             self.set_menu(ui, &off_it, workspace, device, acts, |browser, ui, acts| {
@@ -1860,8 +1860,9 @@ impl Browser {
 /// A row that narrows the library to what is in one state.
 fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, acts: &mut Vec<Act>) {
     let (glyph, dot) = match state {
-        State::Waiting => (Glyph::Upload, crate::app::warn(ui.visuals())),
-        State::Differs => (Glyph::CircleAlert, crate::app::bad(ui.visuals())),
+        State::Waiting => (Glyph::Clock, crate::app::accent(ui.visuals())),
+        State::Differs => (Glyph::Upload, crate::app::warn(ui.visuals())),
+        State::Attention => (Glyph::CircleAlert, crate::app::bad(ui.visuals())),
     };
     let asked = Narrow::State(state);
     let drawn = row(
@@ -1923,10 +1924,9 @@ fn new_tag_row(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
 fn mark(
     entity: &LocalEntity,
     device: &DeviceState,
-    queue: &Queue,
     visuals: &egui::Visuals,
 ) -> Option<(egui::Color32, &'static str)> {
-    let mark = crate::library::keyboard_mark(entity, device, queue)?;
+    let mark = crate::library::keyboard_mark(entity, device)?;
     Some((
         crate::library::mark_ink(mark, visuals),
         crate::library::mark_words(mark),

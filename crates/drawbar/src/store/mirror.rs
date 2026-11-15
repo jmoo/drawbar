@@ -4564,12 +4564,12 @@ enum Evict {
     Untracked,
 }
 
-/// Whether drawbar knows something about this asset that no file says: a tag, or the
-/// slot it came off.
+/// Whether drawbar knows something about this asset that no file says: a tag, the slot
+/// it came off, or a link.
 fn tracked(id: u64, workspace: &Workspace, browser: &Browser) -> bool {
     let slot = workspace
         .get(id)
-        .is_some_and(|entity| entity.origin.slot().is_some());
+        .is_some_and(|entity| entity.origin.slot().is_some() || !entity.links.is_empty());
     slot || !browser.tags.worn(id).is_empty()
 }
 

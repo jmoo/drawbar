@@ -19,8 +19,11 @@ pub enum Place {
 pub enum State {
     /// A write to its slot is waiting to go.
     Waiting,
-    /// Its slot holds something different, and no write is waiting to fix that.
+    /// Its slot holds an earlier version or nothing, and no write is waiting to settle
+    /// that.
     Differs,
+    /// The keyboard changed its slot, and only the user can settle that.
+    Attention,
 }
 
 impl State {
@@ -28,7 +31,8 @@ impl State {
     pub fn title(self) -> &'static str {
         match self {
             State::Waiting => "Waiting to send",
-            State::Differs => "Differs",
+            State::Differs => "Ready to send",
+            State::Attention => "Needs attention",
         }
     }
 
@@ -36,7 +40,8 @@ impl State {
     pub fn word(self) -> &'static str {
         match self {
             State::Waiting => "waiting",
-            State::Differs => "differ",
+            State::Differs => "ready",
+            State::Attention => "need attention",
         }
     }
 
@@ -44,7 +49,8 @@ impl State {
     pub fn sentence(self) -> &'static str {
         match self {
             State::Waiting => "everything waiting to be sent to the instrument",
-            State::Differs => "on this computer and on the instrument, with different contents",
+            State::Differs => "newer on this computer than in its slot, and not waiting",
+            State::Attention => "changed on the keyboard since it was last sent or copied",
         }
     }
 }

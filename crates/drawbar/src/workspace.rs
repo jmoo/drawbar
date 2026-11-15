@@ -444,8 +444,7 @@ impl Baseline {
         }
     }
 
-    /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
-    /// [`crate::library::agrees`] both decide on it.
+    /// The checksum a slot holding these bytes would report.
     ///
     /// `None` for bytes that are not a CBIN container, and for a file whose checksum has
     /// not been checked. See [`Container::body_crc32`].
@@ -600,17 +599,6 @@ impl Baseline {
     }
 }
 
-/// A write this app made: the slot it wrote to, and the checksum of the bytes it wrote.
-///
-/// It is evidence for a class whose slots report no checksum, and only while the asset is
-/// still saved as those bytes: `crc32` is compared with [`Baseline::crc32`].
-#[derive(Clone, Copy)]
-pub struct Wrote {
-    pub class: ObjectClass,
-    pub at: Location,
-    pub crc32: u32,
-}
-
 /// What a set of bytes decodes to, worked out once, when they land.
 struct Decoded {
     container: Option<Container>,
@@ -731,17 +719,6 @@ pub struct LocalEntity {
     /// tell when it is stale. It is the list revision when the bytes landed, so a rename
     /// or a send does not change it.
     pub stamp: u64,
-    /// The slot on the attached instrument that holds these bytes, from
-    /// [`crate::device::link`].
-    ///
-    /// Derived from the scan cache and never persisted. An edit leaves it alone, so an
-    /// edited asset still points at the slot it was matched to.
-    pub link: Option<(ObjectClass, Location)>,
-    /// The last write this app made from this asset. See [`Wrote`] and
-    /// [`crate::library::agrees`].
-    ///
-    /// [`Workspace::forget_writes`] clears it when the instrument goes.
-    pub wrote: Option<Wrote>,
     /// Its slot on each keyboard, as the library keeps them: at most one per keyboard, in
     /// order.
     ///
@@ -819,8 +796,6 @@ impl LocalEntity {
             pending: false,
             kept: true,
             stamp,
-            link: None,
-            wrote: None,
             links: Vec::new(),
             seen: Default::default(),
             by_name,
@@ -890,9 +865,7 @@ impl LocalEntity {
                 facts.whole_crc = decoded.crc;
             }
             // ⚠️ Writes the slot checksum of the decoded bytes over the one a send
-            // reported for the file, which holds other bytes. A send that lands while the
-            // asset's own bytes wait to be decoded then leaves `library::wrote` not
-            // matching the slot.
+            // reported for the file, which holds other bytes.
             Content::Resting {
                 check: Check::Checking { reported },
                 ..
@@ -934,8 +907,6 @@ impl LocalEntity {
             pending: false,
             kept: true,
             stamp,
-            link: None,
-            wrote: None,
             links: Vec::new(),
             seen: Default::default(),
             by_name,
@@ -1145,11 +1116,6 @@ impl LocalEntity {
     /// What a slot holding its saved bytes would report. See [`Baseline::print`].
     pub fn saved_print(&self) -> Option<Print> {
         self.saved.print()
-    }
-
-    /// The slot this asset stands for: its link, or else the slot it came off.
-    pub fn spot(&self) -> Option<(ObjectClass, Location)> {
-        self.link.or_else(|| self.origin.slot())
     }
 
     /// A sample instrument's generation, `v2`, `v3` or `v4`, as
@@ -2109,21 +2075,6 @@ impl Workspace {
         kept
     }
 
-    /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
-    /// with [`crate::device::link`] as `held_by`. Returns whether any link moved.
-    pub fn relink(
-        &mut self,
-        held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>,
-    ) -> bool {
-        let mut moved = false;
-        for entity in &mut self.entities {
-            let link = held_by(entity);
-            moved |= entity.link != link;
-            entity.link = link;
-        }
-        moved
-    }
-
     /// Link an asset to a slot on `keyboard`, in place of any link it had there, and
     /// unlink every other asset from that slot. A view of a slot keeps no links.
     pub fn link(&mut self, id: u64, keyboard: &Keyboard, held: link::Held) {
@@ -2405,8 +2356,7 @@ impl Workspace {
     }
 
     /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
-    /// holds: where its file is, whether it is kept, its link, its last write, its links
-    /// and its pending edit.
+    /// holds: where its file is, whether it is kept, its links and its pending edit.
     fn swap(&mut self, id: u64, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
         let Some(entity) = self.get_mut(id) else {
             return;
@@ -2415,8 +2365,6 @@ impl Workspace {
         *entity = LocalEntity {
             path: entity.path.take(),
             kept: entity.kept,
-            link: entity.link,
-            wrote: entity.wrote,
             links: std::mem::take(&mut entity.links),
             pending: entity.pending,
             seen: entity.seen.clone(),
@@ -3843,25 +3791,19 @@ impl Workspace {
     }
 
     /// Record a write that reached a slot: the bytes it carried become the saved
-    /// baseline, and the slot becomes the link.
+    /// baseline.
     ///
     /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. An edit
     /// made while the write was in flight exists only on this computer, and calling it
     /// saved would let it be discarded with its tab.
     ///
-    /// ⚠️ The only place a link is set instead of derived. [`crate::device::link`] keeps
-    /// it until a walk of that slot says otherwise.
-    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+    pub fn landed(&mut self, id: u64, sent: Vec<u8>) {
         let resting = self
             .get(id)
             .filter(|entity| entity.rests().is_some())
             .map(|entity| entity.saved.reports(&sent));
         match resting {
             Some(true) => {
-                if let Some(entity) = self.get_mut(id) {
-                    entity.link = Some((class, at));
-                    entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
-                }
                 self.revision += 1;
                 return;
             }
@@ -3884,30 +3826,20 @@ impl Workspace {
         // not answered, its bytes are empty, so this saves it as empty bytes: its size
         // reads 0, and the file it rests in is dropped.
         entity.resave(Baseline::read(sent, stamp));
-        entity.link = Some((class, at));
-        entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
         if entity.kept && entity.path.is_some() {
             self.file_asks.push(FileAsk::Save(id));
         }
         self.revision += 1;
     }
 
-    /// Record a write that sent the file `file` to a slot, read from it a chunk at a time:
-    /// the slot becomes the link, and the write is recorded with `crc32`, the checksum a
-    /// slot holding the file reports.
+    /// Record a write that sent the file `file` to a slot, read from it a chunk at a time,
+    /// whose body has the checksum `crc32`.
     ///
     /// ⚠️ An asset resting in another file now, as one whose edit was saved while the
     /// file was sent does, keeps resting there: the edit is on disk, and the slot holds
     /// what it was saved as before. One holding bytes in memory instead is saved as the
     /// file again, under a stamp of its own, for the reason [`Workspace::landed`] gives.
-    pub fn landed_file(
-        &mut self,
-        id: u64,
-        class: ObjectClass,
-        at: Location,
-        file: Arc<OnDisk>,
-        crc32: u32,
-    ) {
+    pub fn landed_file(&mut self, id: u64, file: Arc<OnDisk>, crc32: u32) {
         let moved = self.get(id).is_some_and(|entity| {
             let saved = &entity.saved;
             let other = saved.size() != file.len || saved.crc32() != Some(crc32);
@@ -3926,19 +3858,7 @@ impl Workspace {
             };
             entity.resave(Baseline::new(Content::Resting { file, check }, stamp));
         }
-        entity.link = Some((class, at));
-        entity.wrote = Some(Wrote { class, at, crc32 });
         self.revision += 1;
-    }
-
-    /// Forget every write this app made.
-    ///
-    /// ⚠️ A write is evidence about the instrument that took it. With none attached, or
-    /// another one in its place, it says nothing about what is in any slot.
-    pub fn forget_writes(&mut self) {
-        for entity in &mut self.entities {
-            entity.wrote = None;
-        }
     }
 
     /// Swap in edited bytes, keeping the entity's identity.
@@ -3963,9 +3883,8 @@ impl Workspace {
     /// the verify result.
     ///
     /// ⚠️ The saved baseline is kept: it moves only when the asset is saved, so an edit
-    /// and its revert are measured against the same bytes. The link, the links and the
-    /// last write are kept too, because each is evidence about a slot, which an edit here
-    /// says nothing about.
+    /// and its revert are measured against the same bytes. The links are kept too: an
+    /// edit here says nothing about a slot.
     fn respell(&mut self, id: u64, bytes: Bytes) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
@@ -3987,7 +3906,7 @@ impl Workspace {
             .get(id)
             .is_some_and(|entity| entity.saved.holds(&bytes));
         let entity = self.get_mut(id)?;
-        let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
+        let (kept, pending) = (entity.kept, entity.pending);
         let path = entity.path.take();
         let links = std::mem::take(&mut entity.links);
         let mut saved = entity.saved.clone();
@@ -4001,9 +3920,7 @@ impl Workspace {
         let verify = replaced.verify();
         *entity = LocalEntity {
             kept,
-            link,
             saved,
-            wrote,
             links,
             pending,
             path,
@@ -4439,16 +4356,13 @@ mod tests {
 
         workspace.edit_saved(id, edited.clone());
         workspace.settle_files(&mut log);
-        let (class, at) = (ObjectClass::Piano, Location::from_user(1, 1));
-        workspace.landed_file(id, class, at, sent, crc32);
+        workspace.landed_file(id, sent, crc32);
 
         let entity = workspace.get(id).unwrap();
         assert!(entity
             .rests()
             .is_some_and(|file| Arc::ptr_eq(file, &edited)));
         assert!(!entity.is_unsaved(), "the edit is saved");
-        assert_eq!(entity.link, Some((class, at)));
-        assert!(entity.wrote.is_some_and(|wrote| wrote.crc32 == crc32));
         assert_ne!(entity.saved.crc32(), Some(crc32), "so the slot is behind");
     }
 
@@ -4753,35 +4667,6 @@ mod tests {
         );
         // The detail of what arrived is still recorded, view or not.
         assert!(log.iter().any(|entry| entry.text.contains("verified")));
-    }
-
-    /// ⚠️ A write is what this app knows about a slot without reading it back, and the
-    /// only basis for the Agrees mark on a class whose slots report no checksum. An edit
-    /// and its revert do not touch the slot, so they must keep that evidence.
-    #[test]
-    fn an_edit_and_a_revert_leave_the_write_this_app_made() {
-        let mut workspace = Workspace::new(egui::Context::default());
-        let mut log = Log::default();
-        let at = Location { bank: 6, slot: 3 };
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.to_vec();
-        workspace.landed(id, ObjectClass::Program, at, sent.clone());
-        let wrote = |workspace: &Workspace| {
-            workspace
-                .get(id)
-                .unwrap()
-                .wrote
-                .map(|held| (held.class, held.at, held.crc32))
-        };
-        let landed = wrote(&workspace).expect("a write this app made");
-
-        let (_, edited) =
-            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
-        assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
-
-        workspace.revert(id, &mut log);
-        assert_eq!(wrote(&workspace), Some(landed), "and neither is a revert");
     }
 
     #[test]
@@ -5104,21 +4989,20 @@ mod tests {
     fn a_write_that_landed_saves_what_it_carried_rather_than_a_later_edit() {
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = Log::default();
-        let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let sent = workspace.get(id).unwrap().bytes.to_vec();
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited.clone(), &mut log);
-        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        workspace.landed(id, sent.clone());
         assert!(
             workspace.get(id).unwrap().is_unsaved(),
             "the edit made in flight is still owed"
         );
         assert_eq!(*workspace.get(id).unwrap().saved.bytes(), sent);
 
-        workspace.landed(id, ObjectClass::Program, at, edited);
+        workspace.landed(id, edited);
         assert!(
             !workspace.get(id).unwrap().is_unsaved(),
             "a write of what it holds leaves nothing owed"
@@ -5878,7 +5762,6 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_write_that_landed_saves_the_asset_as_what_it_sent() {
-        let at = Location { bank: 6, slot: 3 };
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = Log::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -5886,13 +5769,11 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited.clone(), &mut log);
-        workspace.landed(id, ObjectClass::Program, at, edited.clone());
+        workspace.landed(id, edited.clone());
         let entity = workspace.get(id).unwrap();
         assert!(!entity.is_unsaved());
         assert_eq!(*entity.saved.bytes(), edited);
         assert_eq!(entity.saved.crc32(), slot_of(&edited));
-        assert_eq!(entity.link, Some((ObjectClass::Program, at)));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&edited));
 
         let dir = crate::testing::Temp::new();
         let sample = crate::testing::sample_bytes();
@@ -5900,12 +5781,10 @@ mod tests {
         let (mut workspace, mut log) = restored(Content::resting(file.clone()), None);
         workspace.check_soon(1);
         workspace.settle_files(&mut log);
-        workspace.landed(1, ObjectClass::Sample, at, sample.clone());
+        workspace.landed(1, sample.clone());
         let entity = workspace.get(1).unwrap();
         assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));
         assert!(!entity.is_unsaved());
-        assert_eq!(entity.link, Some((ObjectClass::Sample, at)));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&sample));
     }
 
     /// The bytes the asset holds stay, now unsaved against that file.
@@ -5919,9 +5798,8 @@ mod tests {
         let mut log = Log::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let held = workspace.get(id).unwrap().bytes.to_vec();
-        let at = Location::from_user(1, 1);
         let crc32 = slot_of(&piano).expect("a piano library is a container");
-        workspace.landed_file(id, ObjectClass::Piano, at, file.clone(), crc32);
+        workspace.landed_file(id, file.clone(), crc32);
 
         let entity = workspace.get(id).unwrap();
         assert!(entity
@@ -5929,8 +5807,6 @@ mod tests {
             .file()
             .is_some_and(|saved| Arc::ptr_eq(saved, &file)));
         assert_eq!(entity.saved.crc32(), Some(crc32));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), Some(crc32));
-        assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
         assert_eq!(entity.bytes, held);
         assert!(entity.is_unsaved());
     }

@@ -16,7 +16,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
-use crate::device::{fit, occupancy, Device, Fit};
+use crate::device::{fit, occupancy, Device, DeviceState, Fit};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
@@ -306,7 +306,7 @@ impl Shown {
                 .map(|_| Item::Local(id))
                 .into_iter()
                 .collect(),
-            None => as_listed(browser.picked().items(), workspace),
+            None => as_listed(browser.picked().items(), workspace, &device.state),
         };
         let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
         let (about, going) = match checked.len() {
@@ -315,9 +315,7 @@ impl Shown {
             _ => {
                 let rows: Vec<Row> = checked
                     .iter()
-                    .filter_map(|item| {
-                        row_of(*item, workspace, &device.state, queue, browser.tags())
-                    })
+                    .filter_map(|item| row_of(*item, workspace, &device.state, browser.tags()))
                     .collect();
                 let going = crate::library::consequence(
                     &rows.iter().collect::<Vec<_>>(),
@@ -473,13 +471,19 @@ fn about(
         // A folder picked beside one asset is still several picked.
         return About::Several(vec![tally(picked, rows)]);
     }
-    let held = row
-        .item
-        .local()
-        .and_then(|id| workspace.get(id))
-        .map(|entity| fit(&device.state, entity))
-        .unwrap_or(Fit::Unattached);
-    About::One(facts(row, &held))
+    let entity = row.item.local().and_then(|id| workspace.get(id));
+    let held = entity.map_or(Fit::Unattached, |entity| fit(&device.state, entity));
+    let mut said = facts(row, &held);
+    let also = entity.map(|entity| crate::device::also_at(&device.state, entity));
+    if let Some(also) = also.filter(|also| !also.is_empty()) {
+        let at: Vec<String> = also.into_iter().map(crate::strings::shown).collect();
+        said.push(Fact {
+            what: "also at",
+            said: at.join(", "),
+            hint: None,
+        });
+    }
+    About::One(said)
 }
 
 /// The facts about a folder or a tag: its name, and how many files are in it or wear it.
@@ -506,15 +510,19 @@ fn grouping(item: Item, browser: &Browser, workspace: &Workspace) -> Option<Vec<
 }
 
 /// The selection as the library's table shows it: a slot that an asset on this computer
-/// stands for is that asset's row.
-fn as_listed(items: impl Iterator<Item = Item>, workspace: &Workspace) -> Vec<Item> {
+/// is linked to is that asset's row.
+fn as_listed(
+    items: impl Iterator<Item = Item>,
+    workspace: &Workspace,
+    device: &DeviceState,
+) -> Vec<Item> {
     let items: Vec<Item> = items.collect();
     if !items.iter().any(|item| matches!(item, Item::Slot { .. })) {
         return items;
     }
     let mut spots = BTreeMap::new();
     for entity in workspace.listed() {
-        if let Some((class, at)) = entity.spot() {
+        if let Some((class, at)) = crate::device::slot_of(device, entity) {
             spots.entry(Item::Slot { class, at }).or_insert(entity.id);
         }
     }
@@ -885,6 +893,7 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::Standing;
     use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
     use crate::workspace::Fresh;
@@ -1120,8 +1129,10 @@ mod tests {
             name: "Africa Split".into(),
             tags: 1,
             unsaved: true,
-            where_: Where::Both(Some(false)),
+            where_: Where::Both(Standing::Ahead),
             at: None,
+            faint: false,
+            mark: None,
             size: 2_048,
             needs: crate::library::Needs::Nothing,
         };
@@ -1136,13 +1147,13 @@ mod tests {
             [
                 ("name", "Africa Split"),
                 ("kind", "Stage 4 program"),
-                ("where", "both ≠"),
+                ("where", "both"),
                 ("size", "2.0 kB"),
             ]
         );
         assert_eq!(
             said[2].hint.as_deref(),
-            Some(Where::Both(Some(false)).sentence()),
+            Some(Where::Both(Standing::Ahead).sentence()),
             "the hover gives the full sentence"
         );
 
@@ -1203,12 +1214,14 @@ mod tests {
             unsaved,
             where_,
             at: None,
+            faint: false,
+            mark: None,
             size: 0,
             needs: crate::library::Needs::Nothing,
         };
         let rows = [
             row("kept", false, Where::Computer),
-            row("edited", true, Where::Both(Some(false))),
+            row("edited", true, Where::Both(Standing::Ahead)),
             row("read off a slot", false, Where::Keyboard),
         ];
         assert_eq!(tally(3, &rows), "3 selected, 1 unsaved, 2 on the keyboard");
@@ -1307,10 +1320,18 @@ mod tests {
         assert!(copy(&bench), "a slot on the keyboard only can be copied");
 
         let name = "Africa Split.ne5p".to_string();
-        bench
+        let print = crate::workspace::print_of(&bytes).unwrap();
+        let id = bench
             .workspace
             .ingest(name, origin(), bytes, &mut bench.log);
-        bench.device.relink(&mut bench.workspace);
+        crate::device::link_copy(
+            &bench.device.state,
+            &mut bench.workspace,
+            id,
+            class,
+            at,
+            print,
+        );
         let said = inspected(&mut bench);
         assert!(said.iter().any(|word| word.starts_with("both")), "{said:?}");
         assert!(!said.iter().any(|word| word == "keyboard"), "{said:?}");

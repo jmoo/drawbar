@@ -17,6 +17,7 @@ use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
 use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
+use crate::link::{Keyboard, Standing};
 use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
@@ -41,6 +42,8 @@ pub struct Queued {
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
     /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
+    /// The keyboard it was queued for, where one was attached. It is written to no other.
+    pub keyboard: Option<Keyboard>,
 }
 
 impl Queued {
@@ -246,7 +249,8 @@ pub fn enqueue(
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
     let holds = Occupancy::of(&device.state, class, at);
-    let displaced = match queue.put(entity, class, at, holds) {
+    let keyboard = device.state.keyboard();
+    let displaced = match queue.put(entity, class, at, holds, keyboard) {
         Put::Standing => return,
         Put::Made => None,
         Put::Moved(was, before) => Some(format!(
@@ -318,29 +322,23 @@ fn taken(class: ObjectClass, holder: Location) -> String {
     )
 }
 
-/// The assets not in the queue whose slot on the attached instrument no longer holds what
-/// they were saved as, each with that slot.
+/// The assets not in the queue that are newer than the slot they are linked to on the
+/// attached keyboard, each with that slot's class and its address, where a walk has found
+/// one.
 ///
-/// An edit queues nothing; saving an asset that stands for a slot does. This finds saved
-/// assets that are not waiting, which a send would skip. It uses the same comparison that
-/// [`crate::library::Where::Both`] shows in the table.
-///
-/// ⚠️ Only an asset's link counts, which is the one slot it stands for. An asset the
-/// attached instrument refuses has no link however well its origin matches, and counting
-/// it would offer a send that [`enqueue`] refuses on every click.
+/// An edit queues nothing; saving a linked asset does. This finds saved assets that are
+/// not waiting, which a send would skip.
 pub fn changed(
     workspace: &Workspace,
     device: &DeviceState,
     queue: &Queue,
-) -> Vec<(u64, ObjectClass, Location)> {
+) -> Vec<(u64, ObjectClass, Option<Location>)> {
     workspace
         .listed()
         .filter(|entity| !queue.holds(entity.id))
         .filter_map(|entity| {
-            let (class, at) = entity.link?;
-            let info = device.slot(class, at).flatten()?;
-            (crate::library::agrees(entity, class, info, queue) == Some(false))
-                .then_some((entity.id, class, at))
+            let linked = crate::device::standing_of(device, entity)?;
+            (linked.standing == Standing::Ahead).then_some((entity.id, linked.class, linked.at))
         })
         .collect()
 }
@@ -389,9 +387,15 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
                 })
                 .map(|(class, at, _)| waiting(*class, *at))
         };
-        let refusal = match fit(state, entity) {
-            Fit::Refuses(why) => Some(why),
-            Fit::Unattached | Fit::Takes | Fit::Warn(_) => {
+        let attached = state.keyboard();
+        let elsewhere = held
+            .keyboard
+            .as_ref()
+            .is_some_and(|keyboard| attached.is_some_and(|attached| attached != *keyboard));
+        let refusal = match (fit(state, entity), elsewhere) {
+            (Fit::Refuses(why), _) => Some(why),
+            (_, true) => Some("It was queued for another keyboard.".to_string()),
+            (Fit::Unattached | Fit::Takes | Fit::Warn(_), false) => {
                 crate::device::name_taken(state, held.class, held.at, entity)
                     .map(|holder| taken(held.class, holder))
                     .or_else(earlier)
@@ -433,10 +437,14 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
     }
 }
 
-/// Queue every asset [`changed`] finds, each for its own slot.
+/// Queue every asset [`changed`] finds, each for its own slot, or a free one where a
+/// piano or sample is gone from the keyboard.
 pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for (id, class, at) in changed(workspace, &device.state, queue) {
-        enqueue(workspace, device, queue, log, id, class, at);
+        let free = || device.state.first_free(class, &queue.waiting_in(class));
+        if let Some(at) = at.or_else(free) {
+            enqueue(workspace, device, queue, log, id, class, at);
+        }
     }
 }
 
@@ -446,7 +454,7 @@ pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Que
 /// whose body is another length than this asset's holds something else.
 ///
 /// ⚠️ The checksum is of the current bytes, which a send writes, and not of the saved
-/// baseline that [`crate::device::link`] matches a slot against.
+/// baseline a link compares.
 fn verdict(class: ObjectClass, entity: &LocalEntity, replaces: &Occupancy) -> Diff {
     let here = entity.container.as_ref();
     let crc = here.map(|here| here.body_crc32);
@@ -526,6 +534,7 @@ impl Queue {
         class: ObjectClass,
         at: Location,
         replaces: Occupancy,
+        keyboard: Option<Keyboard>,
     ) -> Put {
         if let Some(held) = self
             .list
@@ -533,6 +542,7 @@ impl Queue {
             .find(|held| (held.id, held.class, held.at) == (entity.id, class, at))
         {
             held.failure = None;
+            held.keyboard = keyboard;
             self.picked = Some(entity.id);
             return Put::Standing;
         }
@@ -559,6 +569,7 @@ impl Queue {
             read: Read::Unasked,
             stamp: entity.stamp,
             failure: None,
+            keyboard,
         });
         self.picked = Some(entity.id);
         match (moved, instead_of) {
@@ -737,8 +748,7 @@ impl Queue {
 }
 
 /// [`compare`] against what an asset holds. One resting in its file is compared by the
-/// checksum a slot holding it reports, as [`crate::library::agrees`] compares it, and is
-/// never read. One not read yet, or whose check has not answered, has no diff yet.
+/// checksum a slot holding it reports, and is never read. One not read yet, or whose check has not answered, has no diff yet.
 fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
     if entity.unread() {
         return Diff::Pending;
@@ -1809,6 +1819,15 @@ mod tests {
         ));
     }
 
+    /// Link an asset to a slot of the attached keyboard, as what it is saved as now.
+    fn link_to(workspace: &mut Workspace, device: &Device, id: u64, at: Location) {
+        let keyboard = device.state.keyboard().expect("attached");
+        let print = workspace.get(id).unwrap().saved_print().unwrap();
+        let spot = crate::link::Spot::at(at);
+        let held = crate::link::Held::new(ObjectClass::Program, spot, print).unwrap();
+        workspace.link(id, &keyboard, held);
+    }
+
     /// The body checksum of one asset's saved bytes, which is what a slot holding them
     /// reports.
     fn crc(workspace: &Workspace, id: u64) -> u32 {
@@ -1818,7 +1837,7 @@ mod tests {
             .expect("every CBIN container has one")
     }
 
-    /// An asset has changed once it is saved over what its slot holds, and stops
+    /// A linked asset has changed once it is saved over what its slot holds, and stops
     /// counting once it is queued. An edit nothing has saved has not changed.
     #[test]
     fn an_asset_has_changed_once_saved_over_its_slot_and_until_queued() {
@@ -1851,6 +1870,9 @@ mod tests {
                 Some(("off-2", held)),
             ],
         );
+        for (slot, id) in [saved, queued, unsaved].into_iter().enumerate() {
+            link_to(&mut workspace, &device, id, at(slot as u32));
+        }
 
         let ids = |workspace: &Workspace, device: &Device, queue: &Queue| {
             changed(workspace, &device.state, queue)
@@ -1867,7 +1889,6 @@ mod tests {
         }
         // Edited and not saved: the slot still holds what this was saved as.
         edit(&mut workspace, unsaved, &mut log);
-        device.relink(&mut workspace);
 
         assert_eq!(ids(&workspace, &device, &queue), vec![saved, queued]);
 
@@ -1883,8 +1904,8 @@ mod tests {
         assert_eq!(ids(&workspace, &device, &queue), vec![saved]);
     }
 
-    /// Each changed asset is queued for the slot it stands on, and one that stands on
-    /// no slot is not.
+    /// Each changed asset is queued for the slot it is linked to, and one with no link is
+    /// not, whatever slot holds its bytes.
     #[test]
     fn queueing_what_changed_makes_one_entry_each() {
         let (mut workspace, mut log, bytes) = bench();
@@ -1908,18 +1929,20 @@ mod tests {
         let homeless = workspace.ingest("typed-here.ne5p".into(), Origin::Fresh, bytes, &mut log);
         let held = crc(&workspace, ids[0]);
         device.pretend_bodies(class, 7, &[Some(("off-0", held)), Some(("off-1", held))]);
+        for (slot, id) in ids.iter().enumerate() {
+            link_to(&mut workspace, &device, *id, at(slot as u32));
+        }
         for id in ids.iter().copied().chain([homeless]) {
             edit(&mut workspace, id, &mut log);
             workspace.mark_saved(id);
         }
-        device.relink(&mut workspace);
 
         queue_changed(&workspace, &mut device, &mut queue, &mut log);
 
         assert_eq!(queue.ids(), ids);
         assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
         assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
-        assert!(!queue.holds(homeless), "it stands for no slot");
+        assert!(!queue.holds(homeless), "it is linked to no slot");
         assert!(changed(&workspace, &device.state, &queue).is_empty());
     }
 
@@ -1940,6 +1963,7 @@ mod tests {
             class,
             at(0),
             Occupancy::Vacant,
+            None,
         );
         assert!(matches!(landed, Put::Made));
 
@@ -1948,6 +1972,7 @@ mod tests {
             class,
             at(0),
             Occupancy::Vacant,
+            None,
         );
         assert!(
             matches!(landed, Put::Instead(displaced) if displaced == first),
@@ -1960,12 +1985,14 @@ mod tests {
             class,
             at(1),
             Occupancy::Vacant,
+            None,
         );
         let landed = queue.put(
             workspace.get(first).unwrap(),
             class,
             at(2),
             Occupancy::Vacant,
+            None,
         );
         assert!(
             matches!(landed, Put::Moved(was, before) if (was, before) == (class, at(1))),
@@ -1979,6 +2006,7 @@ mod tests {
             class,
             at(2),
             Occupancy::Vacant,
+            None,
         );
         assert!(matches!(landed, Put::Standing));
         assert_eq!(queue.ids(), vec![second, first]);
@@ -2040,6 +2068,7 @@ mod tests {
                 class,
                 at(slot as u32),
                 Occupancy::Vacant,
+                None,
             );
         }
 

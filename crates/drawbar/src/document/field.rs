@@ -1769,7 +1769,7 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
             },
         ),
         ("Layout", layout.0, layout.1),
-        ("Stored at", super::header::lives(entity), String::new()),
+        ("Stored at", super::header::stored(entity), String::new()),
         (
             "Instrument",
             nord_format::accept::Family::of_tag(&entity.tag())
