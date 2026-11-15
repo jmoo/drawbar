@@ -2409,6 +2409,10 @@ impl Device {
                     at,
                     holds,
                 } => {
+                    let reload = self.running.as_mut().and_then(|run| run.reload.as_mut());
+                    if let Some(DeviceCmd::Reload { written, .. }) = reload {
+                        written.retain(|it| *it != at);
+                    }
                     let slot = (id, class, at);
                     crate::queue::changed_under(workspace, self, queue, log, slot, holds.as_ref());
                     let name = workspace.get(id).map_or("", |entity| entity.name.as_str());
@@ -3186,7 +3190,7 @@ mod tests {
         let class = ObjectClass::Program;
         let at = Location { bank: 4, slot: 2 };
 
-        let owed = |focus: bool, refused: bool| {
+        let owed = |focus: bool, refused: Option<DeviceEvent>| {
             let ctx = egui::Context::default();
             let mut workspace = Workspace::new(ctx.clone());
             let mut device = Device::new(ctx);
@@ -3207,8 +3211,8 @@ mod tests {
                 &mut log,
             );
             device.pump();
-            if refused {
-                device.pretend(DeviceEvent::OpFailed("put: refused".into()));
+            if let Some(refused) = refused {
+                device.pretend(refused);
             }
             device.pretend(DeviceEvent::Finished);
             device.poll(
@@ -3223,9 +3227,28 @@ mod tests {
             })
         };
 
-        assert_eq!(owed(true, false), Some((class, vec![at])));
-        assert_eq!(owed(true, true), None, "the refused write changed nothing");
-        assert_eq!(owed(false, false), None, "this panel loads no programs");
+        let failed = || Some(DeviceEvent::OpFailed("put: refused".into()));
+        let changed = || {
+            let (id, holds) = (1, None);
+            Some(DeviceEvent::Changed {
+                id,
+                class,
+                at,
+                holds,
+            })
+        };
+        assert_eq!(owed(true, None), Some((class, vec![at])));
+        assert_eq!(
+            owed(true, failed()),
+            None,
+            "the refused write changed nothing"
+        );
+        assert_eq!(
+            owed(true, changed()),
+            Some((class, vec![])),
+            "the slot that changed on the keyboard keeps what the panel plays"
+        );
+        assert_eq!(owed(false, None), None, "this panel loads no programs");
     }
 
     /// A program written back changes what it needs, so the cached answer does not
