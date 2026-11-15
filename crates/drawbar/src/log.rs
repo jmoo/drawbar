@@ -10,9 +10,11 @@ use std::collections::VecDeque;
 use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
+use crate::bring::Asks;
 use crate::icon::{painted, sized, Glyph};
 use crate::link::{Held, Keyboard};
-use crate::queue::Queue;
+use crate::queue::{Queue, Waiting};
+use crate::strings::{display_name, place};
 use crate::workspace::Workspace;
 
 /// Entries kept before the oldest is dropped. A session that opens a hundred files
@@ -55,15 +57,16 @@ pub struct Entry {
 pub enum Undo {
     /// Files linked on their own: unlink each, and keep it off that keyboard.
     Unlink { keyboard: Keyboard, ids: Vec<u64> },
-    /// Sends queued for drawbar's own reasons: take the files out of the queue.
-    Unqueue(Vec<u64>),
+    /// Sends queued for drawbar's own reasons: take each entry out of the queue, while it
+    /// still waits for the slot it was queued for.
+    Unqueue(Vec<Waiting>),
     /// Files brought in from the keyboard, each as it was before.
     Restore(Vec<Restored>),
-    /// A link that followed its sound to another slot: the link it had before.
+    /// Links drawbar moved or removed: put each back, unless another file is linked to
+    /// one of those slots now.
     Relink {
-        id: u64,
         keyboard: Keyboard,
-        held: Held,
+        links: Vec<(u64, Held)>,
     },
     /// Files unlinked from a slot another file kept: link each back, in place of that one.
     Reclaim {
@@ -72,47 +75,68 @@ pub enum Undo {
     },
 }
 
-/// A file as it was before it was brought in: the bytes it was saved as, and its link.
+/// A file as it was before it was brought in, and the link bringing it in left.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Restored {
     pub id: u64,
     pub bytes: Vec<u8>,
-    pub link: Option<(Keyboard, Held)>,
+    pub keyboard: Keyboard,
+    pub before: Held,
+    /// The link it was brought in under. Its base is what the file was saved as.
+    pub after: Held,
 }
 
 impl Undo {
-    /// Take the change back. A file that is gone is left alone, and so is one that holds
-    /// unsaved edits, which putting its old bytes back would lose.
-    pub fn perform(self, workspace: &mut Workspace, queue: &mut Queue, log: &mut Log) {
+    /// Take the change back, and say what was taken back. A file that is gone is left
+    /// alone; a file brought in is put back only while it is as bringing it in left it.
+    pub fn perform(
+        self,
+        workspace: &mut Workspace,
+        queue: &mut Queue,
+        asks: &mut Asks,
+        log: &mut Log,
+    ) -> String {
         match self {
             Undo::Unlink { keyboard, ids } => {
-                for id in ids {
-                    workspace.keep_off(id, &keyboard);
+                for id in &ids {
+                    workspace.keep_off(*id, &keyboard);
+                }
+                format!("Unlinked {}.", named(workspace, &ids, "files"))
+            }
+            Undo::Unqueue(entries) => {
+                let still = |&(id, class, at): &Waiting| {
+                    queue
+                        .entry(id)
+                        .is_some_and(|held| (held.class, held.at) == (class, at))
+                };
+                let ids: Vec<u64> = entries
+                    .iter()
+                    .filter(|it| still(it))
+                    .map(|it| it.0)
+                    .collect();
+                ids.iter().for_each(|id| queue.forget(*id));
+                match ids.is_empty() {
+                    true => "Not undone: the queue changed since.".to_string(),
+                    false => format!(
+                        "Took {} out of the queue.",
+                        named(workspace, &ids, "sounds")
+                    ),
                 }
             }
-            Undo::Unqueue(ids) => ids.into_iter().for_each(|id| queue.forget(id)),
-            Undo::Restore(kept) => {
-                for Restored { id, bytes, link } in kept {
-                    if workspace.get(id).is_none_or(|entity| entity.is_unsaved()) {
-                        continue;
-                    }
-                    workspace.replace_bytes(id, bytes, log);
-                    workspace.mark_saved(id);
-                    if let Some((keyboard, held)) = link {
-                        workspace.link(id, &keyboard, held);
-                    }
+            Undo::Restore(kept) => restore(kept, workspace, asks, log),
+            Undo::Relink { keyboard, links } => {
+                let ours = |id| links.iter().any(|(it, _)| *it == id);
+                let taken = links.iter().find_map(|(_, held)| {
+                    let other = workspace.linked_at(&keyboard, held.class(), &held.spot)?;
+                    (!ours(other)).then_some((other, held))
+                });
+                if let Some((other, held)) = taken {
+                    let name = named(workspace, &[other], "files");
+                    return format!("Not undone: {name} is linked to {} now.", spot(held));
                 }
+                relink(workspace, &keyboard, links)
             }
-            Undo::Relink { id, keyboard, held } => {
-                if workspace.get(id).is_some() {
-                    workspace.link(id, &keyboard, held);
-                }
-            }
-            Undo::Reclaim { keyboard, links } => {
-                for (id, held) in links {
-                    workspace.link(id, &keyboard, held);
-                }
-            }
+            Undo::Reclaim { keyboard, links } => relink(workspace, &keyboard, links),
         }
     }
 
@@ -127,6 +151,80 @@ impl Undo {
     }
 }
 
+/// Put back each file still as bringing it in left it: saved as what it was brought in as,
+/// and linked as bringing it in linked it. It is not brought in again on its own.
+fn restore(
+    kept: Vec<Restored>,
+    workspace: &mut Workspace,
+    asks: &mut Asks,
+    log: &mut Log,
+) -> String {
+    let mut put = Vec::new();
+    let mut changed = Vec::new();
+    for Restored {
+        id,
+        bytes,
+        keyboard,
+        before,
+        after,
+    } in kept
+    {
+        let Some(entity) = workspace.get(id) else {
+            continue;
+        };
+        let left = !entity.is_unsaved()
+            && entity.saved_print() == Some(after.base)
+            && entity.held_on(&keyboard) == Some(&after);
+        if !left {
+            changed.push(id);
+            continue;
+        }
+        workspace.replace_bytes(id, bytes, log);
+        workspace.mark_saved(id);
+        workspace.link(id, &keyboard, before);
+        asks.undid(id);
+        put.push(id);
+    }
+    let (put, changed) = (
+        named(workspace, &put, "sounds"),
+        named(workspace, &changed, "sounds"),
+    );
+    match (put.is_empty(), changed.is_empty()) {
+        (true, true) => "Nothing to put back.".to_string(),
+        (true, false) => format!("Not undone: {changed} changed since."),
+        (false, true) => format!("Put back {put}."),
+        (false, false) => format!("Put back {put}; {changed} changed since."),
+    }
+}
+
+fn relink(workspace: &mut Workspace, keyboard: &Keyboard, links: Vec<(u64, Held)>) -> String {
+    let ids: Vec<u64> = links.iter().map(|(id, _)| *id).collect();
+    for (id, held) in links {
+        workspace.link(id, keyboard, held);
+    }
+    format!("Linked {} again.", named(workspace, &ids, "files"))
+}
+
+/// One file by its name, several by their count, none as nothing.
+fn named(workspace: &Workspace, ids: &[u64], many: &str) -> String {
+    match ids {
+        [] => String::new(),
+        [id] => format!(
+            "“{}”",
+            display_name(workspace.get(*id).map_or("", |it| it.name.as_str()))
+        ),
+        _ => format!("{} {many}", ids.len()),
+    }
+}
+
+/// The slot a link names, as the user knows it.
+fn spot(held: &Held) -> String {
+    match held.location() {
+        Some(at) => place(held.class(), at),
+        None => held.name().unwrap_or_default().to_string(),
+    }
+}
+
 pub struct Log {
     entries: VecDeque<Entry>,
     /// egui's frame time, refreshed by [`Log::tick`].
@@ -138,8 +236,8 @@ pub struct Log {
     status: (Level, String),
     /// The serial the next entry takes.
     next: u64,
-    /// An Undo pressed in the popover, with the line it was on, until taken.
-    pressed: Option<(Undo, String)>,
+    /// An Undo pressed in the popover, until taken.
+    pressed: Option<Undo>,
 }
 
 impl Default for Log {
@@ -218,13 +316,13 @@ impl Log {
     }
 
     /// Take back what the Undo pressed in the popover since the last call undoes, and say
-    /// so.
-    pub fn undo_pressed(&mut self, workspace: &mut Workspace, queue: &mut Queue) {
-        let Some((undo, line)) = self.pressed.take() else {
+    /// what it took back.
+    pub fn undo_pressed(&mut self, workspace: &mut Workspace, queue: &mut Queue, asks: &mut Asks) {
+        let Some(undo) = self.pressed.take() else {
             return;
         };
-        undo.perform(workspace, queue, self);
-        self.say(format!("Undone: {line}"));
+        let said = undo.perform(workspace, queue, asks, self);
+        self.say(said);
     }
 
     /// Press the Undo of the newest entry that says `text`, as a click in the popover
@@ -236,8 +334,7 @@ impl Log {
             .iter_mut()
             .rev()
             .find(|entry| entry.text.contains(text));
-        let pressed = entry.and_then(|entry| Some((entry.undo.take()?, entry.text.clone())));
-        self.pressed = pressed;
+        self.pressed = entry.and_then(|entry| entry.undo.take());
         self.pressed.is_some()
     }
 
@@ -389,7 +486,7 @@ impl Log {
     }
 
     /// The entries, newest first. Returns the Undo pressed, taken off its entry.
-    fn rows(&mut self, ui: &mut egui::Ui, problems_only: bool) -> Option<(Undo, String)> {
+    fn rows(&mut self, ui: &mut egui::Ui, problems_only: bool) -> Option<Undo> {
         let mut pressed = None;
         egui::ScrollArea::vertical()
             .id_salt("activity_rows")
@@ -405,7 +502,7 @@ impl Log {
                 for entry in shown {
                     any = true;
                     if row(ui, entry) {
-                        pressed = entry.undo.take().map(|undo| (undo, entry.text.clone()));
+                        pressed = entry.undo.take();
                     }
                 }
                 if !any {

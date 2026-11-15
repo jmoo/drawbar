@@ -3885,9 +3885,11 @@ mod tests {
         assert!(bench
             .log
             .press("1 file unlinked from a slot another file is linked to."));
-        bench
-            .log
-            .undo_pressed(&mut bench.workspace, &mut bench.queue);
+        bench.log.undo_pressed(
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.device.asks,
+        );
         heard(&mut bench);
         assert_eq!(linked(&bench), [false, true], "the other one, in its place");
     }

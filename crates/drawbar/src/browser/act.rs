@@ -1775,7 +1775,8 @@ fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64
     log.say(said);
     if let Some(held) = before {
         let keyboard = keyboard.clone();
-        log.offer(crate::log::Undo::Relink { id, keyboard, held });
+        let links = vec![(id, held)];
+        log.offer(crate::log::Undo::Relink { keyboard, links });
     }
 }
 
@@ -1805,7 +1806,9 @@ fn queue_all(
         let bound = bound_for(entity, &device.state, queue);
         fits += usize::from(!matches!(bound, Bound::Refused(_)));
         match bound {
-            Bound::At(class, at) => enqueue(workspace, device, queue, log, id, class, at),
+            Bound::At(class, at) => {
+                enqueue(workspace, device, queue, log, id, class, at);
+            }
             Bound::Nowhere => nowhere += 1,
             Bound::Full(_) | Bound::Refused(_) => {
                 log.say(unqueued(&name, bound, &device.state).unwrap_or_default())
@@ -1874,9 +1877,9 @@ fn save_doc(
         match bound {
             // Already waiting for that slot, so the save only moved the baseline.
             Some(Bound::At(class, at)) if waiting != Some((class, at)) => {
-                enqueue(workspace, device, queue, log, id, class, at);
-                if queue.holds(id) {
-                    log.offer(crate::log::Undo::Unqueue(vec![id]));
+                let queued = enqueue(workspace, device, queue, log, id, class, at);
+                if !queued.is_empty() {
+                    log.offer(crate::log::Undo::Unqueue(queued));
                 }
             }
             _ => log.say(saved),
@@ -1966,7 +1969,9 @@ fn send(
             Some(note),
             Act::Replace { id, class, at },
         ),
-        _ => enqueue(workspace, device, queue, log, id, class, at),
+        _ => {
+            enqueue(workspace, device, queue, log, id, class, at);
+        }
     }
 }
 
@@ -2670,9 +2675,11 @@ mod tests {
         );
 
         assert!(bench.log.press("is unlinked from"));
-        bench
-            .log
-            .undo_pressed(&mut bench.workspace, &mut bench.queue);
+        bench.log.undo_pressed(
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.device.asks,
+        );
         let entity = bench.workspace.get(id).unwrap();
         let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
         assert_eq!((linked.at, linked.standing), (Some(at(2)), Standing::Same));
