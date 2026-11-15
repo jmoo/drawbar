@@ -676,10 +676,6 @@ pub struct DeviceState {
     /// by class and slot. Cleared when the instrument reports a change or disconnects.
     needs: HashMap<(ObjectClass, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
-    /// The assets linked to a slot another asset is linked to as well, where neither is
-    /// known to be the one the slot holds. Two libraries can each link one before they
-    /// sync.
-    contested: std::collections::BTreeSet<u64>,
     /// The keyboard the card last attached names. See [`DeviceState::keyboard`].
     keyboard: Option<Keyboard>,
 }
@@ -951,13 +947,6 @@ impl DeviceState {
         self.needs.clear();
         self.detail = Detail::default();
         self.scan.clear();
-        self.contested.clear();
-    }
-
-    /// The user chose `id` for the slot its rivals were linked to as well, and linking it
-    /// unlinked them.
-    pub(crate) fn uncontest(&mut self, id: u64) {
-        self.contested.remove(&id);
     }
 
     /// Whether a stored link names a slot this keyboard can have: a class this build
@@ -1234,53 +1223,67 @@ fn found(
 }
 
 /// Settle slots two assets are linked to, as two libraries that each linked one before
-/// they synced leave them: where exactly one of them is known to hold what the slot
-/// holds, the others are unlinked, in one log line. Where none or several are, all of
-/// them wait for the user.
-fn settle_claims(state: &mut DeviceState, workspace: &mut Workspace, log: &mut Log) {
+/// they synced leave them: of the files linked to a slot a walk has read, one keeps its
+/// link and the others are unlinked, in one log line whose Undo links them back.
+///
+/// Every computer keeps the same one: the file saved as what the slot holds, else the one
+/// whose link knew what it holds, else the one whose link has the slot's name, else the
+/// greatest link.
+fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
     let Some(keyboard) = state.keyboard().cloned() else {
         return;
     };
-    let mut slots: std::collections::BTreeMap<(u32, Spot), Vec<(&LocalEntity, &Held)>> =
+    let mut slots: std::collections::BTreeMap<(u32, &Spot), Vec<(&LocalEntity, &Held)>> =
         Default::default();
     for entity in workspace.listed() {
         if let Some(held) = held_here(state, entity) {
             let code = crate::store::keys::class_code(held.class()).unwrap_or_default();
-            slots
-                .entry((code, held.spot.clone()))
-                .or_default()
-                .push((entity, held));
+            let claims = slots.entry((code, &held.spot)).or_default();
+            claims.push((entity, held));
         }
     }
-    let mut contested = std::collections::BTreeSet::new();
-    let mut losers = Vec::new();
-    for claims in slots.values().filter(|claims| claims.len() > 1) {
-        let ids = claims.iter().map(|(entity, _)| entity.id);
-        let (_, there) = there(state, claims[0].1);
-        let There::Holds { crc: Some(crc), .. } = there else {
-            contested.extend(ids);
-            continue;
-        };
-        let holds = |(entity, held): &&(&LocalEntity, &Held)| {
-            held.knew(crc) || entity.saved_print().is_some_and(|print| print.crc == crc)
-        };
-        let mut holders = claims.iter().filter(holds);
-        match (holders.next(), holders.next()) {
-            (Some((holder, _)), None) => losers.extend(ids.filter(|id| *id != holder.id)),
-            _ => contested.extend(ids),
-        }
-    }
-    state.contested = contested;
-    if losers.is_empty() {
+    let unlinked: Vec<(u64, Held)> = slots
+        .values()
+        .filter(|claims| claims.len() > 1)
+        .filter_map(|claims| Some((kept(state, claims)?, claims)))
+        .flat_map(|(kept, claims)| {
+            let others = claims.iter().filter(move |(entity, _)| entity.id != kept);
+            others.map(|(entity, held)| (entity.id, (*held).clone()))
+        })
+        .collect();
+    if unlinked.is_empty() {
         return;
     }
-    for id in &losers {
+    for (id, _) in &unlinked {
         workspace.unlink(*id, &keyboard);
     }
     log.say(format!(
-        "{} unlinked from a slot another file holds.",
-        counted(losers.len(), "file", "files")
+        "{} unlinked from a slot another file is linked to.",
+        counted(unlinked.len(), "file", "files")
     ));
+    log.offer(crate::log::Undo::Reclaim {
+        keyboard,
+        links: unlinked,
+    });
+}
+
+/// Which of the files linked to one slot [`settle_claims`] keeps. `None` while no walk has
+/// read the slot.
+fn kept(state: &DeviceState, claims: &[(&LocalEntity, &Held)]) -> Option<u64> {
+    let (at, there) = there(state, claims.first()?.1);
+    if there == There::Unread {
+        return None;
+    }
+    let named = at
+        .and_then(|at| state.slot(claims[0].1.class(), at).flatten())
+        .map(|info| info.name.trim());
+    let rank = |&&(entity, held): &&(&LocalEntity, &Held)| {
+        let same = crate::link::standing(held, entity.saved_print(), there) == Standing::Same;
+        let knew = matches!(there, There::Holds { crc: Some(crc), .. } if held.knew(crc));
+        let named = named.is_some() && held.name() == named;
+        (same, knew, named, held.clone(), entity.path.clone())
+    };
+    claims.iter().max_by_key(rank).map(|(entity, _)| entity.id)
 }
 
 /// The slots of `class` an asset names: the address its header stores, then the slot it
@@ -1300,6 +1303,42 @@ pub fn named_slots(entity: &LocalEntity, class: ObjectClass) -> impl Iterator<It
         Origin::Device { .. } | Origin::File(_) | Origin::Fresh => None,
     };
     stored.into_iter().chain(came_off)
+}
+
+/// Record the name each linked slot of a bank just read has, where it holds what its file
+/// and it last agreed on under another name than the link recorded: the keyboard altered
+/// the name it was sent, or the panel renamed the slot, which keeps its checksum. A slot two
+/// files claim is left to [`settle_claims`].
+fn follow_names(state: &DeviceState, workspace: &mut Workspace, class: ObjectClass, bank: u32) {
+    let Some(keyboard) = state.keyboard() else {
+        return;
+    };
+    let claimed = |held: &Held| {
+        let others = workspace
+            .listed()
+            .filter_map(|entity| held_here(state, entity));
+        others
+            .filter(|other| other.class() == class && other.spot == held.spot)
+            .count()
+            > 1
+    };
+    let renamed: Vec<(u64, Held)> = workspace
+        .listed()
+        .filter_map(|entity| {
+            let held = held_here(state, entity).filter(|held| held.class() == class)?;
+            let at = held
+                .location()
+                .filter(|at| user_bank(at.bank) == Some(bank))?;
+            let info = state.slot(class, at).flatten()?;
+            let name = info.name.trim();
+            let agrees = info.crc32 == Some(held.base.crc);
+            let renamed = agrees && !name.is_empty() && held.name() != Some(name);
+            (renamed && !claimed(held)).then(|| (entity.id, held.agreed(held.base, name)))
+        })
+        .collect();
+    for (id, held) in renamed {
+        workspace.link(id, keyboard, held);
+    }
 }
 
 /// Link a view just kept to the slot it shows, as it was read.
@@ -1399,16 +1438,11 @@ impl Linked {
 pub fn standing_of(state: &DeviceState, entity: &LocalEntity) -> Option<Linked> {
     let held = held_here(state, entity)?;
     let (at, there) = there(state, held);
-    let standing = match crate::link::standing(held, entity.saved_print(), there) {
-        Standing::Unread => Standing::Unread,
-        _ if state.contested.contains(&entity.id) => Standing::Contested,
-        standing => standing,
-    };
     Some(Linked {
         class: held.class(),
         at,
         there,
-        standing,
+        standing: crate::link::standing(held, entity.saved_print(), there),
     })
 }
 
@@ -2267,6 +2301,7 @@ impl Device {
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
+                    follow_names(&self.state, workspace, class, bank);
                     crate::queue::refresh(workspace, self, queue, log);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
@@ -2428,7 +2463,7 @@ impl Device {
         // the cache already shows, without waiting for the next walk.
         if heard || self.list_seen != workspace.revision() {
             let before = workspace.revision();
-            settle_claims(&mut self.state, workspace, log);
+            settle_claims(&self.state, workspace, log);
             link_found(&self.state, workspace, log);
             crate::bring::follow(self, workspace, log);
             crate::bring::queue_ahead(self, workspace, queue, log);
@@ -3861,20 +3896,25 @@ mod tests {
         }
     }
 
-    /// Two files linked to slot 1 of bank 1, as two libraries that synced leave them.
-    fn claimed(bench: &mut crate::testing::Bench, slot: Option<u32>) -> (u64, u64) {
+    /// Files `A` holding `body()` and `B` holding `gained("40")`, linked to slot 1 of bank 1
+    /// as `links` says, as two libraries that synced leave them, with the slot holding
+    /// `slot` under the name `A`.
+    fn claimed(
+        bench: &mut crate::testing::Bench,
+        slot: Option<u32>,
+        links: [Held; 2],
+    ) -> (u64, u64) {
         let class = ObjectClass::Program;
         bench
             .device
             .pretend_bodies(class, 1, &[slot.map(|crc| ("A", crc))]);
         let keyboard = bench.device.state.keyboard().cloned().unwrap();
-        let held = Held::new(class, at(1), "", print(&body())).unwrap();
         let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
             .map(|(name, bytes)| file(bench, name, bytes));
-        for id in [first, second] {
+        for (id, held) in [first, second].into_iter().zip(links) {
             let link = crate::link::Link {
                 keyboard: keyboard.clone(),
-                held: Some(held.clone()),
+                held: Some(held),
             };
             bench.workspace.follow_links(id, vec![link]);
         }
@@ -3882,48 +3922,142 @@ mod tests {
         (first, second)
     }
 
-    #[test]
-    fn of_two_files_linked_to_one_slot_the_one_it_holds_keeps_the_link() {
+    fn agreed(name: &str, base: &[u8]) -> Held {
+        Held::new(ObjectClass::Program, at(1), name, print(base)).unwrap()
+    }
+
+    /// Which of `A` and `B`, claiming one slot as `links` says, keeps it.
+    fn keeps(slot: &[u8], links: [Held; 2]) -> [Option<Spot>; 2] {
         let mut bench = crate::testing::Bench::new();
-        let (first, second) = claimed(&mut bench, Some(print(&gained("40")).crc));
-        assert_eq!(held_at(&bench, first), None);
-        assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
-        assert_eq!(
-            bench
-                .log
-                .transcript()
-                .matches("unlinked from a slot")
-                .count(),
-            1
-        );
+        let (first, second) = claimed(&mut bench, Some(print(slot).crc), links);
+        [held_at(&bench, first), held_at(&bench, second)]
     }
 
     #[test]
-    fn two_files_linked_to_a_slot_holding_neither_wait_for_the_user() {
-        let mut bench = crate::testing::Bench::new();
-        let (first, second) = claimed(&mut bench, Some(print(&gained("41")).crc));
-        for id in [first, second] {
-            let entity = bench.workspace.get(id).unwrap();
-            let linked = standing_of(&bench.device.state, entity).unwrap();
-            assert_eq!(linked.standing, Standing::Contested);
-        }
-        assert!(crate::bring::since(&bench.device.state, &bench.workspace).is_empty());
-        bench.act(vec![crate::browser::Act::SendChecked(vec![first, second])]);
-        assert!(bench.queue.is_empty(), "nothing is queued on its own");
+    fn of_two_files_linked_to_one_slot_every_computer_keeps_the_same_one() {
+        let (linked, off) = (Some(Spot::at(at(1))), None);
+        let both = || [agreed("", &body()), agreed("", &body())];
+        assert_eq!(keeps(&gained("40"), both()), [off.clone(), linked.clone()]);
+        assert_eq!(keeps(&body(), both()), [linked.clone(), off.clone()]);
 
-        crate::bring::choose(&mut bench.device, &bench.workspace, &mut bench.log, first);
-        let crate::testing::Bench {
-            device,
-            workspace,
-            queue,
-            log,
-            ..
-        } = &mut bench;
-        crate::bring::use_mine(device, workspace, queue, log);
+        let other = gained("42");
+        let knows = keeps(&other, [agreed("", &other), agreed("", &gained("41"))]);
+        assert_eq!(
+            knows,
+            [linked.clone(), off.clone()],
+            "the slot holds A's base"
+        );
+        let neither = gained("43");
+        let named = keeps(&neither, [agreed("", &body()), agreed("A", &body())]);
+        assert_eq!(named, [off.clone(), linked.clone()], "the slot is named A");
+
+        let lesser = agreed("", &gained("44"));
+        let greater = agreed("", &gained("45"));
+        let (lesser, greater) = match lesser < greater {
+            true => (lesser, greater),
+            false => (greater, lesser),
+        };
+        let ordered = keeps(&neither, [lesser.clone(), greater.clone()]);
+        assert_eq!(ordered, [off.clone(), linked.clone()]);
+        assert_eq!(keeps(&neither, [greater, lesser]), [linked, off]);
+    }
+
+    #[test]
+    fn a_slot_two_files_claim_is_settled_once_read_and_undo_links_the_other_back() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_attached();
+        bench.device.pretend_geometry(class, &[("A", 1), ("B", 1)]);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let slot = Location::from_user(2, 1);
+        let held = Held::new(class, slot, "", print(&body())).unwrap();
+        let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
+            .map(|(name, bytes)| file(&mut bench, name, bytes));
+        for id in [first, second] {
+            let link = crate::link::Link {
+                keyboard: keyboard.clone(),
+                held: Some(held.clone()),
+            };
+            bench.workspace.follow_links(id, vec![link]);
+        }
         heard(&mut bench);
-        assert_eq!(held_at(&bench, first), Some(Spot::at(at(1))));
-        assert_eq!(held_at(&bench, second), None);
-        assert!(bench.queue.holds(first));
+        let linked =
+            |bench: &crate::testing::Bench| [first, second].map(|id| held_at(bench, id).is_some());
+        assert_eq!(linked(&bench), [true, true], "bank 2 is unread");
+
+        let info = ProgramInfo {
+            location: slot,
+            body_len: 121,
+            format: "ne5p".into(),
+            version: 4,
+            crc32: Some(print(&body()).crc),
+            modified: None,
+            name: "A".into(),
+        };
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 2,
+            slots: vec![Some(info)],
+        });
+        heard(&mut bench);
+        assert_eq!(linked(&bench), [true, false]);
+        assert!(bench
+            .log
+            .press("1 file unlinked from a slot another file is linked to."));
+        bench.log.undo_pressed(
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.device.asks,
+        );
+        heard(&mut bench);
+        assert_eq!(linked(&bench), [false, true], "the other one, in its place");
+    }
+
+    #[test]
+    fn a_link_takes_the_name_its_slot_holds_its_version_under_and_keeps_its_own_otherwise() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_attached();
+        bench.device.pretend_geometry(class, &[("A", 2)]);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let [same, edited] = ["A.ne5p", "B.ne5p"].map(|name| file(&mut bench, name, body()));
+        for (id, slot) in [(same, 1), (edited, 2)] {
+            let held = Held::new(class, at(slot), "Tine", print(&body())).unwrap();
+            bench.workspace.link(id, &keyboard, held);
+        }
+        let info = |slot, crc| ProgramInfo {
+            location: at(slot),
+            body_len: 121,
+            format: "ne5p".into(),
+            version: 4,
+            crc32: Some(crc),
+            modified: None,
+            name: "Tine Mk".into(),
+        };
+        let slots = vec![
+            Some(info(1, print(&body()).crc)),
+            Some(info(2, print(&gained("40")).crc)),
+        ];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        let name = |id| {
+            let entity = bench.workspace.get(id).unwrap();
+            entity
+                .held_on(&keyboard)
+                .unwrap()
+                .name()
+                .map(str::to_string)
+        };
+        assert_eq!(name(same).as_deref(), Some("Tine Mk"));
+        assert_eq!(
+            name(edited).as_deref(),
+            Some("Tine"),
+            "its slot holds another version"
+        );
     }
 
     #[test]

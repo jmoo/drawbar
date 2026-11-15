@@ -491,7 +491,7 @@ fn left(
         },
     );
     match place.mark {
-        Some(mark) => drawn.on_hover_text(mark_words(mark)),
+        Some(mark) => drawn.on_hover_text(mark_words(mark, facts.queue.holds(entity.id))),
         None => drawn.on_hover_text(entity.origin.label()),
     };
 
@@ -1263,7 +1263,7 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
             None => StateLine {
                 words: "edited".to_string(),
                 ink: Ink::Warn,
-                hint: mark_words(Mark::Unsaved).to_string(),
+                hint: mark_words(Mark::Unsaved, false).to_string(),
             },
         });
     }
@@ -1319,13 +1319,13 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
     let linked = standing_of(device, entity);
     let Some(class) = linked.map(|linked| linked.class).or(kind.home()) else {
         return Some(idle(format!(
-            "no instrument has a folder for this {}",
+            "no keyboard has a folder for this {}",
             kind.chip()
         )));
     };
     if !device.connected() {
         return Some(idle(
-            "no instrument attached, so there is nothing to send to".to_string(),
+            "no keyboard attached, so there is nothing to send to".to_string(),
         ));
     }
     if read_only(class) {
@@ -1338,7 +1338,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         return Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick));
     };
     match (linked.standing, linked.at) {
-        (Standing::Theirs | Standing::Both | Standing::Contested, _) => Some(Loud {
+        (Standing::Theirs | Standing::Both, _) => Some(Loud {
             short: "Choose".to_string(),
             glyph: Glyph::CircleAlert,
             ..send(
@@ -1778,11 +1778,7 @@ mod tests {
         let unattached = Device::new(egui::Context::default());
         let held = action(workspace.get(id).unwrap(), &unattached.state).unwrap();
         assert_eq!((held.tone, held.click), (Tone::Idle, Click::Nothing));
-        assert!(
-            held.hint.contains("no instrument attached"),
-            "{}",
-            held.hint
-        );
+        assert!(held.hint.contains("no keyboard attached"), "{}", held.hint);
 
         let mut device = Device::new(egui::Context::default());
         let print = workspace.get(id).unwrap().saved_print().unwrap();
@@ -1942,7 +1938,7 @@ mod tests {
         let loud = action(held.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(loud.tone, Tone::Idle);
         assert_eq!(loud.click, Click::Nothing);
-        assert_eq!(loud.hint, "no instrument has a folder for this note");
+        assert_eq!(loud.hint, "no keyboard has a folder for this note");
     }
 
     #[test]
@@ -1963,7 +1959,7 @@ mod tests {
         assert_eq!(
             loads(workspace.get(copied).unwrap(), &unattached.state),
             None,
-            "no instrument attached"
+            "no keyboard attached"
         );
 
         let mut attached = Device::new(egui::Context::default());

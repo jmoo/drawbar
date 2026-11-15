@@ -813,8 +813,12 @@ impl<F: Fs> Keeper<F> {
             Intent::Link { files } => {
                 let keys: Vec<Key> = files.iter().map(|relink| relink.file.clone()).collect();
                 let mut changes = adopting(library, &keys).await?;
-                let mut committed =
-                    facts(library, label, |built, view| link(built, view, &files)).await?;
+                let mut skipped = Vec::new();
+                let linked = |built, view: &View| link(built, view, &files, &mut skipped);
+                let mut committed = facts(library, label, linked).await?;
+                if let Some(why) = skipped.into_iter().next() {
+                    answer(Event::Unlinked(why));
+                }
                 changes.append(&mut committed.changes);
                 Some(toshokan::Committed {
                     changes,
@@ -1026,13 +1030,24 @@ fn entity_of<'l, F: Fs + 'l>(
     view: &View,
     key: &Key,
 ) -> Result<(Built<'l, F>, toshokan::EntityId), String> {
+    Ok(made(built, holder(view, key)?))
+}
+
+/// What gives the file a [`Key`] names its entity.
+enum Holder {
+    Entity(toshokan::EntityId),
+    Adopt(RelPath, Expect),
+}
+
+/// What gives the file `key` names its entity in `view`, as [`entity_of`] finds it.
+fn holder(view: &View, key: &Key) -> Result<Holder, String> {
     let path = match key {
-        Key::Entity(entity) => return Ok((built, *entity)),
+        Key::Entity(entity) => return Ok(Holder::Entity(*entity)),
         Key::File(path) => path,
     };
     let at = relative(path).ok_or_else(|| no_path(path))?;
     if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
-        return Ok((built, entity));
+        return Ok(Holder::Entity(entity));
     }
     let listed = view
         .listed(&at)
@@ -1041,9 +1056,16 @@ fn entity_of<'l, F: Fs + 'l>(
         len: listed.len,
         modified: listed.modified,
     };
-    Ok(built.create(|e| {
-        e.adopt(&at, expect);
-    }))
+    Ok(Holder::Adopt(at, expect))
+}
+
+fn made<'l, F: Fs + 'l>(built: Built<'l, F>, holder: Holder) -> (Built<'l, F>, toshokan::EntityId) {
+    match holder {
+        Holder::Entity(entity) => (built, entity),
+        Holder::Adopt(at, expect) => built.create(|e| {
+            e.adopt(&at, expect);
+        }),
+    }
 }
 
 /// Put a tag on each file of `files`, on its entity ([`entity_of`]).
@@ -1061,14 +1083,23 @@ fn tag<'l, F: Fs + 'l>(
 }
 
 /// Give each file of `files` its link on each keyboard named, on its entity
-/// ([`entity_of`]), removing what is stored for that keyboard as it is stored.
+/// ([`entity_of`]), removing what is stored for that keyboard as it is stored. A file with
+/// no entity to give one is left out, and why goes in `skipped`; an error only when every
+/// file is.
 fn link<'l, F: Fs + 'l>(
     mut built: Built<'l, F>,
     view: &View,
     files: &[Relink],
+    skipped: &mut Vec<String>,
 ) -> Result<Built<'l, F>, String> {
     for relink in files {
-        let (next, entity) = entity_of(built, view, &relink.file)?;
+        let (next, entity) = match holder(view, &relink.file) {
+            Ok(holder) => made(built, holder),
+            Err(why) => {
+                skipped.push(why);
+                continue;
+            }
+        };
         let stored = stored_links(view, entity);
         built = relink.on.iter().fold(next, |built, (keyboard, link)| {
             let on = stored.iter().filter(|(_, held)| held.keyboard == *keyboard);
@@ -1086,7 +1117,10 @@ fn link<'l, F: Fs + 'l>(
             }
         });
     }
-    Ok(built)
+    match skipped.len() == files.len() {
+        true => Err(skipped.first().cloned().unwrap_or_default()),
+        false => Ok(built),
+    }
 }
 
 /// The links stored on `entity`, each as it is stored and as this build reads it.
@@ -2595,6 +2629,46 @@ mod tests {
         let mut kept = vec![raw(&link("A1", 3)), raw(&link("B2", 4))];
         kept.sort();
         assert_eq!(held, kept);
+    }
+
+    #[test]
+    fn a_file_whose_link_cannot_be_written_is_left_out_and_the_others_are_written() {
+        use crate::link::{Held, Keyboard, Print};
+        use nord_usb::ObjectClass;
+
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&root);
+        let link = Link {
+            keyboard: Keyboard {
+                model: "Nord Electro 5".into(),
+                serial: None,
+            },
+            held: Held::new(
+                ObjectClass::Program,
+                nord_usb::Location { bank: 0, slot: 1 },
+                "",
+                Print { crc: 1, len: 121 },
+            ),
+        };
+        let on = vec![(link.keyboard.clone(), Some(link.clone()))];
+        let answers = keeper.run_one(Cmd::Intent(Intent::Link {
+            files: ["Gone.ne5p", "Grand.ne5p"]
+                .map(|name| Relink {
+                    file: Key::File(path(name)),
+                    on: on.clone(),
+                })
+                .into(),
+        }));
+        let unlinked: Vec<&Event> = answers
+            .iter()
+            .filter(|event| matches!(event, Event::Unlinked(_)))
+            .collect();
+        assert_eq!(unlinked.len(), 1, "{answers:?}");
+        let view = keeper.library.as_ref().unwrap().view();
+        let grand = view.at(&RelPath::new("Grand.ne5p").unwrap()).unwrap().id();
+        let held = view.folded().members(grand, LINKS.name());
+        assert_eq!(held, [toshokan::Raw::of(&link).unwrap()]);
     }
 
     /// A save to the path of a tagged file deleted outside drawbar writes that entity's

@@ -39,9 +39,11 @@ impl State {
     /// The full description, shown on hover.
     pub fn sentence(self) -> &'static str {
         match self {
-            State::Waiting => "everything waiting to be sent to the instrument",
+            State::Waiting => "everything waiting to be sent to the keyboard",
             State::Ready => "newer on this computer than in its slot, and not waiting",
-            State::Attention => "changed on the keyboard since it was last sent or copied",
+            State::Attention => {
+                "changed or emptied on the keyboard since it was last sent or copied"
+            }
         }
     }
 }

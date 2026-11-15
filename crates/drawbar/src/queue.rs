@@ -283,7 +283,11 @@ fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Loc
     );
 }
 
-/// Queue an asset to be written to a slot, and log what that displaced.
+/// An asset in the queue, and the slot it waits for.
+pub type Waiting = (u64, ObjectClass, Location);
+
+/// Queue an asset to be written to a slot, and log what that displaced. Returns each entry
+/// it made or moved, the pianos and samples it takes along first.
 ///
 /// The slot is read unless the scan cache shows it empty or holding a body with the same
 /// checksum. A slot in a bank the scan never reached is read, not assumed vacant.
@@ -297,29 +301,76 @@ pub fn enqueue(
     id: u64,
     class: ObjectClass,
     at: Location,
-) {
+) -> Vec<Waiting> {
+    let placed = place_in(workspace, device, queue, log, (id, class, at));
+    for ((id, class, at), put) in &placed {
+        let name = workspace.get(*id).map_or("", |it| it.name.as_str());
+        let where_ = place(*class, *at);
+        let displaced = match put {
+            Put::Standing | Put::Made => None,
+            Put::Moved(was, before) => Some(format!(
+                "“{name}” is waiting for {where_} rather than {}.",
+                place(*was, *before)
+            )),
+            Put::Instead(other) => workspace.get(*other).map(|other| {
+                format!(
+                    "“{name}” is waiting for {where_}; “{}” is not anymore.",
+                    other.name
+                )
+            }),
+        };
+        log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
+    }
+    placed.into_iter().map(|(waiting, _)| waiting).collect()
+}
+
+/// [`enqueue`], saying only what it refused.
+pub fn enqueue_quietly(
+    workspace: &Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    waiting: Waiting,
+) -> Vec<Waiting> {
+    let placed = place_in(workspace, device, queue, log, waiting);
+    placed.into_iter().map(|(waiting, _)| waiting).collect()
+}
+
+/// Queue an asset as [`enqueue`] does, saying only what it refused, and return what each
+/// entry made or moved displaced.
+fn place_in(
+    workspace: &Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    (id, class, at): Waiting,
+) -> Vec<(Waiting, Put)> {
     let Some(entity) = workspace.get(id) else {
-        return;
+        return Vec::new();
     };
     let name = entity.name.clone();
     let where_ = place(class, at);
     // A send writes what the queue holds, so an asset the instrument refuses must never
     // enter it.
     if let Fit::Refuses(why) = fit(&device.state, entity) {
-        return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
+        log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
+        return Vec::new();
     }
     if let Some(why) = name_clash(workspace, &device.state, queue, entity, class, at) {
-        return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
+        log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
+        return Vec::new();
     }
     if unsettled(&device.state, entity, class, at) {
-        return log.trouble(format!("“{name}” was not queued. {CHOOSE}"));
+        log.trouble(format!("“{name}” was not queued. {CHOOSE}"));
+        return Vec::new();
     }
+    let mut placed = Vec::new();
     for id in missing_plays(entity, workspace, &device.state, queue) {
         if let Some(Bound::At(class, at)) = workspace
             .get(id)
             .map(|file| bound_for(file, &device.state, queue))
         {
-            enqueue(workspace, device, queue, log, id, class, at);
+            placed.extend(place_in(workspace, device, queue, log, (id, class, at)));
         }
     }
     let holds = Occupancy::of(&device.state, class, at);
@@ -328,21 +379,10 @@ pub fn enqueue(
     if let Some((class, at)) = queue.unread(id) {
         read_occupant(device, log, class, at);
     }
-    let displaced = match put {
-        Put::Standing => return,
-        Put::Made => None,
-        Put::Moved(was, before) => Some(format!(
-            "“{name}” is waiting for {where_} rather than {}.",
-            place(was, before)
-        )),
-        Put::Instead(other) => workspace.get(other).map(|other| {
-            format!(
-                "“{name}” is waiting for {where_}; “{}” is not anymore.",
-                other.name
-            )
-        }),
-    };
-    log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
+    if !matches!(put, Put::Standing) {
+        placed.push(((id, class, at), put));
+    }
+    placed
 }
 
 /// Why a write of a file over its own linked slot waits for the user.

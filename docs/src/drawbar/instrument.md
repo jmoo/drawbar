@@ -59,7 +59,8 @@ A queued program takes along the piano or sample it plays when only this compute
 has it.
 
 When sounds on this computer are newer than the slots they are linked to, a
-**Queue** button appears beside **Send**. Click it to queue them all.
+**Queue** button appears beside **Send**. Click it to queue them all. Sounds saved
+while the keyboard was away are queued when it attaches.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel. Sending a sound renamed on this computer renames its
@@ -68,8 +69,10 @@ slot, even when the slot already holds the same sound.
 ## Changes made on the keyboard
 
 Once a newly attached keyboard has been read, drawbar lists the linked sounds that
-changed there since. **Bring them in** updates their files to match; **Not now**
-leaves them marked, and **Keyboard changes…** in the Instrument menu asks again.
+changed there since. **Bring them in** copies each changed slot into its file, moves
+the link of a moved sound, and unlinks a file whose sound was removed or replaced; with
+no slot changed, the button reads **Update links**. **Not now** leaves them marked, and
+**Keyboard changes…** in the Instrument menu asks again.
 Library undo, or **Undo** in the activity log, puts a file back.
 
 ## Safety

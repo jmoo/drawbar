@@ -1329,7 +1329,7 @@ impl DrawbarApp {
                 None => {}
             }
         }
-        log.undo_pressed(workspace, &mut self.queue);
+        log.undo_pressed(workspace, &mut self.queue, &mut device.asks);
     }
 
     /// The row of tabs between the two panel toggles, and the front tab's view in the
