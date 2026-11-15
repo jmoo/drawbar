@@ -2204,6 +2204,7 @@ mod tests {
             dialed: None,
             models: Vec::new(),
             scan_disagrees: None,
+            sample: None,
         }
     }
 

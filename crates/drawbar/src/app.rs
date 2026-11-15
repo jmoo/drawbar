@@ -1318,7 +1318,7 @@ impl DrawbarApp {
             }
         }
         if let Some(choosing) = &device.asks.choosing {
-            match crate::bring::choice_sheet(ctx, choosing, workspace) {
+            match crate::bring::choice_sheet(ctx, choosing, workspace, &device.state) {
                 Some(Answer::Yes) => {
                     crate::bring::use_mine(device, workspace, &mut self.queue, log)
                 }

@@ -1,6 +1,6 @@
-//! What is known about the piano a program plays, the one fact in a field document that
-//! the file alone cannot supply: the id the file stores, the name of the piano that id
-//! names, and the Model dial as the attached instrument's list of pianos.
+//! What is known about the piano and sample a program plays, the facts in a field
+//! document that the file alone cannot supply: the ids the file stores, the names they
+//! name, and the Model dial as the attached instrument's list of pianos.
 
 use eframe::egui;
 use nord_format::fields::{ControlKind, Field, Library};
@@ -17,6 +17,9 @@ pub const PIANO_CATEGORY: &str = "piano_panel.category";
 
 /// The id of the piano the program plays.
 pub const PIANO_ID: &str = "piano_panel.id";
+
+/// The id of the sample the program plays.
+pub const SAMPLE_ID: &str = "sample_panel.id";
 
 /// What is known about the piano a program plays.
 ///
@@ -35,20 +38,28 @@ pub struct PianoLookup {
     pub models: Vec<(u32, String)>,
     /// The scan's name for the current position, where the id names another piano.
     pub scan_disagrees: Option<String>,
+    /// The sample id the file stores, and the name of the sample it names, where one here
+    /// or on the instrument has it.
+    pub sample: Option<(u32, String)>,
 }
 
 impl PianoLookup {
-    /// The name of a library reference, where this lookup resolves it.
-    ///
-    /// Only the piano is resolved here: the piano the id names, and 0 for the piano the
-    /// dials pick. Every other reference shows the id the file stores.
+    /// The name of a library reference, where this lookup resolves it: the piano or
+    /// sample the id names, and 0 for the piano the dials pick. Every other reference
+    /// shows the id the file stores.
     pub(super) fn names(&self, field: &Field) -> Option<&str> {
-        if field.spec.control != ControlKind::Reference(Library::Piano) {
-            return None;
-        }
-        match super::library_id(&field.value) {
-            Some(0) => self.dialed.as_deref(),
-            id if id == self.id => self.name.as_deref(),
+        let id = super::library_id(&field.value);
+        match field.spec.control {
+            ControlKind::Reference(Library::Piano) => match id {
+                Some(0) => self.dialed.as_deref(),
+                id if id == self.id => self.name.as_deref(),
+                _ => None,
+            },
+            ControlKind::Reference(Library::Sample) => self
+                .sample
+                .as_ref()
+                .filter(|(named, _)| id == Some(*named))
+                .map(|(_, name)| name.as_str()),
             _ => None,
         }
     }
@@ -84,8 +95,8 @@ impl PianoLookup {
         true
     }
 
-    /// ⚠️ The instrument plays the piano the id names, whatever the dials say, so the
-    /// reader is told where the dials point elsewhere.
+    /// Where the dials point at another piano than the id names, says so: see
+    /// `PianoPanel::id` in `nord-format` for which one plays.
     pub(super) fn ui(&self, ui: &mut egui::Ui) {
         let Some(scanned) = &self.scan_disagrees else {
             return;

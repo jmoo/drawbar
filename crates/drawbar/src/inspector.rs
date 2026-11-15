@@ -325,22 +325,29 @@ impl Shown {
                     .iter()
                     .filter_map(|item| row_of(*item, workspace, &device.state, browser.tags()))
                     .collect();
-                let going = crate::library::consequence(
-                    &rows.iter().collect::<Vec<_>>(),
-                    &device.state,
-                    queue,
-                );
+                let going = (checked.len() > 1)
+                    .then(|| {
+                        crate::library::consequence(
+                            &rows.iter().collect::<Vec<_>>(),
+                            &device.state,
+                            queue,
+                        )
+                    })
+                    .flatten();
                 (about(&checked, &rows, browser, workspace, device), going)
             }
         };
+        let one = checked.len() == 1;
         let offers = Bulk::ALL
             .into_iter()
+            .filter(|action| !(one && *action == Bulk::Queue))
             .map(|action| {
                 (
                     action,
                     Offer::of(action, &checked, workspace, &device.state),
                 )
             })
+            .filter(|(action, offer)| !(one && *action == Bulk::Copy && !offer.live))
             .collect();
         let wearing = wearing(&locals, browser.tags());
         let sounds = match checked.as_slice() {
@@ -539,7 +546,7 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
     let quiet = ui.visuals().weak_text_color();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let place = picked.at.as_deref().unwrap_or("On this computer");
+        let place = picked.at.as_deref().unwrap_or("This computer");
         let ink = match picked.faint {
             true => quiet,
             false => ui.visuals().text_color(),
@@ -866,7 +873,7 @@ enum Sounds {
 #[derive(Debug, PartialEq, Eq)]
 struct Sound {
     class: ObjectClass,
-    /// Its name, or its id where nothing here or on the instrument goes by it.
+    /// Its name, or its kind where nothing here or on the instrument goes by its id.
     name: String,
     lies: Lies,
 }
@@ -903,36 +910,41 @@ fn sounds(item: Item, workspace: &Workspace, device: &DeviceState) -> Option<Sou
     let catalog = Catalog::of(workspace, device);
     let mut plays: Vec<Sound> = crate::plays::named(entity)
         .iter()
-        .map(|plays| sound(plays.key(), &catalog))
+        .filter_map(|plays| sound(plays.key(), &catalog, device))
         .collect();
     let dialed = crate::bundle::dialed(decoded)
         .and_then(|(category, model)| device.piano_at(category, model));
     if let Some(piano) = dialed {
-        plays.insert(
-            0,
-            sound(crate::plays::slot_key(ObjectClass::Piano, piano), &catalog),
+        let dialed = sound(
+            crate::plays::slot_key(ObjectClass::Piano, piano),
+            &catalog,
+            device,
         );
+        plays.splice(0..0, dialed);
     }
     (!plays.is_empty()).then_some(Sounds::Plays(plays))
 }
 
-fn sound((class, id): crate::plays::Key, catalog: &Catalog) -> Sound {
+/// A piano or sample a program names, by the name it goes by. One nothing here or on the
+/// instrument names is listed as missing only while the attached instrument's library of
+/// its class has been read whole, and is otherwise left out.
+fn sound((class, id): crate::plays::Key, catalog: &Catalog, device: &DeviceState) -> Option<Sound> {
     let Some(found) = catalog.get((class, id)) else {
-        return Sound {
+        return (device.connected() && device.read_whole(class)).then(|| Sound {
             class,
-            name: format!("{} {id:#010x}", Kind::from_class(class).chip()),
+            name: Kind::from_class(class).chip().to_string(),
             lies: Lies::Nowhere,
-        };
+        });
     };
     let lies = match (found.here.is_empty(), found.there) {
         (true, Some(at)) => Lies::KeyboardOnly(at),
         _ => Lies::Here,
     };
-    Sound {
+    Some(Sound {
         class,
         name: found.name.clone(),
         lies,
-    }
+    })
 }
 
 fn played_by(workspace: &Workspace, key: crate::plays::Key) -> Sounds {
@@ -981,36 +993,46 @@ fn sounds_card(ui: &mut egui::Ui, sounds: &Sounds, acts: &mut Vec<Act>) {
     }
 }
 
-/// One piano or sample a program plays: its name, and where it is when that is not here.
+/// One piano or sample a program plays: its name, shortened to the room Copy leaves, and
+/// under it where it is when that is not here.
 fn sound_line(ui: &mut egui::Ui, sound: &Sound, acts: &mut Vec<Act>) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(LINE);
-        let quiet = ui.visuals().weak_text_color();
-        icon(ui, Kind::from_class(sound.class).glyph(), GLYPH, quiet);
-        if sound.lies == Lies::Nowhere {
-            ui.label(
-                egui::RichText::new("!")
-                    .text_style(ui_text())
-                    .color(warn(ui.visuals())),
-            );
-        }
-        ui.label(egui::RichText::new(&sound.name).text_style(ui_text()));
-        let note = match sound.lies {
-            Lies::Here => return,
-            Lies::KeyboardOnly(_) => "on the keyboard only",
-            Lies::Nowhere => "not here",
-        };
-        ui.label(egui::RichText::new(note).text_style(ui_text()).weak());
+    let line = egui::vec2(ui.available_width(), LINE);
+    let right = egui::Layout::right_to_left(egui::Align::Center);
+    let quiet = ui.visuals().weak_text_color();
+    ui.allocate_ui_with_layout(line, right, |ui| {
         if let Lies::KeyboardOnly(at) = sound.lies {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Copy").clicked() {
-                    acts.push(Act::Copy {
-                        class: sound.class,
-                        at,
-                    });
-                }
-            });
+            if ui.small_button("Copy").clicked() {
+                acts.push(Act::Copy {
+                    class: sound.class,
+                    at,
+                });
+            }
         }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            icon(ui, Kind::from_class(sound.class).glyph(), GLYPH, quiet);
+            if sound.lies == Lies::Nowhere {
+                ui.label(
+                    egui::RichText::new("!")
+                        .text_style(ui_text())
+                        .color(warn(ui.visuals())),
+                );
+            }
+            let name = egui::RichText::new(&sound.name).text_style(ui_text());
+            ui.add(egui::Label::new(name).truncate())
+                .on_hover_text(&sound.name);
+        });
+    });
+    let note = match sound.lies {
+        Lies::Here => return,
+        Lies::KeyboardOnly(_) => "on the keyboard only",
+        Lies::Nowhere => "not here",
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(GLYPH + ui.spacing().item_spacing.x);
+        ui.add(
+            egui::Label::new(egui::RichText::new(note).text_style(ui_text()).color(quiet))
+                .truncate(),
+        );
     });
 }
 
@@ -1407,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn a_program_plays_what_is_here_on_the_keyboard_only_or_nowhere() {
+    fn a_program_plays_what_is_here_on_the_keyboard_only_or_missing_from_a_library_read_whole() {
         let Bench {
             mut workspace,
             mut device,
@@ -1453,16 +1475,46 @@ mod tests {
                 },
             ]))
         );
-        let Some(Sounds::Plays(of_gone)) = plays(gone) else {
-            panic!("a program plays");
+        let tine = || Sound {
+            class: ObjectClass::Piano,
+            name: "Tine".into(),
+            lies: Lies::Here,
         };
         assert_eq!(
-            of_gone[1],
-            Sound {
-                class: ObjectClass::Sample,
-                name: "sample 0x09990999".into(),
-                lies: Lies::Nowhere,
-            }
+            plays(gone),
+            Some(Sounds::Plays(vec![tine()])),
+            "a sample nothing names is left out while its library is partly read"
+        );
+
+        device.pretend_geometry(ObjectClass::Sample, &[("Samples", 2)]);
+        let missing = Sound {
+            class: ObjectClass::Sample,
+            name: "sample".into(),
+            lies: Lies::Nowhere,
+        };
+        assert_eq!(
+            sounds(Item::Local(gone), &workspace, &device.state),
+            Some(Sounds::Plays(vec![tine(), missing]))
+        );
+    }
+
+    #[test]
+    fn with_nothing_attached_a_program_lists_only_what_is_found_by_name() {
+        let Bench {
+            mut workspace,
+            mut log,
+            device,
+            ..
+        } = Bench::new();
+        let program = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Royal Grand 3D", 0x0999_0999),
+            &mut log,
+        );
+        assert_eq!(
+            sounds(Item::Local(program), &workspace, &device.state),
+            None
         );
     }
 
@@ -1572,6 +1624,70 @@ mod tests {
         ] {
             assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
         }
+    }
+
+    #[test]
+    fn a_long_name_in_the_plays_card_is_shortened_and_its_note_and_copy_stay_in_the_card() {
+        let ctx = context();
+        let plays = Sounds::Plays(vec![Sound {
+            class: ObjectClass::Piano,
+            name: "Royal Grand 3D YaS6 XL 5.4 Extended Release".into(),
+            lies: Lies::KeyboardOnly(Location::from_user(1, 2)),
+        }]);
+        let screen = egui::vec2(800.0, 400.0);
+        let width = crate::shell::SIDE_LEAST;
+        let frame = || {
+            let input = testing::screen(screen, Vec::new());
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(width)
+                    .show(ctx, |ui| sounds_card(ui, &plays, &mut Vec::new()));
+            });
+            testing::painted(&output)
+        };
+        frame();
+        let said = frame();
+        let note = testing::where_(&said, "on the keyboard only");
+        let copy = testing::where_(&said, "Copy");
+        let name = said
+            .iter()
+            .find(|word| word.text.starts_with("Royal"))
+            .map(|word| word.rect)
+            .expect("the name is painted");
+        for (what, rect) in [("note", note), ("Copy", copy)] {
+            assert!(
+                rect.right() <= screen.x && rect.left() >= screen.x - width,
+                "{what} at {rect:?} runs past the card"
+            );
+        }
+        assert!(name.right() <= copy.left(), "{name:?} runs under {copy:?}");
+        assert!(note.top() >= name.bottom(), "the note goes under the name");
+    }
+
+    #[test]
+    fn one_picked_file_is_sent_by_its_one_action_and_offers_no_bulk_send() {
+        let mut bench = Bench::new();
+        bench.device.pretend_attached_as("Nord Electro 5");
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        bench.browser.check(Item::Local(id));
+
+        let said = inspected(&mut bench);
+        for word in ["Send to…", "Export…", "Export as bundle…", "Delete…"] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+        for word in [Bulk::Queue.label(), Bulk::Copy.label()] {
+            assert!(!said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+        assert!(
+            !said.iter().any(|held| held.starts_with("→")),
+            "no consequence line: {said:?}"
+        );
     }
 
     #[test]
@@ -1751,12 +1867,10 @@ mod tests {
         bench.browser.check(Item::Slot { class, at });
         let copy = |bench: &Bench| {
             let shown = bench.shell.picked.shown.as_ref().unwrap();
-            let mut offers = shown.offers.iter();
-            offers
-                .find(|(action, _)| *action == Bulk::Copy)
-                .unwrap()
-                .1
-                .live
+            shown
+                .offers
+                .iter()
+                .any(|(action, offer)| *action == Bulk::Copy && offer.live)
         };
 
         let said = inspected(&mut bench);
@@ -1799,7 +1913,7 @@ mod tests {
             .pretend_bodies(class, 5, &[None, Some(("First", crc))]);
         bench.browser.check(Item::Local(id));
         let said = inspected(&mut bench);
-        for word in ["On this computer", "Send to…", "Also at 5:2 · ", "Link"] {
+        for word in ["This computer", "Send to…", "Also at 5:2 · ", "Link"] {
             assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
         }
 
@@ -1903,9 +2017,9 @@ mod tests {
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
     }
 
-    /// The Selection card offers every action on the selection, whole, on one line, and
-    /// inside the card at any width the inspector takes, and Queue for sending queues what
-    /// is selected.
+    /// The Selection card offers every action on a selection of several, whole, on one
+    /// line, and inside the card at any width the inspector takes, and Queue for sending
+    /// queues what is selected.
     #[test]
     fn the_selection_card_offers_every_action_on_the_selection() {
         let Bench {
@@ -1919,8 +2033,11 @@ mod tests {
             ..
         } = Bench::new();
         device.pretend_attached_as("Nord Electro 5");
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.check(Item::Local(id));
+        let ids = [
+            workspace.create(Fresh::Program, &mut log).unwrap(),
+            workspace.create(Fresh::Program, &mut log).unwrap(),
+        ];
+        ids.iter().for_each(|id| browser.check(Item::Local(*id)));
         let screen = egui::vec2(800.0, 900.0);
 
         let least = crate::shell::SIDE_LEAST as usize;
@@ -1967,7 +2084,7 @@ mod tests {
             ));
             assert!(
                 acts.iter()
-                    .any(|act| matches!(act, Act::SendChecked(ids) if ids == &[id])),
+                    .any(|act| matches!(act, Act::SendChecked(sent) if sent == &ids)),
                 "{width}: Queue for sending queues the selection; got {} acts",
                 acts.len()
             );

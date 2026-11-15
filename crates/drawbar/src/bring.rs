@@ -12,7 +12,7 @@ use crate::link::{self, Held, Keyboard, Print, Spot, Standing, There};
 use crate::log::{Log, Restored, Undo};
 use crate::queue::{compare, Diff, Queue};
 use crate::sheet;
-use crate::strings::{counted, display_name, label, shown};
+use crate::strings::{counted, display_name, shown};
 use crate::workspace::{print_of, LocalEntity, Workspace};
 
 /// What happened on the keyboard to one linked file's sound while drawbar was away.
@@ -756,6 +756,7 @@ pub fn choice_sheet(
     ctx: &egui::Context,
     choosing: &Choosing,
     workspace: &Workspace,
+    device: &DeviceState,
 ) -> Option<Answer> {
     let entity = workspace.get(choosing.id)?;
     let theirs = choosing.there.is_some() && !entity.is_unsaved();
@@ -769,7 +770,7 @@ pub fn choice_sheet(
                 let title = format!("Which “{}” is current?", display_name(&entity.name));
                 ui.add(egui::Label::new(egui::RichText::new(title).strong()).wrap());
                 ui.add_space(sheet::GAP * 3.0);
-                fields(ui, choosing);
+                fields(ui, choosing, workspace, device);
             });
             sheet::foot(
                 ui,
@@ -810,7 +811,7 @@ pub const DIFFERS: &str = "differs";
 
 /// The fields that differ, Yours beside the Keyboard's, or one line for a difference that
 /// is not a list of fields.
-fn fields(ui: &mut egui::Ui, choosing: &Choosing) {
+fn fields(ui: &mut egui::Ui, choosing: &Choosing, workspace: &Workspace, device: &DeviceState) {
     let fields = match &choosing.diff {
         Diff::Fields(fields) => fields,
         Diff::Bytes { .. } | Diff::Checksum => {
@@ -836,9 +837,10 @@ fn fields(ui: &mut egui::Ui, choosing: &Choosing) {
                     }
                     ui.end_row();
                     for field in fields {
-                        ui.label(label(&field.path));
-                        ui.label(egui::RichText::new(&field.here).monospace());
-                        ui.label(egui::RichText::new(&field.there).monospace());
+                        let [label, there, here] = field.said(workspace, device);
+                        ui.label(label);
+                        ui.label(egui::RichText::new(here).monospace());
+                        ui.label(egui::RichText::new(there).monospace());
                         ui.end_row();
                     }
                 });
@@ -1315,7 +1317,12 @@ mod tests {
         let mut answer = None;
         let mut frame = |events| {
             run(&ctx, screen(size, events), |ctx| {
-                answer = answer.or(choice_sheet(ctx, &choosing, &bench.workspace));
+                answer = answer.or(choice_sheet(
+                    ctx,
+                    &choosing,
+                    &bench.workspace,
+                    &bench.device.state,
+                ));
             })
         };
         frame(Vec::new());
