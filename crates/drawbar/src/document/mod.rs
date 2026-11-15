@@ -177,8 +177,6 @@ pub struct Wants {
     pub keep: bool,
     /// The header's build of this project.
     pub build: bool,
-    /// The header's Revert, which asks first.
-    pub revert: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -603,8 +601,10 @@ impl Document {
             }
         }
         if act.revert {
-            // Asked first; the revert runs as an act, in [`Document::settle`].
-            wants.revert = true;
+            workspace.revert(id, log);
+            self.piano.forget(id);
+            // Reopened on the next frame, because every box holds a reverted edit.
+            self.open = None;
             return wants;
         }
         // The take's cards in the dock ran earlier this frame.
@@ -974,25 +974,6 @@ impl Document {
             }
             Shape::Verbatim => verbatim::ui(ui, asset.entity).then_some(Asked::Export),
         }
-    }
-
-    /// When the open document's own last edit not undone, and its last undo, were, on
-    /// the app's timeline of Undo and Redo, with what Undo and Redo would name them.
-    pub fn timeline(&self) -> (crate::timeline::Held, Option<String>, Option<String>) {
-        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
-            return Default::default();
-        };
-        (
-            held.timeline(),
-            held.last_step().map(|step| format!("Undo {}", step.what)),
-            held.last_redo().map(|step| format!("Redo {}", step.what)),
-        )
-    }
-
-    /// Undo or redo the open document's own last edit, with this frame's edits.
-    pub fn step(&mut self, redo: bool) {
-        let path = if redo { wav::REDO } else { wav::UNDO };
-        self.docked.push((path.to_string(), String::new()));
     }
 
     fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
@@ -1365,8 +1346,6 @@ impl Document {
         };
         let (before, edited) = (entity.stamp, shape(entity));
         let mut gained = None;
-        // A WAV's edit, undo or redo to note.
-        let mut stepped: Option<wav::Stepped> = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
             if let Err(why) = self.samples.take(id, file, index, &sets) {
                 log.error(why.clone());
@@ -1396,44 +1375,17 @@ impl Document {
                     .filter(|open| open.id == id)
                     .and_then(|open| open.wav.as_ref());
                 let original = held.map_or(&entity.bytes[..], wav::State::original);
-                let asked = |name: &str| sets.iter().any(|(path, _)| path == name);
-                let (undo, redo) = (asked(wav::UNDO), asked(wav::REDO));
                 let applied = held.map_or(0.0, wav::State::applied);
-                let back = match (undo, redo) {
-                    (true, _) => held.and_then(wav::State::last_step),
-                    (_, true) => held.and_then(wav::State::last_redo),
-                    _ => None,
-                };
-                match (undo || redo, back) {
-                    (true, Some(step)) => wav::restored(original, step).map(|out| {
-                        gained = Some(step.gain);
-                        let back = wav::Step::back(&entity.bytes, applied, step);
-                        stepped = Some(match undo {
-                            true => wav::Stepped::Undone(back),
-                            false => wav::Stepped::Redone(back),
-                        });
-                        Some(out)
-                    }),
-                    (true, None) => Err(match undo {
-                        true => "there is no edit to undo".to_string(),
-                        false => "there is no edit to make again".to_string(),
-                    }),
-                    (false, _) => wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
-                        if let (Some(db), Some(Ok(Some(clipped)))) =
-                            (db, held.zip(db).map(|(held, db)| held.clipping(db)))
-                        {
-                            log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
-                        }
-                        // A moved cut keeps the gain the bytes hold.
-                        gained = db.or(Some(applied));
-                        stepped = Some(wav::Stepped::Made(wav::Step::before(
-                            &entity.bytes,
-                            applied,
-                            &sets,
-                        )));
-                        Some(out)
-                    }),
-                }
+                wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
+                    if let (Some(db), Some(Ok(Some(clipped)))) =
+                        (db, held.zip(db).map(|(held, db)| held.clipping(db)))
+                    {
+                        log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
+                    }
+                    // A moved cut keeps the gain the bytes hold.
+                    gained = db.or(Some(applied));
+                    Some(out)
+                })
             }
             Shape::Fields | Shape::Verbatim | Shape::Undecoded => {
                 fields::apply(&entity.bytes, &sets).map(|(_, out)| Some(out))
@@ -1458,14 +1410,6 @@ impl Document {
             let open = self.open.as_mut().filter(|open| open.id == id);
             if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
                 state.made(stamp, db);
-                // ⚠️ Only an edit that changed the bytes is one to undo.
-                let undid = matches!(
-                    stepped,
-                    Some(wav::Stepped::Undone(_) | wav::Stepped::Redone(_))
-                );
-                if let Some(step) = stepped.filter(|_| undid || stamp != before) {
-                    state.stepped(step);
-                }
             }
         }
         if let (Shape::Sample, Some(held)) = (edited, workspace.get(id)) {
@@ -3623,47 +3567,12 @@ mod tests {
                 == prep::read(&bytes).unwrap().samples
         );
 
-        // The header's Revert asks first: it reverts nothing itself.
+        // The header's Revert gives the file back as it was.
         let said = open.painted(Vec::new());
-        let wants = open.wants(testing::click(testing::where_(&said, "Revert").center()));
-        assert!(wants.revert);
-        assert_eq!(prep::read_marks(&open.entity().bytes).unwrap(), moved);
-
-        // A gain on top, then Undo twice: the gain goes, then the moved cut.
-        open.state().wav.as_mut().unwrap().gain = -6.0;
-        let said = open.painted(Vec::new());
-        open.frame(testing::click(
-            testing::where_(&said, wav::APPLY_GAIN).center(),
-        ));
+        open.frame(testing::click(testing::where_(&said, "Revert").center()));
         open.frame(Vec::new());
-        let gained = open.entity().bytes.to_vec();
-        assert_eq!(
-            prep::read_marks(&gained).unwrap(),
-            moved,
-            "the gain keeps the cut"
-        );
-        let undo = |open: &mut Open| {
-            let said = open.painted(Vec::new());
-            open.frame(testing::click(
-                testing::where_(&said, wav::UNDO_LABEL).center(),
-            ));
-            open.frame(Vec::new());
-        };
-        undo(&mut open);
-        let held = open.state().wav.as_ref().unwrap();
-        assert_eq!((held.gain, held.applied()), (0.0, 0.0), "the gain undone");
-        assert_eq!(prep::read_marks(&open.entity().bytes).unwrap(), moved);
-        assert!(
-            prep::read(&open.entity().bytes).unwrap().samples
-                == prep::read(&bytes).unwrap().samples
-        );
-        undo(&mut open);
-        assert!(
-            open.entity().bytes == bytes,
-            "the cut undone: the file as it was"
-        );
+        assert!(open.entity().bytes == bytes, "reverted: the file as it was");
         assert!(!open.entity().is_unsaved());
-        assert!(open.state().wav.as_ref().unwrap().last_step().is_none());
     }
 
     /// A take's regions are drawn on its lane by note and layer; a click on one picks its
@@ -3895,14 +3804,6 @@ mod tests {
                 .any(|word| word.text.starts_with("finding")),
             "nothing to find for a take built as recorded"
         );
-        let said = open.painted(Vec::new());
-        open.frame(testing::click(
-            testing::where_(&said, wav::UNDO_LABEL).center(),
-        ));
-        open.twice();
-        let held = open.state().wav.as_ref().unwrap();
-        assert!(held.clean(), "Undo takes the clean back");
-        assert_eq!(held.kind(), Kind::Wurlitzer, "and only that");
 
         open.state().wav.as_mut().unwrap().gain = 3.0;
         let said = open.painted(Vec::new());

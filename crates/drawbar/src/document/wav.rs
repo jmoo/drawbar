@@ -157,39 +157,12 @@ fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
     }
 }
 
-/// What a set that adds or deletes a region or a loop says, for Undo to name it.
-fn said_piece(path: &str, value: &str) -> Option<String> {
-    if path == DETECTED {
-        return Some("detect".to_string());
-    }
-    let name = |label: &str| take::mark(label, 0..0).hit.map(take::named);
-    if let Some(label) = path.strip_prefix(RENAMED) {
-        return Some(format!(
-            "rename {} to {}",
-            name(label).unwrap_or(label.to_string()),
-            name(value).unwrap_or(value.to_string())
-        ));
-    }
-    if let Some(label) = path.strip_prefix(ADDED) {
-        let mark = take::mark(label, 0..0);
-        return Some(match (mark.hit, mark.part) {
-            (Some(hit), take::Part::Release) => format!("add {} key-off", take::named(hit)),
-            (Some(hit), _) => format!("add {}", take::named(hit)),
-            (None, _) => format!("add {label}"),
-        });
-    }
-    if let Some(label) = path.strip_prefix(LOOPED) {
-        return Some(format!(
-            "add {} loop",
-            name(label).unwrap_or(label.to_string())
-        ));
-    }
-    let (label, piece) = path.strip_prefix(DELETED)?.rsplit_once('/')?;
-    let name = name(label).unwrap_or(label.to_string());
-    Some(match piece {
-        "note" => format!("delete {name}"),
-        piece => format!("delete {name} {piece}"),
-    })
+/// Whether `path` adds, deletes or renames a sample, or marks what Detect found.
+fn is_piece(path: &str) -> bool {
+    path == DETECTED
+        || [RENAMED, ADDED, LOOPED, DELETED]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
 }
 
 /// `marks` with the add or delete `path` with `value` made, or none where `path` is not
@@ -425,9 +398,7 @@ pub fn apply(
         }
         let held = match marks.take() {
             Some(held) => Some(held),
-            None if said_piece(path, value).is_some() => {
-                Some(wav::read_marks(current).map_err(error)?)
-            }
+            None if is_piece(path) => Some(wav::read_marks(current).map_err(error)?),
             None => None,
         };
         if let Some(held) = &held {
@@ -483,15 +454,6 @@ pub fn apply(
     Ok((out, total))
 }
 
-/// The path of the set that undoes the last edit.
-pub const UNDO: &str = "undo";
-
-/// The path of the set that makes again the edit undone last.
-pub const REDO: &str = "redo";
-
-/// The label of the button that undoes the last edit.
-pub const UNDO_LABEL: &str = "Undo";
-
 /// The take's loud action: Detect, which marks its samples in place of its regions.
 pub(super) fn detect_loud(state: &State) -> super::header::Loud {
     use super::header::{Click, Loud, Tone};
@@ -501,7 +463,7 @@ pub(super) fn detect_loud(state: &State) -> super::header::Loud {
         glyph: crate::icon::Glyph::Search,
         tone: Tone::Ready,
         hint: "finds the take's notes, layers, cuts and loops, and marks them in place of \
-               its regions; Undo puts them back"
+               its regions"
             .to_string(),
         click: Click::Detect,
     };
@@ -524,93 +486,6 @@ pub(super) fn detect_loud(state: &State) -> super::header::Loud {
         };
     }
     ready
-}
-
-/// What an edit undoes to: the gain, the marks and the settings the bytes held before
-/// it, and what it was, for the Undo button to name.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Step {
-    pub gain: f64,
-    pub marks: Option<wav::Marks>,
-    pub settings: Option<wav::Settings>,
-    pub what: String,
-    /// When on the app's timeline the edit was made, undone or made again.
-    pub at: u64,
-}
-
-/// What an edit, an undo or a redo leaves for Undo and Redo.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Stepped {
-    /// An edit, and what undoing it goes back to. It ends the redo.
-    Made(Step),
-    /// The last edit undone, and what redoing it goes back to.
-    Undone(Step),
-    /// The edit undone last made again, and what undoing it goes back to.
-    Redone(Step),
-}
-
-impl Step {
-    /// What `sets` undo to on `current`, which holds `gain` against the original.
-    pub fn before(current: &[u8], gain: f64, sets: &[(String, String)]) -> Step {
-        let said: Vec<String> = sets
-            .iter()
-            .map(|(path, value)| match path.strip_prefix(CUT) {
-                _ if said_piece(path, value).is_some() => {
-                    said_piece(path, value).unwrap_or_default()
-                }
-                Some(rest) => {
-                    let (label, slug) = rest.rsplit_once('/').unwrap_or((rest, ""));
-                    let cut = hit::Cut::from_slug(slug).map_or(slug, |cut| cut.name());
-                    format!("{} {cut}", take::mark(label, 0..0).text)
-                }
-                None if path == KIND => format!(
-                    "category {}",
-                    encode::Kind::from_word(value).map_or(value.clone(), |kind| {
-                        super::piano::kind_name(kind.code())
-                    })
-                ),
-                None if path == CLEAN => format!("clean audio {value}"),
-                None => match value.trim().parse::<f64>() {
-                    Ok(db) => format!("gain {db:+.1} dB"),
-                    Err(_) => format!("gain {value}"),
-                },
-            })
-            .collect();
-        Step {
-            gain,
-            marks: wav::read_marks(current).ok(),
-            settings: wav::read_settings(current).ok(),
-            what: said.join(", "),
-            at: crate::timeline::tick(),
-        }
-    }
-
-    /// `current`, which holds `gain`, as the step an undo or redo of `step` leaves to
-    /// go back to: the same edit, said the same way.
-    pub fn back(current: &[u8], gain: f64, step: &Step) -> Step {
-        Step {
-            what: step.what.clone(),
-            ..Step::before(current, gain, &[])
-        }
-    }
-}
-
-/// `original` at a total gain of `gain`, marking `marks` and stating `settings` where
-/// they differ from its own: the bytes an edit was made on, made again.
-pub fn restored(original: &[u8], step: &Step) -> Result<Vec<u8>, String> {
-    let sets = [(GAIN.to_string(), format!("{:.1}", step.gain))];
-    let (mut out, _) = apply(original, original, &sets)?;
-    if let Some(marks) = &step.marks {
-        if wav::read_marks(original).ok().as_ref() != Some(marks) {
-            out = wav::with_marks(&out, marks).map_err(|e| e.to_string())?;
-        }
-    }
-    if let Some(settings) = &step.settings {
-        if wav::read_settings(&out).ok().as_ref() != Some(settings) {
-            out = wav::with_settings(&out, settings).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(out)
 }
 
 /// The identity cells a WAV puts on the header: the rate, channels, encoding and length
@@ -677,12 +552,6 @@ pub struct State {
     /// The stamps of the bytes made here from `original`, and the gain each holds, so a
     /// revert to one of them shows its gain again.
     made: Vec<(u64, f64)>,
-    /// What each edit since the document opened undoes to, the last one last.
-    history: Vec<Step>,
-    /// What each edit undone since the last one made redoes to, the one undone last last.
-    redo: Vec<Step>,
-    /// When on the app's timeline the last edit, not an undo or redo, was made.
-    changed: Option<u64>,
     notes: Notes,
     read: Read,
     /// What the take's lane shows, kept across new bytes.
@@ -983,9 +852,6 @@ impl State {
             applied,
             original,
             made: vec![(entity.stamp, applied)],
-            history: Vec::new(),
-            redo: Vec::new(),
-            changed: None,
             notes,
             read,
             view: take::View::default(),
@@ -1033,44 +899,6 @@ impl State {
         self.applied
     }
 
-    /// What the last edit undoes to, where there is one.
-    pub fn last_step(&self) -> Option<&Step> {
-        self.history.last()
-    }
-
-    /// What Redo makes again, where an edit was undone since the last one made.
-    pub fn last_redo(&self) -> Option<&Step> {
-        self.redo.last()
-    }
-
-    /// When the last edit not undone, and the last undo, were, on the app's timeline.
-    pub fn timeline(&self) -> crate::timeline::Held {
-        crate::timeline::Held {
-            made: self.history.last().map(|step| step.at),
-            undone: self.redo.last().map(|step| step.at),
-            changed: self.changed,
-        }
-    }
-
-    /// Note an edit made, undone or made again.
-    pub fn stepped(&mut self, stepped: Stepped) {
-        match stepped {
-            Stepped::Made(step) => {
-                self.changed = Some(step.at);
-                self.history.push(step);
-                self.redo.clear();
-            }
-            Stepped::Undone(back) => {
-                self.history.pop();
-                self.redo.push(back);
-            }
-            Stepped::Redone(back) => {
-                self.redo.pop();
-                self.history.push(back);
-            }
-        }
-    }
-
     /// Note that the bytes stamped `stamp` hold `total` against the original.
     pub fn made(&mut self, stamp: u64, total: f64) {
         self.made.retain(|(made, _)| *made != stamp);
@@ -1114,7 +942,7 @@ impl State {
 
     /// Start finding the take's noise where it is cleaned, or take it once found.
     pub fn follow_noise(&mut self, ctx: &egui::Context) {
-        let clean = self.clean();
+        let clean = self.cleaned();
         if let Ok(audio) = &self.read.source {
             self.audition.follow(audio, clean, ctx);
         }
@@ -1137,7 +965,7 @@ impl State {
         {
             return;
         }
-        let sounding = match self.audition.cleaning(audio, clean) {
+        let sounding = match self.audition.cleaning(audio, self.cleaned()) {
             audition::Cleaning::Off => self.sounding(None),
             audition::Cleaning::Ready(noise) => self.sounding(noise),
             audition::Cleaning::Finding => return,
@@ -1158,6 +986,12 @@ impl State {
     /// Whether the take is cleaned of its hum and hiss, as it is unless it says not.
     pub fn clean(&self) -> bool {
         self.read.settings.clean.unwrap_or(true)
+    }
+
+    /// How the take's noise floor is read where it is cleaned, as prep read it.
+    pub fn cleaned(&self) -> Option<nord_format::take::detect::Floor> {
+        self.clean()
+            .then(|| self.read.settings.floor.unwrap_or_default())
     }
 
     /// The picked sample as the instrument will play it, heard as the take's kind, and
@@ -1260,7 +1094,6 @@ pub fn ui(
         });
         ui.add_space(6.0);
     }
-    let last = state.last_step().map(|step| step.what.clone());
     let read = &mut state.read;
     match &read.source {
         Ok(audio) => {
@@ -1296,7 +1129,6 @@ pub fn ui(
                 picked,
                 place,
                 &mut state.close,
-                last.as_deref(),
             );
             if let (Some(hit::Wanted::Rename(to)), Some(from), Ok(held)) =
                 (wanted, picked, &read.marked)
@@ -1305,8 +1137,6 @@ pub fn ui(
                 sets.push((format!("{RENAMED}{}", from.label), adding::attack_label(to)));
                 state.view.picked = Some(to);
                 state.close.renamed(to);
-            } else if wanted == Some(hit::Wanted::Undo) {
-                sets.push((UNDO.to_string(), String::new()));
             } else if let (Some(wanted), Ok(held)) = (wanted, &read.marked) {
                 pieces(wanted, audio, held, &mut state.view, sets);
             }
@@ -1384,7 +1214,7 @@ fn pieces(
             format!("{LOOPED}{}", cuts.label),
             span_value(&adding::default_loop(&attack, audio.rate)),
         )),
-        Wanted::Add(Piece::Note) | Wanted::Undo | Wanted::Rename(_) => {}
+        Wanted::Add(Piece::Note) | Wanted::Rename(_) => {}
         Wanted::Delete(piece) => {
             sets.push((
                 format!("{DELETED}{}/{}", cuts.label, piece_slug(piece)),
@@ -1858,8 +1688,6 @@ mod tests {
             .any(|found| (found.start, found.end) == (64_000, 64_999)));
         let data = wav::layout(&bytes).unwrap().data;
         assert!(out[wav::layout(&out).unwrap().data] == bytes[data]);
-        let step = Step::before(&bytes, 0.0, &sets);
-        assert_eq!(step.what, "add B4 v00, add B4 v00 key-off, add B4 v00 loop");
 
         let twice = apply(&out, &out, &[set(format!("{ADDED}071-b0-v00"), "1..2")]);
         assert!(twice.is_err(), "a label the take marks already");
@@ -1883,10 +1711,6 @@ mod tests {
             .iter()
             .all(|region| !region.label.starts_with("069")));
         assert_eq!(marks.loops.len(), 1, "the other sample's loop stays");
-        assert_eq!(
-            Step::before(&out, 0.0, &[delete("note"), delete("key-off")]).what,
-            "delete A4 v22, delete A4 v22 key-off"
-        );
     }
 
     /// A rename relabels every region of the sample, keeps its loop, and refuses a name
@@ -1904,10 +1728,6 @@ mod tests {
             .collect();
         assert_eq!(labels, ["071-b0-v30", "071-b2-v30"]);
         assert_eq!(marks.loops.len(), 1);
-        assert_eq!(
-            Step::before(&bytes, 0.0, &rename("071-b0-v30")).what,
-            "rename A4 v22 to B4 v30"
-        );
         let added = [(format!("{ADDED}071-b0-v30"), "60000..70000".to_string())];
         let (both, _) = apply(&bytes, &bytes, &added).unwrap();
         assert!(apply(&both, &both, &rename("071-b0-v30")).is_err());
@@ -2053,7 +1873,6 @@ mod tests {
             found,
             "the old regions are gone"
         );
-        assert_eq!(Step::before(&old, 0.0, &sets).what, "detect");
         assert!(detected_marks("12 x 060-b0-v00").is_err());
     }
 }

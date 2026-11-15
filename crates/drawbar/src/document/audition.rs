@@ -16,6 +16,7 @@ use nord_format::formats::npno::encode::{self, Kind, Rules};
 use nord_format::formats::npno::{Bank, Version};
 use nord_format::formats::nsmp::codec;
 use nord_format::take::clean::{self, Noise};
+use nord_format::take::detect::Floor;
 use nord_format::take::layers;
 use nord_format::take::sustain;
 use nord_format::wav::{Audio, Loop};
@@ -350,11 +351,12 @@ pub enum Cleaning<'a> {
     Ready(Option<&'a Noise>),
 }
 
-/// A print of `audio` that changes when a gain does: its length and a spread of its
-/// samples, so its noise is found again only for other audio.
-fn print(audio: &Audio) -> u64 {
+/// A print of `audio` with its floor read by `floor` that changes when a gain does: its
+/// length and a spread of its samples, so its noise is found again only for other audio.
+fn print(audio: &Audio, floor: Floor) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (floor == Floor::OneNote).hash(&mut hasher);
     audio.samples.len().hash(&mut hasher);
     for v in audio.samples.iter().step_by(4_099) {
         v.to_bits().hash(&mut hasher);
@@ -363,13 +365,13 @@ fn print(audio: &Audio) -> u64 {
 }
 
 impl Audition {
-    /// Start finding the noise of `audio`, where `clean` asks for it and it is not
-    /// already found or being found, and take it once found.
-    pub fn follow(&mut self, audio: &Audio, clean: bool, ctx: &egui::Context) {
-        if !clean {
+    /// Start finding the noise of `audio`, its floor read by the `clean` floor where
+    /// it is cleaned, if it is not already found or being found, and take it once found.
+    pub fn follow(&mut self, audio: &Audio, clean: Option<Floor>, ctx: &egui::Context) {
+        let Some(floor) = clean else {
             return;
-        }
-        let at = print(audio);
+        };
+        let at = print(audio, floor);
         match &mut self.noise {
             Some((held, Search::Running(job))) if *held == at => match job.poll() {
                 work::Answer::Running => {
@@ -382,19 +384,20 @@ impl Audition {
             },
             Some((held, _)) if *held == at => {}
             _ => {
-                let job = work::hand(ctx, work::FindNoise::of(audio));
+                let job = work::hand(ctx, work::FindNoise::of(audio, floor));
                 self.noise = Some((at, Search::Running(job)));
             }
         }
     }
 
-    /// How far cleaning `audio` has got, where `clean` asks for it.
-    pub fn cleaning(&self, audio: &Audio, clean: bool) -> Cleaning<'_> {
-        if !clean {
+    /// How far cleaning `audio` has got, its floor read by the `clean` floor where it
+    /// is cleaned.
+    pub fn cleaning(&self, audio: &Audio, clean: Option<Floor>) -> Cleaning<'_> {
+        let Some(floor) = clean else {
             return Cleaning::Off;
-        }
+        };
         match &self.noise {
-            Some((at, found)) if *at == print(audio) => match found {
+            Some((at, found)) if *at == print(audio, floor) => match found {
                 Search::Running(_) => Cleaning::Finding,
                 Search::Done(noise) => Cleaning::Ready(Some(noise)),
                 Search::Lost => Cleaning::Ready(None),
@@ -456,9 +459,12 @@ pub fn controls(
     let mut asked = None;
     let clean = state.clean();
     state.prepare();
-    let finding = state
-        .audio()
-        .is_some_and(|audio| matches!(state.audition.cleaning(audio, clean), Cleaning::Finding));
+    let finding = state.audio().is_some_and(|audio| {
+        matches!(
+            state.audition.cleaning(audio, state.cleaned()),
+            Cleaning::Finding
+        )
+    });
     let audition = &mut state.audition;
     audition.waiting &= finding;
     let accent = app::accent(ui.visuals());

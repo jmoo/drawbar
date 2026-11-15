@@ -23,6 +23,7 @@ use nord_format::formats::nsmpproj::{
 };
 use nord_format::note;
 use nord_format::take::build as take_build;
+use nord_format::take::detect::Floor;
 use nord_format::wav::{Audio, Loop, Marks, Pcm16, Play, Region};
 use nord_format::Entity;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -133,6 +134,8 @@ pub struct Prepped {
     marks: Marks,
     /// Whether its strokes are cleaned of its hum and hiss: unless its editor set it raw.
     clean: bool,
+    /// How its noise floor is read before cleaning, as prep read it.
+    floor: Floor,
     /// The category its editor saved.
     kind: Option<Kind>,
 }
@@ -158,6 +161,7 @@ impl Prepped {
                 audio,
                 marks,
                 clean: settings.clean != Some(false),
+                floor: settings.floor.unwrap_or_default(),
                 kind: settings.kind.as_deref().and_then(Kind::from_word),
             })
         };
@@ -559,6 +563,7 @@ impl Draft {
                     audio: prepped.audio.clone(),
                     marks: prepped.marks.clone(),
                     clean: prepped.clean,
+                    floor: prepped.floor,
                 });
             }
         }
@@ -778,6 +783,8 @@ struct Marked {
     #[serde(with = "marks")]
     marks: Marks,
     clean: bool,
+    #[serde(with = "floor")]
+    floor: Floor,
 }
 
 /// A piano library build, detached from the dialog that set it up, which
@@ -1014,6 +1021,22 @@ mod kind {
     }
 }
 
+/// How a take's noise floor is read, as whether it is a one-note file's.
+mod floor {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(floor: &Floor, serializer: S) -> Result<S::Ok, S::Error> {
+        (*floor == Floor::OneNote).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Floor, D::Error> {
+        Ok(match bool::deserialize(deserializer)? {
+            true => Floor::OneNote,
+            false => Floor::Take,
+        })
+    }
+}
+
 /// A bank, as its record code.
 mod bank {
     use super::*;
@@ -1150,46 +1173,19 @@ fn marked(
             audio: &take.audio,
             marks: &take.marks,
             clean: take.clean,
+            floor: take.floor,
         })
         .collect();
     progress.say(format!("cleaning {} take(s)…", takes.len()));
-    let strokes = take_build::strokes(&inputs, leveled).map_err(|e| e.to_string())?;
-    let named: Vec<(u8, Bank, LayerTag)> = strokes
-        .iter()
-        .map(|stroke| (stroke.root, stroke.bank, stroke.layer))
-        .collect();
-    let values = stated_values(&named, version, |i| strokes[i].whose())?;
-    let refs: Vec<&take_build::Stroke> = strokes.iter().collect();
-    let gains = take_build::gains(&refs, leveled);
-    let balances = take_build::release_balance(&refs, &values, leveled);
-    let count = strokes.len();
+    let prepared = take_build::prepared(&inputs, version, leveled).map_err(|e| e.to_string())?;
+    let count = prepared.len();
     let mut recordings = Vec::with_capacity(count);
     let mut clipped = 0usize;
-    for (done, (((stroke, layer), gain), under_attack)) in strokes
-        .iter()
-        .zip(values)
-        .zip(gains)
-        .zip(balances)
-        .enumerate()
-    {
+    for (done, stroke) in prepared.iter().enumerate() {
         progress.say(format!("cutting {} of {count}", done + 1));
-        let pcm = stroke.pcm(gain);
-        let audio = resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
-            .map_err(|e| format!("{}: {e}", stroke.whose()))?;
-        clipped += audio.clipped;
-        let sustain = pcm
-            .sample_loop
-            .map(|found| sustain(found, pcm.rate))
-            .transpose()
-            .map_err(|e| format!("{}: {e}", stroke.whose()))?;
-        recordings.push(Recording {
-            root: stroke.root,
-            bank: stroke.bank,
-            layer,
-            channels: audio.channels,
-            sustain,
-            under_attack,
-        });
+        let (recording, cut) = stroke.recording().map_err(|e| e.to_string())?;
+        clipped += cut;
+        recordings.push(recording);
     }
     Ok((recordings, clipped))
 }

@@ -391,12 +391,11 @@ pub enum Piece {
     KeyOff,
 }
 
-/// What the close lane's Add and Delete menus, or its Undo, asked.
+/// What the close lane's Add and Delete menus asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wanted {
     Add(Piece),
     Delete(Piece),
-    Undo,
     /// Rename the picked sample to this note and layer.
     Rename(Hit),
 }
@@ -423,19 +422,6 @@ pub fn named(text: &str) -> Result<Hit, String> {
         true => Ok(hit),
         false => Err(bad()),
     }
-}
-
-/// Undo, at the far right of the row it ends, naming on hover the edit it takes back,
-/// `last`; grayed where there is none.
-fn undo(ui: &mut egui::Ui, last: Option<&str>, wanted: &mut Option<Wanted>) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let button = ui.add_enabled(last.is_some(), egui::Button::new(super::wav::UNDO_LABEL));
-        if let Some(what) = last {
-            if button.on_hover_text(format!("Undo {what}")).clicked() {
-                *wanted = Some(Wanted::Undo);
-            }
-        }
-    });
 }
 
 /// The labels of the close lane's menus and their items.
@@ -515,7 +501,6 @@ fn placed(
     drawn: &mut Drawn,
     place: u32,
     close: &mut Close,
-    last: Option<&str>,
     wanted: &mut Option<Wanted>,
 ) {
     let rate = f64::from(audio.rate.max(1));
@@ -551,7 +536,6 @@ fn placed(
         }
         ui.add_space(8.0);
         menus(ui, None, wanted);
-        undo(ui, last, wanted);
     });
     let width = take::lane_width(ui);
     let (rect, response) =
@@ -607,7 +591,6 @@ pub fn ui(
     picked: Option<Hit>,
     place: Option<u32>,
     close: &mut Close,
-    last: Option<&str>,
 ) -> (Option<(Cut, u32)>, Option<Wanted>) {
     let mut wanted = None;
     let Ok(marks) = marked else {
@@ -624,7 +607,7 @@ pub fn ui(
     }
     let Some(hit) = picked else {
         match place {
-            Some(place) => placed(ui, audio, summary, drawn, place, close, last, &mut wanted),
+            Some(place) => placed(ui, audio, summary, drawn, place, close, &mut wanted),
             None if marks.regions.is_empty() => {}
             None => {
                 ui.horizontal(|ui| {
@@ -634,7 +617,6 @@ pub fn ui(
                             .size(take::LEGEND_TEXT)
                             .color(app::caption(ui.visuals())),
                     );
-                    undo(ui, last, &mut wanted);
                 });
             }
         }
@@ -706,7 +688,7 @@ pub fn ui(
         }
     });
     // ⚠️ The zoom, Add and Delete have a row of their own: beside the legend they
-    // wrapped. Undo sits at its end, for edits are made sample by sample.
+    // wrapped.
     ui.horizontal(|ui| {
         if ui.button(take::ZOOM_IN).clicked() {
             close.zoom(0.5, &cuts, total, rate);
@@ -728,7 +710,6 @@ pub fn ui(
         }
         ui.add_space(8.0);
         menus(ui, Some(&cuts), &mut wanted);
-        undo(ui, last, &mut wanted);
     });
 
     let shown = close.shown(&cuts, total, rate);

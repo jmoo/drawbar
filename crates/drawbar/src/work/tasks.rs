@@ -8,6 +8,7 @@
 
 use eframe::egui;
 use nord_format::take::clean::Noise;
+use nord_format::take::detect::Floor;
 use nord_format::take::hum::Hum;
 use nord_format::wav::Audio;
 use serde::de::DeserializeOwned;
@@ -134,15 +135,19 @@ pub struct FindNoise {
     /// The take's samples, as their little-endian bytes: the one copy of them made to
     /// hand over, which the message takes.
     samples: wire::Handed,
+    /// Whether its floor is read as a one-note file's, as [`Floor::OneNote`].
+    one_note: bool,
 }
 
 impl FindNoise {
-    pub fn of(audio: &Audio) -> FindNoise {
+    /// The search for the noise of `audio`, its floor read by `floor`.
+    pub fn of(audio: &Audio, floor: Floor) -> FindNoise {
         let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
         FindNoise {
             rate: audio.rate,
             channels: audio.channels,
             samples: wire::Handed::new(bytes),
+            one_note: floor == Floor::OneNote,
         }
     }
 }
@@ -177,7 +182,11 @@ impl Work for FindNoise {
         let bytes = self.samples.into_inner().unwrap_or_default();
         let mono = mono(&bytes, self.channels);
         drop(bytes);
-        FoundNoise(Noise::of(&mono, self.rate))
+        let floor = match self.one_note {
+            true => Floor::OneNote,
+            false => Floor::Take,
+        };
+        FoundNoise(Noise::of(&mono, self.rate, floor))
     }
 }
 
@@ -311,18 +320,6 @@ mod tests {
     #[test]
     fn a_take_s_noise_found_through_a_message_is_the_noise_found_in_place() {
         let audio = take();
-        let here = Noise::of(&nord_format::take::plan::mono(&audio), audio.rate);
-        assert!(
-            here.hum.is_some() && here.hiss.is_some(),
-            "the take has both"
-        );
-
-        let sent = wire::encode(&Task::from(FindNoise::of(&audio))).unwrap();
-        let task: Task = wire::decode(sent).unwrap();
-        let answered = answer(task, &Progress::default()).unwrap();
-        let FoundNoise(there) = wire::decode(answered).unwrap();
-
-        assert_eq!(there, here);
         let bits = |noise: &Noise| -> Vec<u64> {
             let hum = noise.hum.as_ref().unwrap();
             let hiss = noise.hiss.as_ref().unwrap();
@@ -333,7 +330,21 @@ mod tests {
                 .map(f64::to_bits)
                 .collect()
         };
-        assert_eq!(bits(&there), bits(&here), "every measure, to the bit");
+        for floor in [Floor::Take, Floor::OneNote] {
+            let here = Noise::of(&nord_format::take::plan::mono(&audio), audio.rate, floor);
+            assert!(
+                here.hum.is_some() && here.hiss.is_some(),
+                "the take has both"
+            );
+
+            let sent = wire::encode(&Task::from(FindNoise::of(&audio, floor))).unwrap();
+            let task: Task = wire::decode(sent).unwrap();
+            let answered = answer(task, &Progress::default()).unwrap();
+            let FoundNoise(there) = wire::decode(answered).unwrap();
+
+            assert_eq!(there, here, "{floor:?}");
+            assert_eq!(bits(&there), bits(&here), "every measure, to the bit");
+        }
     }
 
     #[test]
