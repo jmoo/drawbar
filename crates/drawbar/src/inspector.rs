@@ -264,7 +264,7 @@ enum About {
     /// A folder or a tag.
     One(Vec<Fact>),
     /// One asset or slot.
-    Row(Single),
+    Row(Box<Single>),
     /// Several rows, in a line or two.
     Several(Vec<String>),
 }
@@ -390,7 +390,7 @@ fn selection(
             About::Row(picked) => one(ui, picked, acts),
             About::Several(lines) => lines.iter().for_each(|line| void(ui, line)),
         }
-        bulk_actions(ui, browser, shown, device, acts);
+        actions(ui, browser, shown, device, acts);
     });
     if shown.checked.is_empty() {
         return;
@@ -413,8 +413,8 @@ fn selection(
     }
 }
 
-/// One picked row: its name, its place and the one action the document header offers,
-/// the slots holding its bytes, then its other facts.
+/// One picked row: its name, its place, the slots holding its bytes, and the one action
+/// the document header offers.
 struct Single {
     name: String,
     /// The slot's place, or `None` for an asset with no slot.
@@ -429,7 +429,10 @@ struct Single {
     action: Option<(String, String, Click)>,
     /// The slots [`crate::device::also_at`] finds for an asset with no slot.
     also: Vec<(ObjectClass, Location)>,
-    facts: Vec<Fact>,
+    /// Its kind and size, as the library's table shows them, for the name's hover.
+    about: String,
+    /// Why the attached instrument refuses it.
+    refused: Option<String>,
 }
 
 /// One line about a single picked asset: its label, its value, and the full text when
@@ -440,31 +443,10 @@ pub struct Fact {
     pub hint: Option<String>,
 }
 
-/// The facts about the single picked asset besides its name and place.
-///
-/// The row is the library table's own, so these facts match the table. `fit` is the
-/// attached instrument's verdict on the asset, which gets a line only when it refuses.
-pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
-    let mut said = vec![
-        Fact {
-            what: "kind",
-            said: kind_word(row.kind, row.qualifier),
-            hint: None,
-        },
-        Fact {
-            what: "size",
-            said: room::measure(row.size),
-            hint: None,
-        },
-    ];
-    if let Fit::Refuses(why) = fit {
-        said.push(Fact {
-            what: "refused",
-            said: why.clone(),
-            hint: None,
-        });
-    }
-    said
+/// A row's kind and size, as the library's table shows them.
+pub fn about_row(row: &Row) -> String {
+    let kind = kind_word(row.kind, row.qualifier);
+    format!("{kind} · {}", room::measure(row.size))
 }
 
 /// The summary of a multiple selection: how many rows are picked, and of the assets among
@@ -515,7 +497,7 @@ fn about(
         .map_or_else(Vec::new, |entity| {
             crate::device::also_at(&device.state, workspace, entity)
         });
-    About::Row(Single {
+    About::Row(Box::new(Single {
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),
         mark: row.mark,
@@ -524,8 +506,12 @@ fn about(
         id: entity.map(|entity| entity.id),
         action,
         also,
-        facts: facts(row, &held),
-    })
+        about: about_row(row),
+        refused: match held {
+            Fit::Refuses(why) => Some(why),
+            _ => None,
+        },
+    }))
 }
 
 /// What a click on the document header's action asks for, from the inspector.
@@ -540,12 +526,12 @@ fn clicked(click: Click, id: u64) -> Option<Act> {
     }
 }
 
-/// One picked row: its name, where it is with its mark, the header's one action, the
-/// slots that also hold its bytes, then its facts.
+/// One picked row: its name, where it is with its mark, the slots that also hold its
+/// bytes, and why the instrument refuses it. Its kind and size are the name's hover.
 fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
     let name = crate::strings::display_name(&picked.name);
     ui.label(egui::RichText::new(name).font(egui::FontId::new(14.0, bold())))
-        .on_hover_text(&picked.name);
+        .on_hover_text(format!("{} · {}", picked.name, picked.about));
     let quiet = ui.visuals().weak_text_color();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -561,24 +547,13 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
             ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
         }
     });
-    let Some(id) = picked.id else {
-        return picked.facts.iter().for_each(|fact| fact_line(ui, fact));
-    };
-    if let Some((label, hint, click)) = &picked.action {
-        crate::panel::tonal(ui);
-        let live = *click != Click::Nothing;
-        let button = ui
-            .add_enabled(live, egui::Button::new(label))
-            .on_hover_text(hint)
-            .on_disabled_hover_text(hint);
-        if let (true, Some(act)) = (button.clicked(), clicked(*click, id)) {
-            acts.push(act);
-        }
-    }
-    if !picked.also.is_empty() {
+    if let (Some(id), false) = (picked.id, picked.also.is_empty()) {
         also_at(ui, id, &picked.also, acts);
     }
-    picked.facts.iter().for_each(|fact| fact_line(ui, fact));
+    if let Some(why) = &picked.refused {
+        let (what, said, hint) = ("refused", why.clone(), None);
+        fact_line(ui, &Fact { what, said, hint });
+    }
 }
 
 /// `Also at 5:46 · Link`: the first two slots holding a file's bytes, how many more, and
@@ -690,9 +665,10 @@ fn summed(checked: &[Item], workspace: &Workspace, device: &Device) -> Vec<Strin
     said
 }
 
-/// What sending the selection would do, when there is something to say, then every
-/// action on the whole of it, wrapped to the card's width.
-fn bulk_actions(
+/// What sending the selection would do, when there is something to say, then one row of
+/// buttons: the single row's own action and the actions that reach the keyboard, then
+/// the rest behind `…`.
+fn actions(
     ui: &mut egui::Ui,
     browser: &mut Browser,
     shown: &Shown,
@@ -710,9 +686,36 @@ fn bulk_actions(
         // folding its label into the room left.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         crate::panel::tonal(ui);
-        for (action, offer) in &shown.offers {
+        let own = match &shown.about {
+            About::Row(picked) => picked.id.zip(picked.action.as_ref()),
+            _ => None,
+        };
+        if let Some((id, (label, hint, click))) = own {
+            let live = *click != Click::Nothing;
+            let button = ui
+                .add_enabled(live, egui::Button::new(label))
+                .on_hover_text(hint)
+                .on_disabled_hover_text(hint);
+            if let (true, Some(act)) = (button.clicked(), clicked(*click, id)) {
+                acts.push(act);
+            }
+        }
+        let (near, rest): (Vec<_>, Vec<_>) = shown
+            .offers
+            .iter()
+            .partition(|(action, _)| matches!(action, Bulk::Queue | Bulk::Copy));
+        for (action, offer) in near {
             browser.bulk_button(ui, *action, offer, &shown.checked, &device.state, acts);
         }
+        if rest.is_empty() {
+            return;
+        }
+        let more = ui.button("…").on_hover_text("more actions");
+        egui::Popup::menu(&more).show(|ui| {
+            for (action, offer) in rest {
+                browser.bulk_button(ui, *action, offer, &shown.checked, &device.state, acts);
+            }
+        });
     });
 }
 
@@ -1661,8 +1664,8 @@ mod tests {
         assert!(note.top() >= name.bottom(), "the note goes under the name");
     }
 
-    #[test]
-    fn one_picked_file_is_sent_by_its_one_action_and_offers_no_bulk_send() {
+    /// A bench with one new program picked and an instrument attached.
+    fn one_picked() -> Bench {
         let mut bench = Bench::new();
         bench.device.pretend_attached_as("Nord Electro 5");
         bench
@@ -1673,12 +1676,20 @@ mod tests {
             .create(Fresh::Program, &mut bench.log)
             .unwrap();
         bench.browser.check(Item::Local(id));
+        bench
+    }
+
+    #[test]
+    fn one_picked_file_shows_its_one_action_and_keeps_the_rest_behind_more() {
+        let mut bench = one_picked();
 
         let said = inspected(&mut bench);
-        for word in ["Send to…", "Export…", "Export as bundle…", "Delete…"] {
+        for word in ["Send to…", "…"] {
             assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
         }
-        for word in [Bulk::Queue.label(), Bulk::Copy.label()] {
+        let behind = ["Export…", "Export as bundle…", "Delete…"];
+        let gone = [Bulk::Queue.label(), Bulk::Copy.label(), "kind", "size"];
+        for word in behind.into_iter().chain(gone) {
             assert!(!said.iter().any(|held| held == word), "{word}: {said:?}");
         }
         assert!(
@@ -1688,7 +1699,24 @@ mod tests {
     }
 
     #[test]
-    fn the_facts_of_one_picked_asset_are_its_rows_own() {
+    fn more_opens_the_actions_on_the_file_itself() {
+        let mut bench = one_picked();
+        inspect(&mut bench, Vec::new());
+        let seen = testing::painted(&inspect(&mut bench, Vec::new()));
+        let more = testing::where_(&seen, "…").center();
+
+        inspect(&mut bench, testing::click(more));
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            said = testing::words(&inspect(&mut bench, Vec::new()));
+        }
+        for word in ["Export…", "Export as bundle…", "Delete…"] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+    }
+
+    #[test]
+    fn the_hover_of_one_picked_asset_says_its_rows_own_kind_and_size() {
         use crate::browser::Qualifier;
         use nord_format::accept::Family;
 
@@ -1708,24 +1736,7 @@ mod tests {
             needs: crate::library::Needs::Nothing,
         };
 
-        let said = facts(&row, &Fit::Takes);
-        let lines: Vec<(&str, &str)> = said
-            .iter()
-            .map(|fact| (fact.what, fact.said.as_str()))
-            .collect();
-        assert_eq!(lines, [("kind", "Stage 4 program"), ("size", "2.0 kB")]);
-
-        // The only fact not taken from the row is the instrument's refusal.
-        let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
-        let refused = facts(&row, &Fit::Refuses(why.into()));
-        assert_eq!(refused.len(), said.len() + 1);
-        assert_eq!(refused[2].what, "refused");
-        assert_eq!(refused[2].said, why);
-        assert_eq!(
-            facts(&row, &Fit::Warn("untried".into())).len(),
-            said.len(),
-            "an untried write is the queue's warning, not a fact about the asset"
-        );
+        assert_eq!(about_row(&row), "Stage 4 program · 2.0 kB");
     }
 
     #[test]
@@ -1791,8 +1802,12 @@ mod tests {
 
     /// One frame of the inspector over the bench, and every word it painted.
     fn inspected(bench: &mut Bench) -> Vec<String> {
-        let input = testing::screen(egui::vec2(800.0, 900.0), Vec::new());
-        let output = testing::run(&bench.ctx, input, |ctx| {
+        testing::words(&inspect(bench, Vec::new()))
+    }
+
+    fn inspect(bench: &mut Bench, events: Vec<egui::Event>) -> egui::FullOutput {
+        let input = testing::screen(egui::vec2(800.0, 900.0), events);
+        testing::run(&bench.ctx, input, |ctx| {
             egui::SidePanel::right("inspector")
                 .exact_width(crate::shell::INSPECTOR)
                 .show(ctx, |panel| {
@@ -1815,8 +1830,7 @@ mod tests {
                         queue,
                     );
                 });
-        });
-        testing::words(&output)
+        })
     }
 
     #[test]
@@ -2012,11 +2026,11 @@ mod tests {
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
     }
 
-    /// The Selection card offers every action on a selection of several, whole, on one
-    /// line, and inside the card at any width the inspector takes, and Queue for sending
-    /// queues what is selected.
+    /// The Selection card offers the actions that reach the keyboard on a selection of
+    /// several, whole, on one line, and inside the card at any width the inspector takes,
+    /// and Add to Sync places what is selected.
     #[test]
-    fn the_selection_card_offers_every_action_on_the_selection() {
+    fn the_selection_card_offers_the_keyboards_actions_on_the_selection() {
         let Bench {
             ctx,
             mut browser,
@@ -2061,7 +2075,7 @@ mod tests {
             frame(Vec::new());
             let said = frame(Vec::new());
             let line = testing::where_(&said, "Selection").height();
-            for action in Bulk::ALL {
+            for action in [Bulk::Queue, Bulk::Copy] {
                 let word = testing::where_(&said, action.label());
                 assert!(
                     word.left() >= screen.x - width && word.right() <= screen.x - GUTTER,

@@ -2824,7 +2824,7 @@ mod tests {
             let _ = frame_from(&ctx, app, input);
             settled(&ctx, app, LARGE)
         };
-        let queue = crate::browser::Bulk::Export.label();
+        let more = "…";
 
         let morph = in_inspector(&painted, "Morph").expect("the Morph card");
         let selection = in_inspector(&painted, "Selection").expect("the Selection card");
@@ -2836,7 +2836,7 @@ mod tests {
             in_inspector(&painted, "Tags").is_some(),
             "the Tags card's header"
         );
-        for body in [queue, "Add tag"] {
+        for body in [more, "Add tag"] {
             assert!(
                 in_inspector(&painted, body).is_none(),
                 "{body} is folded away"
@@ -2845,12 +2845,12 @@ mod tests {
 
         let picked = press(&mut app, own.center());
         assert!(
-            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, queue).is_none(),
+            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, more).is_none(),
             "a click on its own row in the browser leaves it followed"
         );
 
         let opened = press(&mut app, selection.center());
-        assert!(in_inspector(&opened, queue).is_some(), "a click unfolds it");
+        assert!(in_inspector(&opened, more).is_some(), "a click unfolds it");
 
         let browsing = press(&mut app, upright.center());
         assert!(
@@ -3471,6 +3471,9 @@ mod tests {
         run(testing::click(
             testing::where_(&seen, "Africa Split").center(),
         ));
+        let seen = run(Vec::new());
+        run(testing::click(testing::where_(&seen, "…").center()));
+        run(Vec::new());
         let seen = run(Vec::new());
         run(testing::click(testing::where_(&seen, "Delete…").center()));
         // A sheet is laid out unseen on its first frame.
