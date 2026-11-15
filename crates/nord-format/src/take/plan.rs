@@ -463,7 +463,7 @@ mod tests {
             assert!(plan.hits.is_empty(), "{len} samples");
             assert_eq!(plan.missing, [48]);
             assert_eq!(plan.hum, Err(NoHum::NoQuiet));
-            let noise = Noise::of(&x, rate);
+            let noise = Noise::of(&x, rate, detect::Floor::Take);
             assert_eq!((noise.hum, noise.hiss), (None, None));
         }
     }

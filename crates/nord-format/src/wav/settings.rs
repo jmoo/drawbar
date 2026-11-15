@@ -1,11 +1,13 @@
 //! A take's own settings, which no other WAV reader knows: the kind of instrument it is
-//! heard and built as, and whether the build cleans it. They sit in a chunk of their
-//! own, `npno`, as `key=value` lines, which other readers skip. Saving replaces that
-//! chunk whole and copies every other byte of the file as it was.
+//! heard and built as, whether the build cleans it, and how its noise floor is read.
+//! They sit in a chunk of their own, `npno`, as `key=value` lines, which other readers
+//! skip. Saving replaces that chunk whole and copies every other byte of the file as it
+//! was.
 
 use super::marks::push_chunk;
 use super::{chunks, layout, only};
 use crate::error::{malformed, out_of_bounds, Error};
+use crate::take::detect::Floor;
 
 /// The chunk the settings sit in.
 const ID: &[u8; 4] = b"npno";
@@ -17,6 +19,9 @@ pub struct Settings {
     pub kind: Option<String>,
     /// Whether the build cleans the take's regions of its hum and hiss.
     pub clean: Option<bool>,
+    /// How the build reads the take's noise floor before cleaning it, as prep read it:
+    /// a one-note file's on its quietest stretch, since its note fills most of it.
+    pub floor: Option<Floor>,
     /// The `key=value` lines this version does not know, in their order, written back
     /// after the ones it does.
     pub others: Vec<String>,
@@ -30,6 +35,12 @@ impl Settings {
         }
         if let Some(clean) = self.clean {
             lines.push_str(&format!("clean={}\n", if clean { "on" } else { "off" }));
+        }
+        if let Some(floor) = self.floor {
+            lines.push_str(match floor {
+                Floor::Take => "floor=take\n",
+                Floor::OneNote => "floor=one-note\n",
+            });
         }
         for line in &self.others {
             lines.push_str(line);
@@ -68,6 +79,17 @@ pub fn read_settings(bytes: &[u8]) -> Result<Settings, Error> {
                     "on" => true,
                     "off" => false,
                     _ => return malformed(format!("npno chunk says clean={value}, not on or off")),
+                })
+            }
+            "floor" => {
+                settings.floor = Some(match value {
+                    "take" => Floor::Take,
+                    "one-note" => Floor::OneNote,
+                    _ => {
+                        return malformed(format!(
+                            "npno chunk says floor={value}, not take or one-note"
+                        ))
+                    }
                 })
             }
             _ => settings.others.push(line.to_string()),
@@ -179,6 +201,11 @@ mod tests {
         let riff = (bad.len() - 8) as u32;
         bad[4..8].copy_from_slice(&riff.to_le_bytes());
         assert!(read_settings(&bad).is_err());
+        let mut bad = bytes[..].to_vec();
+        push_chunk(&mut bad, ID, b"floor=loud\n");
+        let riff = (bad.len() - 8) as u32;
+        bad[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(read_settings(&bad).is_err());
         let refused = Settings {
             kind: Some("a=b".into()),
             ..Settings::default()
@@ -202,12 +229,13 @@ mod tests {
 
         let mut read = read_settings(&odd).unwrap();
         read.clean = Some(true);
+        read.floor = Some(Floor::OneNote);
         let saved = with_settings(&odd, &read).unwrap();
         let chunks = chunks(&saved).unwrap();
         let body = only(&chunks, ID).unwrap().unwrap().body.clone();
         assert_eq!(
             &saved[body],
-            b"kind=grand\nclean=on\ntempo=fast\nmood=calm\n"
+            b"kind=grand\nclean=on\nfloor=one-note\ntempo=fast\nmood=calm\n"
         );
     }
 }

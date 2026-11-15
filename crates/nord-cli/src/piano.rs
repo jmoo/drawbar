@@ -1199,6 +1199,7 @@ fn take_strokes<'a>(
                 audio,
                 marks,
                 clean,
+                floor: settings.floor.unwrap_or_default(),
             }
         })
         .collect();
@@ -1747,7 +1748,11 @@ mod tests {
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
         let noise =
-            nord_format::take::clean::Noise::of(&nord_format::take::plan::mono(take), take.rate);
+            nord_format::take::clean::Noise::of(
+            &nord_format::take::plan::mono(take),
+            take.rate,
+            nord_format::take::detect::Floor::Take,
+        );
         for (found, sample_loop) in marks.regions_with_loops().unwrap() {
             let (root, bank, layer) = parse_stroke_name(&found.label, Stem::None).unwrap();
             let frames = noise.stroke(

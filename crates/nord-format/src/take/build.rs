@@ -8,6 +8,7 @@ use crate::error::{malformed, Result};
 use crate::formats::npno::encode::{parse_stroke_name, LayerTag, Stem, FADE_SUFFIX};
 use crate::formats::npno::Bank;
 use crate::take::clean::{self, Noise};
+use crate::take::detect::Floor;
 use crate::take::layers::{self, TAKE_PEAK_DB};
 use crate::take::{plan, resample, sustain};
 use crate::wav::{self, Audio, Loop, Marks, Pcm16, Region};
@@ -21,6 +22,8 @@ pub struct Take<'a> {
     /// Whether its strokes are cleaned of its hum and hiss, as its editor last said;
     /// raw, they are built as recorded.
     pub clean: bool,
+    /// How its noise floor is read before it is cleaned, as prep read it.
+    pub floor: Floor,
 }
 
 /// A region of a take as a stroke, and what its label says the stroke is.
@@ -140,7 +143,7 @@ pub fn strokes<'a>(takes: &[Take<'a>], leveled: bool) -> Result<Vec<Stroke<'a>>>
     for take in takes {
         let noise = take
             .clean
-            .then(|| Noise::of(&plan::mono(take.audio), take.audio.rate));
+            .then(|| Noise::of(&plan::mono(take.audio), take.audio.rate, take.floor));
         out.extend(region_strokes(
             take.file,
             take.audio,

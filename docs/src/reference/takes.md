@@ -16,7 +16,9 @@ first the loudest.
 
 A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
 of a folder holds its note for most of its length, so its floor is the mean level of
-its quietest half second instead, and only its loudest hit counts. A folder's hits
+its quietest half second instead, and only its loudest hit counts. `prep` notes this
+in the file it writes, and the build reads the file's noise the same way before
+cleaning it. A folder's hits
 are sorted by pitch before their notes are named, so a stretched note has its
 neighbors to go by. Each keeps the octave its pitch was read in.
 

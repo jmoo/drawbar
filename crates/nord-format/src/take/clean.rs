@@ -5,7 +5,7 @@
 //! own pitch. The build cleans every stroke of a take this way, and Detect searches for
 //! loops on the strokes as the build leaves them.
 
-use crate::take::detect::{self, Envelope};
+use crate::take::detect::{self, Envelope, Floor};
 use crate::take::fft;
 use crate::take::hum::{self, Hum};
 
@@ -36,15 +36,24 @@ pub struct Noise {
 }
 
 impl Noise {
-    /// The noise of `mono`, a take at `rate` as [`crate::take::plan::mono`] reads it.
-    pub fn of(mono: &[f64], rate: u32) -> Noise {
+    /// The noise of `mono`, a take at `rate` as [`crate::take::plan::mono`] reads it,
+    /// its floor read by `floor`, as prep read it.
+    pub fn of(mono: &[f64], rate: u32, floor: Floor) -> Noise {
         let x = detect::highpassed(mono, rate);
-        let hum = hum::find(&x, rate, &Envelope::of(&x, rate)).ok();
+        let env = Envelope {
+            floor,
+            ..Envelope::of(&x, rate)
+        };
+        let hum = hum::find(&x, rate, &env).ok();
         let cleaned = match &hum {
             Some(found) => found.removed(&x, rate),
             None => x,
         };
-        Noise::measured(rate, hum, &cleaned, &Envelope::of(&cleaned, rate))
+        let quiet = Envelope {
+            floor,
+            ..Envelope::of(&cleaned, rate)
+        };
+        Noise::measured(rate, hum, &cleaned, &quiet)
     }
 
     /// The noise of a take at `rate` with `hum`, whose hum `cleaned` is with all of it
@@ -312,6 +321,33 @@ mod tests {
         for (i, (a, b)) in x.iter().zip(&back).enumerate() {
             assert!((a - b).abs() < 1e-9, "sample {i}");
         }
+    }
+
+    /// A note held for most of a one-note file is not its noise: read as a take's floor
+    /// reads it, the hiss would be the note itself, and cleaning would take its partials.
+    #[test]
+    fn a_held_one_note_file_s_noise_is_read_on_its_rest() {
+        let rate = 35_002;
+        let held = rate as usize * 112 / 10;
+        let rest = hiss(rate as usize * 6 / 10, -70.0);
+        let x: Vec<f64> = (0..held)
+            .map(|i| {
+                let t = i as f64 / f64::from(rate);
+                (1..=6)
+                    .map(|k| (2.0 * PI * 261.6 * f64::from(k) * t).sin() * 0.2 / f64::from(k))
+                    .sum::<f64>()
+            })
+            .chain(rest)
+            .collect();
+        let power = |floor: Floor| -> f64 {
+            let hiss = Noise::of(&x, rate, floor).hiss.expect("a quiet stretch");
+            10.0 * hiss.iter().sum::<f64>().log10()
+        };
+        let (one_note, take) = (power(Floor::OneNote), power(Floor::Take));
+        assert!(
+            take - one_note > 40.0,
+            "one-note {one_note:.1} dB, take {take:.1} dB"
+        );
     }
 
     /// Where the note stands over the hiss nothing changes; once it has died, the hiss

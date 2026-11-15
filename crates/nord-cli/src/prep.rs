@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
+use nord_format::take::detect::Floor;
 use nord_format::take::layers::{self, Choice, Order, Placed};
 use nord_format::take::plan::{self, Fate, PlanOptions, SetLayer};
 use nord_format::take::sustain::Sustain;
@@ -272,7 +273,7 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
                     Fate::Kept { value, .. } => Some((*value, sustain_of(&p.fate, rate))),
                     _ => None,
                 });
-                let (bytes, _) = marked(file, loaded, &plan)?;
+                let (bytes, _) = marked(file, loaded, &plan, true)?;
                 planned.push((out, bytes));
                 let (value, sustain) = kept.unwrap_or_default();
                 (
@@ -438,7 +439,7 @@ fn prep_take(
         ));
     }
     list(ui, &plan);
-    let (written, marks) = marked(path, loaded, &plan)?;
+    let (written, marks) = marked(path, loaded, &plan, false)?;
     if resampled {
         ui.note(format!(
             "resampled to the {} Hz the instrument plays at, so the regions lie where the \
@@ -490,11 +491,13 @@ fn load(path: &std::path::Path, out: &std::path::Path) -> Result<Loaded, String>
     })
 }
 
-/// The take read from `path` with `plan`'s regions, and those regions.
+/// The take read from `path` with `plan`'s regions, and those regions. A `one_note` file
+/// also states that its floor was read as one note's, so the build reads it so too.
 fn marked(
     path: &std::path::Path,
     loaded: Loaded,
     plan: &plan::Plan,
+    one_note: bool,
 ) -> Result<(Vec<u8>, wav::Marks), String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let regions = plan.regions();
@@ -511,7 +514,14 @@ fn marked(
         }
         false => loaded.bytes,
     };
-    let written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
+    let mut written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
+    if one_note {
+        let settings = wav::Settings {
+            floor: Some(Floor::OneNote),
+            ..wav::read_settings(&written).map_err(|e| named(&e))?
+        };
+        written = wav::with_settings(&written, &settings).map_err(|e| named(&e))?;
+    }
     Ok((written, marks))
 }
 
@@ -1057,6 +1067,10 @@ mod tests {
         assert_eq!(labels("2.wav"), ["060-b0-v40", "060-b2-v40"]);
         assert_eq!(labels("high/3.wav"), ["064-b0-v00", "064-b2-v00"]);
         assert!(!out.join("silent.wav").exists(), "no hit, not written");
+        let floor = wav::read_settings(&std::fs::read(out.join("1.wav")).unwrap())
+            .unwrap()
+            .floor;
+        assert_eq!(floor, Some(Floor::OneNote), "the build reads its floor so too");
 
         let written = ["1.wav", "2.wav", "high/3.wav"].map(|n| out.join(n));
         let written: Vec<&str> = written.iter().map(|p| p.to_str().unwrap()).collect();
