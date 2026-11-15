@@ -55,13 +55,28 @@ pub enum Floor {
     /// them for far more than that.
     #[default]
     Take,
-    /// The mean level of its quietest [`QUIETEST`] seconds: a one-note file holds its
-    /// note for most of its length and may rest only after the key-up.
+    /// The mean level of the quietest [`QUIETEST`] seconds of its rest: a one-note file
+    /// holds its note for most of its length and may rest only after the key-up. One
+    /// that rests less than that has no floor to read, and its quietest frame stands in.
     OneNote,
 }
 
-/// Seconds of a one-note file's quietest stretch its floor is read on.
+/// Seconds of a one-note file's rest its floor is read on, and the least rest it has a
+/// floor read on at all.
 pub const QUIETEST: f64 = 0.5;
+
+/// A frame under this is digital silence, under the rounding noise of a 24-bit sample,
+/// in dB under full scale: a tail faded to nothing is no rest to read noise on.
+pub const DIGITAL_SILENCE_DB: f64 = -150.0;
+
+/// A one-note file rests where its level stays within this of its quietest frame that
+/// is not digital silence, in dB.
+pub const REST_DB: f64 = 6.0;
+
+/// A one-note file's rest lies at least this far under its loudest frame, in dB: a
+/// stretch nearer is taken for the note, held or dying, whose noise cannot be told
+/// from it by level. Chosen, not measured.
+pub const REST_UNDER_DB: f64 = 40.0;
 
 impl Envelope {
     pub fn of(x: &[f64], rate: u32) -> Envelope {
@@ -88,8 +103,49 @@ impl Envelope {
         }
         match self.floor {
             Floor::Take => percentile(&self.db, 10.0),
-            Floor::OneNote => quietest_mean(&self.db, frames(QUIETEST).max(1)),
+            Floor::OneNote => match self.rest() {
+                Some(rest) => quietest_mean(&self.db[rest], frames(QUIETEST).max(1)),
+                None => self.quietest_heard().unwrap_or(SILENT_DB),
+            },
         }
+    }
+
+    /// Whether its floor is read on a rest: a take's always is, and a one-note file's
+    /// where it rests at least [`QUIETEST`] seconds.
+    pub fn rests(&self) -> bool {
+        self.floor == Floor::Take || self.rest().is_some()
+    }
+
+    /// The level of its quietest frame that is not digital silence.
+    fn quietest_heard(&self) -> Option<f64> {
+        self.db
+            .iter()
+            .copied()
+            .filter(|&d| d > DIGITAL_SILENCE_DB)
+            .reduce(f64::min)
+    }
+
+    /// The longest run of frames within [`REST_DB`] of its quietest heard frame, none
+    /// digital silence, where it lasts at least [`QUIETEST`] seconds and lies
+    /// [`REST_UNDER_DB`] under its loudest frame.
+    fn rest(&self) -> Option<std::ops::Range<usize>> {
+        let loudest = self.db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let under = (self.quietest_heard()? + REST_DB).min(loudest - REST_UNDER_DB);
+        let mut best = 0..0;
+        let mut from = None;
+        for (i, &d) in self.db.iter().chain([f64::INFINITY].iter()).enumerate() {
+            match (d > DIGITAL_SILENCE_DB && d < under, from) {
+                (true, None) => from = Some(i),
+                (false, Some(start)) => {
+                    if i - start > best.len() {
+                        best = start..i;
+                    }
+                    from = None;
+                }
+                _ => {}
+            }
+        }
+        (best.len() >= frames(QUIETEST).max(1)).then_some(best)
     }
 }
 
@@ -135,16 +191,27 @@ pub fn highpassed(x: &[f64], rate: u32) -> Vec<f64> {
 /// loudest wins. Only the first frame of a rise counts: the frames after it pass too,
 /// and a note whose level wavers would drift the onset 30 to 50 ms late.
 ///
-/// A take that starts [`RISE_DB`] over the floor starts with a hit: a sample set's
-/// one-note files are cut at the strike, with nothing before it to rise from.
+/// A one-note file whose level comes within [`RISE_DB`] of its loudest in its first
+/// [`LOOKBACK`] starts with a hit there: a sample set's files are cut at or just before
+/// the strike, with too little before it to rise from. A take of many notes does not.
 pub fn onsets(env: &Envelope) -> Vec<usize> {
     let db = &env.db;
     let floor = env.floor();
     let (back, gap, hold) = (frames(LOOKBACK), frames(MIN_GAP), frames(0.1));
     let mut found: Vec<(usize, f64)> = Vec::new();
-    if db.len() > hold && db[0] - floor >= RISE_DB && db[hold] > floor + 15.0 {
-        let loudest = db[..hold].iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        found.push((0, loudest));
+    if env.floor == Floor::OneNote {
+        let loudest = db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let start = db[..back.min(db.len())]
+            .iter()
+            .position(|&d| d > DIGITAL_SILENCE_DB && d >= loudest - RISE_DB);
+        if let Some(start) = start {
+            let to = (start + hold).min(db.len());
+            let level = db[start..to]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            found.push((start, level));
+        }
     }
     let mut rising = false;
     for i in back..db.len().saturating_sub(hold) {
@@ -424,11 +491,14 @@ pub(crate) mod tests {
             db: vec![-60.0, -70.0],
             ..one
         };
-        let mean = 10.0 * ((1e-6 + 1e-7) / 2.0f64).log10();
-        assert!(
-            (short.floor() - mean).abs() < 1e-9,
-            "fewer frames than half a second"
-        );
+        assert!(!short.rests());
+        assert_eq!(short.floor(), -70.0, "no rest: its quietest frame");
+        let faded = Envelope {
+            db: [vec![-33.0; 300], vec![SILENT_DB; 100]].concat(),
+            ..short
+        };
+        assert!(!faded.rests(), "digital silence is no rest");
+        assert_eq!(faded.floor(), -33.0);
     }
 
     #[test]

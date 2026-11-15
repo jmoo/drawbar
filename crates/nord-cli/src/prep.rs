@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
-use nord_format::take::detect::Floor;
+use nord_format::take::detect::{self, Floor};
 use nord_format::take::layers::{self, Choice, Order, Placed};
 use nord_format::take::plan::{self, Fate, PlanOptions, SetLayer};
 use nord_format::take::sustain::Sustain;
@@ -227,6 +227,7 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
     struct Found {
         hit: Option<plan::Planned>,
         floor_db: f64,
+        rests: bool,
     }
     let mut found = Vec::new();
     for (file, out) in files.iter().zip(&outs) {
@@ -235,11 +236,16 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
         options.one_note = true;
         let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
         found.push(Found {
-            hit: plan
-                .hits
-                .into_iter()
-                .find(|planned| planned.fate != Fate::Skipped),
+            // The loudest hit is the file's note, a hit with no pitch included.
+            hit: plan.hits.into_iter().reduce(|a, b| {
+                if b.hit.level_db > a.hit.level_db {
+                    b
+                } else {
+                    a
+                }
+            }),
             floor_db: plan.floor_db,
+            rests: plan.rests,
         });
     }
     let struck: Vec<_> = found
@@ -308,7 +314,8 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
             (None, None) => (None, "no hit found".into(), String::new()),
         };
         let hit = found[i].hit.as_ref().map(|p| &p.hit);
-        rows.push((note, shown, hit.cloned(), found[i].floor_db, what, sustain));
+        let floor = found[i].rests.then_some(found[i].floor_db);
+        rows.push((note, shown, hit.cloned(), floor, what, sustain));
     }
 
     rows.sort_by_key(|row| (row.0.map_or(u16::MAX, u16::from), row.4.clone()));
@@ -318,17 +325,24 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
     )));
     for (note, shown, hit, floor_db, what, sustain) in &rows {
         ui.out(format!(
-            "  {:<28} {:>6} {:>6} {:>6.1} {:>4}  {:<30} {}",
+            "  {:<28} {:>6} {:>6} {:>6} {:>4}  {:<30} {}",
             shown,
             hit.as_ref()
                 .and_then(|h| h.pitch)
                 .map_or("-".into(), |p| format!("{p:.2}")),
             hit.as_ref()
                 .map_or("-".into(), |h| format!("{:.1}", h.level_db)),
-            floor_db,
+            floor_db.map_or("-".into(), |f| format!("{f:.1}")),
             note.map_or("-".into(), note::name),
             what,
             sustain
+        ));
+    }
+    if rows.iter().any(|row| row.3.is_none()) {
+        ui.note(format!(
+            "a floor of - rests under {} s, too little to read its noise on, so it is not \
+             held to --min-snr",
+            detect::QUIETEST
         ));
     }
     if planned.is_empty() {
@@ -1070,7 +1084,11 @@ mod tests {
         let floor = wav::read_settings(&std::fs::read(out.join("1.wav")).unwrap())
             .unwrap()
             .floor;
-        assert_eq!(floor, Some(Floor::OneNote), "the build reads its floor so too");
+        assert_eq!(
+            floor,
+            Some(Floor::OneNote),
+            "the build reads its floor so too"
+        );
 
         let written = ["1.wav", "2.wav", "high/3.wav"].map(|n| out.join(n));
         let written: Vec<&str> = written.iter().map(|p| p.to_str().unwrap()).collect();

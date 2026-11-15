@@ -105,6 +105,9 @@ pub struct Plan {
     pub hum: Result<Hum, NoHum>,
     /// The take's floor with its hum taken out, in dB under full scale.
     pub floor_db: f64,
+    /// Whether the floor was read on a rest. A one-note file that rests too little has
+    /// none to read, and its hits are not held to [`PlanOptions::min_snr_db`].
+    pub rests: bool,
     /// The notes the hits were assigned to, in playing order: the list given, or the one
     /// found from their pitches.
     pub notes: Vec<u8>,
@@ -184,7 +187,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
             let over_db = hit.level_db - floor;
             let fate = if note.is_none() {
                 Fate::Skipped
-            } else if over_db < options.min_snr_db {
+            } else if quiet.rests() && over_db < options.min_snr_db {
                 Fate::TooQuiet { over_db }
             } else {
                 Fate::Chosen(Choice::Extra)
@@ -273,6 +276,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
         hits: planned,
         hum,
         floor_db: floor,
+        rests: quiet.rests(),
         notes,
         missing,
     }
@@ -400,14 +404,54 @@ mod tests {
     fn a_one_note_file_cut_at_its_strike_is_a_hit_with_its_release() {
         let rate = 35_002;
         let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
-        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        let options = PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        };
+        let plan = plan(&x, rate, &options);
         assert_eq!(plan.hits.len(), 1, "{:?}", plan.hits);
+        assert!(plan.rests);
         assert_eq!(plan.hits[0].hit.onset, 0);
         assert_eq!(plan.notes, [60]);
         match &plan.hits[0].fate {
             Fate::Kept { cuts, .. } => assert!(cuts.release.is_some(), "{:?}", cuts.no_release),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A one-note file with less than half a second of rest, or a tail faded to digital
+    /// silence, has no floor to read: it is still a hit, and is not held to the limit.
+    #[test]
+    fn a_one_note_file_with_little_rest_is_still_a_hit() {
+        let rate = 35_002;
+        let options = PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        };
+        for (what, seconds, up, floor_db) in [
+            ("0.4 s", 0.4, 10.0, -80.0),
+            ("no tail", 3.0, 10.0, -80.0),
+            ("a 0.3 s tail", 3.3, 3.0, -80.0),
+            ("faded to silence", 4.0, 3.0, -200.0),
+        ] {
+            let x = take(rate, seconds, &[(0.0, 60.0, -12.0, up)], floor_db);
+            let plan = plan(&x, rate, &options);
+            assert!(!plan.rests, "{what}");
+            let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+            assert!(
+                matches!(fates.as_slice(), [Fate::Kept { .. }]),
+                "{what}: {fates:?}"
+            );
+        }
+    }
+
+    /// Only a one-note file starts with a hit: a take that starts mid-note does not.
+    #[test]
+    fn a_take_that_starts_mid_note_has_no_hit_at_its_start() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
+        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        assert!(plan.hits.is_empty(), "{:?}", plan.hits);
     }
 
     #[test]

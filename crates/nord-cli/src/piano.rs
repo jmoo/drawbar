@@ -1747,8 +1747,7 @@ mod tests {
     /// cleaned and their loops shaped as a take's build does it.
     fn write_cuts(dir: &Path, take: &wav::Audio, marks: &wav::Marks) {
         std::fs::create_dir(dir).unwrap();
-        let noise =
-            nord_format::take::clean::Noise::of(
+        let noise = nord_format::take::clean::Noise::of(
             &nord_format::take::plan::mono(take),
             take.rate,
             nord_format::take::detect::Floor::Take,

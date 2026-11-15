@@ -15,11 +15,15 @@ spread evenly in dB. With `--order played`, the first hits played are kept, the
 first the loudest.
 
 A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
-of a folder holds its note for most of its length, so its floor is the mean level of
-its quietest half second instead, and only its loudest hit counts. `prep` notes this
-in the file it writes, and the build reads the file's noise the same way before
-cleaning it. A folder's hits
-are sorted by pitch before their notes are named, so a stretched note has its
+of a folder holds its note for most of its length, so its floor is read on its rest
+instead: the mean level of the quietest half second where it stays level, at least
+40 dB under its loudest, digital silence left out. Only its loudest hit counts, and
+it starts with a hit where it is cut at the strike. A file that rests less than
+that has no floor to read and is not held to the too-quiet limit. `prep` notes in
+each file it writes that its floor is read this way, and the build reads its noise
+the same way before cleaning it.
+
+A folder's hits are sorted by pitch before their notes are named, so a stretched note has its
 neighbors to go by. Each keeps the octave its pitch was read in.
 
 A hit standing less than 54 dB over the floor is left out: leveled with the others,
