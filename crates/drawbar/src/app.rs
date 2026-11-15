@@ -1324,7 +1324,9 @@ impl DrawbarApp {
                 Some(Answer::Yes) => {
                     crate::bring::use_mine(device, workspace, &mut self.queue, log)
                 }
-                Some(Answer::Other) => crate::bring::use_keyboards(device, workspace, log),
+                Some(Answer::Other) => {
+                    crate::bring::use_keyboards(device, workspace, &mut self.queue, log)
+                }
                 Some(Answer::No) => device.asks.choosing = None,
                 None => {}
             }

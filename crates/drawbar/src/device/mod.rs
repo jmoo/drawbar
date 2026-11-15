@@ -2363,7 +2363,7 @@ impl Device {
                     }
                     Purpose::Pull => {
                         if let Some((class, at)) = origin.slot() {
-                            crate::bring::landed(self, workspace, log, class, at, bytes);
+                            crate::bring::landed(self, workspace, queue, log, class, at, bytes);
                         }
                     }
                     Purpose::Choose => {

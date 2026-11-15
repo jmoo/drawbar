@@ -555,6 +555,7 @@ fn follow_moves(
 fn bring(
     device: &mut Device,
     workspace: &mut Workspace,
+    queue: &mut Queue,
     log: &mut Log,
     (class, at, id): (ObjectClass, Location, u64),
     bytes: Vec<u8>,
@@ -580,6 +581,9 @@ fn bring(
     workspace.replace_bytes(id, bytes, log);
     workspace.mark_saved(id);
     workspace.link(id, keyboard, after);
+    if queue.waiting(class, at).is_some_and(|held| held.id == id) {
+        queue.forget(id);
+    }
     Some(restored)
 }
 
@@ -589,6 +593,7 @@ fn bring(
 pub fn landed(
     device: &mut Device,
     workspace: &mut Workspace,
+    queue: &mut Queue,
     log: &mut Log,
     class: ObjectClass,
     at: Location,
@@ -612,7 +617,7 @@ pub fn landed(
         device.asks.pulling[index].id,
         device.asks.pulling[index].first,
     );
-    if let Some(restored) = bring(device, workspace, log, (class, at, id), bytes) {
+    if let Some(restored) = bring(device, workspace, queue, log, (class, at, id), bytes) {
         device.asks.pulling.remove(index);
         brought(&mut device.asks, workspace, log, restored, first);
     }
@@ -694,7 +699,12 @@ pub fn choose(device: &mut Device, workspace: &Workspace, log: &mut Log, id: u64
 }
 
 /// Use the keyboard's: bring the slot's bytes in.
-pub fn use_keyboards(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
+pub fn use_keyboards(
+    device: &mut Device,
+    workspace: &mut Workspace,
+    queue: &mut Queue,
+    log: &mut Log,
+) {
     let Some(Choosing {
         id,
         class,
@@ -705,7 +715,7 @@ pub fn use_keyboards(device: &mut Device, workspace: &mut Workspace, log: &mut L
     else {
         return;
     };
-    if let Some(restored) = bring(device, workspace, log, (class, at, id), bytes) {
+    if let Some(restored) = bring(device, workspace, queue, log, (class, at, id), bytes) {
         brought(&mut device.asks, workspace, log, restored, false);
     }
 }
@@ -1351,6 +1361,41 @@ mod tests {
     }
 
     #[test]
+    fn choosing_the_keyboards_version_takes_the_files_own_send_out_of_the_queue() {
+        use crate::browser::Act;
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body()))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        bench
+            .workspace
+            .replace_bytes(id, gained("50"), &mut bench.log);
+        bench.act(vec![Act::SaveDoc(id)]);
+        assert!(bench.queue.holds(id), "Save queues the send");
+
+        let theirs = gained("40");
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class: PROGRAM,
+            bank: 1,
+            slots: vec![Some(program_info(1, "A", crc(&theirs)))],
+        });
+        heard(&mut bench);
+        assert_eq!(standing(&bench, id), Some(Standing::Both));
+        choose(&mut bench.device, &bench.workspace, &mut bench.log, id);
+        got(&mut bench, 1, theirs, Purpose::Choose);
+        let Bench {
+            device,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut bench;
+        use_keyboards(device, workspace, queue, log);
+
+        assert_eq!(standing(&bench, id), Some(Standing::Same));
+        assert!(!bench.queue.holds(id), "nothing is left to send");
+    }
+
+    #[test]
     fn a_panel_edit_after_queueing_is_not_overwritten_and_the_rest_expect_what_the_walk_found() {
         use crate::browser::Act;
         use crate::device::Expect;
@@ -1671,7 +1716,7 @@ mod tests {
                     bench.queue.forget(id);
                 }
                 Answer::Other | Answer::No => {
-                    use_keyboards(device, workspace, log);
+                    use_keyboards(device, workspace, queue, log);
                     assert_eq!(standing(&bench, id), Some(Standing::Same));
                 }
             }
