@@ -57,14 +57,22 @@ pub enum Undo {
     Unlink { keyboard: Keyboard, ids: Vec<u64> },
     /// A save that queued a send: take the file out of the queue.
     Unqueue(u64),
-    /// Files brought in from the keyboard, each with the bytes it was saved as before.
-    Restore(Vec<(u64, Vec<u8>)>),
+    /// Files brought in from the keyboard, each as it was before.
+    Restore(Vec<Restored>),
     /// A link that followed its sound to another slot: the link it had before.
     Relink {
         id: u64,
         keyboard: Keyboard,
         held: Held,
     },
+}
+
+/// A file as it was before it was brought in: the bytes it was saved as, and its link.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Restored {
+    pub id: u64,
+    pub bytes: Vec<u8>,
+    pub link: Option<(Keyboard, Held)>,
 }
 
 impl Undo {
@@ -79,12 +87,15 @@ impl Undo {
             }
             Undo::Unqueue(id) => queue.forget(id),
             Undo::Restore(kept) => {
-                for (id, bytes) in kept {
+                for Restored { id, bytes, link } in kept {
                     if workspace.get(id).is_none_or(|entity| entity.is_unsaved()) {
                         continue;
                     }
                     workspace.replace_bytes(id, bytes, log);
                     workspace.mark_saved(id);
+                    if let Some((keyboard, held)) = link {
+                        workspace.link(id, &keyboard, held);
+                    }
                 }
             }
             Undo::Relink { id, keyboard, held } => {
@@ -98,7 +109,7 @@ impl Undo {
     /// The bytes it keeps.
     pub fn weight(&self) -> usize {
         match self {
-            Undo::Restore(kept) => kept.iter().map(|(_, bytes)| bytes.len()).sum(),
+            Undo::Restore(kept) => kept.iter().map(|kept| kept.bytes.len()).sum(),
             Undo::Unlink { .. } | Undo::Unqueue(_) | Undo::Relink { .. } => 0,
         }
     }

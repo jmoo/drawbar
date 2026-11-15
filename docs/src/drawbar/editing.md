@@ -16,7 +16,8 @@ To the right are the two faces, **Revert**, **Export…**, and the document's
 main action. It is **Save** while the document is edited; **Send to…** for a
 document linked to no slot, which queues it and opens the review to pick its
 slot; **Load on instrument** when its slot holds it, which makes the panel play
-that slot; and **Send to 1:7** when the slot holds an earlier version. A document
+that slot; and **Send to 1:7** when the slot holds an earlier version or is
+empty. A document
 whose slot the keyboard changed has **Choose…**, which shows the fields that
 differ: **Use the keyboard’s** saves the slot's version into the document, and
 **Use mine** queues the document's to the slot. The action is grayed out when

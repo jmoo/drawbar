@@ -61,6 +61,7 @@ pub enum Command {
     Disconnect,
     ReadEverything,
     ReadAgain,
+    KeyboardChanges,
     ReviewQueue,
     SendAll,
     ClearQueue,
@@ -155,6 +156,7 @@ pub fn label(command: Command) -> String {
         Command::Disconnect => "Disconnect",
         Command::ReadEverything => "Read everything",
         Command::ReadAgain => "Read again",
+        Command::KeyboardChanges => crate::bring::KEYBOARD_CHANGES,
         Command::ReviewQueue => "Review send queue…",
         Command::SendAll => "Send all",
         Command::ClearQueue => "Clear send queue",
@@ -322,6 +324,7 @@ fn instrument_entries() -> Vec<Entry> {
         Rule,
         Do(C::ReadEverything),
         Do(C::ReadAgain),
+        Do(C::KeyboardChanges),
         Rule,
         Do(C::ReviewQueue),
         Do(C::SendAll),
@@ -637,6 +640,10 @@ impl DrawbarApp {
             Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
                 attached.then_some(plain)?
             }
+            Command::KeyboardChanges => Offer {
+                enabled: !crate::bring::since(&self.device.state, &self.workspace).is_empty(),
+                ..attached.then_some(plain)?
+            },
             Command::ReadAgain => {
                 let class = self.open_class().filter(|_| attached)?;
                 relabeled(format!("Read {} again", folder(class)))
@@ -725,6 +732,7 @@ impl DrawbarApp {
             Command::Disconnect => acts.push(Act::Disconnect),
             Command::ReadEverything => acts.push(Act::Resync),
             Command::ReadAgain => acts.extend(self.open_class().map(Act::ReadAgain)),
+            Command::KeyboardChanges => acts.push(Act::KeyboardChanges),
             Command::ReviewQueue => acts.push(Act::ReviewQueue),
             Command::SendAll => acts.push(Act::AskSendAll),
             Command::ClearQueue => acts.push(Act::ClearQueue),

@@ -1491,6 +1491,17 @@ impl Browser {
                     let label = format!("Send all ({waiting})");
                     offer(ui, &label, None, Act::AskSendAll, acts);
                 }
+                let changes = crate::bring::since(&device.state, workspace);
+                if ui
+                    .add_enabled(
+                        !changes.is_empty(),
+                        egui::Button::new(crate::bring::KEYBOARD_CHANGES),
+                    )
+                    .clicked()
+                {
+                    acts.push(Act::KeyboardChanges);
+                    ui.close();
+                }
                 ui.separator();
                 offer(ui, "Disconnect", None, Act::Disconnect, acts);
             });

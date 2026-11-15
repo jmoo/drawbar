@@ -5,31 +5,38 @@
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::{occupied, standing_of, there, Device, DeviceCmd, DeviceState, Purpose};
-use crate::link::{self, Held, Keyboard, Spot, Standing, There};
-use crate::log::{Log, Undo};
+use crate::device::{
+    occupied, slot_label, standing_of, there, Device, DeviceCmd, DeviceState, Purpose,
+};
+use crate::link::{self, Held, Keyboard, Print, Spot, Standing, There};
+use crate::log::{Log, Restored, Undo};
 use crate::queue::{compare, Diff, Queue};
 use crate::sheet;
 use crate::strings::{counted, display_name, label, shown};
 use crate::workspace::{print_of, LocalEntity, Workspace};
 
 /// What happened on the keyboard to one linked file's sound while drawbar was away.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
-    /// The slot holds a version the file never had, and the file has not changed.
+    /// The slot holds a version the file never had, under the file's name, and the file
+    /// has not changed.
     Changed(Location),
-    /// The sound is in another slot of its class, which no file is linked to. `agrees`
-    /// where that slot holds the file's saved version.
+    /// The sound is in another slot of its class, which no file is linked to, or which
+    /// holds the sound of the file linked there while this slot holds that one's.
+    /// `agrees` where that slot holds the file's saved version.
     Moved {
         from: Location,
         to: Location,
         agrees: bool,
     },
+    /// The slot holds another sound, named `by`, and the file's sound is not in exactly
+    /// one other slot.
+    Replaced { at: Location, by: String },
     /// The slot is empty and the sound is nowhere else. A piano or sample has no address.
     Removed(Option<Location>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Found {
     pub id: u64,
     pub class: ObjectClass,
@@ -37,90 +44,165 @@ pub struct Found {
 }
 
 /// What changed on the attached keyboard to the files linked there, for the question
-/// asked once its walk has finished. A file with unsaved edits, and one changed here as
-/// well as there, is left to its mark. A sound two files would move to has moved for
-/// neither.
+/// asked once its walk has finished. A file with unsaved edits is left to its mark. A
+/// sound two files would move to has moved for neither.
 pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Found> {
     let Some(keyboard) = state.keyboard() else {
         return Vec::new();
     };
-    let judged: Vec<(Found, Standing)> = workspace
+    let judged: Vec<(Found, &Held)> = workspace
         .listed()
         .filter(|entity| !entity.is_unsaved())
         .filter_map(|entity| {
             let held = entity.held_on(&keyboard)?;
-            let (change, standing) = change(state, workspace, &keyboard, entity, held)?;
+            if claimants(workspace, &keyboard, held) > 1 {
+                return None;
+            }
+            let change = change(state, workspace, &keyboard, entity, held)?;
             let (id, class) = (entity.id, held.class());
-            Some((Found { id, class, change }, standing))
+            Some((Found { id, class, change }, held))
         })
         .collect();
     let target = |found: &Found| match found.change {
         Change::Moved { to, .. } => Some((found.class, to)),
-        Change::Changed(_) | Change::Removed(_) => None,
+        Change::Changed(_) | Change::Replaced { .. } | Change::Removed(_) => None,
     };
     let contested = |found: &Found| {
-        let claims = judged
+        let mut claims = judged
             .iter()
             .filter(|(other, _)| target(other) == target(found));
-        target(found).is_some() && claims.count() > 1
+        target(found).is_some() && claims.nth(1).is_some()
     };
     judged
         .iter()
-        .filter_map(|(found, standing)| match (contested(found), found.change) {
-            (false, _) => Some(*found),
-            (true, Change::Moved { from, .. }) if *standing == Standing::Theirs => Some(Found {
-                change: Change::Changed(from),
-                ..*found
+        .filter_map(|(found, held)| match contested(found) {
+            false => Some(found.clone()),
+            true => Some(Found {
+                change: unmoved(state, held)?,
+                ..found.clone()
             }),
-            (true, _) => None,
         })
         .collect()
 }
 
-/// What changed to one file's sound, and how the file stands against its slot.
-fn change(
+/// What changed to one file's sound, judged by what its slot holds now and the name it
+/// holds it under.
+pub fn change(
     state: &DeviceState,
     workspace: &Workspace,
     keyboard: &Keyboard,
     entity: &LocalEntity,
     held: &Held,
-) -> Option<(Change, Standing)> {
-    let class = held.class();
+) -> Option<Change> {
     let here = entity.saved_print()?;
     let (_, there) = there(state, held);
-    let standing = link::standing(held, Some(here), there);
-    if matches!(standing, Standing::Both | Standing::Unread) {
-        return None;
-    }
     let Some(from) = held.location() else {
-        return (there == There::Vacant).then_some((Change::Removed(None), standing));
+        return (there == There::Vacant).then_some(Change::Removed(None));
     };
-    let lost = match there {
-        There::Vacant => true,
-        There::Holds { crc: Some(crc), .. } => !held.knew(crc) && crc != here.crc,
-        There::Holds { crc: None, .. } | There::Unread => false,
+    let by = match there {
+        There::Unread | There::Holds { crc: None, .. } => return None,
+        There::Holds { crc: Some(crc), .. } if held.knew(crc) || crc == here.crc => return None,
+        There::Vacant => None,
+        There::Holds { .. } => Some(name_at(state, held.class(), from)),
     };
-    let ours = |crc: u32| crc == held.base.crc || crc == here.crc;
-    let mut elsewhere = occupied(state, class)
-        .filter(|(at, info)| *at != from && info.crc32.is_some_and(ours))
-        .map(|(at, info)| (at, info.crc32 == Some(here.crc)));
-    let moved = match (elsewhere.next(), elsewhere.next()) {
-        (Some((to, agrees)), None) => Some(Change::Moved { from, to, agrees }),
-        (None, _) if there == There::Vacant => {
-            return Some((Change::Removed(Some(from)), standing))
-        }
+    if by.is_some() && by == slot_label(&entity.name) {
+        let theirs = link::standing(held, Some(here), there) == Standing::Theirs;
+        return theirs.then_some(Change::Changed(from));
+    }
+    let mut elsewhere = elsewhere(state, held, here, from);
+    let unique = match (elsewhere.next(), elsewhere.next()) {
+        (Some(to), None) => Some(to),
+        (None, None) if by.is_none() => return Some(Change::Removed(Some(from))),
         _ => None,
     };
-    let free = |change: &Change| match change {
-        Change::Moved { to, .. } => workspace
-            .linked_at(keyboard, class, &Spot::at(*to))
-            .is_none(),
-        Change::Changed(_) | Change::Removed(_) => false,
-    };
-    match moved.filter(|_| lost).filter(free) {
-        Some(moved) => Some((moved, standing)),
-        None => (standing == Standing::Theirs).then_some((Change::Changed(from), standing)),
+    let to = unique.filter(|to| movable(state, workspace, keyboard, held, from, *to));
+    match (to, by) {
+        (Some(to), _) => {
+            let agrees = state
+                .slot(held.class(), to)
+                .flatten()
+                .and_then(|info| info.crc32);
+            Some(Change::Moved {
+                from,
+                to,
+                agrees: agrees == Some(here.crc),
+            })
+        }
+        (None, Some(by)) => Some(Change::Replaced { at: from, by }),
+        (None, None) => None,
     }
+}
+
+/// The name the keyboard keeps the slot `at` of `class` under.
+fn name_at(state: &DeviceState, class: ObjectClass, at: Location) -> String {
+    let info = state.slot(class, at).flatten();
+    info.map_or("", |info| info.name.trim()).to_string()
+}
+
+/// The slots of its class other than `from` holding what a link last agreed on, or what
+/// its file is saved as.
+fn elsewhere<'s>(
+    state: &'s DeviceState,
+    held: &'s Held,
+    here: Print,
+    from: Location,
+) -> impl Iterator<Item = Location> + 's {
+    let ours = move |crc: u32| crc == held.base.crc || crc == here.crc;
+    occupied(state, held.class())
+        .filter(move |(at, info)| *at != from && info.crc32.is_some_and(ours))
+        .map(|(at, _)| at)
+}
+
+/// Whether a link at `from` may follow its sound to `to`: no file is linked there, or the
+/// one linked there has its sound at `from`, which is a swap.
+fn movable(
+    state: &DeviceState,
+    workspace: &Workspace,
+    keyboard: &Keyboard,
+    held: &Held,
+    from: Location,
+    to: Location,
+) -> bool {
+    let class = held.class();
+    let Some(other) = workspace.linked_at(keyboard, class, &Spot::at(to)) else {
+        return true;
+    };
+    let Some(other) = workspace.get(other) else {
+        return false;
+    };
+    let theirs = |crc| {
+        other.held_on(keyboard).is_some_and(|it| it.base.crc == crc)
+            || other.saved_print().is_some_and(|it| it.crc == crc)
+    };
+    let at_from = state
+        .slot(class, from)
+        .flatten()
+        .and_then(|info| info.crc32);
+    at_from.is_some_and(theirs)
+}
+
+/// What a link two files would move to the same slot says instead: its slot holds another
+/// sound, or nothing.
+fn unmoved(state: &DeviceState, held: &Held) -> Option<Change> {
+    let at = held.location()?;
+    let (_, there) = there(state, held);
+    (there != There::Vacant).then(|| Change::Replaced {
+        at,
+        by: name_at(state, held.class(), at),
+    })
+}
+
+/// How many files are linked to the slot `held` names on `keyboard`. Two libraries that
+/// linked one slot each before they synced both keep their link.
+pub fn claimants(workspace: &Workspace, keyboard: &Keyboard, held: &Held) -> usize {
+    workspace
+        .listed()
+        .filter(|entity| {
+            entity
+                .held_on(keyboard)
+                .is_some_and(|other| other.class() == held.class() && other.spot == held.spot)
+        })
+        .count()
 }
 
 /// Whether the walk of every class holding a file linked on the attached keyboard has
@@ -138,16 +220,13 @@ fn walked(state: &DeviceState, workspace: &Workspace) -> bool {
             .all(|class| state.read_whole(class) && !running(class))
 }
 
-/// The slots holding a version their linked file never had, where the file has not
-/// changed and can be brought in.
-fn theirs(state: &DeviceState, workspace: &Workspace) -> Vec<(ObjectClass, Location)> {
-    workspace
-        .listed()
-        .filter(|entity| !entity.is_unsaved())
-        .filter_map(|entity| standing_of(state, entity))
-        .filter(|linked| linked.standing == Standing::Theirs && !linked.class.is_library())
-        .filter_map(|linked| Some((linked.class, linked.at?)))
-        .collect()
+/// A slot read to be brought into the file linked to it.
+struct Pull {
+    class: ObjectClass,
+    at: Location,
+    id: u64,
+    /// Whether it is one of those Bring them in asked for, which share one log line.
+    first: bool,
 }
 
 /// What drawbar asks, and has been told, while one keyboard is attached. A new attach
@@ -163,11 +242,15 @@ pub struct Asks {
     pub since: Option<Vec<Found>>,
     /// The question asked about one file, while it shows.
     pub choosing: Option<Choosing>,
-    /// Slots read to be brought in, until their bytes land. A read that fails stays, so
-    /// it is not asked for again.
-    pulling: Vec<(ObjectClass, Location)>,
-    /// The log line counting the slots brought in now.
+    /// Slots read to be brought in, until their bytes land. A read that fails, or lands
+    /// on a file that is no longer what its slot last agreed on, stays, so it is not asked
+    /// for again.
+    pulling: Vec<Pull>,
+    /// The log line counting the slots Bring them in brought in.
     brought: Option<u64>,
+    /// Each file brought in this session and what its link agreed on then. One whose link
+    /// says otherwise now had it undone, and is not brought in again on its own.
+    agreed: Vec<(u64, Print)>,
 }
 
 impl Asks {
@@ -194,7 +277,8 @@ impl Asks {
 
     /// A read for a question found its slot empty, so there is nothing to bring in.
     pub fn vacant(&mut self, class: ObjectClass, at: Location) {
-        self.pulling.retain(|slot| *slot != (class, at));
+        self.pulling
+            .retain(|pull| (pull.class, pull.at) != (class, at));
         if self
             .choosing
             .as_ref()
@@ -203,40 +287,91 @@ impl Asks {
             self.choosing = None;
         }
     }
+
+    /// Whether a file brought in this session had that undone since.
+    fn undone(&self, id: u64, held: &Held) -> bool {
+        self.agreed
+            .iter()
+            .any(|(was, print)| *was == id && *print != held.base)
+    }
+
+    /// Whether this attach's question was answered, or found nothing to ask.
+    pub fn answered(&self) -> bool {
+        self.settled && self.since.is_none()
+    }
 }
 
 /// Settle the question for this attach once the walk allows, and bring in what changed
 /// on the keyboard after the user said Bring them in. Call when the instrument or the
 /// list may have changed.
 ///
-/// ⚠️ Never while a write is running or waiting: a send changes the slots it is asked
-/// about.
+/// ⚠️ Nothing is asked or brought in while a write is running or waiting: a send changes
+/// the slots it is asked about.
 pub fn follow(device: &mut Device, workspace: &Workspace, log: &mut Log) {
-    if !device.asks.settled && !device.sending() && walked(&device.state, workspace) {
+    if device.sending() {
+        return;
+    }
+    if !device.asks.settled && walked(&device.state, workspace) {
         let found = since(&device.state, workspace);
         device.asks.settled = true;
         device.asks.since = (!found.is_empty()).then_some(found);
     }
     if device.asks.bringing {
-        for (class, at) in theirs(&device.state, workspace) {
-            pull(device, log, class, at);
-        }
+        bring_changed(device, workspace, log, false);
     }
 }
 
-/// Read a slot to bring it in, unless it is being read already.
-fn pull(device: &mut Device, log: &mut Log, class: ObjectClass, at: Location) {
-    if device.asks.pulling.contains(&(class, at)) {
+/// Read every slot [`since`] finds changed to be brought in, but for a file whose earlier
+/// bringing in was undone.
+fn bring_changed(device: &mut Device, workspace: &Workspace, log: &mut Log, first: bool) {
+    let Some(keyboard) = device.state.keyboard() else {
+        return;
+    };
+    for found in since(&device.state, workspace) {
+        let Change::Changed(at) = found.change else {
+            continue;
+        };
+        let held = workspace.get(found.id).and_then(|it| it.held_on(&keyboard));
+        if found.class.is_library() || held.is_none_or(|held| device.asks.undone(found.id, held)) {
+            continue;
+        }
+        pull(
+            device,
+            log,
+            Pull {
+                class: found.class,
+                at,
+                id: found.id,
+                first,
+            },
+        );
+    }
+}
+
+/// Read a slot to bring it in, unless it was asked for already.
+fn pull(device: &mut Device, log: &mut Log, pull: Pull) {
+    let asked = |it: &Pull| (it.class, it.at) == (pull.class, pull.at);
+    if device.asks.pulling.iter().any(asked) {
         return;
     }
-    device.asks.pulling.push((class, at));
-    let why = Purpose::Pull;
+    let (class, at, why) = (pull.class, pull.at, Purpose::Pull);
+    device.asks.pulling.push(pull);
     device.send(DeviceCmd::Get { class, at, why }, log);
 }
 
+/// The command that asks again what changed on the keyboard.
+pub const KEYBOARD_CHANGES: &str = "Keyboard changes…";
+
+/// Ask again what changed on the attached keyboard, after Not now.
+pub fn ask_again(device: &mut Device, workspace: &Workspace) {
+    let found = since(&device.state, workspace);
+    device.asks.since = (!found.is_empty()).then_some(found);
+}
+
 /// Bring them in: every slot changed on the keyboard is brought in, now and while this
-/// keyboard stays attached; a moved sound's link follows it; a removed sound's file is
-/// unlinked and kept. What changed since the question was asked is left as it is.
+/// keyboard stays attached; a moved sound's link follows it; a removed or replaced
+/// sound's file is unlinked and kept. What changed since the question was asked is left
+/// as it is.
 pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     let asked = device.asks.since.take().unwrap_or_default();
     let Some(keyboard) = device.state.keyboard() else {
@@ -244,72 +379,100 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     };
     device.asks.bringing = true;
     device.asks.brought = None;
-    let now = since(&device.state, workspace);
-    for found in now.iter().filter(|found| asked.contains(found)) {
-        let Some(held) = workspace.get(found.id).and_then(|it| it.held_on(&keyboard)) else {
-            continue;
-        };
-        match found.change {
-            Change::Changed(_) => {}
+    let now: Vec<Found> = since(&device.state, workspace)
+        .into_iter()
+        .filter(|found| asked.contains(found))
+        .collect();
+    let moved: Vec<(&Found, Location, bool, Held)> = now
+        .iter()
+        .filter_map(|found| match found.change {
             Change::Moved { to, agrees, .. } => {
-                let mut moved = held.moved(Spot::at(to));
-                if let (true, Some(print)) = (
-                    agrees,
-                    workspace.get(found.id).and_then(LocalEntity::saved_print),
-                ) {
-                    moved = moved.agreed(print);
-                }
-                let before = held.clone();
-                workspace.link(found.id, &keyboard, moved);
-                let name = workspace
-                    .get(found.id)
-                    .map(|it| it.name.clone())
-                    .unwrap_or_default();
-                log.say(format!(
-                    "“{}” is now at {}.",
-                    display_name(&name),
-                    shown(to)
-                ));
-                log.offer(Undo::Relink {
-                    id: found.id,
-                    keyboard: keyboard.clone(),
-                    held: before,
-                });
+                let held = workspace.get(found.id)?.held_on(&keyboard)?.clone();
+                Some((found, to, agrees, held))
             }
-            Change::Removed(_) => workspace.unlink(found.id, &keyboard, false),
+            _ => None,
+        })
+        .collect();
+    let mut classes: Vec<ObjectClass> = Vec::new();
+    for (found, ..) in &moved {
+        if !classes.contains(&found.class) {
+            classes.push(found.class);
         }
     }
-    follow(device, workspace, log);
+    for class in classes {
+        let moves: Vec<(Spot, Option<Spot>)> = moved
+            .iter()
+            .filter(|(found, ..)| found.class == class)
+            .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to))))
+            .collect();
+        workspace.respot(&keyboard, class, &moves);
+    }
+    for (found, to, agrees, before) in moved {
+        let entity = workspace.get(found.id);
+        let saved = entity.and_then(LocalEntity::saved_print);
+        let now = entity.and_then(|it| it.held_on(&keyboard)).cloned();
+        if let (true, Some(print), Some(now)) = (agrees, saved, now) {
+            workspace.link(found.id, &keyboard, now.agreed(print));
+        }
+        let name = workspace.get(found.id).map_or("", |it| it.name.as_str());
+        log.say(format!("“{}” is now at {}.", display_name(name), shown(to)));
+        log.offer(Undo::Relink {
+            id: found.id,
+            keyboard: keyboard.clone(),
+            held: before,
+        });
+    }
+    for found in &now {
+        if let Change::Removed(_) | Change::Replaced { .. } = found.change {
+            workspace.unlink(found.id, &keyboard, false);
+        }
+    }
+    if !device.sending() {
+        bring_changed(device, workspace, log, true);
+    }
 }
 
-/// Save `bytes`, read from the slot `at` of `class`, as the file linked to that slot on
-/// the attached keyboard, and agree the link on them. Returns the file and the bytes it
-/// was saved as before.
+/// Save `bytes`, read from the slot `at` of `class`, as the file `id` linked to that slot
+/// on the attached keyboard, and agree the link on them. Returns what it held before.
 ///
 /// ⚠️ A file with unsaved edits is never brought in over: they would be lost.
 fn bring(
-    state: &DeviceState,
+    device: &mut Device,
     workspace: &mut Workspace,
     log: &mut Log,
-    class: ObjectClass,
-    at: Location,
+    (class, at, id): (ObjectClass, Location, u64),
     bytes: Vec<u8>,
-) -> Option<(u64, Vec<u8>)> {
-    let keyboard = state.keyboard()?;
-    let id = workspace.linked_at(&keyboard, class, &Spot::at(at))?;
-    let entity = workspace.get(id)?;
-    if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
+) -> Option<Restored> {
+    let keyboard = device.state.keyboard()?;
+    let spot = Spot::at(at);
+    if workspace.linked_at(&keyboard, class, &spot) != Some(id) {
         return None;
     }
-    let held = entity.held_on(&keyboard)?.agreed(print_of(&bytes)?);
-    let before = entity.bytes.to_vec();
+    let entity = workspace.get(id)?;
+    let before = entity.held_on(&keyboard)?.clone();
+    if entity.is_unsaved()
+        || entity.unread()
+        || entity.rests().is_some()
+        || claimants(workspace, &keyboard, &before) > 1
+    {
+        return None;
+    }
+    let held = before.agreed(print_of(&bytes)?);
+    let restored = Restored {
+        id,
+        bytes: entity.bytes.to_vec(),
+        link: Some((keyboard.clone(), before)),
+    };
+    device.asks.agreed.retain(|(was, _)| *was != id);
+    device.asks.agreed.push((id, held.base));
     workspace.replace_bytes(id, bytes, log);
     workspace.mark_saved(id);
     workspace.link(id, &keyboard, held);
-    Some((id, before))
+    Some(restored)
 }
 
-/// A slot read to be brought in landed.
+/// A slot read to be brought in landed. It is brought in only over the file it was read
+/// for, while that file is still what it and its slot last agreed on.
 pub fn landed(
     device: &mut Device,
     workspace: &mut Workspace,
@@ -318,18 +481,36 @@ pub fn landed(
     at: Location,
     bytes: Vec<u8>,
 ) {
-    if let Some((id, before)) = bring(&device.state, workspace, log, class, at, bytes) {
-        device.asks.pulling.retain(|slot| *slot != (class, at));
-        brought(&mut device.asks, workspace, log, id, before);
+    let asked = |it: &Pull| (it.class, it.at) == (class, at);
+    let Some(pull) = device.asks.pulling.iter().find(|it| asked(it)) else {
+        return;
+    };
+    let (id, first) = (pull.id, pull.first);
+    let agreed = device.state.keyboard().is_some_and(|keyboard| {
+        workspace.get(id).is_some_and(|entity| {
+            let held = entity.held_on(&keyboard);
+            held.is_some_and(|held| entity.saved_print() == Some(held.base))
+        })
+    });
+    if !agreed {
+        return;
+    }
+    if let Some(restored) = bring(device, workspace, log, (class, at, id), bytes) {
+        device.asks.pulling.retain(|it| !asked(it));
+        brought(&mut device.asks, workspace, log, restored, first);
     }
 }
 
-/// Count a file brought in on the log line of the ones brought in with it, or start one.
-fn brought(asks: &mut Asks, workspace: &Workspace, log: &mut Log, id: u64, before: Vec<u8>) {
-    let counted_on = asks.brought.and_then(|serial| log.entry_mut(serial));
+/// Log a file brought in. Those Bring them in asked for share one line; any other gets
+/// its own.
+fn brought(asks: &mut Asks, workspace: &Workspace, log: &mut Log, restored: Restored, first: bool) {
+    let counted_on = asks
+        .brought
+        .filter(|_| first)
+        .and_then(|serial| log.entry_mut(serial));
     if let Some(entry) = counted_on {
         if let Some(Undo::Restore(kept)) = &mut entry.undo {
-            kept.push((id, before));
+            kept.push(restored);
             entry.text = format!(
                 "Brought in {} from the keyboard.",
                 counted(kept.len(), "sound", "sounds")
@@ -344,12 +525,15 @@ fn brought(asks: &mut Asks, workspace: &Workspace, log: &mut Log, id: u64, befor
             return;
         }
     }
-    let name = workspace.get(id).map_or("", |it| it.name.as_str());
+    let name = workspace.get(restored.id).map_or("", |it| it.name.as_str());
     log.say(format!(
         "Brought in “{}” from the keyboard.",
         display_name(name)
     ));
-    asks.brought = log.offer(Undo::Restore(vec![(id, before)]));
+    let serial = log.offer(Undo::Restore(vec![restored]));
+    if first {
+        asks.brought = serial;
+    }
 }
 
 /// The question about one file whose slot holds a version it never had.
@@ -395,6 +579,7 @@ pub fn choose(device: &mut Device, workspace: &Workspace, log: &mut Log, id: u64
 /// Use the keyboard's: bring the slot's bytes in.
 pub fn use_keyboards(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     let Some(Choosing {
+        id,
         class,
         at,
         there: Some(bytes),
@@ -403,9 +588,8 @@ pub fn use_keyboards(device: &mut Device, workspace: &mut Workspace, log: &mut L
     else {
         return;
     };
-    device.asks.brought = None;
-    if let Some((id, before)) = bring(&device.state, workspace, log, class, at, bytes) {
-        brought(&mut device.asks, workspace, log, id, before);
+    if let Some(restored) = bring(device, workspace, log, (class, at, id), bytes) {
+        brought(&mut device.asks, workspace, log, restored, false);
     }
 }
 
@@ -443,15 +627,16 @@ pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) 
         workspace
             .get(id)
             .map_or("", |it: &LocalEntity| display_name(&it.name))
+            .to_string()
     };
-    let changed: Vec<(&str, String)> = found
+    let changed: Vec<(String, String)> = found
         .iter()
         .filter_map(|found| match found.change {
             Change::Changed(at) => Some((name(found.id), shown(at))),
             _ => None,
         })
         .collect();
-    let moved: Vec<(&str, String)> = found
+    let moved: Vec<(String, String)> = found
         .iter()
         .filter_map(|found| match found.change {
             Change::Moved { from, to, .. } => {
@@ -460,7 +645,14 @@ pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) 
             _ => None,
         })
         .collect();
-    let removed: Vec<(&str, String)> = found
+    let replaced: Vec<(String, String)> = found
+        .iter()
+        .filter_map(|found| match &found.change {
+            Change::Replaced { at, by } => Some((format!("{} → {by}", name(found.id)), shown(*at))),
+            _ => None,
+        })
+        .collect();
+    let removed: Vec<(String, String)> = found
         .iter()
         .filter_map(|found| match found.change {
             Change::Removed(at) => Some((name(found.id), at.map(shown).unwrap_or_default())),
@@ -470,6 +662,7 @@ pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) 
     let groups = [
         (format!("{} changed", changed.len()), changed),
         (format!("{} moved", moved.len()), moved),
+        (format!("{} replaced", replaced.len()), replaced),
         (
             format!("{} removed, kept on this computer", removed.len()),
             removed,
@@ -552,13 +745,19 @@ pub fn choice_sheet(
                     if sheet::primary(ui, None, "Use mine").clicked() {
                         answer = Some(Answer::Yes);
                     }
-                    let keyboards = ui
+                    let mut keyboards = ui
                         .add_enabled_ui(theirs, |ui| {
                             sheet::secondary(ui, None, "Use the keyboard’s")
                         })
                         .inner;
+                    if choosing.class.is_library() {
+                        keyboards = keyboards.on_disabled_hover_text(UNREAD);
+                    }
                     if keyboards.clicked() {
                         answer = Some(Answer::Other);
+                    }
+                    if sheet::secondary(ui, None, "Cancel").clicked() {
+                        answer = Some(Answer::No);
                     }
                 },
             );
@@ -569,14 +768,28 @@ pub fn choice_sheet(
     answer
 }
 
-/// The fields that differ, Yours beside the Keyboard's, or the one line the send queue's
-/// review says for a difference that is not a list of fields.
+/// Why a piano or sample cannot be brought in from the question about it: its slot is
+/// never read whole.
+const UNREAD: &str = "Copy it to this computer instead.";
+
+/// What the question says of two versions that differ in no field it can name.
+pub const DIFFERS: &str = "differs";
+
+/// The fields that differ, Yours beside the Keyboard's, or one line for a difference that
+/// is not a list of fields.
 fn fields(ui: &mut egui::Ui, choosing: &Choosing) {
-    let Diff::Fields(fields) = &choosing.diff else {
-        let (_, tint, said) =
-            crate::queue::summary(&choosing.diff, choosing.class, choosing.at, ui.visuals());
-        ui.label(egui::RichText::new(said).color(tint));
-        return;
+    let fields = match &choosing.diff {
+        Diff::Fields(fields) => fields,
+        Diff::Bytes { .. } | Diff::Checksum => {
+            ui.label(egui::RichText::new(DIFFERS).color(crate::app::warn(ui.visuals())));
+            return;
+        }
+        Diff::Pending | Diff::Identical | Diff::Empty => {
+            let (_, tint, said) =
+                crate::queue::summary(&choosing.diff, choosing.class, choosing.at, ui.visuals());
+            ui.label(egui::RichText::new(said).color(tint));
+            return;
+        }
     };
     egui::ScrollArea::vertical()
         .max_height(sheet::middle(ui.ctx(), 220.0, 120.0))
@@ -640,14 +853,24 @@ mod tests {
     }
 
     /// Programs as a finished walk of one bank reported them, each slot `None` or a
-    /// checksum.
+    /// checksum under the next letter's name, so the file `A.ne5p` names slot 1.
     fn walked(bench: &mut Bench, slots: &[Option<u32>]) {
+        const NAMES: [&str; 5] = ["A", "B", "C", "D", "E"];
+        let slots: Vec<Option<(&str, u32)>> = slots
+            .iter()
+            .zip(NAMES)
+            .map(|(crc, name)| crc.map(|crc| (name, crc)))
+            .collect();
+        walked_named(bench, &slots);
+    }
+
+    /// Programs as a finished walk of one bank reported them, each slot `None` or a name
+    /// and a checksum.
+    fn walked_named(bench: &mut Bench, slots: &[Option<(&str, u32)>]) {
         bench.device.pretend_partitions(&ELECTRO5);
         let banks = [("A", slots.len() as u32)];
         bench.device.pretend_geometry(PROGRAM, &banks);
-        let slots: Vec<Option<(&str, u32)>> =
-            slots.iter().map(|crc| crc.map(|crc| ("P", crc))).collect();
-        bench.device.pretend_bodies(PROGRAM, 1, &slots);
+        bench.device.pretend_bodies(PROGRAM, 1, slots);
     }
 
     /// A file holding `bytes`, linked to `slot` as last agreed on `base`.
@@ -742,10 +965,13 @@ mod tests {
     }
 
     #[test]
-    fn a_sound_in_one_other_free_slot_has_moved_and_one_in_two_has_not() {
+    fn a_sound_in_one_other_free_slot_has_moved_and_one_in_two_was_replaced() {
         let mut bench = Bench::new();
-        let other = crc(&gained("40"));
-        walked(&mut bench, &[Some(other), Some(crc(&body())), None]);
+        let (other, ours) = (crc(&gained("40")), crc(&body()));
+        walked_named(
+            &mut bench,
+            &[Some(("Clav", other)), Some(("A", ours)), None],
+        );
         let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
         let moved = Change::Moved {
             from: at(1),
@@ -757,30 +983,82 @@ mod tests {
             [found(id, moved)]
         );
 
-        walked(
-            &mut bench,
-            &[Some(other), Some(crc(&body())), Some(crc(&body()))],
-        );
+        let slots = [Some(("Clav", other)), Some(("A", ours)), Some(("A", ours))];
+        walked_named(&mut bench, &slots);
+        let replaced = Change::Replaced {
+            at: at(1),
+            by: "Clav".into(),
+        };
         assert_eq!(
             since(&bench.device.state, &bench.workspace),
-            [found(id, Change::Changed(at(1)))],
+            [found(id, replaced)],
             "two slots hold it"
         );
     }
 
     #[test]
-    fn a_sound_two_files_would_move_to_has_moved_for_neither() {
+    fn a_slot_edited_under_its_name_has_changed_though_a_copy_is_elsewhere() {
         let mut bench = Bench::new();
-        walked(
-            &mut bench,
-            &[Some(crc(&gained("40"))), None, Some(crc(&body()))],
-        );
-        let theirs = linked(&mut bench, "A.ne5p", body(), 1, &body());
-        linked(&mut bench, "B.ne5p", body(), 2, &body());
+        let slots = [Some(("A", crc(&gained("40")))), Some(("A", crc(&body())))];
+        walked_named(&mut bench, &slots);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
         assert_eq!(
             since(&bench.device.state, &bench.workspace),
-            [found(theirs, Change::Changed(at(1)))]
+            [found(id, Change::Changed(at(1)))]
         );
+    }
+
+    #[test]
+    fn two_linked_sounds_that_swapped_slots_have_both_moved() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(&mut bench, &[Some(("B", crc(&b))), Some(("A", crc(&a)))]);
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        let moved = |from, to| Change::Moved {
+            from: at(from),
+            to: at(to),
+            agrees: true,
+        };
+        assert_eq!(
+            since(&bench.device.state, &bench.workspace),
+            [found(first, moved(1, 2)), found(second, moved(2, 1))]
+        );
+        heard(&mut bench);
+        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        assert_eq!(slot_of(&bench, first), Some(Spot::at(at(2))));
+        assert_eq!(slot_of(&bench, second), Some(Spot::at(at(1))));
+    }
+
+    #[test]
+    fn a_sound_two_files_would_move_to_has_moved_for_neither() {
+        let mut bench = Bench::new();
+        let slots = [
+            Some(("Clav", crc(&gained("40")))),
+            None,
+            Some(("C", crc(&body()))),
+        ];
+        walked_named(&mut bench, &slots);
+        let replaced = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        linked(&mut bench, "B.ne5p", body(), 2, &body());
+        let by = "Clav".into();
+        assert_eq!(
+            since(&bench.device.state, &bench.workspace),
+            [found(replaced, Change::Replaced { at: at(1), by })]
+        );
+    }
+
+    #[test]
+    fn a_replaced_sound_is_unlinked_by_bring_them_in_and_never_pulled() {
+        let mut bench = Bench::new();
+        walked_named(&mut bench, &[Some(("Clav", crc(&gained("40"))))]);
+        let id = linked(&mut bench, "Tine.ne5p", body(), 1, &body());
+        heard(&mut bench);
+        assert!(bench.device.asks.since.is_some());
+        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        assert_eq!(slot_of(&bench, id), None);
+        assert!(pulls(&bench).is_empty());
+        assert_eq!(bench.workspace.get(id).unwrap().bytes.to_vec(), body());
     }
 
     #[test]
@@ -971,6 +1249,61 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_changes_asks_again_after_not_now_while_anything_changed() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40")))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        heard(&mut bench);
+        bench.device.asks.since = None;
+        bench.act(vec![crate::browser::Act::KeyboardChanges]);
+        let asked = Some(vec![found(id, Change::Changed(at(1)))]);
+        assert_eq!(bench.device.asks.since, asked);
+
+        bench.device.asks.since = None;
+        walked(&mut bench, &[Some(crc(&body()))]);
+        bench.act(vec![crate::browser::Act::KeyboardChanges]);
+        assert_eq!(bench.device.asks.since, None, "nothing to ask");
+    }
+
+    #[test]
+    fn the_choice_says_differs_for_unnamed_bytes_and_cancel_asks_nothing() {
+        use crate::testing::{click, run, screen, where_};
+        let mut bench = Bench::new();
+        let id = linked_off(&mut bench);
+        let choosing = Choosing {
+            id,
+            class: PROGRAM,
+            at: at(1),
+            diff: Diff::Bytes { first_at: 0x40 },
+            there: None,
+        };
+        let ctx = crate::testing::context();
+        let size = egui::vec2(800.0, 600.0);
+        let mut answer = None;
+        let mut frame = |events| {
+            run(&ctx, screen(size, events), |ctx| {
+                answer = answer.or(choice_sheet(ctx, &choosing, &bench.workspace));
+            })
+        };
+        frame(Vec::new());
+        let said = crate::testing::painted(&frame(Vec::new()));
+        let words: Vec<&str> = said.iter().map(|word| word.text.as_str()).collect();
+        assert!(words.contains(&DIFFERS), "{words:?}");
+        assert!(!words.iter().any(|word| word.contains("0x")), "{words:?}");
+        let cancel = where_(&said, "Cancel").center();
+        frame(click(cancel));
+        frame(Vec::new());
+        assert_eq!(answer, Some(Answer::No));
+    }
+
+    /// A file on this computer the choice can name.
+    fn linked_off(bench: &mut Bench) -> u64 {
+        let origin = Origin::File("A.ne5p".into());
+        let log = &mut bench.log;
+        bench.workspace.ingest("A.ne5p".into(), origin, body(), log)
+    }
+
+    #[test]
     fn nothing_changed_asks_nothing() {
         let mut bench = Bench::new();
         walked(&mut bench, &[Some(crc(&body()))]);
@@ -1108,10 +1441,87 @@ mod tests {
 
         assert!(undo(&mut bench, "Brought in"));
         assert_eq!(bench.workspace.get(changed).unwrap().bytes.to_vec(), body());
-        assert_eq!(standing(&bench, changed), Some(Standing::Ahead));
+        assert_eq!(
+            standing(&bench, changed),
+            Some(Standing::Theirs),
+            "the link is as it was too"
+        );
         heard(&mut bench);
         assert_eq!(pulls(&bench), [at(1)], "not brought in again");
         assert!(!undo(&mut bench, "Brought in"), "once");
+    }
+
+    #[test]
+    fn each_later_bringing_in_has_its_own_line_and_undo() {
+        let mut bench = Bench::new();
+        let (one, two) = (gained("40"), gained("41"));
+        walked(&mut bench, &[Some(crc(&one)), Some(crc(&two))]);
+        let first = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let second = linked(&mut bench, "B.ne5p", body(), 2, &body());
+        heard(&mut bench);
+        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        got(&mut bench, 1, one.clone(), Purpose::Pull);
+        got(&mut bench, 2, two.clone(), Purpose::Pull);
+        assert!(bench.log.transcript().contains("Brought in 2 sounds"));
+
+        let three = gained("42");
+        walked(&mut bench, &[Some(crc(&three)), Some(crc(&two))]);
+        bench.device.pretend(DeviceEvent::Finished);
+        heard(&mut bench);
+        got(&mut bench, 1, three.clone(), Purpose::Pull);
+        assert_eq!(bench.workspace.get(first).unwrap().bytes.to_vec(), three);
+        assert!(bench.log.press("Brought in “A”"));
+        bench
+            .log
+            .undo_pressed(&mut bench.workspace, &mut bench.queue);
+        assert_eq!(bench.workspace.get(first).unwrap().bytes.to_vec(), one);
+        assert_eq!(bench.workspace.get(second).unwrap().bytes.to_vec(), two);
+        assert!(
+            bench.log.press("Brought in 2 sounds"),
+            "the first batch keeps its undo"
+        );
+    }
+
+    #[test]
+    fn a_pull_lands_only_on_a_file_still_as_its_slot_last_agreed() {
+        let mut bench = Bench::new();
+        let one = gained("40");
+        walked(&mut bench, &[Some(crc(&one))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        heard(&mut bench);
+        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        let log = &mut bench.log;
+        bench.workspace.replace_bytes(id, gained("60"), log);
+        bench.workspace.mark_saved(id);
+        got(&mut bench, 1, one, Purpose::Pull);
+        assert_eq!(
+            bench.workspace.get(id).unwrap().bytes.to_vec(),
+            gained("60")
+        );
+        assert!(standing(&bench, id).is_some_and(Standing::needs_attention));
+    }
+
+    #[test]
+    fn nothing_is_pulled_while_a_send_waits() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40"))), None]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let log = &mut bench.log;
+        let other = bench
+            .workspace
+            .ingest("B.ne5p".into(), Origin::Fresh, gained("41"), log);
+        heard(&mut bench);
+        bench.act(vec![crate::browser::Act::Send {
+            id: other,
+            class: PROGRAM,
+            at: at(2),
+        }]);
+        bench.act(vec![crate::browser::Act::SendAll]);
+        assert!(bench.device.sending());
+        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        heard(&mut bench);
+        assert!(pulls(&bench).is_empty());
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
     }
 
     #[test]

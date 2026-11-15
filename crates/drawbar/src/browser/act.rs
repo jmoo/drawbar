@@ -185,6 +185,8 @@ pub enum Act {
     Unqueue(u64),
     /// Ask which of a file and its slot on the attached keyboard is current.
     Choose(u64),
+    /// Ask again what changed on the attached keyboard since drawbar last saw it.
+    KeyboardChanges,
     /// Empty the queue. Nothing is deleted, so it asks nothing.
     ClearQueue,
     /// Write everything in the queue, grouped by folder. Already confirmed.
@@ -379,6 +381,7 @@ impl Act {
             | Act::ClearQueue
             | Act::SendAll
             | Act::QueueChanged
+            | Act::KeyboardChanges
             | Act::AskSendAll
             | Act::Rearrange { .. }
             | Act::RenameLocal { .. }
@@ -795,6 +798,7 @@ pub fn apply(
                 retarget(workspace, device, queue, log, id, class, at)
             }
             Act::Choose(id) => crate::bring::choose(device, workspace, log, id),
+            Act::KeyboardChanges => crate::bring::ask_again(device, workspace),
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
@@ -1776,8 +1780,12 @@ fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64
         Some((class, at)) => format!("“{}” is unlinked from {}.", entity.name, place(class, at)),
         None => format!("“{}” is unlinked from the keyboard.", entity.name),
     };
+    let before = entity.held_on(&keyboard).cloned();
     workspace.unlink(id, &keyboard, true);
     log.say(said);
+    if let Some(held) = before {
+        log.offer(crate::log::Undo::Relink { id, keyboard, held });
+    }
 }
 
 /// Queue a set of assets, each for the slot [`bound_for`] gives, and say what was not
@@ -2669,6 +2677,14 @@ mod tests {
             entity.kept_off(&keyboard),
             "nothing links it there on its own"
         );
+
+        assert!(bench.log.press("is unlinked from"));
+        bench
+            .log
+            .undo_pressed(&mut bench.workspace, &mut bench.queue);
+        let entity = bench.workspace.get(id).unwrap();
+        let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
+        assert_eq!((linked.at, linked.standing), (Some(at(2)), Standing::Same));
     }
 
     #[test]
