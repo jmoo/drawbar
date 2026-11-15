@@ -985,6 +985,36 @@ fn send_with<T: Transport + Recorded>(
     name: Option<&str>,
     stamp: Option<u32>,
 ) -> Result<(), String> {
+    send_linking(
+        ui,
+        device,
+        spill_into,
+        file,
+        at,
+        class,
+        confirmed,
+        what,
+        name,
+        stamp,
+        |from, to| std::fs::hard_link(from, to),
+    )
+}
+
+/// [`send_with`], keeping a rescue by `link`, which makes a second name for a file.
+#[allow(clippy::too_many_arguments)]
+fn send_linking<T: Transport + Recorded>(
+    ui: &Ui,
+    device: &mut Device<T>,
+    spill_into: &Path,
+    file: &mut impl FileSource,
+    at: Location,
+    class: ObjectClass,
+    confirmed: bool,
+    what: &str,
+    name: Option<&str>,
+    stamp: Option<u32>,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     // Check geometry before the transfer starts.
     let bad = transact(
         device,
@@ -1078,23 +1108,28 @@ fn send_with<T: Transport + Recorded>(
     let backup = match &existing {
         // Nothing is deleted until the backup is in hand.
         Some(info) => {
-            let unkept = |e: String| {
-                format!(
-                    "could not keep a rescue copy of {} in {} ({e}), so it was left alone; \
-                     run from a folder you can write to, or pass --rescue-dir",
-                    shown(at),
-                    spill_into.display(),
-                )
+            let unkept = |remedy: &'static str| {
+                move |e: String| {
+                    format!(
+                        "could not keep a rescue copy of {} in {} ({e}), so it was left \
+                         alone; run from a folder {remedy}, or pass --rescue-dir",
+                        shown(at),
+                        spill_into.display(),
+                    )
+                }
             };
+            let writable = unkept("you can write to");
             let name = envelope::rescue_name_for(info);
-            let (partial, file) = rescue_file(spill_into, &name).map_err(unkept)?;
+            let (partial, file) = rescue_file(spill_into, &name).map_err(&writable)?;
+            probe_links(spill_into, &name, &partial, &link)
+                .map_err(unkept("that takes hard links"))?;
             back_up(ui, device, class, info, &partial, file).map_err(|e| {
                 format!(
                     "could not read {} back before replacing it, so it was left alone: {e}",
                     shown(at),
                 )
             })?;
-            Some(keep(spill_into, &name, &partial).map_err(unkept)?)
+            Some(keep(spill_into, &name, &partial, &link).map_err(writable)?)
         }
         None => None,
     };
@@ -1242,6 +1277,28 @@ fn rescue_file(dir: &Path, name: &str) -> Result<(PathBuf, std::fs::File), Strin
     })
 }
 
+/// Refuses a `dir` that cannot [keep] a backup, because it makes no second name for a
+/// file, before anything is read into the still-empty `partial`: `link` gives it a name no
+/// rescue has, which is then removed. A refusal removes `partial` too.
+fn probe_links(
+    dir: &Path,
+    name: &str,
+    partial: &Path,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let probe = format!("{name}.link{}", envelope::PARTIAL);
+    match claim(dir, &probe, |path| link(partial, path)) {
+        Ok((path, ())) => {
+            let _ = std::fs::remove_file(path);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(partial);
+            Err(e)
+        }
+    }
+}
+
 /// Read the occupant of `info.location` so it can be put back, into `file`, a new file
 /// at `partial` to be [kept](keep), a transfer chunk at a time. It is synced and checked
 /// whole before this returns. A read that fails leaves no file behind.
@@ -1273,12 +1330,17 @@ fn back_up<T: Transport + Recorded>(
     })
 }
 
-/// Give a whole backup at `partial` the first free form of `name` in `dir`, and sync that
-/// name in `dir`, so the backup survives a power cut. One that cannot be kept leaves no
-/// file behind.
-fn keep(dir: &Path, name: &str, partial: &Path) -> Result<Backup, String> {
+/// Give a whole backup at `partial` the first free form of `name` in `dir` by `link`, and
+/// sync that name in `dir`, so the backup survives a power cut. One that cannot be kept
+/// leaves no file behind.
+fn keep(
+    dir: &Path,
+    name: &str,
+    partial: &Path,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Backup, String> {
     // ⚠️ A rename would replace a rescue another run has kept under the same name.
-    let linked = claim(dir, name, |path| std::fs::hard_link(partial, path));
+    let linked = claim(dir, name, |path| link(partial, path));
     let _ = std::fs::remove_file(partial);
     let (path, ()) = linked?;
     match sync_dir(dir) {
@@ -2901,6 +2963,49 @@ mod tests {
             );
         }
 
+        /// A folder that makes no hard link could not keep the rescue once read, so it is
+        /// refused before the read begins, and nothing is left in it.
+        #[test]
+        fn a_rescue_folder_without_hard_links_is_refused_before_the_read() {
+            let dir = crate::edit::tests::scratch("send-no-links");
+            let put = recorded();
+            let begin_read = put[3][7].frame().expect("the BEGIN_READ").to_vec();
+            let mut device = Device::new(ReplayTransport::new(put.concat()));
+            let err = send_linking(
+                &Ui::piped(),
+                &mut device,
+                &dir,
+                &mut { FILE },
+                AT,
+                ObjectClass::Program,
+                true,
+                "prog_8-14.ne5p",
+                Some(NAME),
+                Some(STAMP),
+                |_, _| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "Operation not supported",
+                    ))
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!(
+                    "could not keep a rescue copy of {} in {} ({}: Operation not supported), \
+                     so it was left alone; run from a folder that takes hard links, or pass \
+                     --rescue-dir",
+                    shown(AT),
+                    dir.display(),
+                    dir.join(format!("{RESCUE}.link{}", envelope::PARTIAL))
+                        .display(),
+                )
+            );
+            assert!(!device.transport().sent().contains(&begin_read));
+            assert_eq!(rescued(&dir), Vec::<String>::new());
+        }
+
         /// A rescue folder that is a file fails as a rescue copy that could not be
         /// kept: the slot's read never started.
         #[test]
@@ -3294,7 +3399,9 @@ mod tests {
             use std::io::Write;
             let (partial, mut file) = rescue_file(dir, name).unwrap();
             file.write_all(bytes).unwrap();
-            keep(dir, name, &partial).unwrap().0
+            keep(dir, name, &partial, |from, to| std::fs::hard_link(from, to))
+                .unwrap()
+                .0
         }
 
         #[test]
@@ -3344,9 +3451,11 @@ mod tests {
             assert_ne!(first, second);
             first_file.write_all(b"first").unwrap();
             second_file.write_all(b"second, still being read").unwrap();
-            let Backup(first_kept) = keep(&dir, name, &first).unwrap();
+            let Backup(first_kept) =
+                keep(&dir, name, &first, |from, to| std::fs::hard_link(from, to)).unwrap();
             second_file.write_all(b", whole").unwrap();
-            let Backup(second_kept) = keep(&dir, name, &second).unwrap();
+            let Backup(second_kept) =
+                keep(&dir, name, &second, |from, to| std::fs::hard_link(from, to)).unwrap();
 
             assert_eq!(std::fs::read(&first_kept).unwrap(), b"first");
             assert_eq!(
