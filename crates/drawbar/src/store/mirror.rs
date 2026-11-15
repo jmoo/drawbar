@@ -25,6 +25,7 @@ use super::{
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
+use crate::link::Link;
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::tags::Asked;
@@ -201,6 +202,12 @@ pub struct Store {
     shown: Option<Shown>,
     /// Changes to the tags the user asked for that wait for a file to name.
     asked: Vec<Asked>,
+    /// The assets whose links changed here and wait to be sent: for the library to open,
+    /// or for the file to be written.
+    link_asks: BTreeSet<u64>,
+    /// The assets whose links changed here since the library last answered every change.
+    /// A projection leaves their links as they are until it has.
+    linking: BTreeSet<u64>,
     /// Changes to files the user asked for, each carried out once the one before it has
     /// gone and nothing it waits on is in flight.
     asks: VecDeque<(FileAsk, u64)>,
@@ -370,6 +377,8 @@ impl Store {
             ids: Ids::default(),
             shown: None,
             asked: Vec::new(),
+            link_asks: BTreeSet::new(),
+            linking: BTreeSet::new(),
             asks: VecDeque::new(),
             passes: 0,
             batch: Batch::default(),
@@ -483,14 +492,15 @@ impl Store {
             .then(|| rescued.expect("a folder's name is one component"))
     }
 
-    /// Send the saves the files need, then say whether no save, rescan or tag waits for
-    /// its answer. A library whose answers cannot be waited for is let go only once
+    /// Send the saves the files need, then say whether no save, rescan, tag or link waits
+    /// for its answer. A library whose answers cannot be waited for is let go only once
     /// settled, so its last pass sends no save. A new tag whose name is still being chosen
     /// goes under the name it has, as at a quit.
     pub fn settled(&mut self, workspace: &mut Workspace, browser: &mut Browser) -> bool {
         browser.tags.named();
         self.sync(workspace, browser, Pass::Files);
-        let carried = (self.asks.is_empty() && self.asked.is_empty()) || !self.open();
+        let asked = self.asked.is_empty() && self.link_asks.is_empty();
+        let carried = (self.asks.is_empty() && asked) || !self.open();
         let idle = self.scan == Scan::Idle && !self.saving() && self.moving.is_empty();
         carried && idle && self.committing == 0
     }
@@ -514,12 +524,13 @@ impl Store {
 
     /// Whether letting the library go now, with no last pass, would lose an edit: an
     /// unsaved one, an asset never written to a file, a write that has not landed, a
-    /// slot view's edit not kept yet, a change held in memory only, or a tag asked for
-    /// and not sent. A browser tab may close without that pass.
+    /// slot view's edit not kept yet, a change held in memory only, or a tag or a link
+    /// asked for and not sent. A browser tab may close without that pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
         let unheld = self.unheld(workspace).next().is_some();
-        let tagging = !self.asked.is_empty() || browser.tags.naming().is_some();
-        self.writing() || unheld || self.unkept_view(workspace) || self.held(browser) || tagging
+        let asking = !self.asked.is_empty() || !self.link_asks.is_empty();
+        let asking = asking || browser.tags.naming().is_some();
+        self.writing() || unheld || self.unkept_view(workspace) || self.held(browser) || asking
     }
 
     /// Say that an unsaved edit could not be kept in this install's own state, or let go
@@ -1048,6 +1059,7 @@ impl Store {
     ) -> bool {
         self.ask(workspace, browser, queue, log);
         self.ask_tags(workspace, browser, log);
+        self.ask_links(workspace, log);
         let mut released = false;
         while let Some(event) = self.backend.try_recv() {
             released |= self.react(event, workspace, browser, queue, log);
@@ -1169,6 +1181,7 @@ impl Store {
         log: &mut Log,
     ) -> bool {
         self.ask_tags(workspace, browser, log);
+        self.ask_links(workspace, log);
         let Some(event) = self.backend.recv() else {
             return false;
         };
@@ -1480,7 +1493,7 @@ impl Store {
     /// Whether a change to the facts waits to be sent or answered.
     #[cfg(test)]
     pub fn deciding(&self) -> bool {
-        !self.asked.is_empty() || self.committing > 0
+        !self.asked.is_empty() || !self.link_asks.is_empty() || self.committing > 0
     }
 
     /// Whether a send is held for a rescan or check still in flight.
@@ -1947,6 +1960,7 @@ impl Store {
         // the name it has, and what waited for it is asked for now.
         browser.tags.named();
         self.ask_tags(workspace, browser, log);
+        self.ask_links(workspace, log);
         for _ in 0..ROUNDS {
             if !self.answered(workspace, browser, queue, log) {
                 break;
@@ -2001,6 +2015,7 @@ impl Store {
                 Some(event) => {
                     self.react(event, workspace, browser, queue, log);
                     self.ask_tags(workspace, browser, log);
+                    self.ask_links(workspace, log);
                 }
             }
         }
@@ -2334,6 +2349,7 @@ impl Store {
         }
         self.lose(&shown, workspace, browser);
         self.project_tags(&shown, browser);
+        self.project_links(&shown, workspace);
         browser.forget_gone(workspace);
         if retired {
             self.history = History::default();
@@ -2656,6 +2672,65 @@ impl Store {
             Some((id, worn.iter().cloned().collect()))
         });
         browser.tags.project(names.collect(), worn.collect());
+    }
+
+    /// Bring the assets' links level with the view, but for those whose links changed here
+    /// and wait to be sent or answered: once every change has been answered, the view is
+    /// all there is.
+    fn project_links(&mut self, shown: &Shown, workspace: &mut Workspace) {
+        self.take_link_asks(workspace);
+        if self.link_asks.is_empty() && self.committing == 0 {
+            self.linking.clear();
+        }
+        let projected: Vec<(u64, Vec<Link>)> = self
+            .ids
+            .iter()
+            .filter(|(id, _)| !self.linking.contains(id))
+            .map(|(id, key)| {
+                let links = key.entity().and_then(|entity| shown.links.get(&entity));
+                (id, links.cloned().unwrap_or_default())
+            })
+            .collect();
+        for (id, links) in projected {
+            workspace.follow_links(id, links);
+        }
+    }
+
+    /// Take the changes to links the workspace asked for.
+    fn take_link_asks(&mut self, workspace: &mut Workspace) {
+        let asked = workspace.take_link_asks();
+        self.linking.extend(&asked);
+        self.link_asks.extend(asked);
+    }
+
+    /// Send each asset's links as it holds them now, once its file has a key the library
+    /// knows. One whose file is still to be written waits for it, and for the answer that
+    /// lists it.
+    fn ask_links(&mut self, workspace: &mut Workspace, log: &mut Log) {
+        self.take_link_asks(workspace);
+        if self.link_asks.is_empty() {
+            return;
+        }
+        match &self.phase {
+            Phase::Opening => return,
+            Phase::Open => {}
+            Phase::ReadOnly(why) | Phase::Unfinished(why) | Phase::Failed(why) => {
+                log.error(format!("keeping links: {why}"));
+                self.link_asks.clear();
+                return;
+            }
+        }
+        for id in std::mem::take(&mut self.link_asks) {
+            let key = self.ids.key(id).cloned();
+            let links = workspace.get(id).map(|entity| entity.links.clone());
+            match (key, links) {
+                (Some(file), Some(links)) => self.commit(Intent::Link { file, links }),
+                (None, Some(_)) if self.committing > 0 || self.writes(id, workspace) => {
+                    self.link_asks.insert(id);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Say which tags another drawbar changed.
@@ -3775,6 +3850,7 @@ impl Store {
     pub fn sync(&mut self, workspace: &mut Workspace, browser: &mut Browser, pass: Pass) -> bool {
         // A tag asked for with the files it waits on can go in their change.
         self.asked.extend(browser.take_tag_asks());
+        self.take_link_asks(workspace);
         self.take_asks(workspace);
         if pass != Pass::Files {
             self.learn_crcs(workspace);

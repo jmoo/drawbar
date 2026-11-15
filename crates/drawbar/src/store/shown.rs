@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use toshokan::{EntityId, FileState, RelPath, View};
 
-use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
+use super::keys::{Came, LINKS, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::{Key, LibPath, Stat};
+use crate::link::Link;
 
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Shown {
@@ -24,6 +25,8 @@ pub struct Shown {
     pub came: BTreeMap<EntityId, Came>,
     /// The tags each entity wears.
     pub worn: BTreeMap<EntityId, BTreeSet<String>>,
+    /// The links of each entity that has any: one per keyboard, in order.
+    pub links: BTreeMap<EntityId, Vec<Link>>,
     /// The library's list of tags.
     pub names: BTreeSet<String>,
     /// The lists older drawbars kept that the library took in, by their hashes.
@@ -38,6 +41,7 @@ pub struct Showing {
     lost: Option<LibPath>,
     came: Option<Came>,
     worn: Option<BTreeSet<String>>,
+    links: Option<Vec<Link>>,
 }
 
 /// What an answer's view changed of what the app shows.
@@ -125,6 +129,7 @@ impl Shown {
             self.lost.remove(&entity);
             self.came.remove(&entity);
             self.worn.remove(&entity);
+            self.links.remove(&entity);
         }
     }
 
@@ -135,6 +140,7 @@ impl Shown {
             lost,
             came,
             worn,
+            links,
         } = showing;
         if let Some(entity) = key.entity() {
             if let Some(lost) = lost {
@@ -145,6 +151,9 @@ impl Shown {
             }
             if let Some(worn) = worn {
                 self.worn.insert(entity, worn);
+            }
+            if let Some(links) = links {
+                self.links.insert(entity, links);
             }
         }
         if let Some(other) = other {
@@ -181,15 +190,17 @@ impl Showing {
         }
         showing.came = toshokan::Field::shown(&shown.get(ORIGIN)).copied();
         let joined = view.joined().iter().filter(|joined| joined.into == entity);
-        let joined = joined.filter_map(|joined| view.entity(joined.entity));
+        let joined: Vec<_> = joined
+            .filter_map(|joined| view.entity(joined.entity))
+            .collect();
+        let holders = || std::iter::once(&shown).chain(&joined);
         let (mut worn, mut unreadable) = (BTreeSet::new(), false);
-        for members in std::iter::once(shown)
-            .chain(joined)
-            .map(|e| e.members(TAGS))
-        {
+        for members in holders().map(|e| e.members(TAGS)) {
             unreadable |= !members.unreadable.is_empty();
             worn.extend(members.values);
         }
+        let links = one_per_keyboard(holders().flat_map(|e| e.members(LINKS).values));
+        showing.links = (!links.is_empty()).then_some(links);
         let tagged = !worn.is_empty() || unreadable;
         if !worn.is_empty() {
             showing.worn = Some(worn);
@@ -269,6 +280,16 @@ const MOST_KEYS: usize = 1024;
 fn values(view: &View, key: toshokan::Set<String>) -> BTreeSet<String> {
     let listed = view.values(key).values.into_iter();
     listed.map(|(value, _)| value).collect()
+}
+
+/// One link per keyboard, in order: of two that writers left apart, the greatest.
+fn one_per_keyboard(links: impl Iterator<Item = Link>) -> Vec<Link> {
+    let sorted: BTreeSet<Link> = links.collect();
+    let by_keyboard: BTreeMap<_, Link> = sorted
+        .into_iter()
+        .map(|link| (link.keyboard.clone(), link))
+        .collect();
+    by_keyboard.into_values().collect()
 }
 
 /// `path` as drawbar shows it: none with a name that starts with a dot.

@@ -8,6 +8,7 @@ use std::fs;
 use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
+use crate::link::{Held, Keyboard, Link, Print, Spot};
 use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
@@ -9046,4 +9047,153 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
     session.answer_reads();
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
+}
+
+fn electro(serial: &str) -> Keyboard {
+    Keyboard {
+        model: "Nord Electro 5".into(),
+        serial: Some(serial.into()),
+    }
+}
+
+fn program_at(slot: u32) -> Held {
+    let base = Print { crc: 7, len: 121 };
+    Held::new(ObjectClass::Program, Spot::At { bank: 0, slot }, base).unwrap()
+}
+
+impl Session {
+    fn links(&self, id: u64) -> Vec<Link> {
+        self.bench.workspace.get(id).expect("held").links.clone()
+    }
+
+    fn link(&mut self, id: u64, keyboard: &Keyboard, held: Held) {
+        self.bench.workspace.link(id, keyboard, held);
+        self.decided();
+    }
+
+    fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
+        self.bench.workspace.unlink(id, keyboard, apart);
+        self.decided();
+    }
+}
+
+#[test]
+fn a_link_follows_its_file_through_a_rename_and_a_reopen() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.link(id, &electro("A1"), program_at(6));
+    let linked = session.links(id);
+    assert_eq!(linked.len(), 1);
+
+    let to = LibPath::root().join("Tine.ne5p");
+    session.bench.workspace.place(id, to);
+    session.sync();
+    assert_eq!(session.path(id).as_deref(), Some("Tine.ne5p"));
+    assert_eq!(session.links(id), linked);
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.links(again.named("Tine.ne5p")), linked);
+}
+
+#[test]
+fn linking_a_file_the_library_knows_nothing_of_adopts_it() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    assert!(matches!(session.store.key(id), Some(Key::File(_))));
+    session.link(id, &electro("A1"), program_at(6));
+    assert!(matches!(session.store.key(id), Some(Key::Entity(_))));
+    let linked = session.links(id);
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(again.links(again.only()), linked);
+}
+
+#[test]
+fn unlinking_removes_the_link_and_unlinking_apart_keeps_the_file_off_its_keyboard() {
+    let root = Temp::new();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.link(id, &here, program_at(6));
+    session.link(id, &there, program_at(6));
+    session.unlink(id, &here, false);
+    session.unlink(id, &there, true);
+    session.close();
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(again.only()).unwrap();
+    assert_eq!(
+        (entity.held_on(&here), entity.kept_off(&here)),
+        (None, false)
+    );
+    assert_eq!(
+        (entity.held_on(&there), entity.kept_off(&there)),
+        (None, true)
+    );
+}
+
+#[test]
+fn a_slot_a_second_file_is_linked_to_is_no_longer_the_first_files_after_a_reopen() {
+    let root = Temp::new();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::open(&root);
+    let first = session.create();
+    let second = session.create();
+    session.link(first, &here, program_at(6));
+    session.link(first, &there, program_at(6));
+    session.link(second, &here, program_at(6));
+    let names = [first, second].map(|id| session.bench.workspace.get(id).unwrap().name.clone());
+    session.close();
+
+    let again = Session::open(&root);
+    let [first, second] = names.map(|name| again.named(&name));
+    let first = again.bench.workspace.get(first).unwrap();
+    let second = again.bench.workspace.get(second).unwrap();
+    assert_eq!(first.held_on(&here), None);
+    assert_eq!(first.held_on(&there), Some(&program_at(6)));
+    assert_eq!(second.held_on(&here), Some(&program_at(6)));
+}
+
+#[test]
+fn another_drawbars_link_shows_once_its_change_is_read() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    let theirs = second.only();
+    second.link(theirs, &electro("A1"), program_at(6));
+
+    let ours = first.only();
+    assert_eq!(first.links(ours), [], "not read yet");
+    first.refresh();
+    assert_eq!(first.links(ours), second.links(theirs));
+}
+
+#[test]
+fn a_link_made_here_outlasts_the_answers_that_come_before_it_is_kept() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session
+        .bench
+        .workspace
+        .link(id, &electro("A1"), program_at(6));
+    let linked = session.links(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    while session.store.deciding() {
+        assert!(session.next(), "the library answered");
+        assert_eq!(session.links(id), linked, "while its file is written");
+    }
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.links(again.only()), linked);
 }

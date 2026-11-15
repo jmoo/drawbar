@@ -644,6 +644,12 @@ pub enum Intent {
     },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
+    /// Give a file these links and no others, making an entity for it where it has none.
+    /// No undo takes it back: a link changes on its own as sends land.
+    Link {
+        file: Key,
+        links: Vec<crate::link::Link>,
+    },
     /// Take changes another branch of a writer's history made, which are kept apart
     /// from the library ([`KeptApart`]): each of `changes`, or every one it can take
     /// where none is named.
@@ -786,6 +792,7 @@ impl Intent {
             | Intent::RemoveDir { path }
             | Intent::MoveFolder { from: path, .. } => named(path),
             Intent::Forget { .. }
+            | Intent::Link { .. }
             | Intent::Take { .. }
             | Intent::Dismiss { .. }
             | Intent::TakeIn { .. } => verb.to_string(),
@@ -810,6 +817,7 @@ impl Intent {
             Intent::RenameTag { .. } => verb("Rename tag", "Renaming tag"),
             Intent::RemoveTag { .. } => verb("Remove tag", "Removing tag"),
             Intent::Forget { .. } => verb("Forget", "Forgetting"),
+            Intent::Link { .. } => verb("Link", "Linking"),
             Intent::Take { .. } => verb("Take kept-apart changes", "Taking kept-apart changes"),
             Intent::Dismiss { .. } => verb(
                 "Dismiss kept-apart changes",
@@ -840,15 +848,17 @@ impl Intent {
         }
     }
 
-    /// Whether it, or a part of it, copies a slot's former occupant into the library or
-    /// takes in the list an older drawbar kept, which no undo takes back.
+    /// Whether it, or a part of it, copies a slot's former occupant into the library,
+    /// takes in the list an older drawbar kept, or sets a file's links, which no undo
+    /// takes back.
     pub fn lasting(&self) -> bool {
         match self {
             Intent::Import {
                 came: Some(keys::Came::Rescued { .. }),
                 ..
             }
-            | Intent::TakeIn { .. } => true,
+            | Intent::TakeIn { .. }
+            | Intent::Link { .. } => true,
             Intent::Batch(parts) => parts.iter().any(Intent::lasting),
             _ => false,
         }

@@ -16,7 +16,7 @@ use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
 use nord_usb::{Location, ObjectClass};
 
-use crate::link::Print;
+use crate::link::{self, Keyboard, Link, Print};
 use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
@@ -736,6 +736,12 @@ pub struct LocalEntity {
     ///
     /// [`Workspace::forget_writes`] clears it when the instrument goes.
     pub wrote: Option<Wrote>,
+    /// Its slot on each keyboard, as the library keeps them: at most one per keyboard, in
+    /// order.
+    ///
+    /// ⚠️ Change them through [`Workspace::link`] and [`Workspace::unlink`], which keep
+    /// one asset per slot and ask the library to keep the change.
+    pub links: Vec<Link>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
     /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
@@ -809,6 +815,7 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            links: Vec::new(),
             seen: Default::default(),
             by_name,
         }
@@ -923,6 +930,7 @@ impl LocalEntity {
             stamp,
             link: None,
             wrote: None,
+            links: Vec::new(),
             seen: Default::default(),
             by_name,
         }
@@ -1110,6 +1118,22 @@ impl LocalEntity {
         };
         let bytes = self.bytes.clone();
         Baseline::new(Content::Resident { bytes, facts }, self.stamp)
+    }
+
+    /// The slot it is linked to on `keyboard`, and what the two last agreed on. `None`
+    /// where it has no link there, or is kept off it.
+    pub fn held_on(&self, keyboard: &Keyboard) -> Option<&link::Held> {
+        self.link_on(keyboard)?.held.as_ref()
+    }
+
+    /// Whether the user keeps it off `keyboard`: nothing links it there on its own.
+    pub fn kept_off(&self, keyboard: &Keyboard) -> bool {
+        self.link_on(keyboard)
+            .is_some_and(|link| link.held.is_none())
+    }
+
+    fn link_on(&self, keyboard: &Keyboard) -> Option<&Link> {
+        self.links.iter().find(|link| link.keyboard == *keyboard)
     }
 
     /// What a slot holding its saved bytes would report. See [`Baseline::print`].
@@ -1659,6 +1683,8 @@ pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// The changes to files asked for and not yet taken.
     file_asks: Vec<FileAsk>,
+    /// The assets whose links changed here, for the library to keep, not yet taken.
+    link_asks: std::collections::BTreeSet<u64>,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
     at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
@@ -1803,6 +1829,7 @@ impl Workspace {
         Workspace {
             entities: Vec::new(),
             file_asks: Vec::new(),
+            link_asks: Default::default(),
             at: Default::default(),
             families: Default::default(),
             generations: Default::default(),
@@ -2083,6 +2110,86 @@ impl Workspace {
         moved
     }
 
+    /// Link an asset to a slot on `keyboard`, in place of any link it had there, and
+    /// unlink every other asset from that slot. A view of a slot keeps no links.
+    pub fn link(&mut self, id: u64, keyboard: &Keyboard, held: link::Held) {
+        if !self.get(id).is_some_and(|entity| entity.kept) {
+            return;
+        }
+        let there = |link: &Link| {
+            let other = link.held.as_ref().filter(|_| link.keyboard == *keyboard);
+            other.is_some_and(|other| other.class() == held.class() && other.spot == held.spot)
+        };
+        for entity in self.entities.iter_mut().filter(|entity| entity.id != id) {
+            let before = entity.links.len();
+            entity.links.retain(|link| !there(link));
+            if entity.links.len() != before {
+                self.link_asks.insert(entity.id);
+            }
+        }
+        let keyboard = keyboard.clone();
+        self.set_link(
+            id,
+            Link {
+                keyboard,
+                held: Some(held),
+            },
+        );
+    }
+
+    /// Unlink an asset from `keyboard`. `apart` keeps it off that keyboard: nothing links
+    /// it there again on its own.
+    pub fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
+        let keyboard = keyboard.clone();
+        match apart {
+            true => self.set_link(
+                id,
+                Link {
+                    keyboard,
+                    held: None,
+                },
+            ),
+            false => self.change_links(id, |links| links.retain(|link| link.keyboard != keyboard)),
+        }
+    }
+
+    /// Give an asset `link` in place of any link it had on that keyboard.
+    fn set_link(&mut self, id: u64, link: Link) {
+        self.change_links(id, |links| {
+            links.retain(|held| held.keyboard != link.keyboard);
+            links.push(link);
+        });
+    }
+
+    fn change_links(&mut self, id: u64, change: impl FnOnce(&mut Vec<Link>)) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.kept) else {
+            return;
+        };
+        let mut links = entity.links.clone();
+        change(&mut links);
+        links.sort();
+        if links == entity.links {
+            return;
+        }
+        entity.links = links;
+        self.link_asks.insert(id);
+        self.revision += 1;
+    }
+
+    /// Show the links the library keeps for an asset, asking for nothing.
+    pub(crate) fn follow_links(&mut self, id: u64, links: Vec<Link>) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.links != links) else {
+            return;
+        };
+        entity.links = links;
+        self.revision += 1;
+    }
+
+    /// The assets whose links changed since the last call.
+    pub fn take_link_asks(&mut self) -> std::collections::BTreeSet<u64> {
+        std::mem::take(&mut self.link_asks)
+    }
+
     /// Rename an asset held here. Nothing leaves this computer.
     pub fn rename(&mut self, id: u64, name: String) {
         if let Some(entity) = self.get_mut(id) {
@@ -2235,8 +2342,8 @@ impl Workspace {
     }
 
     /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
-    /// holds: where its file is, whether it is kept, its link, its last write and its
-    /// pending edit.
+    /// holds: where its file is, whether it is kept, its link, its last write, its links
+    /// and its pending edit.
     fn swap(&mut self, id: u64, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
         let Some(entity) = self.get_mut(id) else {
             return;
@@ -2247,6 +2354,7 @@ impl Workspace {
             kept: entity.kept,
             link: entity.link,
             wrote: entity.wrote,
+            links: std::mem::take(&mut entity.links),
             pending: entity.pending,
             seen: entity.seen.clone(),
             ..made
@@ -3785,9 +3893,9 @@ impl Workspace {
     /// the verify result.
     ///
     /// ⚠️ The saved baseline is kept: it moves only when the asset is saved, so an edit
-    /// and its revert are measured against the same bytes. The link and the last write
-    /// are kept too, because both are evidence about a slot, which an edit here says
-    /// nothing about.
+    /// and its revert are measured against the same bytes. The link, the links and the
+    /// last write are kept too, because each is evidence about a slot, which an edit here
+    /// says nothing about.
     fn respell(&mut self, id: u64, bytes: Bytes) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
@@ -3811,6 +3919,7 @@ impl Workspace {
         let entity = self.get_mut(id)?;
         let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
         let path = entity.path.take();
+        let links = std::mem::take(&mut entity.links);
         let mut saved = entity.saved.clone();
         saved.under_edit();
         let (bytes, stamp) = match held {
@@ -3825,6 +3934,7 @@ impl Workspace {
             link,
             saved,
             wrote,
+            links,
             pending,
             path,
             seen: entity.seen.clone(),
@@ -5786,6 +5896,100 @@ mod tests {
         let entity = workspace.get(1).unwrap();
         assert_eq!(entity.verify().badge(), "ok");
         assert_eq!(entity.saved.crc32(), slot_of(&sample));
+    }
+
+    fn electro(serial: &str) -> Keyboard {
+        Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: Some(serial.into()),
+        }
+    }
+
+    fn program_at(slot: u32) -> link::Held {
+        let base = Print { crc: 7, len: 121 };
+        link::Held::new(ObjectClass::Program, link::Spot::At { bank: 0, slot }, base).unwrap()
+    }
+
+    fn two_programs() -> (Workspace, Log, [u64; 2]) {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let program = Fresh::Program.bytes().unwrap();
+        let ids = ["A.ne5p", "B.ne5p"]
+            .map(|name| workspace.ingest(name.into(), Origin::Fresh, program.clone(), &mut log));
+        (workspace, log, ids)
+    }
+
+    #[test]
+    fn linking_a_second_asset_to_a_slot_unlinks_the_first_on_that_keyboard_only() {
+        let (mut workspace, _, [first, second]) = two_programs();
+        let (here, there) = (electro("A1"), electro("B2"));
+        workspace.link(first, &here, program_at(6));
+        workspace.link(first, &there, program_at(6));
+        workspace.take_link_asks();
+        workspace.link(second, &here, program_at(6));
+
+        let linked = |id: u64, keyboard| workspace.get(id).unwrap().held_on(keyboard).cloned();
+        assert_eq!(linked(first, &here), None);
+        assert_eq!(linked(first, &there), Some(program_at(6)));
+        assert_eq!(linked(second, &here), Some(program_at(6)));
+        let asked = workspace.take_link_asks();
+        assert_eq!(asked, [first, second].into(), "both are kept");
+    }
+
+    #[test]
+    fn an_asset_has_one_link_per_keyboard_and_unlinking_apart_keeps_it_off() {
+        let (mut workspace, _, [id, _]) = two_programs();
+        let here = electro("A1");
+        workspace.link(id, &here, program_at(6));
+        workspace.link(id, &here, program_at(7));
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(entity.links.len(), 1);
+        assert_eq!(entity.held_on(&here), Some(&program_at(7)));
+
+        workspace.unlink(id, &here, false);
+        let entity = workspace.get(id).unwrap();
+        assert_eq!((entity.links.len(), entity.kept_off(&here)), (0, false));
+        workspace.unlink(id, &here, true);
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(
+            (entity.held_on(&here), entity.kept_off(&here)),
+            (None, true)
+        );
+        workspace.link(id, &here, program_at(6));
+        assert!(
+            !workspace.get(id).unwrap().kept_off(&here),
+            "a link replaces it"
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_the_links_and_a_duplicate_or_a_view_has_none() {
+        let (mut workspace, mut log, [id, _]) = two_programs();
+        let here = electro("A1");
+        workspace.link(id, &here, program_at(6));
+        let gain = [("center_panel.gain".into(), "40".into())];
+        let edited = crate::fields::apply(&workspace.get(id).unwrap().bytes, &gain);
+        let edited = edited.expect("the gain is a field").1;
+        workspace.replace_bytes(id, edited, &mut log);
+        assert_eq!(
+            workspace.get(id).unwrap().held_on(&here),
+            Some(&program_at(6))
+        );
+
+        let copy = workspace.duplicate(id, &mut log).expect("a copy");
+        assert_eq!(workspace.get(copy).unwrap().links, []);
+
+        let program = Fresh::Program.bytes().unwrap();
+        let at = Location::from_user(1, 7);
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let view = workspace.view("Slot.ne5p".into(), origin, program, &mut log);
+        workspace.take_link_asks();
+        workspace.link(view, &here, program_at(6));
+        assert_eq!(workspace.get(view).unwrap().links, []);
+        assert_eq!(workspace.take_link_asks(), [].into());
     }
 
     /// The print of the saved bytes is what a walk reports for a slot holding the body

@@ -8,10 +8,16 @@ use toshokan::io::Range;
 use toshokan::{Identify, Identity, Layout, Register, RelPath, Schema, Set};
 
 use super::LibPath;
+use crate::link::Link;
 use crate::workspace::Origin;
 
 /// The tags on an asset, by name.
 pub const TAGS: Set<String> = Set::new("tags");
+
+/// The slot an asset is linked to on each keyboard. A file has at most one member per
+/// keyboard; of two that writers left apart, readers take the greatest, and the next write
+/// of the file's links keeps that one alone.
+pub const LINKS: Set<Link> = Set::new("links");
 
 /// Every tag made, by name, worn or not: the library's list of tags. Writers that make
 /// a list at once each keep one, and the tags are all their names together.
@@ -183,8 +189,14 @@ pub const DIR: &str = ".drawbar";
 pub const LOCAL: &str = "local";
 
 pub fn schema() -> Schema {
-    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key(), TAKEN_IN.key()])
-        .expect("drawbar's keys are distinct")
+    Schema::of(&[
+        TAGS.key(),
+        TAG_NAMES.key(),
+        ORIGIN.key(),
+        TAKEN_IN.key(),
+        LINKS.key(),
+    ])
+    .expect("drawbar's keys are distinct")
 }
 
 /// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:

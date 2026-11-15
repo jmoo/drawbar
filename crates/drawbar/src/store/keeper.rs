@@ -19,7 +19,7 @@ use toshokan::report::{
 };
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
-use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
+use super::keys::{self, Came, LINKS, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
@@ -27,6 +27,7 @@ use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
     Part, Source, Stat, Unwritable, Viewed, Waiting,
 };
+use crate::link::Link;
 use crate::rewrite::{self, Pieces};
 
 /// The most entries a listing of the library's folders looks at: a guard against a
@@ -736,13 +737,7 @@ impl<F: Fs> Keeper<F> {
         }
         let changes = match intent {
             Intent::Tag { files, name, make } => {
-                // ⚠️ A file another drawbar made an entity of since the last refresh would
-                // be adopted twice, as two entities the next scan joins. Reading what others
-                // wrote first leaves that only to one that adopts it in the moment between.
-                let mut changes = Vec::new();
-                if files.iter().any(|key| matches!(key, Key::File(_))) {
-                    changes = library.refresh().await.map_err(|e| told(&e))?.changes;
-                }
+                let mut changes = adopting(library, &files).await?;
                 let mut committed = facts(library, label, |built, view| {
                     let built = tag(built, view, &files, &name)?;
                     Ok(match make {
@@ -804,6 +799,18 @@ impl<F: Fs> Keeper<F> {
             Intent::Forget { entity } => {
                 let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
                 Some(forgot.await?)
+            }
+            Intent::Link { file, links } => {
+                let mut changes = adopting(library, std::slice::from_ref(&file)).await?;
+                let mut committed = facts(library, label, |built, view| {
+                    link(built, view, &file, links)
+                })
+                .await?;
+                changes.append(&mut committed.changes);
+                Some(toshokan::Committed {
+                    changes,
+                    ..committed
+                })
             }
             Intent::Take { run, changes } => {
                 let view = library.view();
@@ -987,8 +994,50 @@ fn on_list<'l, F: Fs + 'l>(
     }
 }
 
-/// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`
-/// where another writer made one since the app looked, or a new one that adopts it.
+/// What reading what others wrote changed, read first where an intent may adopt a file of
+/// `files`.
+///
+/// ⚠️ A file another drawbar made an entity of since the last refresh would be adopted
+/// twice, as two entities the next scan joins. Reading what others wrote first leaves that
+/// only to one that adopts it in the moment between.
+async fn adopting<F: Fs>(
+    library: &mut Library<F>,
+    files: &[Key],
+) -> Result<Vec<toshokan::report::Change>, String> {
+    if !files.iter().any(|key| matches!(key, Key::File(_))) {
+        return Ok(Vec::new());
+    }
+    Ok(library.refresh().await.map_err(|e| told(&e))?.changes)
+}
+
+/// The entity of the file `key` names: the one bound to its path in `view` where another
+/// writer made one since the app looked, or a new one that adopts it.
+fn entity_of<'l, F: Fs + 'l>(
+    built: Built<'l, F>,
+    view: &View,
+    key: &Key,
+) -> Result<(Built<'l, F>, toshokan::EntityId), String> {
+    let path = match key {
+        Key::Entity(entity) => return Ok((built, *entity)),
+        Key::File(path) => path,
+    };
+    let at = relative(path).ok_or_else(|| no_path(path))?;
+    if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
+        return Ok((built, entity));
+    }
+    let listed = view
+        .listed(&at)
+        .ok_or_else(|| format!("{path} is not listed"))?;
+    let expect = Expect::Listed {
+        len: listed.len,
+        modified: listed.modified,
+    };
+    Ok(built.create(|e| {
+        e.adopt(&at, expect);
+    }))
+}
+
+/// Put a tag on each file of `files`, on its entity ([`entity_of`]).
 fn tag<'l, F: Fs + 'l>(
     mut built: Built<'l, F>,
     view: &View,
@@ -996,31 +1045,31 @@ fn tag<'l, F: Fs + 'l>(
     name: &str,
 ) -> Result<Built<'l, F>, String> {
     for key in files {
-        let path = match key {
-            Key::Entity(entity) => {
-                built = built.add(*entity, TAGS, name.to_string());
-                continue;
-            }
-            Key::File(path) => path,
-        };
-        let at = relative(path).ok_or_else(|| no_path(path))?;
-        if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
-            built = built.add(entity, TAGS, name.to_string());
-            continue;
-        }
-        let listed = view
-            .listed(&at)
-            .ok_or_else(|| format!("{path} is not listed"))?;
-        let expect = Expect::Listed {
-            len: listed.len,
-            modified: listed.modified,
-        };
-        let (next, _) = built.create(|e| {
-            e.adopt(&at, expect).add(TAGS, name.to_string());
-        });
-        built = next;
+        let (next, entity) = entity_of(built, view, key)?;
+        built = next.add(entity, TAGS, name.to_string());
     }
     Ok(built)
+}
+
+/// Give the file `key` names these links and no others, on its entity ([`entity_of`]).
+fn link<'l, F: Fs + 'l>(
+    built: Built<'l, F>,
+    view: &View,
+    key: &Key,
+    links: Vec<Link>,
+) -> Result<Built<'l, F>, String> {
+    let (built, entity) = entity_of(built, view, key)?;
+    let held: BTreeSet<Link> = view
+        .entity(entity)
+        .map(|held| held.members(LINKS).values.into_iter().collect())
+        .unwrap_or_default();
+    let wanted: BTreeSet<Link> = links.into_iter().collect();
+    let built = held
+        .difference(&wanted)
+        .fold(built, |built, gone| built.remove(entity, LINKS, gone));
+    Ok(wanted
+        .difference(&held)
+        .fold(built, |built, new| built.add(entity, LINKS, new.clone())))
 }
 
 /// Where a write goes, what it expects to find there, and where a new file came from.
