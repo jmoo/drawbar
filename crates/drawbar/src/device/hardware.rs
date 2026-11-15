@@ -623,7 +623,7 @@ impl Rig {
 
     /// Run `acts`, which place `id` on a slot and Sync, until its write lands or fails,
     /// calling `during` with every range of `file` the send has read so far. A failed
-    /// write leaves the send placed by hand, and the error the log says last is why.
+    /// write leaves the send placed by hand, and the errors the log says since are why.
     fn send(
         &mut self,
         acts: Vec<Act>,
@@ -648,12 +648,12 @@ impl Rig {
                 }
                 let errors = self.bench.log.iter().skip(logged);
                 let errors = errors.filter(|entry| entry.level == crate::log::Level::Error);
-                let failure = errors.last().map(|entry| entry.text.clone());
+                let failure: Vec<&str> = errors.map(|entry| entry.text.as_str()).collect();
                 if self.bench.device.state.in_flight.is_none() {
-                    match (self.bench.queue.holds(id), failure) {
+                    match (self.bench.queue.holds(id), failure.is_empty()) {
                         (false, _) => return Ok(()),
-                        (true, Some(why)) => return Err(why),
-                        (true, None) => {}
+                        (true, false) => return Err(failure.join("\n")),
+                        (true, true) => {}
                     }
                 }
                 assert!(
