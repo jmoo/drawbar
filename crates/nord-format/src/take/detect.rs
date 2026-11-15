@@ -265,7 +265,9 @@ pub(crate) fn spectrum(x: &[f64], plan: &fft::Plan) -> Vec<f64> {
 /// noise would otherwise pull it an octave down. Mains hum fooled a harmonic-product
 /// estimate on soft treble notes.
 pub fn pitch(x: &[f64], rate: u32, top_hz: f64) -> Option<f64> {
-    if x.is_empty() {
+    // No harmonic is searched for over the Nyquist frequency, with room for its window.
+    let top_hz = top_hz.min(f64::from(rate) / 2.0 / 1.015);
+    if x.is_empty() || top_hz <= 80.0 {
         return None;
     }
     let n = (1usize << 18).max(x.len().next_power_of_two());
@@ -505,6 +507,17 @@ pub(crate) mod tests {
     fn a_percentile_interpolates_between_its_neighbors() {
         assert_eq!(percentile(&[4.0, 1.0, 3.0, 2.0], 50.0), 2.5);
         assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0), 1.4);
+    }
+
+    /// A top over the file's Nyquist frequency is searched only up to it: an 880 Hz note
+    /// in an 8 kHz WAV, asked for to 5 kHz, is still found.
+    #[test]
+    fn a_pitch_is_found_in_a_low_rate_file_asked_for_past_its_nyquist() {
+        let rate = 8_000;
+        let x = take(rate, 1.0, &[(0.0, 81.0, -12.0, 1.0)], -110.0);
+        let found = pitch(&x[..samples(0.5, rate)], rate, 5_000.0).expect("a pitch");
+        assert!((found - 81.0).abs() < 0.2, "{found}");
+        assert_eq!(pitch(&x, 100, 5_000.0), None, "no band to search");
     }
 
     #[test]

@@ -190,6 +190,14 @@ pub fn region_strokes<'a>(
             )));
         };
         let channels = usize::from(take.channels.max(1));
+        let total = take.samples.len() / channels;
+        if u64::from(region.start) + u64::from(region.frames) > total as u64 {
+            return malformed(named(&format!(
+                "region {:?} runs to frame {}, past the audio's end at frame {total}",
+                region.label,
+                u64::from(region.start) + u64::from(region.frames)
+            )));
+        }
         let audio = match noise {
             Some(noise) => noise.stroke(
                 &take.samples,
@@ -223,7 +231,7 @@ pub fn region_strokes<'a>(
                 "fades no stroke: no region is labeled {stroke:?}"
             )));
         };
-        let end = |r: &Region| r.start + r.frames;
+        let end = |r: &Region| u64::from(r.start) + u64::from(r.frames);
         if fade.start < owner.region.start || end(fade) != end(owner.region) {
             return malformed(refuse(&format!(
                 "must lie within {stroke:?} and end with it, where the fade reaches silence"
@@ -434,5 +442,33 @@ mod tests {
             region_stroke(&take, &high, 107),
         ];
         assert!(pitched_roots(&strokes).unwrap().is_empty());
+    }
+
+    /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
+    /// read out of bounds, cleaned or not.
+    #[test]
+    fn a_region_past_the_audio_s_end_is_refused() {
+        let take = Audio {
+            rate: 35_002,
+            channels: 2,
+            samples: vec![0.0; 200],
+        };
+        let noise = Noise::of(&plan::mono(&take), take.rate, Floor::Take);
+        for (start, frames) in [(50, 51), (u32::MAX, 2)] {
+            let marks = Marks {
+                regions: vec![Region {
+                    start,
+                    frames,
+                    label: "060-b0-l00".into(),
+                }],
+                loops: Vec::new(),
+            };
+            for cleaned in [None, Some(&noise)] {
+                let err = region_strokes("take.wav", &take, &marks, cleaned)
+                    .err()
+                    .expect("refused");
+                assert!(err.to_string().contains("past the audio's end"), "{err}");
+            }
+        }
     }
 }
