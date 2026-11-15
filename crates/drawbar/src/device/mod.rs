@@ -2421,6 +2421,10 @@ impl Device {
                     if let Some(DeviceCmd::Reload { written, .. }) = reload {
                         written.retain(|it| *it != at);
                     }
+                    // The rest of this Send all waits, so no program goes out ahead of
+                    // what it plays.
+                    self.pending
+                        .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
                     let slot = (id, class, at);
                     crate::queue::changed_under(workspace, self, queue, log, slot, holds.as_ref());
                     let name = workspace.get(id).map_or("", |entity| entity.name.as_str());
@@ -2451,6 +2455,8 @@ impl Device {
                         running.reload = None;
                         if let Some(class) = running.writing {
                             queue.stumbled(class, &text);
+                            self.pending
+                                .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
                         }
                     }
                     log.error(text);
@@ -3257,6 +3263,40 @@ mod tests {
             "the slot that changed on the keyboard keeps what the panel plays"
         );
         assert_eq!(owed(false, None), None, "this panel loads no programs");
+    }
+
+    /// A write refused or failed in one folder holds back the folders after it in the
+    /// same Send all, so no program goes out ahead of the piano it plays.
+    #[test]
+    fn a_refused_write_holds_back_the_rest_of_its_send() {
+        let refusals = [
+            DeviceEvent::OpFailed("put: refused".into()),
+            DeviceEvent::Changed {
+                id: 1,
+                class: ObjectClass::Piano,
+                at: Location { bank: 0, slot: 0 },
+                holds: None,
+            },
+        ];
+        for refused in refusals {
+            let ctx = egui::Context::default();
+            let mut workspace = Workspace::new(ctx.clone());
+            let mut device = Device::new(ctx);
+            let mut log = Log::default();
+            device.pretend_attached();
+            for class in [ObjectClass::Piano, ObjectClass::Program] {
+                let items = Vec::new();
+                device.send(DeviceCmd::SendAll { class, items }, &mut log);
+            }
+            device.pump();
+            device.pretend(refused);
+            device.pretend(DeviceEvent::Finished);
+            let (mut tabs, mut queue) = (Tabs::default(), Queue::default());
+            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
+            let queued = device.queued().into_iter();
+            let mut sends = queued.filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }));
+            assert!(sends.next().is_none(), "the programs wait in the queue");
+        }
     }
 
     /// A program written back changes what it needs, so the cached answer does not

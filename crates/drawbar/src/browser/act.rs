@@ -1541,13 +1541,27 @@ type Batch = (ObjectClass, Vec<Outgoing>);
 /// What will be written, grouped by folder in queue order, pianos and samples first so
 /// that a program lands after what it plays. A session belongs to a folder, so a batch
 /// is split by folder. An asset the instrument must not be sent stops the batch, named
-/// with why. An asset resting in its file is sent from it, unread here.
+/// with why. An asset resting in its file is sent from it, unread here. A program that
+/// plays a queued piano or sample left out of the batch is left out too.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, String)> {
+    let staying: Vec<crate::plays::Key> = queue
+        .entries()
+        .iter()
+        .filter(|held| held.failure.is_some() || held.replaces.expect().is_none())
+        .filter_map(|held| workspace.get(held.id).and_then(crate::plays::key_of))
+        .collect();
     let mut by_class: Vec<Batch> = Vec::new();
     for held in will_write(queue) {
         let (Some(entity), Some(expect)) = (workspace.get(held.id), held.replaces.expect()) else {
             continue;
         };
+        let plays = crate::plays::named(entity).iter();
+        if plays
+            .map(|plays| plays.key())
+            .any(|key| staying.contains(&key))
+        {
+            continue;
+        }
         let item = Outgoing {
             id: entity.id,
             at: held.at,
@@ -2043,6 +2057,42 @@ mod tests {
             .map(|(class, _)| class)
             .collect();
         assert_eq!(classes, [ObjectClass::Piano, ObjectClass::Program]);
+    }
+
+    /// A program never goes out ahead of a queued piano it plays that is not going.
+    #[test]
+    fn a_program_waits_with_the_piano_it_plays_while_that_piano_waits_for_a_read() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let fresh = Fresh::Program.bytes().unwrap();
+        let tine = crate::plays::slot_key(ObjectClass::Piano, "Tine").1;
+        let set = [("piano_panel.id".to_string(), tine.to_string())];
+        let (_, bytes) = crate::fields::apply(&fresh, &set).unwrap();
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let piano = crate::testing::piano(1);
+        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, &mut log);
+        device.pretend_scanned(ObjectClass::Program, 1, &[""]);
+        let unread = Location::from_user(2, 1);
+        let waiting = [
+            (piano, ObjectClass::Piano, unread),
+            (program, ObjectClass::Program, Location::from_user(1, 1)),
+        ];
+        for (id, class, at) in waiting {
+            enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
+        }
+        assert_eq!(queue.len(), 2);
+
+        let batch = grouped(&queue, &workspace).unwrap();
+        assert!(
+            batch.is_empty(),
+            "{:?}",
+            batch.iter().map(|(class, _)| class).collect::<Vec<_>>()
+        );
     }
 
     fn at(slot: u32) -> Location {
