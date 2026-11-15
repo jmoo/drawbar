@@ -14,7 +14,7 @@ can connect to an instrument or hear a MIDI controller.
 ## On the desktop
 
 On Windows, download `drawbar-<version>-x86_64-windows.exe` from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases?q=drawbar-v&expanded=true)
+[drawbar release](https://github.com/jmoo/drawbar/releases)
 and run it. It is not signed, so Windows may ask before running it the first
 time.
 
@@ -33,7 +33,7 @@ cargo install drawbar
 ## The `nord` command
 
 On Windows, download `nord-<version>-x86_64-windows.exe` from the newest
-[nord-cli release](https://github.com/jmoo/drawbar/releases?q=nord-cli-v&expanded=true),
+[nord-cli release](https://github.com/jmoo/drawbar/releases),
 rename it to `nord.exe`, and put it in a folder on your `PATH`.
 
 ```sh

@@ -23,7 +23,7 @@ nix run github:jmoo/drawbar#nord-cli -- --help
 ```
 
 On Windows, download `nord` from the newest
-[nord-cli release](https://github.com/jmoo/drawbar/releases?q=nord-cli-v&expanded=true).
+[nord-cli release](https://github.com/jmoo/drawbar/releases).
 
 The [guide](../../docs/src/nord-cli/overview.md) covers every command, and
 [What is supported](../../docs/src/getting-started/support.md) says what has been

@@ -14,7 +14,7 @@ cargo install drawbar
 ```
 
 On Windows, download it from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases?q=drawbar-v&expanded=true).
+[drawbar release](https://github.com/jmoo/drawbar/releases).
 
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
