@@ -629,7 +629,8 @@ pub fn sheet(
     let Some(sheet) = asks.sheet.as_mut() else {
         return;
     };
-    let read = sheet.read(state);
+    let pressed = sheet.pressed();
+    let read = sheet.read(state) && pressed.is_none();
     let rows = match read {
         true => sync.list.clone(),
         false => Vec::new(),
@@ -738,15 +739,17 @@ fn foot(
     );
     bar.spacing_mut().item_spacing.x = 8.0;
     let plan = crate::bring::plan(sheet, &drawn.rows, drawn.device, drawn.workspace);
-    let label = match plan.len() {
+    let pressed = sheet.pressed();
+    let label = match pressed.unwrap_or(plan.len()) {
         0 => "Sync".to_string(),
         n => format!("Sync {n}"),
     };
     let live = read && !plan.is_empty();
     let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live)
-        .on_disabled_hover_text(match read {
-            true => "Pick a direction for a row first.",
-            false => "Reading the keyboard…",
+        .on_disabled_hover_text(match (pressed, read) {
+            (Some(_), _) => SYNCING,
+            (None, true) => "Pick a direction for a row first.",
+            (None, false) => "Reading the keyboard…",
         });
     let up = plan.iter().filter(|step| step.way == Way::Up);
     let up = up.filter_map(|step| Some((step.row.class, drawn.workspace.get(step.row.id)?)));
@@ -787,9 +790,10 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &
         ui.add_space(GAP);
         ui.horizontal(|ui| {
             ui.add_space(PAD);
-            let said = match read {
-                true => "Nothing to sync.",
-                false => "Reading the keyboard…",
+            let said = match (sheet.pressed(), read) {
+                (Some(_), _) => SYNCING,
+                (None, true) => "Nothing to sync.",
+                (None, false) => "Reading the keyboard…",
             };
             ui.label(
                 egui::RichText::new(said)
@@ -1059,6 +1063,9 @@ fn placed<'a>(row: &Row, queue: &'a Queue) -> Option<&'a Queued> {
         .flatten()
 }
 
+/// What the sheet says while the plan Sync was pressed on waits to run.
+const SYNCING: &str = "Syncing…";
+
 /// The way control's width.
 const WAY: f32 = 44.0;
 
@@ -1076,14 +1083,15 @@ fn way_control(
     box_: egui::Rect,
 ) -> f32 {
     let way = sheet.way(row, &drawn.rows, drawn.workspace);
-    let ways = row.ways(drawn.workspace).allowed;
+    let ways = row.ways(drawn.workspace);
     let text = match (way, &row.change) {
         (None, _) => "!",
         (Some(Way::Up), _) => "↑",
         (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink",
         (Some(Way::Down), _) => "↓",
     };
-    let turns = ways.len() > 1 || (way.is_none() && !ways.is_empty());
+    let free = way.is_none() && (ways.taken.is_none() || sheet.left_out(row));
+    let turns = ways.allowed.len() > 1 || (free && !ways.allowed.is_empty());
     let response = ui.interact(box_, ui.id().with(("way", row.id)), egui::Sense::click());
     let visuals = ui.visuals();
     if turns && response.hovered() {
@@ -1103,7 +1111,17 @@ fn way_control(
     );
     let both = matches!(row.change, Change::Ahead | Change::Theirs | Change::Both);
     let blocked = row.down_blocked(drawn.workspace).filter(|_| both);
+    let partner = match row.change {
+        Change::Moved {
+            with: Some(with), ..
+        } if way.is_none() => drawn.workspace.get(with),
+        _ => None,
+    };
     let hover = match (way, blocked.map(crate::bring::Blocked::hint)) {
+        _ if partner.is_some() => {
+            let name = partner.map_or("", |it| display_name(&it.name));
+            format!("Moves only with “{name}”.")
+        }
         (None, Some(why)) => format!("click to pick a direction\n{ARROWS}\n{why}"),
         (None, None) => format!("click to pick a direction\n{ARROWS}"),
         (Some(_), Some(why)) => format!("{ARROWS}\n{why}"),
@@ -1788,7 +1806,7 @@ mod tests {
             id: program,
             class: ObjectClass::Program,
             at: Some(at(0)),
-            change: Change::Placed { refused: false },
+            change: Change::Placed { waits: None },
         };
         let played = Row {
             id: piano,

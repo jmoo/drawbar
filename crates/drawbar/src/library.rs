@@ -2109,6 +2109,7 @@ mod tests {
         let moved = Change::Moved {
             to: at(6, 3),
             agrees: true,
+            with: None,
         };
         assert_eq!(marked(moved), ("!", "moved to 7:4".into()));
     }
