@@ -402,7 +402,7 @@ fn duplicate(rig: &mut Rig, id: u64) -> u64 {
 /// writes.
 fn sync(rig: &mut Rig) {
     tick(rig, vec![Act::Sync(None)]);
-    synced(rig, |_| {});
+    synced(rig);
 }
 
 /// Once the open sheet's read lands, turn `id`'s row to `way` and confirm the sheet as a
@@ -429,16 +429,15 @@ fn sync_with(rig: &mut Rig, id: u64, way: Way) {
         "{row:?}"
     );
     rig.syncing = true;
-    synced(rig, |_| {});
+    synced(rig);
 }
 
 /// Wait, a frame at a time and at most [`SEND_LIMIT`], until the pressed sheet has closed
-/// and what Sync asked of the keyboard is done, telling `each` after every frame.
-fn synced(rig: &mut Rig, mut each: impl FnMut(&Rig)) {
+/// and what Sync asked of the keyboard is done.
+fn synced(rig: &mut Rig) {
     let started = Instant::now();
     loop {
         tick(rig, Vec::new());
-        each(rig);
         let failures: Vec<String> = rig
             .bench
             .queue
@@ -997,22 +996,16 @@ fn l10_a_program_placed_on_a_slot_lists_the_sample_it_plays_and_sync_writes_it_f
         rig.bench.log.tail(20)
     );
 
-    let mut order = Vec::new();
-    let mut seen = Vec::new();
     tick(&mut rig, vec![Act::Sync(None)]);
-    synced(&mut rig, |rig| {
-        for id in [probe, id] {
-            let held = rig.bench.queue.holds(id);
-            if held && !seen.contains(&id) {
-                seen.push(id);
-            }
-            if !held && seen.contains(&id) && !order.contains(&id) {
-                order.push(id);
-            }
-        }
-    });
+    synced(&mut rig);
     settle(&mut rig);
-    assert_eq!(order, [probe, id], "the sample is written first");
+    let log = rig.bench.log.transcript();
+    let wrote = |name: &str| log.find(&format!("wrote {name} -> "));
+    let (sample_at, program_at) = (wrote(&sample_name), wrote(&program_name));
+    assert!(
+        sample_at.is_some() && sample_at < program_at,
+        "the sample is written first:\n{log}"
+    );
     drop(rig);
 
     let deps = bank().deps(spare());

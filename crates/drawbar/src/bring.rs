@@ -625,7 +625,7 @@ impl Sheet {
     }
 
     /// The way Sync takes `row`: the one the user picked, or else its own. A move goes
-    /// only among the [`moving`](Sheet::moving) ones.
+    /// only with every move it depends on: a swap or a rotation goes whole or not at all.
     pub fn way(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> Option<Way> {
         if self.skipped.contains(&key(row)) {
             return None;

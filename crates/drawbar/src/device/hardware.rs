@@ -621,8 +621,9 @@ impl Rig {
             .collect()
     }
 
-    /// Run `acts`, which queue `id` and send it, until its write lands or fails, calling
-    /// `during` with every range of `file` the send has read so far.
+    /// Run `acts`, which place `id` on a slot and Sync, until its write lands or fails,
+    /// calling `during` with every range of `file` the send has read so far. A failed
+    /// write leaves the send placed by hand, and the error the log says last is why.
     fn send(
         &mut self,
         acts: Vec<Act>,
@@ -632,6 +633,7 @@ impl Rig {
     ) -> Sending {
         file.take_reads();
         let started = Instant::now();
+        let logged = self.bench.log.iter().count();
         let mut reads = Vec::new();
         let mut backup = 0;
         let (outcome, largest) = largest_allocation_anywhere(|| {
@@ -644,10 +646,11 @@ impl Rig {
                 for (_, len) in self.backups() {
                     backup = backup.max(len);
                 }
-                let queue = &self.bench.queue;
-                let failure = queue.entry(id).and_then(|held| held.failure.clone());
+                let errors = self.bench.log.iter().skip(logged);
+                let errors = errors.filter(|entry| entry.level == crate::log::Level::Error);
+                let failure = errors.last().map(|entry| entry.text.clone());
                 if self.bench.device.state.in_flight.is_none() {
-                    match (queue.holds(id), failure) {
+                    match (self.bench.queue.holds(id), failure) {
                         (false, _) => return Ok(()),
                         (true, Some(why)) => return Err(why),
                         (true, None) => {}
@@ -866,14 +869,20 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
         slot_from("DRAWBAR_HARDWARE_PIANO", "1:6"),
     );
     let mut claims = Claims::default();
-    let mut rig = Rig::open(&[("drawbar-hw-piano.npno", &source)]);
+    // A file and its slot that agree have nothing to sync, so the occupant is replaced by
+    // a second copy under another name, placed on the slot by hand.
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-piano.npno", &source),
+        ("drawbar-hw-again.npno", &source),
+    ]);
     rig.connect();
     let class = ObjectClass::Piano;
     let slot = rig.vacant(class, 0);
     claims.take(class, slot);
-    let id = rig.asset("drawbar-hw-piano.npno");
+    let occupant = rig.asset("drawbar-hw-piano.npno");
+    send_into_vacant(&mut rig, occupant, class, slot);
+    let id = rig.asset("drawbar-hw-again.npno");
     let file = rig.file(id);
-    send_into_vacant(&mut rig, id, class, slot);
 
     let sending = rig.send(
         vec![
@@ -910,7 +919,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
     assert_streamed(&sending, file.len);
     rig.release();
     assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-piano");
+    assert_holds(class, slot, &source, "drawbar-hw-again");
 }
 
 /// A file overwritten while it is sent onto an occupied slot fails the send before its
@@ -1134,7 +1143,12 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
         slot_from("DRAWBAR_HARDWARE_SAMPLE", "1:20"),
     );
     let mut claims = Claims::default();
-    let mut rig = Rig::open(&[("drawbar-hw-sample.nsmp", &source)]);
+    // A file and its slot that agree have nothing to sync, so the round trip is replaced
+    // by a second copy under another name, placed on the slot by hand.
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-sample.nsmp", &source),
+        ("drawbar-hw-again.nsmp", &source),
+    ]);
     rig.connect();
     let class = ObjectClass::Sample;
     let slot = rig.vacant(class, 0);
@@ -1150,6 +1164,8 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
         Some((class, slot))
     );
 
+    let id = rig.asset("drawbar-hw-again.nsmp");
+    let file = rig.file(id);
     let again = rig.send(
         vec![
             Act::Replace {
@@ -1179,7 +1195,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
 
     rig.release();
     assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-sample");
+    assert_holds(class, slot, &source, "drawbar-hw-again");
 }
 
 /// A program on the instrument exports as the bundle nord-cli makes of it: the program
