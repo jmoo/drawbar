@@ -22,7 +22,7 @@ use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
 use crate::plays;
-use crate::strings::{label, place};
+use crate::strings::{display_name, label, place};
 use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
 
 /// One asset waiting to be written, and the slot it is waiting for.
@@ -729,6 +729,36 @@ pub fn retarget(
     }
 }
 
+/// Take out of the queue every entry waiting for a slot a sound moved out of or into,
+/// which holds another sound now, and say so in one line.
+pub fn unqueue_moved(
+    workspace: &Workspace,
+    queue: &mut Queue,
+    log: &mut Log,
+    moved: &[(ObjectClass, Vec<crate::workspace::Moved>)],
+) {
+    let ends = |class: ObjectClass, at: Location| {
+        let at = Spot::at(at);
+        let moves = moved.iter().filter(|(of, _)| *of == class);
+        moves.flat_map(|(_, moves)| moves).any(|(from, to, _)| {
+            matches!(to, Some(to @ Spot::At { .. }) if to != from && (*from == at || *to == at))
+        })
+    };
+    let gone: Vec<u64> = queue
+        .list
+        .iter()
+        .filter(|held| ends(held.class, held.at))
+        .map(|held| held.id)
+        .collect();
+    gone.iter().for_each(|id| queue.forget(*id));
+    let name = |id: u64| display_name(workspace.get(id).map_or("", |it| it.name.as_str()));
+    log.say(match gone.as_slice() {
+        [] => return,
+        [id] => format!("“{}” is no longer waiting to send.", name(*id)),
+        many => format!("{} sounds are no longer waiting to send.", many.len()),
+    });
+}
+
 impl Queue {
     /// Queue one asset for one slot, and report what that displaced: where this asset was
     /// waiting before, or what was waiting for this slot.
@@ -894,31 +924,6 @@ impl Queue {
         self.list
             .iter()
             .find(|held| (held.class, held.at) == (class, at))
-    }
-
-    /// Follow slots of `class` that drawbar moved: an entry waiting for the first address
-    /// of a pair waits for the second, and asks again what it replaces there. Every pair
-    /// moves at once, so a swap moves both.
-    pub fn respot(&mut self, class: ObjectClass, moves: &[crate::workspace::Moved]) {
-        let to = |at: Location| {
-            moves.iter().find_map(|(from, to, _)| match to {
-                Some(to @ Spot::At { bank, slot }) if *from == Spot::at(at) && to != from => {
-                    Some(Location {
-                        bank: *bank,
-                        slot: *slot,
-                    })
-                }
-                _ => None,
-            })
-        };
-        for held in self.list.iter_mut().filter(|held| held.class == class) {
-            if let Some(at) = to(held.at) {
-                held.at = at;
-                held.replaces = Occupancy::Unknown;
-                held.read = Read::Unasked;
-                held.diff = Diff::Pending;
-            }
-        }
     }
 
     /// Take an asset out of the queue.

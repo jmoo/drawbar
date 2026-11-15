@@ -509,14 +509,17 @@ fn follow_moves(
             classes.push(found.class);
         }
     }
-    for class in classes {
-        let moves: Vec<crate::workspace::Moved> = moved
-            .iter()
-            .filter(|(found, ..)| found.class == class)
-            .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to)), None))
-            .collect();
-        workspace.respot(keyboard, class, &moves);
-        queue.respot(class, &moves);
+    let respotted: Vec<(ObjectClass, Vec<crate::workspace::Moved>)> = classes
+        .into_iter()
+        .map(|class| {
+            let moves = moved.iter().filter(|(found, ..)| found.class == class);
+            let moves =
+                moves.map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to)), None));
+            (class, moves.collect())
+        })
+        .collect();
+    for (class, moves) in &respotted {
+        workspace.respot(keyboard, *class, moves);
     }
     for (found, to, agrees, _) in &moved {
         let entity = workspace.get(found.id);
@@ -542,6 +545,7 @@ fn follow_moves(
         keyboard: keyboard.clone(),
         links: links.collect(),
     });
+    crate::queue::unqueue_moved(workspace, queue, log, &respotted);
 }
 
 /// Save `bytes`, read from the slot `at` of `class`, as the file `id` linked to that slot
@@ -1201,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_waiting_for_a_sound_that_moved_waits_for_where_it_moved_to() {
+    fn a_file_waiting_for_a_sound_that_moved_leaves_the_queue_and_its_undo_brings_none_back() {
         use crate::browser::Act;
         let mut bench = Bench::new();
         walked(&mut bench, &[Some(crc(&body())), None]);
@@ -1227,7 +1231,19 @@ mod tests {
         );
 
         assert_eq!(slot_of(&bench, id), Some(Spot::at(at(2))));
-        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(2)));
+        assert!(
+            !bench.queue.holds(id),
+            "the slot it waited for holds another sound"
+        );
+        assert_eq!(bench.log.status().1, "“A” is no longer waiting to send.");
+        bench.act(vec![Act::SendAll]);
+        let sends = bench.device.queued().into_iter();
+        let sends = sends.filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }));
+        assert_eq!(sends.count(), 0, "nothing is written to either slot");
+
+        assert_eq!(undo(&mut bench, "“A” is now at"), "Linked “A” again.");
+        assert_eq!(slot_of(&bench, id), Some(Spot::at(at(1))));
+        assert!(!bench.queue.holds(id), "undoing the move queues nothing");
     }
 
     #[test]

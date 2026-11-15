@@ -2424,7 +2424,7 @@ impl Device {
                     if let (Some((class, moves)), Some(keyboard)) = (respot, self.state.keyboard())
                     {
                         workspace.respot(keyboard, class, &moves);
-                        queue.respot(class, &moves);
+                        crate::queue::unqueue_moved(workspace, queue, log, &[(class, moves)]);
                     }
                     let follow_up = self.running.as_ref().is_some_and(|run| run.follow_up);
                     if let Some(words) = self.state.in_flight.as_ref().filter(|_| !follow_up) {
@@ -3647,10 +3647,16 @@ mod tests {
         done(&mut bench, swap);
         assert_eq!(held_at(&bench, first), Some(Spot::at(at(2))));
         assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
-        let entry = bench.queue.entry(waiting).unwrap();
-        assert_eq!(entry.at, at(2), "the write follows the sound it replaces");
-        assert!(matches!(entry.replaces, crate::queue::Occupancy::Unknown));
-        bench.queue.forget(waiting);
+        assert!(
+            !bench.queue.holds(waiting),
+            "its slot holds another sound now"
+        );
+        let said = "“C” is no longer waiting to send.";
+        assert!(bench.log.iter().any(|entry| entry.text == said));
+        bench.act(vec![crate::browser::Act::SendAll]);
+        let sends = bench.device.queued().into_iter();
+        let mut sends = sends.filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }));
+        assert!(sends.next().is_none(), "nothing is written to either slot");
         assert_eq!(name_held(&bench, first).as_deref(), Some("A"), "it travels");
 
         bench.device.state.in_flight = None;
