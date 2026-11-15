@@ -27,22 +27,22 @@ use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
 
 /// The prefix of every name this suite writes to a slot, and the only names it deletes.
-const MARK: &str = "drawbar-hw-";
+pub(super) const MARK: &str = "drawbar-hw-";
 
 /// The bytes of a CBIN header ahead of the body the instrument stores.
-const HEADER: usize = 44;
+pub(super) const HEADER: usize = 44;
 
 /// More than a write takes, the backup read, delete and restore of a replace included.
-const SEND_LIMIT: Duration = Duration::from_secs(300);
+pub(super) const SEND_LIMIT: Duration = Duration::from_secs(300);
 
 /// More than attaching takes: the partition table, and a walk of every class.
-const ATTACH_LIMIT: Duration = Duration::from_secs(120);
+pub(super) const ATTACH_LIMIT: Duration = Duration::from_secs(120);
 
 /// The most any single allocation may take while a file is sent: a few transfer chunks.
 const BOUNDED: usize = 128 << 10;
 
 /// Whether this run may write to the instrument, and one is attached.
-fn attached() -> bool {
+pub(super) fn attached() -> bool {
     if std::env::var("DRAWBAR_HARDWARE").as_deref() != Ok("1") {
         eprintln!("skipped: set DRAWBAR_HARDWARE=1 to write to an attached instrument");
         return false;
@@ -83,7 +83,7 @@ fn noun(class: ObjectClass) -> &'static str {
 
 /// nord-cli, for what drawbar is not under test for: reading sources, reading back and
 /// deleting.
-struct Cli(PathBuf);
+pub(super) struct Cli(pub(super) PathBuf);
 
 impl Cli {
     fn run(&self, args: &[&str]) -> std::process::Output {
@@ -95,7 +95,7 @@ impl Cli {
     }
 
     /// What a command printed to stdout and stderr, or why it failed.
-    fn said(&self, args: &[&str]) -> Result<(String, String), String> {
+    pub(super) fn said(&self, args: &[&str]) -> Result<(String, String), String> {
         let out = self.run(args);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         match out.status.success() {
@@ -104,7 +104,7 @@ impl Cli {
         }
     }
 
-    fn ok(&self, args: &[&str]) -> String {
+    pub(super) fn ok(&self, args: &[&str]) -> String {
         self.said(args).unwrap_or_else(|why| panic!("{why}")).0
     }
 
@@ -132,13 +132,13 @@ impl Cli {
         ]);
     }
 
-    fn delete(&self, class: ObjectClass, slot: Location) -> Result<(), String> {
+    pub(super) fn delete(&self, class: ObjectClass, slot: Location) -> Result<(), String> {
         self.said(&[noun(class), "delete", &shown(slot), "--yes"])
             .map(|_| ())
     }
 
     /// Every occupied slot of the class, and its name.
-    fn list(&self, class: ObjectClass) -> Result<Vec<(Location, String)>, String> {
+    pub(super) fn list(&self, class: ObjectClass) -> Result<Vec<(Location, String)>, String> {
         let (list, _) = self.said(&[noun(class), "list"])?;
         Ok(list
             .lines()
@@ -361,7 +361,7 @@ fn assert_no_strays(class: ObjectClass) {
 }
 
 /// A library file placed in the rig's library under a name of this suite.
-fn place(library: &Temp, name: &str, from: &Path) -> PathBuf {
+pub(super) fn place(library: &Temp, name: &str, from: &Path) -> PathBuf {
     let to = library.at(name);
     fs::copy(from, &to).unwrap_or_else(|e| panic!("{from:?} -> {to:?}: {e}"));
     to
@@ -408,10 +408,10 @@ impl Sending {
 
 /// The app with no window: a library over a temporary folder and the instrument it
 /// attaches, run a frame at a time as [`crate::app::DrawbarApp`] runs them.
-struct Rig {
-    library: Temp,
-    store: Store,
-    bench: Bench,
+pub(super) struct Rig {
+    pub(super) library: Temp,
+    pub(super) store: Store,
+    pub(super) bench: Bench,
 }
 
 impl Rig {
@@ -447,7 +447,7 @@ impl Rig {
 
     /// One frame of the app's update, without the panels: the library, the instrument's
     /// events, the queue, the acts, and the next command.
-    fn frame(&mut self, acts: Vec<Act>) {
+    pub(super) fn frame(&mut self, acts: Vec<Act>) {
         let Bench {
             ctx,
             browser,
@@ -507,7 +507,7 @@ impl Rig {
 
     /// Whether the instrument has nothing left to do: no command running or waiting, and
     /// no walk.
-    fn idle(&self) -> bool {
+    pub(super) fn idle(&self) -> bool {
         let device = &self.bench.device;
         let state = &device.state;
         state.connected()
@@ -524,7 +524,7 @@ impl Rig {
 
     /// Attach the instrument as the Connect button does, and wait for the walk of every
     /// class.
-    fn connect(&mut self) {
+    pub(super) fn connect(&mut self) {
         let started = Instant::now();
         self.frame(vec![Act::Connect]);
         loop {
@@ -550,7 +550,7 @@ impl Rig {
 
     /// Release the instrument as the Disconnect button does, and wait until the worker
     /// has let the interface go.
-    fn release(&mut self) {
+    pub(super) fn release(&mut self) {
         if !self.bench.device.state.connected() {
             return;
         }
@@ -663,13 +663,13 @@ impl Rig {
         }
     }
 
-    fn logged(&self, text: &str) -> bool {
+    pub(super) fn logged(&self, text: &str) -> bool {
         self.bench.log.iter().any(|entry| entry.text.contains(text))
     }
 
     /// The same library opened again, as the next start of the app opens it, with the
     /// instrument let go.
-    fn reopen(mut self) -> Rig {
+    pub(super) fn reopen(mut self) -> Rig {
         self.release();
         let library = std::mem::replace(&mut self.library, Temp::new());
         drop(self);

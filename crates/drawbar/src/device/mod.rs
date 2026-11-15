@@ -24,6 +24,8 @@ use crate::workspace::{LocalEntity, Origin, Workspace};
 
 #[cfg(all(test, unix))]
 mod hardware;
+#[cfg(all(test, unix))]
+mod links_on_hardware;
 mod scan;
 mod scratch;
 #[cfg(not(target_arch = "wasm32"))]

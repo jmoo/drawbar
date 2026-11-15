@@ -1619,7 +1619,11 @@ fn stored_category(category: &Field, value: &str) -> Option<u8> {
 ///
 /// ⚠️ The Electro 5 plays the piano the id names, whatever the dials say, and plays the
 /// piano at the dials' position only where the id is 0. Confirmed on hardware.
-fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(String, String)> {
+pub(crate) fn piano_follows(
+    sets: &Sets,
+    fields: &[Field],
+    device: &Device,
+) -> Option<(String, String)> {
     let set = |path: &str| {
         sets.iter()
             .rev()
