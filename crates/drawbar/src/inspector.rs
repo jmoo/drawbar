@@ -333,7 +333,10 @@ impl Shown {
                         )
                     })
                     .flatten();
-                (about(&checked, &rows, browser, workspace, device), going)
+                (
+                    about(&checked, &rows, browser, workspace, device, queue),
+                    going,
+                )
             }
         };
         let one = checked.len() == 1;
@@ -418,6 +421,7 @@ struct Single {
     /// The slot's place, or `None` for an asset with no slot.
     at: Option<String>,
     mark: Option<Mark>,
+    queued: bool,
     faint: bool,
     /// The asset's id; a slot has none.
     id: Option<u64>,
@@ -487,6 +491,7 @@ fn about(
     browser: &Browser,
     workspace: &Workspace,
     device: &Device,
+    queue: &Queue,
 ) -> About {
     let picked = checked.len();
     if let [item] = checked {
@@ -515,6 +520,7 @@ fn about(
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),
         mark: row.mark,
+        queued: entity.is_some_and(|entity| queue.holds(entity.id)),
         faint: row.faint,
         id: entity.map(|entity| entity.id),
         action,
@@ -552,7 +558,7 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
         };
         ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
         if let Some(mark) = picked.mark {
-            let said = format!(" · {}", mark_words(mark).to_lowercase());
+            let said = format!(" · {}", mark_words(mark, picked.queued).to_lowercase());
             let ink = mark_ink(mark, ui.visuals());
             ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
         }

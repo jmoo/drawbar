@@ -63,11 +63,10 @@ impl Where {
             Where::Both(Standing::Both) => {
                 "On this computer and in its slot, and both have changed."
             }
-            Where::Both(Standing::Gone) => "On this computer, and its slot is empty.",
             Where::Both(Standing::Unread) => "On this computer and in a slot not read yet.",
-            Where::Computer => "On this computer only.",
+            Where::Both(Standing::Gone) | Where::Computer => "On this computer only.",
             Where::Foreign => "On this computer only. Not for this keyboard.",
-            Where::Keyboard => "On the instrument only.",
+            Where::Keyboard => "On the keyboard only.",
         }
     }
 
@@ -250,7 +249,7 @@ pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
     match (item, mark) {
         (Item::Local(id), _) if queue.holds(id) => Some(State::Waiting),
         (Item::Local(_), Some(Mark::Ahead)) => Some(State::Ready),
-        (Item::Local(_), Some(Mark::Attention)) => Some(State::Attention),
+        (Item::Local(_), Some(Mark::Attention | Mark::Gone)) => Some(State::Attention),
         _ => None,
     }
 }
@@ -350,8 +349,10 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, linked: Option<&Linke
 pub enum Mark {
     /// Its slot holds an earlier version: a send settles it.
     Ahead,
-    /// The keyboard changed or emptied its slot, and only the user can settle it.
+    /// The keyboard changed its slot, and only the user can settle it.
     Attention,
+    /// The keyboard emptied its slot. Only an explicit send puts it back.
+    Gone,
     Unsaved,
 }
 
@@ -360,7 +361,8 @@ impl Mark {
     pub fn of(standing: Standing) -> Option<Mark> {
         match standing {
             Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs | Standing::Both | Standing::Gone => Some(Mark::Attention),
+            Standing::Theirs | Standing::Both => Some(Mark::Attention),
+            Standing::Gone => Some(Mark::Gone),
             Standing::Same | Standing::Unread => None,
         }
     }
@@ -370,17 +372,20 @@ impl Mark {
 pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     match mark {
         Mark::Ahead => warn(visuals),
-        Mark::Attention => crate::app::bad(visuals),
+        Mark::Attention | Mark::Gone => crate::app::bad(visuals),
         Mark::Unsaved => visuals.text_color(),
     }
 }
 
-/// What a mark means, in words, wherever a hover or hint explains one.
-pub fn mark_words(mark: Mark) -> &'static str {
-    match mark {
-        Mark::Ahead => "Ready to send",
-        Mark::Attention => "Needs attention",
-        Mark::Unsaved => "Edited since it was last saved",
+/// What a mark means, in words, wherever a hover or hint explains one. A file in the
+/// queue says so, as the filter counts it.
+pub fn mark_words(mark: Mark, queued: bool) -> &'static str {
+    match (mark, queued) {
+        (Mark::Unsaved, _) => "Edited since it was last saved",
+        (_, true) => State::Waiting.title(),
+        (Mark::Ahead, false) => State::Ready.title(),
+        (Mark::Attention, false) => State::Attention.title(),
+        (Mark::Gone, false) => "Its slot is empty",
     }
 }
 
@@ -388,7 +393,7 @@ pub fn mark_words(mark: Mark) -> &'static str {
 pub fn mark_sign(mark: Mark) -> &'static str {
     match mark {
         Mark::Ahead => "↑",
-        Mark::Attention => "!",
+        Mark::Attention | Mark::Gone => "!",
         Mark::Unsaved => "*",
     }
 }
@@ -1539,7 +1544,7 @@ fn paint(
     }
 
     let said = under(&response, content, tracks)
-        .map(|column| tooltip(row, column, browser.tags(), workspace, device))
+        .map(|column| tooltip(row, column, browser.tags(), workspace, device, queue))
         .filter(|said| !said.is_empty());
     let response = match said {
         Some(said) => response.on_hover_text(said),
@@ -1564,12 +1569,14 @@ fn tooltip(
     tags: &Tags,
     workspace: &Workspace,
     device: &Device,
+    queue: &Queue,
 ) -> String {
+    let queued = row.item.local().is_some_and(|id| queue.holds(id));
     match column {
         Column::Glyph | Column::Kind => word(row),
         Column::Mark => row
             .mark
-            .map_or_else(String::new, |mark| mark_words(mark).to_string()),
+            .map_or_else(String::new, |mark| mark_words(mark, queued).to_string()),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -2093,21 +2100,35 @@ mod tests {
         );
     }
 
-    /// Four marks, four sentences, four colors. Two marks a reader cannot tell apart
-    /// explain nothing.
+    /// Every mark says what it means apart from the others, and each of the three kinds of
+    /// mark has its own color: an emptied slot needs the user as a changed one does.
     #[test]
     fn every_mark_is_painted_and_said_apart_from_the_others() {
-        let all = [Mark::Ahead, Mark::Attention, Mark::Unsaved];
-        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark)).collect();
+        let all = [Mark::Ahead, Mark::Attention, Mark::Gone, Mark::Unsaved];
+        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark, false)).collect();
         assert_eq!(said.len(), all.len(), "{said:?}");
 
+        let kinds = [Mark::Ahead, Mark::Attention, Mark::Unsaved];
         for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            let inks: BTreeSet<[u8; 4]> = all
+            let inks: BTreeSet<[u8; 4]> = kinds
                 .iter()
                 .map(|mark| mark_ink(*mark, &visuals).to_array())
                 .collect();
-            assert_eq!(inks.len(), all.len(), "{inks:?}");
+            assert_eq!(inks.len(), kinds.len(), "{inks:?}");
+            let gone = mark_ink(Mark::Gone, &visuals);
+            assert_eq!(gone, mark_ink(Mark::Attention, &visuals));
         }
+    }
+
+    #[test]
+    fn a_queued_file_is_said_to_wait_as_the_filter_counts_it() {
+        for mark in [Mark::Ahead, Mark::Attention, Mark::Gone] {
+            assert_eq!(mark_words(mark, true), State::Waiting.title(), "{mark:?}");
+        }
+        assert_eq!(
+            mark_words(Mark::Unsaved, true),
+            mark_words(Mark::Unsaved, false)
+        );
     }
 
     #[test]
@@ -2134,12 +2155,15 @@ mod tests {
             Some(at(6, 0)),
             121,
         );
-        let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device);
+        let queue = Queue::default();
+        let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device, &queue);
         assert_eq!(hover(&held), "");
         held.mark = Some(Mark::Ahead);
         assert_eq!(hover(&held), "Ready to send");
         held.mark = Some(Mark::Attention);
         assert_eq!(hover(&held), "Needs attention");
+        held.mark = Some(Mark::Gone);
+        assert_eq!(hover(&held), "Its slot is empty");
     }
 
     /// The sentence about a selection: where the picked rows go, how many of those slots
@@ -3022,7 +3046,7 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &[None]);
         assert_eq!(
             looks(&bench),
-            (Where::Computer, Some(Mark::Attention)),
+            (Where::Computer, Some(Mark::Gone)),
             "emptied on the keyboard"
         );
     }

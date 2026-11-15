@@ -731,8 +731,8 @@ pub enum Answer {
 
 const WIDTH: f32 = 440.0;
 
-/// The question asked once after an attach, while it shows: "Bring them in" is
-/// [`Answer::Yes`], "Not now" [`Answer::No`].
+/// The question asked once after an attach, while it shows: "Bring them in", or "Update
+/// links" where no slot is listed as changed, is [`Answer::Yes`], "Not now" [`Answer::No`].
 pub fn since_sheet(
     ctx: &egui::Context,
     found: &[Noticed],
@@ -758,6 +758,10 @@ pub fn since_sheet(
         groups[group].push(line);
     }
     let [changed, moved, replaced, removed] = groups;
+    let yes = match changed.is_empty() {
+        true => UPDATE_LINKS,
+        false => BRING_THEM_IN,
+    };
     let groups = [
         (format!("{} changed", changed.len()), changed),
         (format!("{} moved", moved.len()), moved),
@@ -791,7 +795,7 @@ pub fn since_sheet(
                 ui,
                 |_| {},
                 |ui| {
-                    if sheet::primary(ui, None, "Bring them in").clicked() {
+                    if sheet::primary(ui, None, yes).clicked() {
                         answer = Some(Answer::Yes);
                     }
                     if sheet::secondary(ui, None, "Not now").clicked() {
@@ -852,6 +856,8 @@ pub fn choice_sheet(
                         .inner;
                     if choosing.class.is_library() {
                         keyboards = keyboards.on_disabled_hover_text(UNREAD);
+                    } else if entity.is_unsaved() {
+                        keyboards = keyboards.on_disabled_hover_text(UNSAVED);
                     }
                     if keyboards.clicked() {
                         answer = Some(Answer::Other);
@@ -871,6 +877,14 @@ pub fn choice_sheet(
 /// Why a piano or sample cannot be brought in from the question about it: its slot is
 /// never read whole.
 const UNREAD: &str = "Copy it to this computer instead.";
+
+/// Why a file with unsaved edits cannot be brought in over.
+const UNSAVED: &str = "Save your edits first.";
+
+/// The answer to the question asked on attach that brings changed slots in, and the one
+/// for a list with none, whose answer only moves and removes links.
+const BRING_THEM_IN: &str = "Bring them in";
+const UPDATE_LINKS: &str = "Update links";
 
 /// What the question says of two versions that differ in no field it can name.
 pub const DIFFERS: &str = "differs";
@@ -2022,5 +2036,31 @@ mod tests {
         heard(&mut bench);
         let asked = Some(vec![found(ids[0], Change::Changed(at(1)))]);
         assert_eq!(bench.device.asks.since, asked);
+    }
+
+    #[test]
+    fn the_question_offers_to_bring_in_only_a_list_with_a_changed_slot() {
+        use crate::testing::{painted, run, screen};
+        let mut bench = Bench::new();
+        let id = linked_off(&mut bench);
+        let ctx = crate::testing::context();
+        let words = |found: &[Noticed]| {
+            let frame = || {
+                let size = egui::vec2(800.0, 600.0);
+                run(&ctx, screen(size, Vec::new()), |ctx| {
+                    since_sheet(ctx, found, &bench.workspace);
+                })
+            };
+            frame();
+            let said = painted(&frame());
+            said.into_iter().map(|word| word.text).collect::<Vec<_>>()
+        };
+        let by = "Clav".to_string();
+        let replaced = [found(id, Change::Replaced { at: at(1), by })];
+        let said = words(&replaced);
+        assert!(said.iter().any(|it| it == UPDATE_LINKS), "{said:?}");
+        assert!(!said.iter().any(|it| it == BRING_THEM_IN), "{said:?}");
+        let said = words(&[found(id, Change::Changed(at(1)))]);
+        assert!(said.iter().any(|it| it == BRING_THEM_IN), "{said:?}");
     }
 }

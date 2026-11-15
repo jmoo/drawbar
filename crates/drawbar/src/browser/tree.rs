@@ -1242,7 +1242,7 @@ impl Browser {
                 name: &entity.name,
                 note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: mark(entity, &device.state, ui.visuals()),
+                dot: mark(entity, &device.state, queue, ui.visuals()),
                 tags: wears,
                 child: true,
                 gray: !self.followed,
@@ -2024,12 +2024,13 @@ pub(crate) fn slot_items(
 fn mark(
     entity: &LocalEntity,
     device: &DeviceState,
+    queue: &Queue,
     visuals: &egui::Visuals,
 ) -> Option<(egui::Color32, &'static str)> {
     let mark = crate::library::keyboard_mark(entity, device)?;
     Some((
         crate::library::mark_ink(mark, visuals),
-        crate::library::mark_words(mark),
+        crate::library::mark_words(mark, queue.holds(entity.id)),
     ))
 }
 
