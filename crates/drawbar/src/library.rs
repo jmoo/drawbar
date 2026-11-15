@@ -242,14 +242,15 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>
 /// What a row needs: a write already waiting, a send to its slot, or the user. A slot
 /// on the instrument needs nothing, since it is what the instrument holds.
 ///
-/// ⚠️ A queued row counts as waiting, never as ready to send, however the two compare.
-/// The queued write settles them, so counting the row under both would ask twice for one
-/// thing.
+/// ⚠️ A queued row counts as waiting, never as ready to send: the queued write settles
+/// the two, so counting the row under both would ask twice for one thing. A row whose
+/// slot the keyboard changed needs the user even while queued, since that write is held.
 pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
     match (item, mark) {
+        (Item::Local(_), Some(Mark::Attention)) => Some(State::Attention),
         (Item::Local(id), _) if queue.holds(id) => Some(State::Waiting),
         (Item::Local(_), Some(Mark::Ahead)) => Some(State::Ready),
-        (Item::Local(_), Some(Mark::Attention | Mark::Gone)) => Some(State::Attention),
+        (Item::Local(_), Some(Mark::Gone)) => Some(State::Attention),
         _ => None,
     }
 }
@@ -377,14 +378,14 @@ pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// What a mark means, in words, wherever a hover or hint explains one. A file in the
-/// queue says so, as the filter counts it.
+/// What a mark means, in words, wherever a hover or hint explains one, as [`state`]
+/// counts it.
 pub fn mark_words(mark: Mark, queued: bool) -> &'static str {
     match (mark, queued) {
         (Mark::Unsaved, _) => "Edited since it was last saved",
+        (Mark::Attention, _) => State::Attention.title(),
         (_, true) => State::Waiting.title(),
         (Mark::Ahead, false) => State::Ready.title(),
-        (Mark::Attention, false) => State::Attention.title(),
         (Mark::Gone, false) => "Its slot is empty",
     }
 }
@@ -2090,6 +2091,13 @@ mod tests {
             at(6, 0),
         );
         assert!(queue.holds(id), "it is owed to the slot it is linked to");
+        let said = |mark| state(Item::Local(id), Some(mark), &queue);
+        assert_eq!(said(Mark::Gone), Some(State::Waiting));
+        assert_eq!(
+            said(Mark::Attention),
+            Some(State::Attention),
+            "a write held for the user's choice is not waiting"
+        );
         assert_eq!(
             narrowed(&workspace, &device, &queue, &tags, State::Waiting),
             1
@@ -2121,10 +2129,15 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_file_is_said_to_wait_as_the_filter_counts_it() {
-        for mark in [Mark::Ahead, Mark::Attention, Mark::Gone] {
+    fn a_queued_file_is_said_to_wait_unless_the_keyboard_changed_its_slot() {
+        for mark in [Mark::Ahead, Mark::Gone] {
             assert_eq!(mark_words(mark, true), State::Waiting.title(), "{mark:?}");
         }
+        assert_eq!(
+            mark_words(Mark::Attention, true),
+            State::Attention.title(),
+            "its queued write is held until the user chooses"
+        );
         assert_eq!(
             mark_words(Mark::Unsaved, true),
             mark_words(Mark::Unsaved, false)
