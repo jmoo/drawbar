@@ -508,7 +508,9 @@ fn about(
         .map(|loud| (loud.label, loud.hint, loud.click));
     let also = entity
         .filter(|_| row.at.is_none())
-        .map_or_else(Vec::new, |entity| crate::device::also_at(&device.state, workspace, entity));
+        .map_or_else(Vec::new, |entity| {
+            crate::device::also_at(&device.state, workspace, entity)
+        });
     About::Row(Single {
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),

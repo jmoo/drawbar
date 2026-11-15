@@ -1070,7 +1070,9 @@ fn by_name(state: &DeviceState) -> ByName<'_> {
     let mut by_name = ByName::new();
     for class in [ObjectClass::Piano, ObjectClass::Sample] {
         for (at, info) in occupied(state, class) {
-            by_name.entry((class, info.name.trim())).or_insert((at, info));
+            by_name
+                .entry((class, info.name.trim()))
+                .or_insert((at, info));
         }
     }
     by_name
@@ -1296,9 +1298,10 @@ pub fn there(state: &DeviceState, held: &Held) -> (Option<Location>, There) {
 /// have, which counts as no link.
 fn held_here<'e>(state: &DeviceState, entity: &'e LocalEntity) -> Option<&'e Held> {
     let card = state.card()?;
-    let link = entity.links.iter().find(|link| {
-        link.keyboard.model == card.product && link.keyboard.serial == card.serial
-    })?;
+    let link = entity
+        .links
+        .iter()
+        .find(|link| link.keyboard.model == card.product && link.keyboard.serial == card.serial)?;
     link.held.as_ref().filter(|held| state.names_a_slot(held))
 }
 
@@ -1400,11 +1403,7 @@ struct Offer {
     holds: bool,
 }
 
-/// The slots of the attached keyboard an asset with no link there may be linked to: the
-/// ones holding exactly what it was saved as, and first the slot its header or origin
-/// names where that slot holds it or, for an asset that is not new, a sound under its
-/// name. Only those no other asset is linked to. Only a hint: nothing is linked, merged or
-/// sent by it.
+/// [`link_offers`], each with whether it holds what the asset was saved as.
 fn offers(state: &DeviceState, workspace: &Workspace, entity: &LocalEntity) -> Vec<Offer> {
     let (Some(keyboard), Some(class), Some(print)) =
         (state.keyboard(), home(entity), entity.saved_print())
@@ -1438,7 +1437,11 @@ fn offers(state: &DeviceState, workspace: &Workspace, entity: &LocalEntity) -> V
     named.into_iter().chain(holding).collect()
 }
 
-/// The slots Link to offers an asset: every one of [`offers`].
+/// The slots of the attached keyboard an asset with no link there may be linked to: the
+/// ones holding exactly what it was saved as, and first the slot its header or origin
+/// names where that slot holds it or, for an asset that is not new, a sound under its
+/// name. Only those no other asset is linked to. Only a hint: nothing is linked, merged or
+/// sent by it.
 pub fn link_offers(
     state: &DeviceState,
     workspace: &Workspace,
@@ -1448,7 +1451,7 @@ pub fn link_offers(
     offers.map(|offer| (offer.class, offer.at)).collect()
 }
 
-/// The slots of [`offers`] holding exactly what an asset was saved as.
+/// The slots of [`link_offers`] holding exactly what an asset was saved as.
 pub fn also_at(
     state: &DeviceState,
     workspace: &Workspace,
@@ -3656,7 +3659,10 @@ mod tests {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         let (mine, other) = (gained("40"), body());
-        let slots = [Some(("A", print(&other).crc)), Some(("Z", print(&mine).crc))];
+        let slots = [
+            Some(("A", print(&other).crc)),
+            Some(("Z", print(&mine).crc)),
+        ];
         bench.device.pretend_bodies(class, 1, &slots);
         let origin = Origin::Device { class, at: at(1) };
         let id = bench

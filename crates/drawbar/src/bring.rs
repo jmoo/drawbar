@@ -202,7 +202,10 @@ fn claims<'w>(
     keyboard: &Keyboard,
 ) -> HashMap<(ObjectClass, &'w Spot), usize> {
     let mut claims = HashMap::new();
-    for held in workspace.listed().filter_map(|entity| entity.held_on(keyboard)) {
+    for held in workspace
+        .listed()
+        .filter_map(|entity| entity.held_on(keyboard))
+    {
         *claims.entry((held.class(), &held.spot)).or_default() += 1;
     }
     claims
@@ -670,7 +673,9 @@ pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) 
         let name = name(found.id);
         let (group, line) = match &found.change {
             Change::Changed(at) => (0, (name, shown(*at))),
-            Change::Moved { from, to, .. } => (1, (name, format!("{} → {}", shown(*from), shown(*to)))),
+            Change::Moved { from, to, .. } => {
+                (1, (name, format!("{} → {}", shown(*from), shown(*to))))
+            }
             Change::Replaced { at, by } => (2, (format!("{name} → {by}"), shown(*at))),
             Change::Removed(at) => (3, (name, at.map(shown).unwrap_or_default())),
         };

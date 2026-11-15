@@ -1231,7 +1231,10 @@ mod tests {
     #[test]
     fn a_containers_length_states_its_body_length_in_both_generations() {
         let body = [0xaa, 0xbb, 0xcc, 0xdd, 0xee];
-        for (generation, bytes) in [(Generation::V1, v1_file(&body)), (Generation::V0, v0_file(&body))] {
+        for (generation, bytes) in [
+            (Generation::V1, v1_file(&body)),
+            (Generation::V0, v0_file(&body)),
+        ] {
             assert_eq!(
                 generation.body_len(bytes.len() as u64),
                 Some(body.len() as u64),

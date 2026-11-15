@@ -202,7 +202,10 @@ pub fn rows(
         let row = local(entity, device, worn.len(), &kept, instrument, &catalog);
         // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = row.at.filter(|_| device.connected()) {
-            claimed.insert(Item::Slot { class: slot.0, at: slot.1 });
+            claimed.insert(Item::Slot {
+                class: slot.0,
+                at: slot.1,
+            });
         }
         let state = state(row.item, row.mark, queue);
         if admits(filter, &row, worn, state) {

@@ -1347,17 +1347,19 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
                 Click::Choose,
             )
         }),
-        (Standing::Same | Standing::Unread, Some(at)) if loadable(device, class, at) => Some(Loud {
-            short: "Load".to_string(),
-            glyph: Glyph::Keyboard,
-            hint: format!("plays {} on the keyboard", place(class, at)),
-            click: Click::Load(class, at),
-            ..send(
-                LOAD_ON_INSTRUMENT.to_string(),
-                String::new(),
-                Click::Nothing,
-            )
-        }),
+        (Standing::Same | Standing::Unread, Some(at)) if loadable(device, class, at) => {
+            Some(Loud {
+                short: "Load".to_string(),
+                glyph: Glyph::Keyboard,
+                hint: format!("plays {} on the keyboard", place(class, at)),
+                click: Click::Load(class, at),
+                ..send(
+                    LOAD_ON_INSTRUMENT.to_string(),
+                    String::new(),
+                    Click::Nothing,
+                )
+            })
+        }
         (Standing::Same | Standing::Unread, _) => Some(idle(format!(
             "{} has not been found on the keyboard yet",
             folder(class)

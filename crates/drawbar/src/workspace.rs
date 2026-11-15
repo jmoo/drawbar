@@ -2127,7 +2127,13 @@ impl Workspace {
     /// Keep an asset off `keyboard`: nothing links it there again on its own.
     pub fn keep_off(&mut self, id: u64, keyboard: &Keyboard) {
         let keyboard = keyboard.clone();
-        self.set_link(id, Link { keyboard, held: None });
+        self.set_link(
+            id,
+            Link {
+                keyboard,
+                held: None,
+            },
+        );
     }
 
     /// The asset linked to the slot of `class` at `spot` on `keyboard`.

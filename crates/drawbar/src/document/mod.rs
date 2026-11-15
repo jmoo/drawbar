@@ -2742,7 +2742,7 @@ mod tests {
     }
 
     /// A program stores its piano's id, and the piano is named by the file or slot whose
-    /// name hashes to it. 0x92e0cba2 is the id an Electro 5 gave a piano written as
+    /// name hashes to it. 0x92e0cba2 is the id an Electro 5 gave a sample written as
     /// `drawbar-tine`.
     #[test]
     fn a_pianos_name_is_that_of_the_file_or_slot_its_id_hashes_from() {

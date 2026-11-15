@@ -862,7 +862,9 @@ impl DrawbarApp {
         if send.clicked() {
             acts.push(Act::ReviewQueue);
         }
-        let [_, ready, _] = self.library.counts(&self.workspace, &self.device, &self.queue);
+        let [_, ready, _] = self
+            .library
+            .counts(&self.workspace, &self.device, &self.queue);
         let offer = crate::queue::offered(ready);
         if let Some((label, hint)) = offer {
             let queue = Pill {
