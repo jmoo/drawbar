@@ -16,15 +16,17 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
+use crate::device::link_offers;
 use crate::device::{fit, occupancy, Device, DeviceState, Fit};
+use crate::document::Click;
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{row_of, Row, Where};
+use crate::library::{mark_ink, mark_words, row_of, Mark, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
 use crate::plays::Catalog;
 use crate::queue::{Diff, Queue};
 use crate::room;
 use crate::shell::Shell;
-use crate::strings::{kind_word, place};
+use crate::strings::{kind_word, place, shown};
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
@@ -260,7 +262,10 @@ struct Shown {
 /// What the selection card says about what is picked.
 enum About {
     Nothing,
+    /// A folder or a tag.
     One(Vec<Fact>),
+    /// One asset or slot.
+    Row(Single),
     /// Several rows, in a line or two.
     Several(Vec<String>),
 }
@@ -374,6 +379,7 @@ fn selection(
         match &shown.about {
             About::Nothing => return faint(ui, "Nothing is selected."),
             About::One(facts) => facts.iter().for_each(|fact| fact_line(ui, fact)),
+            About::Row(picked) => one(ui, picked, acts),
             About::Several(lines) => lines.iter().for_each(|line| void(ui, line)),
         }
         bulk_actions(ui, browser, shown, device, acts);
@@ -399,6 +405,23 @@ fn selection(
     }
 }
 
+/// One picked row: its name, its place and the one action the document header offers,
+/// the slots holding its bytes, then its other facts.
+struct Single {
+    name: String,
+    /// The slot's place, or `None` for an asset with no slot.
+    at: Option<String>,
+    mark: Option<Mark>,
+    faint: bool,
+    /// The asset's id; a slot has none.
+    id: Option<u64>,
+    /// The header's action for an asset: its label, its hover, and what a click asks for.
+    action: Option<(String, String, Click)>,
+    /// The slots [`crate::device::link_offers`] finds for an asset with no slot.
+    also: Vec<(ObjectClass, Location)>,
+    facts: Vec<Fact>,
+}
+
 /// One line about a single picked asset: its label, its value, and the full text when
 /// the value is shortened.
 pub struct Fact {
@@ -407,26 +430,16 @@ pub struct Fact {
     pub hint: Option<String>,
 }
 
-/// The facts about the single picked asset.
+/// The facts about the single picked asset besides its name and place.
 ///
 /// The row is the library table's own, so these facts match the table. `fit` is the
 /// attached instrument's verdict on the asset, which gets a line only when it refuses.
 pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
     let mut said = vec![
         Fact {
-            what: "name",
-            said: crate::strings::display_name(&row.name).to_string(),
-            hint: (crate::strings::display_name(&row.name) != row.name).then(|| row.name.clone()),
-        },
-        Fact {
             what: "kind",
             said: kind_word(row.kind, row.qualifier),
             hint: None,
-        },
-        Fact {
-            what: "where",
-            said: row.where_.short().to_string(),
-            hint: Some(row.where_.sentence().to_string()),
         },
         Fact {
             what: "size",
@@ -484,17 +497,102 @@ fn about(
     }
     let entity = row.item.local().and_then(|id| workspace.get(id));
     let held = entity.map_or(Fit::Unattached, |entity| fit(&device.state, entity));
-    let mut said = facts(row, &held);
-    let also = entity.map(|entity| crate::device::also_at(&device.state, entity));
-    if let Some(also) = also.filter(|also| !also.is_empty()) {
-        let at: Vec<String> = also.into_iter().map(crate::strings::shown).collect();
-        said.push(Fact {
-            what: "also at",
-            said: at.join(", "),
-            hint: None,
+    let action = entity
+        .and_then(|entity| crate::document::action(entity, &device.state))
+        .map(|loud| (loud.label, loud.hint, loud.click));
+    let also = entity
+        .filter(|_| row.at.is_none())
+        .map_or_else(Vec::new, |entity| {
+            link_offers(&device.state, workspace, entity)
         });
+    About::Row(Single {
+        name: row.name.clone(),
+        at: row.at.map(|(class, at)| place(class, at)),
+        mark: row.mark,
+        faint: row.faint,
+        id: entity.map(|entity| entity.id),
+        action,
+        also,
+        facts: facts(row, &held),
+    })
+}
+
+/// What a click on the document header's action asks for, from the inspector.
+fn clicked(click: Click, id: u64) -> Option<Act> {
+    match click {
+        Click::Send(class, at) => Some(Act::Send { id, class, at }),
+        Click::Pick => Some(Act::SendTo(id)),
+        Click::Load(class, at) => Some(Act::LoadOnInstrument { class, at }),
+        Click::Save => Some(Act::SaveDoc(id)),
+        Click::Build => Some(Act::Build(id)),
+        Click::Nothing => None,
     }
-    About::One(said)
+}
+
+/// One picked row: its name, where it is with its mark, the header's one action, the
+/// slots that also hold its bytes, then its facts.
+fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
+    let name = crate::strings::display_name(&picked.name);
+    ui.label(egui::RichText::new(name).font(egui::FontId::new(14.0, bold())))
+        .on_hover_text(&picked.name);
+    let quiet = ui.visuals().weak_text_color();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let place = picked.at.as_deref().unwrap_or("On this computer");
+        let ink = match picked.faint {
+            true => quiet,
+            false => ui.visuals().text_color(),
+        };
+        ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
+        if let Some(mark) = picked.mark {
+            let said = format!(" · {}", mark_words(mark).to_lowercase());
+            let ink = mark_ink(mark, ui.visuals());
+            ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
+        }
+    });
+    let Some(id) = picked.id else {
+        return picked.facts.iter().for_each(|fact| fact_line(ui, fact));
+    };
+    if let Some((label, hint, click)) = &picked.action {
+        crate::panel::tonal(ui);
+        let live = *click != Click::Nothing;
+        let button = ui
+            .add_enabled(live, egui::Button::new(label))
+            .on_hover_text(hint)
+            .on_disabled_hover_text(hint);
+        if let (true, Some(act)) = (button.clicked(), clicked(*click, id)) {
+            acts.push(act);
+        }
+    }
+    if !picked.also.is_empty() {
+        also_at(ui, id, &picked.also, acts);
+    }
+    picked.facts.iter().for_each(|fact| fact_line(ui, fact));
+}
+
+/// `Also at 5:46 · Link`: the first two slots holding a file's bytes, how many more, and
+/// Link, which links the file to the first.
+fn also_at(ui: &mut egui::Ui, id: u64, offers: &[(ObjectClass, Location)], acts: &mut Vec<Act>) {
+    let shown: Vec<String> = offers.iter().take(2).map(|(_, at)| shown(*at)).collect();
+    let more = match offers.len().saturating_sub(2) {
+        0 => String::new(),
+        n => format!(" +{n}"),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let quiet = ui.visuals().weak_text_color();
+        let said = format!("Also at {}{more} · ", shown.join(", "));
+        ui.label(egui::RichText::new(said).text_style(ui_text()).color(quiet));
+        let (class, at) = offers[0];
+        let link = ui
+            .add(egui::Link::new(
+                egui::RichText::new("Link").text_style(ui_text()),
+            ))
+            .on_hover_text(format!("link it to {}", place(class, at)));
+        if link.clicked() {
+            acts.push(Act::Link { id, class, at });
+        }
+    });
 }
 
 /// The facts about a folder or a tag: its name, and how many files are in it or wear it.
@@ -1067,6 +1165,7 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::LOAD_ON_INSTRUMENT;
     use crate::link::Standing;
     use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
@@ -1499,27 +1598,14 @@ mod tests {
             .iter()
             .map(|fact| (fact.what, fact.said.as_str()))
             .collect();
-        assert_eq!(
-            lines,
-            [
-                ("name", "Africa Split"),
-                ("kind", "Stage 4 program"),
-                ("where", "both"),
-                ("size", "2.0 kB"),
-            ]
-        );
-        assert_eq!(
-            said[2].hint.as_deref(),
-            Some(Where::Both(Standing::Ahead).sentence()),
-            "the hover gives the full sentence"
-        );
+        assert_eq!(lines, [("kind", "Stage 4 program"), ("size", "2.0 kB")]);
 
         // The only fact not taken from the row is the instrument's refusal.
         let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
         let refused = facts(&row, &Fit::Refuses(why.into()));
         assert_eq!(refused.len(), said.len() + 1);
-        assert_eq!(refused[4].what, "refused");
-        assert_eq!(refused[4].said, why);
+        assert_eq!(refused[2].what, "refused");
+        assert_eq!(refused[2].said, why);
         assert_eq!(
             facts(&row, &Fit::Warn("untried".into())).len(),
             said.len(),
@@ -1673,7 +1759,7 @@ mod tests {
         };
 
         let said = inspected(&mut bench);
-        assert!(said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(said.iter().any(|word| word == "Programs 7:1"), "{said:?}");
         assert!(copy(&bench), "a slot on the keyboard only can be copied");
 
         let name = "Africa Split.ne5p".to_string();
@@ -1690,9 +1776,54 @@ mod tests {
             print,
         );
         let said = inspected(&mut bench);
-        assert!(said.iter().any(|word| word.starts_with("both")), "{said:?}");
-        assert!(!said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(said.iter().any(|word| word == "Programs 7:1"), "{said:?}");
+        assert!(
+            said.iter().any(|word| word == LOAD_ON_INSTRUMENT),
+            "{said:?}"
+        );
         assert!(!copy(&bench), "a copy is already on this computer");
+    }
+
+    #[test]
+    fn one_picked_file_says_where_it_is_its_one_action_and_where_else_its_bytes_are() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench
+            .workspace
+            .ingest("Jazzy.ne5p".into(), Origin::Fresh, bytes, &mut bench.log);
+        let crc = bench.workspace.get(id).unwrap().saved_print().unwrap().crc;
+        bench
+            .device
+            .pretend_bodies(class, 5, &[None, Some(("First", crc))]);
+        bench.browser.check(Item::Local(id));
+        let said = inspected(&mut bench);
+        for word in ["On this computer", "Send to…", "Also at 5:2 · ", "Link"] {
+            assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
+        }
+
+        let base = crate::link::Print {
+            crc: !crc,
+            len: 121,
+        };
+        let held = crate::link::Held::new(
+            class,
+            crate::link::Spot::at(Location { bank: 4, slot: 0 }),
+            base,
+        );
+        let keyboard = bench.device.state.keyboard().unwrap();
+        bench.workspace.link(id, &keyboard, held.unwrap());
+        bench
+            .device
+            .pretend_bodies(class, 5, &[Some(("Jazzy", !crc))]);
+        let said = inspected(&mut bench);
+        for word in ["Programs 5:1", " · ready to send", "Send to 5:1"] {
+            assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
+        }
+        assert!(
+            !said.iter().any(|word| word.starts_with("Also at")),
+            "{said:?}"
+        );
     }
 
     /// ⚠️ Every class is addressed by the same banks and slots, so the sample at a

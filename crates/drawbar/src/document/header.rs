@@ -1289,7 +1289,7 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
 /// has nothing to send whatever is attached. An unattached instrument cannot be written
 /// to whatever the asset is. A class this app does not write into is never a question of
 /// room.
-pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud> {
+pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud> {
     let send = |label: String, hint: String, click: Click| Loud {
         short: "Send".to_string(),
         glyph: Glyph::Upload,

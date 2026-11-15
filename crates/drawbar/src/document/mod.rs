@@ -39,6 +39,7 @@ pub(crate) mod wav;
 use advanced::Advanced;
 use controls::{Ctx, Sets};
 
+pub(crate) use header::action;
 pub use header::{Body, Cell, Click, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
 pub use sample::note_picker;
 
