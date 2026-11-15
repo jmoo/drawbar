@@ -13,13 +13,14 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
-use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
-use crate::device::{fit, Device, DeviceCmd, DeviceState, Fit, Purpose};
+use crate::browser::{bound_for, cell_ink, Act, Bound, Carried, Held, Item, Kind};
+use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
 use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
+use crate::plays;
 use crate::strings::{label, place};
 use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
 
@@ -245,6 +246,13 @@ pub fn enqueue(
     if let Some(why) = name_clash(workspace, &device.state, queue, entity, class, at) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
+    for id in missing_plays(entity, workspace, &device.state, queue) {
+        if let Some(Bound::At(class, at)) =
+            workspace.get(id).map(|file| bound_for(file, &device.state, queue))
+        {
+            enqueue(workspace, device, queue, log, id, class, at);
+        }
+    }
     let holds = Occupancy::of(&device.state, class, at);
     let displaced = match queue.put(entity, class, at, holds) {
         Put::Standing => return,
@@ -264,6 +272,38 @@ pub fn enqueue(
         read_occupant(device, log, class, at);
     }
     log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
+}
+
+/// The piano and sample files on this computer a program plays that the attached
+/// instrument does not hold and nothing waiting will write, the first file of each.
+///
+/// ⚠️ Only for a class whose every bank has been read: a slot missing from a partial
+/// read may still be on the instrument.
+fn missing_plays(
+    entity: &LocalEntity,
+    workspace: &Workspace,
+    state: &DeviceState,
+    queue: &Queue,
+) -> Vec<u64> {
+    let waiting = |key| {
+        queue
+            .list
+            .iter()
+            .any(|held| workspace.get(held.id).and_then(plays::key_of) == Some(key))
+    };
+    plays::named(entity)
+        .iter()
+        .map(|plays| plays.key())
+        .filter(|&(class, id)| {
+            let held = |info: &ProgramInfo| plays::slot_key(class, &info.name) == (class, id);
+            state.read_whole(class) && !occupied(state, class).any(|(_, info)| held(info))
+        })
+        .filter(|key| !waiting(*key))
+        .filter_map(|key| {
+            let file = workspace.listed().find(|file| plays::key_of(file) == Some(key))?;
+            Some(file.id)
+        })
+        .collect()
 }
 
 /// Why a write of `entity` into `at` would be refused for its name: a slot of the
@@ -1106,10 +1146,12 @@ fn review_body(
                 let Some(entity) = workspace.get(held.id) else {
                     continue;
                 };
+                let note = sent_for(held, entity, queue, workspace);
                 let drawn = item(
                     ui,
                     held,
                     entity,
+                    note.as_deref(),
                     picked == Some(held.id),
                     device,
                     queue,
@@ -1255,6 +1297,7 @@ fn item(
     ui: &mut egui::Ui,
     held: &Queued,
     entity: &LocalEntity,
+    note: Option<&str>,
     selected: bool,
     device: &DeviceState,
     queue: &Queue,
@@ -1323,7 +1366,7 @@ fn item(
         ink,
     );
     let name_at = left + GLYPH + GAP;
-    cut(
+    let name = cut(
         &painter,
         name_at,
         rect.center().y,
@@ -1331,6 +1374,17 @@ fn item(
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
+    if let Some(note) = note {
+        let note_at = name_at + name.x + GAP;
+        cut(
+            &painter,
+            note_at,
+            rect.center().y,
+            right - note_at,
+            note,
+            egui::TextFormat::simple(egui::FontId::proportional(NAME), quiet),
+        );
+    }
 
     // Double-click opens the asset's document, as it does in the tree.
     if response.double_clicked() {
@@ -1342,7 +1396,31 @@ fn item(
         egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, device));
     }
     // The row truncates the name, so the hover text shows it in full.
-    response.on_hover_text(format!("{}\n{why}", entity.name))
+    let note = note.map(|note| format!("\n{note}")).unwrap_or_default();
+    response.on_hover_text(format!("{}{note}\n{why}", entity.name))
+}
+
+/// Why a waiting piano or sample goes: the first waiting program that plays it.
+fn sent_for(
+    held: &Queued,
+    entity: &LocalEntity,
+    queue: &Queue,
+    workspace: &Workspace,
+) -> Option<String> {
+    let key = plays::key_of(entity)?;
+    let program = queue
+        .list
+        .iter()
+        .filter_map(|other| workspace.get(other.id))
+        .find(|program| plays::named(program).iter().any(|plays| plays.key() == key))?;
+    let new = match held.replaces {
+        Occupancy::Vacant => "new · ",
+        Occupancy::Held(_) | Occupancy::Unknown => "",
+    };
+    Some(format!(
+        "{new}“{}” plays it",
+        crate::strings::display_name(&program.name)
+    ))
 }
 
 /// What dragging a waiting entry carries.
@@ -2433,6 +2511,71 @@ mod tests {
             }
         }
         assert_eq!(file.take_reads(), [], "nothing read the file");
+    }
+
+    /// An instrument whose piano library has been read up to `banks` of its two banks,
+    /// holding a piano called `held` at 1:1.
+    fn pianos_read(workspace: &Workspace, banks: u32, held: &str) -> Device {
+        let (mut device, _) = attached(workspace);
+        device.pretend_partitions(&crate::device::ELECTRO5);
+        device.pretend_geometry(ObjectClass::Piano, &[("Grand", 2), ("Upright", 2)]);
+        for bank in 1..=banks {
+            let name = (bank == 1).then_some((held, 1000));
+            device.pretend_lengths(ObjectClass::Piano, bank, &[name, None]);
+        }
+        device
+    }
+
+    /// What a queue holds after queueing `program` alone, in order.
+    fn after_queueing(workspace: &Workspace, device: &mut Device, program: u64) -> Queue {
+        let mut queue = Queue::default();
+        let mut log = Log::default();
+        enqueue(
+            workspace,
+            device,
+            &mut queue,
+            &mut log,
+            program,
+            ObjectClass::Program,
+            at(0),
+        );
+        queue
+    }
+
+    #[test]
+    fn a_queued_program_takes_the_piano_it_plays_that_the_instrument_lacks_ahead_of_it() {
+        let (mut workspace, mut log, fresh) = bench();
+        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
+        let (_, bytes) =
+            crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let order = |queue: &Queue| -> Vec<(u64, ObjectClass, Location)> {
+            queue.entries().iter().map(|held| (held.id, held.class, held.at)).collect()
+        };
+
+        let mut device = pianos_read(&workspace, 2, "Grand");
+        let queue = after_queueing(&workspace, &mut device, program);
+        assert_eq!(
+            order(&queue),
+            [
+                (piano, ObjectClass::Piano, Location::from_user(1, 2)),
+                (program, ObjectClass::Program, at(0)),
+            ]
+        );
+        let entity = workspace.get(piano).unwrap();
+        assert_eq!(
+            sent_for(&queue.entries()[0], entity, &queue, &workspace).as_deref(),
+            Some("new · “Keys” plays it")
+        );
+
+        let mut partly = pianos_read(&workspace, 1, "Grand");
+        let queue = after_queueing(&workspace, &mut partly, program);
+        assert_eq!(order(&queue), [(program, ObjectClass::Program, at(0))], "a bank unread");
+
+        let mut holding = pianos_read(&workspace, 2, "Tine");
+        let queue = after_queueing(&workspace, &mut holding, program);
+        assert_eq!(order(&queue), [(program, ObjectClass::Program, at(0))], "already there");
     }
 
     /// A piano slot reports no checksum. One whose body is another length than the

@@ -1498,9 +1498,10 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
 /// One folder's writes, in queue order.
 type Batch = (ObjectClass, Vec<Outgoing>);
 
-/// What will be written, grouped by folder in queue order. A session belongs to a
-/// folder, so a batch is split by folder. An asset the instrument must not be sent stops
-/// the batch, named with why. An asset resting in its file is sent from it, unread here.
+/// What will be written, grouped by folder in queue order, pianos and samples first so
+/// that a program lands after what it plays. A session belongs to a folder, so a batch
+/// is split by folder. An asset the instrument must not be sent stops the batch, named
+/// with why. An asset resting in its file is sent from it, unread here.
 fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, String)> {
     let mut by_class: Vec<Batch> = Vec::new();
     for held in will_write(queue) {
@@ -1518,6 +1519,7 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, 
             None => by_class.push((held.class, vec![item])),
         }
     }
+    by_class.sort_by_key(|(class, _)| !class.is_library());
     Ok(by_class)
 }
 
@@ -1597,7 +1599,7 @@ pub(super) fn owed(entity: &LocalEntity) -> Option<(ObjectClass, Location)> {
 
 /// Where queueing an asset for sending would put it.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) enum Bound {
+pub(crate) enum Bound {
     At(ObjectClass, Location),
     /// Its folder is on the instrument, but no slot there has been read and found empty.
     Full(ObjectClass),
@@ -1625,7 +1627,7 @@ pub(super) fn spare_slot(
 ///
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
-pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
+pub(crate) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
     if let Fit::Refuses(why) = fit(state, entity) {
         return Bound::Refused(why);
     }
@@ -1843,6 +1845,34 @@ mod tests {
     use crate::strings::folder;
     use crate::testing::Bench;
     use crate::workspace::Origin;
+
+    /// A piano queued after the program that plays it is still written first.
+    #[test]
+    fn a_send_writes_pianos_before_programs() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut queue,
+            mut log,
+            ..
+        } = Bench::new();
+        let program = Fresh::Program.bytes().unwrap();
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, program, &mut log);
+        let piano = crate::testing::piano(1);
+        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, &mut log);
+        device.pretend_attached();
+        let program_at = Location::from_user(1, 1);
+        let piano_at = Location::from_user(1, 2);
+        enqueue(&workspace, &mut device, &mut queue, &mut log, program, ObjectClass::Program, program_at);
+        enqueue(&workspace, &mut device, &mut queue, &mut log, piano, ObjectClass::Piano, piano_at);
+
+        let classes: Vec<ObjectClass> = grouped(&queue, &workspace)
+            .unwrap()
+            .into_iter()
+            .map(|(class, _)| class)
+            .collect();
+        assert_eq!(classes, [ObjectClass::Piano, ObjectClass::Program]);
+    }
 
     fn at(slot: u32) -> Location {
         Location { bank: 6, slot }
