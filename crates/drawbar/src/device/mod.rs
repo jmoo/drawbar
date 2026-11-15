@@ -543,7 +543,8 @@ pub enum DeviceEvent {
         deps: Vec<Dependency>,
     },
     Got {
-        name: String,
+        /// What the read's own `INFO` reported.
+        info: ProgramInfo,
         origin: Origin,
         bytes: Vec<u8>,
         why: Purpose,
@@ -1770,6 +1771,20 @@ fn respot(state: &DeviceState, cmd: &DeviceCmd) -> Option<Respot> {
     }
 }
 
+/// What a slot's `INFO` reports for a program named `name` that sums nothing.
+#[cfg(test)]
+pub fn reported(at: Location, name: &str) -> ProgramInfo {
+    ProgramInfo {
+        location: at,
+        body_len: 121,
+        format: "ne5p".into(),
+        version: 4,
+        crc32: None,
+        modified: None,
+        name: name.into(),
+    }
+}
+
 impl Device {
     pub fn new(ctx: egui::Context) -> Device {
         let (sender, events) = std::sync::mpsc::channel();
@@ -2323,18 +2338,19 @@ impl Device {
                 // A view belongs to its tab, a copied read becomes a local entity, and
                 // an occupant read for a diff goes only to the queue.
                 DeviceEvent::Got {
-                    name,
+                    info,
                     origin,
                     bytes,
                     why,
                 } => match why {
                     Purpose::View => {
-                        let id = workspace.view(name, origin, bytes, log);
+                        let id = workspace.view(worker::entity_name(&info), origin, bytes, log);
                         tabs.open(id);
                     }
                     Purpose::Copy => {
                         let print = crate::workspace::print_of(&bytes);
                         let slot = origin.slot();
+                        let name = worker::entity_name(&info);
                         let id = workspace.ingest(name, origin, bytes, log);
                         if let (Some((class, at)), Some(print)) = (slot, print) {
                             link_copy(&self.state, workspace, id, class, at, print);
@@ -2342,7 +2358,7 @@ impl Device {
                     }
                     Purpose::Compare => {
                         if let Some((class, at)) = origin.slot() {
-                            queue.arrived(class, at, &name, &bytes, workspace);
+                            queue.arrived(class, at, &info, &bytes, workspace);
                         }
                     }
                     Purpose::Pull => {
@@ -3574,7 +3590,7 @@ mod tests {
             .pretend_bodies(class, 1, &[Some(("Tine", print(&body()).crc))]);
         for _ in 0..2 {
             bench.device.pretend(DeviceEvent::Got {
-                name: "Tine.ne5p".into(),
+                info: reported(at(1), "Tine.ne5p"),
                 origin: Origin::Device { class, at: at(1) },
                 bytes: body(),
                 why: Purpose::Copy,

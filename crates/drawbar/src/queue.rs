@@ -238,17 +238,6 @@ impl Occupant {
             body_len: info.body_len,
         }
     }
-
-    /// The occupant a compare read answered with, for a slot no walk had reached.
-    fn read(name: &str, bytes: &[u8]) -> Occupant {
-        let sum = wire_sum(bytes);
-        let body = sum.as_ref().map_or(bytes.len(), |(body, _)| body.len());
-        Occupant {
-            name: name.trim().to_string(),
-            crc: sum.map(|(_, crc)| crc),
-            body_len: u32::try_from(body).unwrap_or(u32::MAX),
-        }
-    }
 }
 
 /// Everything owed to the instrument, in the order it was asked for.
@@ -849,7 +838,7 @@ impl Queue {
         &mut self,
         class: ObjectClass,
         at: Location,
-        name: &str,
+        info: &ProgramInfo,
         there: &[u8],
         workspace: &Workspace,
     ) {
@@ -857,7 +846,7 @@ impl Queue {
             return;
         };
         if let Occupancy::Unknown = held.replaces {
-            held.replaces = Occupancy::Held(Occupant::read(name, there));
+            held.replaces = Occupancy::Held(Occupant::of(info));
         }
         let Some(entity) = workspace.get(held.id) else {
             return;
@@ -2536,8 +2525,20 @@ mod tests {
         assert!(matches!(queue.entry(ids[2]).unwrap().diff, Diff::Empty));
         assert_eq!(device.queued().len(), 2, "one read per occupied slot");
 
-        queue.arrived(class, at(0), "Africa Split", &bytes, &workspace);
-        queue.arrived(class, at(1), "Squabble B", &bytes, &workspace);
+        queue.arrived(
+            class,
+            at(0),
+            &crate::device::reported(at(0), "Africa Split"),
+            &bytes,
+            &workspace,
+        );
+        queue.arrived(
+            class,
+            at(1),
+            &crate::device::reported(at(1), "Squabble B"),
+            &bytes,
+            &workspace,
+        );
         let Diff::Fields(fields) = &queue.entry(ids[0]).unwrap().diff else {
             panic!("a program against a program is a field list");
         };
@@ -2575,7 +2576,13 @@ mod tests {
             class,
             at(0),
         );
-        queue.arrived(class, at(0), "Africa Split", &bytes, &workspace);
+        queue.arrived(
+            class,
+            at(0),
+            &crate::device::reported(at(0), "Africa Split"),
+            &bytes,
+            &workspace,
+        );
         assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
         let reads = device.queued().len();
 
@@ -2815,7 +2822,13 @@ mod tests {
                 at(0),
             );
             assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
-            queue.arrived(class, at(0), "Grand", there, &workspace);
+            queue.arrived(
+                class,
+                at(0),
+                &crate::device::reported(at(0), "Grand"),
+                there,
+                &workspace,
+            );
 
             let diff = &queue.entry(id).unwrap().diff;
             match identical {
@@ -3106,7 +3119,7 @@ mod tests {
     }
 
     /// For a slot no walk had reached, the read settles it: an empty read makes the slot
-    /// free, and bytes make the entry a replacement of what the read named.
+    /// free, and bytes make the entry a replacement of what the read's `INFO` reported.
     #[test]
     fn the_read_of_an_unscanned_slot_settles_what_the_entry_replaces() {
         let (mut workspace, mut log, bytes) = bench();
@@ -3141,8 +3154,9 @@ mod tests {
             at: at(3),
             why: Purpose::Compare,
         });
+        let info = crate::device::reported(at(4), "");
         device.pretend(DeviceEvent::Got {
-            name: "Jazzy Click B".into(),
+            info: info.clone(),
             origin: Origin::Device { class, at: at(4) },
             bytes,
             why: Purpose::Compare,
@@ -3162,9 +3176,9 @@ mod tests {
             vec!["center_panel.gain"]
         );
         assert_eq!(
-            taken.replaces.occupant().map(|held| held.name.as_str()),
-            Some("Jazzy Click B"),
-            "the read named what it found"
+            taken.replaces.expect(),
+            Some(Expect::of(Some(&info))),
+            "what the read's INFO reported, though it sums nothing and has no name"
         );
         assert_eq!((queue.len(), replacing(&queue)), (2, 1));
     }
@@ -3710,7 +3724,13 @@ mod tests {
                 class,
                 at(0),
             );
-            queue.arrived(class, at(0), "Incense", &bytes, &workspace);
+            queue.arrived(
+                class,
+                at(0),
+                &crate::device::reported(at(0), "Incense"),
+                &bytes,
+                &workspace,
+            );
             let held = queue.entry(id).unwrap();
             assert!(matches!(held.diff, Diff::Identical), "{name}");
 
@@ -3756,7 +3776,13 @@ mod tests {
             class,
             at(0),
         );
-        queue.arrived(class, at(0), "Africa Split", &bytes, &workspace);
+        queue.arrived(
+            class,
+            at(0),
+            &crate::device::reported(at(0), "Africa Split"),
+            &bytes,
+            &workspace,
+        );
         let held = queue.entry(id).unwrap();
         let Diff::Fields(fields) = &held.diff else {
             panic!("a program against a program is a field list");
@@ -3861,7 +3887,13 @@ mod tests {
             );
         }
         // One waiting on its read, one with a field list, one for a free slot.
-        queue.arrived(class, at(1), "Squabble B", &bytes, &workspace);
+        queue.arrived(
+            class,
+            at(1),
+            &crate::device::reported(at(1), "Squabble B"),
+            &bytes,
+            &workspace,
+        );
 
         for width in [700.0_f32, 1280.0] {
             for picked in queue.ids() {

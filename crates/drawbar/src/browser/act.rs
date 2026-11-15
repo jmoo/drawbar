@@ -1928,18 +1928,34 @@ fn save_doc(
             ));
         }
     };
-    // The slot is expected to hold what the view was read as, or last saved as.
+    // The slot must still hold what the view was read as, or last saved as.
     let Some(print) = entity.saved_print() else {
         return log.trouble(format!("“{}” cannot be saved to its slot.", entity.name));
     };
+    let (name, where_) = (&entity.name, place(class, at));
+    let Some(holds) = device.state.slot(class, at) else {
+        return log.trouble(format!(
+            "“{name}” was not saved: {where_} has not been read."
+        ));
+    };
+    let expect = Expect::of(holds);
+    let unchanged = match &expect {
+        Expect::Holds {
+            crc: Some(crc),
+            len,
+            ..
+        } => (*crc, *len) == (print.crc, print.len),
+        Expect::Holds { crc: None, .. } => true,
+        Expect::Vacant => false,
+    };
+    if !unchanged {
+        return log.trouble(format!(
+            "“{name}” was not saved: {where_} changed on the keyboard."
+        ));
+    }
     if let Some(note) = write_note(&device.state, class, entity).filter(|_| ask) {
         return browser.ask_write(&entity.name, place(class, at), note, Act::WriteBack(id));
     }
-    let expect = Expect::Holds {
-        crc: Some(print.crc),
-        len: print.len,
-        name: crate::device::slot_label(&entity.name).unwrap_or_default(),
-    };
     device.send(
         DeviceCmd::Put {
             id,
@@ -2264,8 +2280,10 @@ mod tests {
         assert!(said.contains("waits for its slot to be read"), "{said}");
     }
 
+    /// A view saved back expects what the walk read its slot holding, and is not written
+    /// while the slot is unread or reports a checksum other than the view's.
     #[test]
-    fn a_view_saved_back_expects_its_slot_as_it_was_read_and_is_refused_once_it_changed() {
+    fn a_view_saved_back_expects_its_slot_as_the_walk_read_it_and_is_refused_once_it_changed() {
         use crate::device::DeviceEvent;
 
         let mut bench = Bench::new();
@@ -2284,18 +2302,52 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         bench.workspace.replace_bytes(id, edited, &mut bench.log);
+        let saved = |bench: &mut Bench| {
+            bench.act(vec![Act::SaveDoc(id)]);
+            let put = bench
+                .device
+                .queued()
+                .into_iter()
+                .rev()
+                .find_map(|cmd| match cmd {
+                    DeviceCmd::Put { expect, .. } => Some(expect.clone()),
+                    _ => None,
+                });
+            (put, bench.log.status().1.to_string())
+        };
+        let slot = |held| [None, None, None, held];
 
-        bench.act(vec![Act::SaveDoc(id)]);
-        let expect = bench.device.queued().into_iter().find_map(|cmd| match cmd {
-            DeviceCmd::Put { expect, .. } => Some(expect.clone()),
-            _ => None,
-        });
+        let refused = "“Africa Split.ne5p” was not saved: Programs 7:4 has not been read.";
+        assert_eq!(saved(&mut bench), (None, refused.to_string()));
+
+        let other = Some(("Africa Split", read_as.crc ^ 1));
+        bench
+            .device
+            .pretend_bodies(ObjectClass::Program, 7, &slot(other));
+        let refused = "“Africa Split.ne5p” was not saved: Programs 7:4 changed on the keyboard.";
+        assert_eq!(saved(&mut bench), (None, refused.to_string()));
+
+        let unsummed = Some(("", read_as.len));
+        bench
+            .device
+            .pretend_lengths(ObjectClass::Program, 7, &slot(unsummed));
+        let reported = Expect::Holds {
+            crc: None,
+            len: read_as.len,
+            name: String::new(),
+        };
+        assert_eq!(saved(&mut bench).0, Some(reported), "what the walk read");
+
+        let same = Some(("Africa Split", read_as.crc));
+        bench
+            .device
+            .pretend_bodies(ObjectClass::Program, 7, &slot(same));
         let as_read = Expect::Holds {
             crc: Some(read_as.crc),
-            len: read_as.len,
+            len: 121,
             name: "Africa Split".into(),
         };
-        assert_eq!(expect, Some(as_read));
+        assert_eq!(saved(&mut bench).0, Some(as_read));
 
         bench.device.pretend(DeviceEvent::Changed {
             id,
@@ -2332,6 +2384,9 @@ mod tests {
         let mut bench = Bench::new();
         let bytes = Fresh::Program.bytes().unwrap();
         bench.device.pretend_attached();
+        let crc = crate::workspace::print_of(&bytes).unwrap().crc;
+        let held = [None, None, None, Some(("Africa Split", crc))];
+        bench.device.pretend_bodies(ObjectClass::Program, 7, &held);
         let id = bench.workspace.view(
             "Africa Split.ne5p".to_string(),
             Origin::Device {
@@ -3638,7 +3693,7 @@ mod tests {
         };
 
         bench.device.pretend(DeviceEvent::Got {
-            name: "Africa-Split.ne5p".into(),
+            info: crate::device::reported(at, "Africa-Split.ne5p"),
             origin,
             bytes,
             why: Purpose::View,
@@ -3808,7 +3863,7 @@ mod tests {
             .pretend_scanned(class, 7, &["", "", "", "Africa Split"]);
 
         bench.device.pretend(DeviceEvent::Got {
-            name: "Africa-Split.ne5p".into(),
+            info: crate::device::reported(at, "Africa-Split.ne5p"),
             origin: Origin::Device { class, at },
             bytes,
             why: Purpose::View,

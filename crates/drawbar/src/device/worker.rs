@@ -300,7 +300,7 @@ async fn execute<T: Transport>(
                 bytes.len()
             );
             emit.send(DeviceEvent::Got {
-                name: entity_name(&info),
+                info,
                 origin: Origin::Device { class, at },
                 bytes,
                 why,
@@ -1196,13 +1196,12 @@ async fn copy_all<T: Transport>(
                     }
                     Err(e) => return Err(e),
                 };
-                let name = entity_name(&info);
                 if info.body_len <= HELD_COPY {
                     let bytes = op::read_program(s, at).await?;
                     let origin = Origin::Device { class, at };
                     let why = Purpose::Copy;
                     emit.send(DeviceEvent::Got {
-                        name,
+                        info,
                         origin,
                         bytes,
                         why,
@@ -1371,7 +1370,7 @@ fn unix_now() -> Result<u32, Error> {
 }
 
 /// Name a fetched entity after the name its slot reports.
-fn entity_name(info: &ProgramInfo) -> String {
+pub(super) fn entity_name(info: &ProgramInfo) -> String {
     let name = info.name.trim();
     match name.is_empty() {
         true => "unnamed".to_string(),

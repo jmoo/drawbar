@@ -1035,9 +1035,8 @@ mod tests {
             class: PROGRAM,
             at: at(slot),
         };
-        let name = "P.ne5p".into();
         bench.device.pretend(DeviceEvent::Got {
-            name,
+            info: crate::device::reported(at(slot), "P.ne5p"),
             origin,
             bytes,
             why,

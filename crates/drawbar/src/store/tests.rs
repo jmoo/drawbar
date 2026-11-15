@@ -9457,7 +9457,7 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     } = &mut session.bench;
     crate::bring::bring_in(device, workspace, queue, log);
     device.pretend(crate::device::DeviceEvent::Got {
-        name: "untitled".into(),
+        info: crate::device::reported(at, "untitled"),
         origin: Origin::Device { class, at },
         bytes: new.clone(),
         why: crate::device::Purpose::Pull,
