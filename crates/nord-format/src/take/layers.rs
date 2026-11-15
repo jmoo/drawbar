@@ -25,9 +25,9 @@ fn class_distance(pitch: f64, note: u8) -> f64 {
 }
 
 /// How far a run's offset from its note may move from the run before's, in semitones,
-/// before [`notes_of`] takes it for stretch tuning that rounded to the next note. Stretch
-/// moves a few cents from note to note, and an instrument's detuning seldom more than a
-/// third of a semitone.
+/// before [`notes_by_hit`] takes it for stretch tuning that rounded to the next note.
+/// Chosen, not measured: over the few cents stretch tuning moves from note to note, and
+/// over the third of a semitone an instrument's own detuning seldom passes.
 pub const STRETCH_JUMP: f64 = 0.7;
 
 /// The notes `hits` play, in playing order, found from their pitches: each run of hits

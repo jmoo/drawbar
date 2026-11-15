@@ -1126,12 +1126,11 @@ mod tests {
         let out_s = out.to_str().unwrap();
         let err = prep(&Ui::piped(), prep_args(&[set_s, "-o", set_s])).unwrap_err();
         assert!(err.contains("-o is the folder itself"), "{err}");
-        let err = prep(
-            &Ui::piped(),
-            prep_args(&[set_s, "--notes", "C4", "-o", out_s]),
-        )
-        .unwrap_err();
-        assert!(err.contains("--notes does not apply"), "{err}");
+        for (flag, value) in [("--notes", "C4"), ("--order", "played"), ("--skip", "1")] {
+            let err =
+                prep(&Ui::piped(), prep_args(&[set_s, flag, value, "-o", out_s])).unwrap_err();
+            assert!(err.contains(&format!("{flag} does not apply")), "{err}");
+        }
         prep(&Ui::piped(), prep_args(&[set_s, "-o", out_s])).unwrap();
 
         let labels = |name: &str| -> Vec<String> {

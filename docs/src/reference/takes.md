@@ -26,7 +26,8 @@ the same way before cleaning it.
 A folder's hits are sorted by pitch before their notes are named, so a stretched note has its
 neighbors to go by. Each keeps the octave its pitch was read in.
 
-A hit standing less than 54 dB over the floor is left out: leveled with the others,
+A hit standing less than the [`--min-snr`](../nord-cli/libraries.md#building-from-a-recorded-take)
+limit over the floor is left out: leveled with the others,
 its hiss would come up with it. Each kept hit becomes an attack, from its strike to
 its key-up, and a release from the key-up. A key-off that stands clear of neither
 the quiet before its hit nor the floor gets no release.

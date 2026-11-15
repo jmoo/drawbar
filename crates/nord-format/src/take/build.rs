@@ -606,6 +606,66 @@ mod tests {
         assert!(pitched_roots(&strokes).unwrap().is_empty());
     }
 
+    /// Leveled, every stroke is brought to the take's one peak, a silent one left as it
+    /// is; otherwise each keeps its level.
+    #[test]
+    fn leveled_strokes_are_brought_to_one_peak() {
+        let take = Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.0; 100],
+        };
+        let region = Region {
+            start: 0,
+            frames: 100,
+            label: "060-b0-l00".into(),
+        };
+        let at = |peak: f32| Stroke {
+            audio: vec![0.0, -peak, peak / 2.0],
+            ..region_stroke(&take, &region, 60)
+        };
+        let strokes = [at(0.5), at(0.05), at(0.0)];
+        let refs: Vec<&Stroke> = strokes.iter().collect();
+        let target = 10f32.powf(TAKE_PEAK_DB as f32 / 20.0);
+        let raised = gains(&refs, true);
+        assert!((raised[0] * 0.5 - target).abs() < 1e-6, "{raised:?}");
+        assert!((raised[1] * 0.05 - target).abs() < 1e-6, "{raised:?}");
+        assert_eq!(raised[2], 1.0, "silence is not raised");
+        assert_eq!(gains(&refs, false), [1.0; 3]);
+    }
+
+    /// A release is balanced under the attack of its root at its layer value, and only
+    /// where leveled.
+    #[test]
+    fn a_release_is_balanced_under_its_own_attack() {
+        let take = Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.0; 35_002],
+        };
+        let region = Region {
+            start: 0,
+            frames: 35_002,
+            label: "060-b0-l00".into(),
+        };
+        let steady = |level: f32, bank: Bank| Stroke {
+            audio: vec![level; 35_002],
+            bank,
+            ..region_stroke(&take, &region, 60)
+        };
+        let strokes = [
+            steady(0.5, Bank::Attack),
+            steady(0.05, Bank::Release),
+            steady(0.05, Bank::Release),
+        ];
+        let refs: Vec<&Stroke> = strokes.iter().collect();
+        let balance = release_balance(&refs, &[0, 0, 40], true);
+        assert_eq!(balance[0], None, "an attack");
+        assert!((balance[1].unwrap() - 20.0).abs() < 0.01, "{balance:?}");
+        assert_eq!(balance[2], None, "no attack at its layer value");
+        assert_eq!(release_balance(&refs, &[0, 0, 40], false), [None; 3]);
+    }
+
     #[test]
     fn takes_state_the_kind_they_agree_on() {
         let says = |kind: Option<&str>| wav::Settings {

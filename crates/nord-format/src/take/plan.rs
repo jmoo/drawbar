@@ -47,8 +47,8 @@ pub struct SetLayer {
     pub of: usize,
 }
 
-/// The [`PlanOptions::min_snr_db`] unless a caller says otherwise: soft treble hits
-/// recorded about 30 dB over the floor gave very noisy loops once leveled.
+/// The [`PlanOptions::min_snr_db`] unless a caller says otherwise. Chosen by ear: a hit
+/// leveled from nearer the floor loops with its hiss heard.
 pub const MIN_SNR_DB: f64 = 54.0;
 
 impl PlanOptions {

@@ -1900,6 +1900,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// `--no-decay` builds every stroke, its key-off too, with a flat decay ladder, where
+    /// the kind's own rules fade its attacks.
+    #[test]
+    fn no_decay_builds_flat_ladders_on_every_stroke() {
+        let dir = crate::edit::tests::scratch("piano-take-no-decay");
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples: tone(261.6, 9_000),
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(100, 7_900, "060-b0-v00"),
+                region(8_000, 1_000, "060-b2-v00"),
+            ],
+            loops: Vec::new(),
+        };
+        let path = dir.join("take.wav");
+        write_take(&path, &audio, &marks);
+        let ladders = |extra: &[&str]| -> Vec<[u32; nord_format::formats::npno::DECAYS]> {
+            let out = dir.join("take.npno");
+            let mut argv = vec![
+                "build",
+                path.to_str().unwrap(),
+                "--name",
+                "Take",
+                "--kind",
+                "grand",
+                "-o",
+                out.to_str().unwrap(),
+            ];
+            argv.extend_from_slice(extra);
+            let Ok(crate::PianoAction::Build(args)) = piano(&argv) else {
+                panic!("build did not parse");
+            };
+            build(&Ui::piped(), args).unwrap();
+            let (_, piano) = read(&out).unwrap();
+            let library = piano.library().unwrap();
+            library.strokes().iter().map(|s| s.ladder()).collect()
+        };
+        let flat = |ladder: &[u32; nord_format::formats::npno::DECAYS]| {
+            ladder.iter().all(|&entry| entry == ladder[0])
+        };
+        let held = ladders(&["--no-decay"]);
+        assert!(held.len() >= 2, "an attack and its key-off, pitched out too");
+        assert!(held.iter().all(flat), "{held:x?}");
+        assert!(!ladders(&[]).iter().all(flat), "a grand's attack fades");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A take states its kind and whether it is cleaned, as drawbar's take editor saves
     /// them: a build files the library as that kind where `--kind` says none, builds a
     /// take set to raw from its regions as recorded, and refuses takes whose kinds
