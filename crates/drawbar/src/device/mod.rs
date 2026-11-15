@@ -1240,6 +1240,42 @@ pub fn named_slots(entity: &LocalEntity, class: ObjectClass) -> impl Iterator<It
     stored.into_iter().chain(came_off)
 }
 
+/// Record the name each linked slot of a bank just read has, where it holds what its file
+/// and it last agreed on under another name than the link recorded: the keyboard altered
+/// the name it was sent, or the panel renamed the slot, which keeps its checksum. A slot two
+/// files claim is left to [`settle_claims`].
+fn follow_names(state: &DeviceState, workspace: &mut Workspace, class: ObjectClass, bank: u32) {
+    let Some(keyboard) = state.keyboard() else {
+        return;
+    };
+    let claimed = |held: &Held| {
+        let others = workspace
+            .listed()
+            .filter_map(|entity| held_here(state, entity));
+        others
+            .filter(|other| other.class() == class && other.spot == held.spot)
+            .count()
+            > 1
+    };
+    let renamed: Vec<(u64, Held)> = workspace
+        .listed()
+        .filter_map(|entity| {
+            let held = held_here(state, entity).filter(|held| held.class() == class)?;
+            let at = held
+                .location()
+                .filter(|at| user_bank(at.bank) == Some(bank))?;
+            let info = state.slot(class, at).flatten()?;
+            let name = info.name.trim();
+            let agrees = info.crc32 == Some(held.base.crc);
+            let renamed = agrees && !name.is_empty() && held.name() != Some(name);
+            (renamed && !claimed(held)).then(|| (entity.id, held.agreed(held.base, name)))
+        })
+        .collect();
+    for (id, held) in renamed {
+        workspace.link(id, keyboard, held);
+    }
+}
+
 /// Link a view just kept to the slot it shows, as it was read.
 pub fn link_kept(state: &DeviceState, workspace: &mut Workspace, id: u64) {
     let Some(entity) = workspace.get(id) else {
@@ -2200,6 +2236,7 @@ impl Device {
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
+                    follow_names(&self.state, workspace, class, bank);
                     crate::queue::recheck(workspace, self, queue, log);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
@@ -3892,6 +3929,53 @@ mod tests {
         );
         heard(&mut bench);
         assert_eq!(linked(&bench), [false, true], "the other one, in its place");
+    }
+
+    #[test]
+    fn a_link_takes_the_name_its_slot_holds_its_version_under_and_keeps_its_own_otherwise() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_attached();
+        bench.device.pretend_geometry(class, &[("A", 2)]);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let [same, edited] = ["A.ne5p", "B.ne5p"].map(|name| file(&mut bench, name, body()));
+        for (id, slot) in [(same, 1), (edited, 2)] {
+            let held = Held::new(class, at(slot), "Tine", print(&body())).unwrap();
+            bench.workspace.link(id, &keyboard, held);
+        }
+        let info = |slot, crc| ProgramInfo {
+            location: at(slot),
+            body_len: 121,
+            format: "ne5p".into(),
+            version: 4,
+            crc32: Some(crc),
+            modified: None,
+            name: "Tine Mk".into(),
+        };
+        let slots = vec![
+            Some(info(1, print(&body()).crc)),
+            Some(info(2, print(&gained("40")).crc)),
+        ];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        let name = |id| {
+            let entity = bench.workspace.get(id).unwrap();
+            entity
+                .held_on(&keyboard)
+                .unwrap()
+                .name()
+                .map(str::to_string)
+        };
+        assert_eq!(name(same).as_deref(), Some("Tine Mk"));
+        assert_eq!(
+            name(edited).as_deref(),
+            Some("Tine"),
+            "its slot holds another version"
+        );
     }
 
     #[test]
