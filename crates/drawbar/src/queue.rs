@@ -14,7 +14,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
 use crate::browser::{bound_for, cell_ink, Act, Bound, Carried, Held, Item, Kind};
-use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Fit, Purpose};
+use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Expect, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
 use crate::link::{Keyboard, Spot, Standing};
@@ -43,13 +43,20 @@ pub struct Queued {
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
     /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
-    /// Why [`recheck`] held it back, until it is queued again.
-    held_back: Option<String>,
     /// The keyboard it was queued for, where one was attached. It is written to no other.
     pub keyboard: Option<Keyboard>,
 }
 
 impl Queued {
+    /// Diff again against what the slot is now known to hold, to be read if that does
+    /// not settle it.
+    fn shows(&mut self, entity: &LocalEntity, now: Occupancy) {
+        self.diff = verdict(self.class, entity, &now);
+        self.replaces = now;
+        self.read = Read::Unasked;
+        self.stamp = entity.stamp;
+    }
+
     /// The name the slot holds and the one a send of `name` gives it, where the two
     /// differ. The name goes with the sound, so a send renames the slot even when the
     /// bytes are the same.
@@ -166,6 +173,29 @@ impl Occupancy {
         }
     }
 
+    /// What a write over the slot expects to find there; `None` while nothing has read
+    /// it.
+    pub fn expect(&self) -> Option<Expect> {
+        match self {
+            Occupancy::Unknown => None,
+            Occupancy::Vacant => Some(Expect::Vacant),
+            Occupancy::Held(held) => Some(Expect::Holds {
+                crc: held.crc,
+                len: held.body_len,
+                name: held.name.clone(),
+            }),
+        }
+    }
+
+    /// Whether two reads of the slot found one occupant, by the rule a write checks its
+    /// slot with. A slot nobody has read agrees with anything.
+    fn agrees(&self, now: &Occupancy) -> bool {
+        match (self.expect(), now.expect()) {
+            (Some(was), Some(now)) => was.matches(&now),
+            _ => true,
+        }
+    }
+
     pub fn occupant(&self) -> Option<&Occupant> {
         match self {
             Occupancy::Held(held) => Some(held),
@@ -194,8 +224,7 @@ impl Occupancy {
 /// What a slot holds, as the read that found it reported.
 pub struct Occupant {
     pub name: String,
-    /// ⚠️ `None` where the class reports no checksum, or where the occupant arrived as
-    /// bytes from a read instead of as a walk's entry. `None` means the checksums cannot
+    /// ⚠️ `None` where the class reports no checksum. `None` means the checksums cannot
     /// be compared; it never means they match.
     pub crc: Option<u32>,
     pub body_len: u32,
@@ -212,10 +241,11 @@ impl Occupant {
 
     /// The occupant a compare read answered with, for a slot no walk had reached.
     fn read(name: &str, bytes: &[u8]) -> Occupant {
-        let body = wire_sum(bytes).map_or(bytes.len(), |(body, _)| body.len());
+        let sum = wire_sum(bytes);
+        let body = sum.as_ref().map_or(bytes.len(), |(body, _)| body.len());
         Occupant {
             name: name.trim().to_string(),
-            crc: None,
+            crc: sum.map(|(_, crc)| crc),
             body_len: u32::try_from(body).unwrap_or(u32::MAX),
         }
     }
@@ -326,68 +356,52 @@ fn unsettled(state: &DeviceState, entity: &LocalEntity, class: ObjectClass, at: 
     })
 }
 
-/// Whether a slot holds something other than what an entry was made against. A slot no
-/// walk has read changes nothing.
-fn differs(was: &Occupancy, now: &Occupancy) -> bool {
-    match (was, now) {
-        (Occupancy::Unknown, _) | (_, Occupancy::Unknown) => false,
-        (Occupancy::Vacant, Occupancy::Vacant) => false,
-        (Occupancy::Vacant, Occupancy::Held(_)) | (Occupancy::Held(_), Occupancy::Vacant) => true,
-        (Occupancy::Held(was), Occupancy::Held(now)) => {
-            let sums = match (was.crc, now.crc) {
-                (Some(was), Some(now)) => was != now,
-                (None, None) => was.body_len != now.body_len,
-                (Some(_), None) | (None, Some(_)) => false,
-            };
-            was.name != now.name || sums
+/// Show every waiting entry what the cache of the attached keyboard says its slot holds
+/// now, and ask for the compare read of each slot that leaves unsettled. Call whenever a
+/// bank is read again and before a send.
+pub fn refresh(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    for held in &mut queue.list {
+        let now = Occupancy::of(&device.state, held.class, held.at);
+        let unread = matches!(held.replaces, Occupancy::Unknown);
+        if matches!(now, Occupancy::Unknown) || (!unread && held.replaces.agrees(&now)) {
+            continue;
+        }
+        match (unread, &held.read, workspace.get(held.id)) {
+            (true, Read::Asked, _) => held.replaces = now,
+            (_, _, Some(entity)) => held.shows(entity, now),
+            (_, _, None) => {}
         }
     }
+    ask_unread(device, queue, log);
 }
 
-/// Check every waiting entry against what the attached keyboard holds now. An entry whose
-/// slot changed since it was queued, or whose file's slot now waits for the user, is held
-/// back: it stays queued, says why, and shows what the slot holds now. Call before a send
-/// and whenever a bank is read again.
-pub fn recheck(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    for held in &mut queue.list {
-        let Some(entity) = workspace.get(held.id) else {
-            continue;
-        };
-        let now = Occupancy::of(&device.state, held.class, held.at);
-        let changed = differs(&held.replaces, &now);
-        match (changed, &held.replaces) {
-            (true, _) => {
-                held.diff = verdict(held.class, entity, &now);
-                held.replaces = now;
-                held.read = Read::Unasked;
-                held.stamp = entity.stamp;
-            }
-            (false, Occupancy::Unknown) => {
-                if matches!(held.read, Read::Unasked) {
-                    held.diff = verdict(held.class, entity, &now);
-                }
-                held.replaces = now;
-            }
-            (false, Occupancy::Vacant | Occupancy::Held(_)) => {}
-        }
-        let why = match (
-            unsettled(&device.state, entity, held.class, held.at),
-            changed,
-        ) {
-            (true, _) => CHOOSE,
-            (false, true) => "Its slot changed on the keyboard since it was queued.",
-            (false, false) => continue,
-        };
-        if held.failure.as_deref() != Some(why) {
-            log.say(format!(
-                "“{}” was held back from {}. {why}",
-                entity.name,
-                place(held.class, held.at)
-            ));
-            held.failure = Some(why.to_string());
-        }
-        held.held_back = changed.then(|| why.to_string()).or(held.held_back.take());
-    }
+/// Record what a write found in its slot instead of what it expected, so the review shows
+/// it and the next send expects it, and say on the entry why it stopped.
+pub fn changed_under(
+    workspace: &Workspace,
+    device: &mut Device,
+    queue: &mut Queue,
+    log: &mut Log,
+    (id, class, at): (u64, ObjectClass, Location),
+    holds: Option<&ProgramInfo>,
+) {
+    let waiting = queue.list.iter_mut();
+    let mut waiting = waiting.filter(|held| (held.id, held.class, held.at) == (id, class, at));
+    let (Some(held), Some(entity)) = (waiting.next(), workspace.get(id)) else {
+        return;
+    };
+    held.shows(
+        entity,
+        holds.map_or(Occupancy::Vacant, |info| {
+            Occupancy::Held(Occupant::of(info))
+        }),
+    );
+    held.failure = Some("Its slot changed on the keyboard.".to_string());
+    ask_unread(device, queue, log);
+}
+
+/// Ask for the compare read of every slot an entry still needs one of.
+fn ask_unread(device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for id in queue.ids() {
         if let Some((class, at)) = queue.unread(id) {
             read_occupant(device, log, class, at);
@@ -562,6 +576,9 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
                 crate::device::name_taken(state, held.class, held.at, entity)
                     .map(|holder| taken(held.class, holder))
                     .or_else(earlier)
+                    .or_else(|| {
+                        unsettled(state, entity, held.class, held.at).then(|| CHOOSE.to_string())
+                    })
             }
         };
         // Logged only when the reason changes, so repeated refits stay quiet.
@@ -574,7 +591,7 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
                 ));
             }
         }
-        held.failure = refusal.or_else(|| held.held_back.clone());
+        held.failure = refusal;
     }
 }
 
@@ -589,15 +606,9 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
         let Some(entity) = workspace.get(held.id) else {
             continue;
         };
-        held.replaces = Occupancy::of(&device.state, held.class, held.at);
-        held.read = Read::Unasked;
-        held.diff = verdict(held.class, entity, &held.replaces);
+        held.shows(entity, Occupancy::of(&device.state, held.class, held.at));
     }
-    for id in queue.ids() {
-        if let Some((class, at)) = queue.unread(id) {
-            read_occupant(device, log, class, at);
-        }
-    }
+    ask_unread(device, queue, log);
 }
 
 /// Queue every asset [`changed`] finds, each for its own slot.
@@ -701,14 +712,10 @@ impl Queue {
             .iter_mut()
             .find(|held| (held.id, held.class, held.at) == (entity.id, class, at))
         {
-            if held.keyboard != keyboard || differs(&held.replaces, &replaces) {
-                held.diff = verdict(class, entity, &replaces);
-                held.replaces = replaces;
-                held.read = Read::Unasked;
-                held.stamp = entity.stamp;
+            if held.keyboard != keyboard || !held.replaces.agrees(&replaces) {
+                held.shows(entity, replaces);
             }
             held.failure = None;
-            held.held_back = None;
             held.keyboard = keyboard;
             self.picked = Some(entity.id);
             return Put::Standing;
@@ -736,7 +743,6 @@ impl Queue {
             read: Read::Unasked,
             stamp: entity.stamp,
             failure: None,
-            held_back: None,
             keyboard,
         });
         self.picked = Some(entity.id);

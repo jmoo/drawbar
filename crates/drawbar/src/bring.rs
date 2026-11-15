@@ -1220,8 +1220,9 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_write_whose_slot_changed_is_held_back_and_the_rest_go() {
+    fn a_panel_edit_after_queueing_is_not_overwritten_and_the_rest_expect_what_the_walk_found() {
         use crate::browser::Act;
+        use crate::device::Expect;
         let mut bench = Bench::new();
         walked(&mut bench, &[Some(crc(&body())), Some(crc(&body())), None]);
         let theirs = linked(&mut bench, "A.ne5p", body(), 1, &body());
@@ -1244,9 +1245,10 @@ mod tests {
         }
         assert_eq!(bench.queue.len(), 3);
 
+        let someone = crc(&gained("44"));
         let slots = vec![
             Some(program_info(1, "A", crc(&gained("43")))),
-            Some(program_info(2, "Someone", crc(&gained("44")))),
+            Some(program_info(2, "Someone", someone)),
             None,
         ];
         bench.device.pretend(DeviceEvent::BankScanned {
@@ -1255,32 +1257,37 @@ mod tests {
             slots,
         });
         heard(&mut bench);
-        let failure = |bench: &Bench, id| bench.queue.entry(id).unwrap().failure.clone();
-        assert!(failure(&bench, theirs).unwrap().contains("Choose…"));
-        assert!(
-            failure(&bench, other).is_some(),
-            "it replaces another sound now"
-        );
         let Some(crate::queue::Occupancy::Held(now)) =
             bench.queue.entry(other).map(|held| &held.replaces)
         else {
             panic!("the review shows what the slot holds");
         };
         assert_eq!(now.name, "Someone");
-        assert_eq!(failure(&bench, free), None);
 
         bench.act(vec![Act::SendAll]);
-        let ids: Vec<u64> = bench
+        let items: Vec<(u64, Expect)> = bench
             .device
             .queued()
             .into_iter()
             .flat_map(|cmd| match cmd {
-                DeviceCmd::SendAll { items, .. } => items.iter().map(|item| item.id).collect(),
+                DeviceCmd::SendAll { items, .. } => items
+                    .iter()
+                    .map(|item| (item.id, item.expect.clone()))
+                    .collect(),
                 _ => Vec::new(),
             })
             .collect();
-        assert_eq!(ids, [free]);
-        assert!(bench.queue.holds(theirs) && bench.queue.holds(other));
+        let expects_someone = Expect::Holds {
+            crc: Some(someone),
+            len: 121,
+            name: "Someone".into(),
+        };
+        assert_eq!(items, [(other, expects_someone), (free, Expect::Vacant)]);
+        let failure = bench
+            .queue
+            .entry(theirs)
+            .and_then(|held| held.failure.clone());
+        assert!(failure.is_some_and(|why| why.contains("Choose…")));
     }
 
     #[test]

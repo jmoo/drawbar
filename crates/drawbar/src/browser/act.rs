@@ -7,8 +7,8 @@ use super::drag::{Item, Kind};
 use super::Browser;
 use crate::builds::Builds;
 use crate::device::{
-    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
-    Purpose,
+    fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Expect, Fetched, Fit, Outgoing,
+    Payload, Purpose,
 };
 use crate::filter::Narrow;
 use crate::folders::{Clash, Occupant};
@@ -1493,12 +1493,18 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
 ///
 /// Every queued write goes through here, with the same refusal, grouping and per-item
 /// flow. An entry leaves the queue when its [`crate::device::DeviceEvent::Sent`] arrives,
-/// so a batch that stops halfway leaves the rest of the queue in place.
+/// so a batch that stops halfway leaves the rest of the queue in place. Each write
+/// expects its slot to hold what the review shows; one whose slot has not been read waits
+/// for the read.
 fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
-    crate::queue::recheck(workspace, device, queue, log);
+    crate::queue::refresh(workspace, device, queue, log);
+    let unread = will_write(queue).find(|held| held.replaces.expect().is_none());
+    if let Some(entity) = unread.and_then(|held| workspace.get(held.id)) {
+        log.say(format!("“{}” waits for its slot to be read.", entity.name));
+    }
     let mut checking = None;
     for held in will_write(queue) {
         let entity = workspace
@@ -1539,7 +1545,7 @@ type Batch = (ObjectClass, Vec<Outgoing>);
 fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, String)> {
     let mut by_class: Vec<Batch> = Vec::new();
     for held in will_write(queue) {
-        let Some(entity) = workspace.get(held.id) else {
+        let (Some(entity), Some(expect)) = (workspace.get(held.id), held.replaces.expect()) else {
             continue;
         };
         let item = Outgoing {
@@ -1547,6 +1553,7 @@ fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, 
             at: held.at,
             name: entity.name.clone(),
             payload: Payload::of(entity).map_err(|e| (entity.name.clone(), e))?,
+            expect,
         };
         match by_class.iter_mut().find(|(class, _)| *class == held.class) {
             Some((_, items)) => items.push(item),
@@ -1904,9 +1911,18 @@ fn save_doc(
             ));
         }
     };
+    // The slot is expected to hold what the view was read as, or last saved as.
+    let Some(print) = entity.saved_print() else {
+        return log.trouble(format!("“{}” cannot be saved to its slot.", entity.name));
+    };
     if let Some(note) = write_note(&device.state, class, entity).filter(|_| ask) {
         return browser.ask_write(&entity.name, place(class, at), note, Act::WriteBack(id));
     }
+    let expect = Expect::Holds {
+        crc: Some(print.crc),
+        len: print.len,
+        name: crate::device::slot_label(&entity.name).unwrap_or_default(),
+    };
     device.send(
         DeviceCmd::Put {
             id,
@@ -1914,6 +1930,7 @@ fn save_doc(
             at,
             name: entity.name.clone(),
             payload,
+            expect,
         },
         log,
     );
@@ -1992,7 +2009,8 @@ mod tests {
         let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, program, &mut log);
         let piano = crate::testing::piano(1);
         let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, &mut log);
-        device.pretend_attached();
+        device.pretend_scanned(ObjectClass::Program, 1, &[""]);
+        device.pretend_lengths(ObjectClass::Piano, 1, &[None, None]);
         let program_at = Location::from_user(1, 1);
         let piano_at = Location::from_user(1, 2);
         enqueue(
@@ -2072,6 +2090,170 @@ mod tests {
                 "“a.pdf”, “b.png”, “c.zip” and 2 more were not copied in: drawbar does not \
               open these kinds of file."
             ]
+        );
+    }
+
+    /// What a walk or a write reports of a program slot at `at` holding `name`, with no
+    /// checksum.
+    fn program_slot(at: Location, name: &str) -> nord_usb::wire::ProgramInfo {
+        nord_usb::wire::ProgramInfo {
+            location: at,
+            body_len: 121,
+            format: "ne5p".into(),
+            version: 4,
+            crc32: None,
+            modified: None,
+            name: name.into(),
+        }
+    }
+
+    /// Each batch asked for, as its items' ids and what each expects its slot to hold.
+    fn batches(bench: &Bench) -> Vec<Vec<(u64, Expect)>> {
+        let batches = bench
+            .device
+            .queued()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                DeviceCmd::SendAll { items, .. } => Some(
+                    items
+                        .iter()
+                        .map(|item| (item.id, item.expect.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            });
+        batches.collect()
+    }
+
+    #[test]
+    fn a_write_its_slot_refused_stays_queued_shows_the_slot_and_goes_with_the_next_send() {
+        use crate::device::DeviceEvent;
+        use crate::queue::Occupancy;
+
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_scanned(class, 7, &[""]);
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench
+            .workspace
+            .ingest("Mine.ne5p".into(), Origin::Fresh, bytes, &mut bench.log);
+        enqueue(
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
+            id,
+            class,
+            at(0),
+        );
+        bench.act(vec![Act::SendAll]);
+        let shown = |name: &str| Expect::Holds {
+            crc: None,
+            len: 121,
+            name: name.into(),
+        };
+        assert_eq!(batches(&bench), [vec![(id, Expect::Vacant)]]);
+        bench.device.pump();
+
+        bench.device.pretend(DeviceEvent::Changed {
+            id,
+            class,
+            at: at(0),
+            holds: Some(program_slot(at(0), "Squabble B")),
+        });
+        poll(&mut bench);
+        let held = bench.queue.entry(id).expect("it is still queued");
+        assert!(
+            matches!(&held.replaces, Occupancy::Held(now) if now.name == "Squabble B"),
+            "the review shows what the slot holds now"
+        );
+        let why = held.failure.clone().unwrap_or_default();
+        assert!(why.contains("changed on the keyboard"), "{why}");
+        let (_, said) = bench.log.status();
+        assert!(said.contains("“Mine.ne5p” was not sent"), "{said}");
+
+        bench.act(vec![Act::SendAll]);
+        assert_eq!(
+            batches(&bench).last(),
+            Some(&vec![(id, shown("Squabble B"))]),
+            "the next send expects what the review showed"
+        );
+    }
+
+    #[test]
+    fn an_entry_whose_slot_is_unread_is_not_sent_and_its_read_is_asked() {
+        let mut bench = Bench::new();
+        bench.device.pretend_attached();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench
+            .workspace
+            .ingest("Mine.ne5p".into(), Origin::Fresh, bytes, &mut bench.log);
+        enqueue(
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
+            id,
+            ObjectClass::Program,
+            at(0),
+        );
+
+        bench.act(vec![Act::SendAll]);
+        assert_eq!(batches(&bench), Vec::<Vec<(u64, Expect)>>::new());
+        assert!(bench.queue.holds(id));
+        let reads = bench.device.queued().into_iter().any(|cmd| {
+            matches!(cmd, DeviceCmd::Get { at: read, why: Purpose::Compare, .. } if *read == at(0))
+        });
+        assert!(reads, "the slot is read");
+        let (_, said) = bench.log.status();
+        assert!(said.contains("waits for its slot to be read"), "{said}");
+    }
+
+    #[test]
+    fn a_view_saved_back_expects_its_slot_as_it_was_read_and_is_refused_once_it_changed() {
+        use crate::device::DeviceEvent;
+
+        let mut bench = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let read_as = crate::workspace::print_of(&bytes).expect("a container");
+        bench.device.pretend_attached();
+        let id = bench.workspace.view(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(3),
+            },
+            bytes.clone(),
+            &mut bench.log,
+        );
+        let (_, edited) =
+            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
+        bench.workspace.replace_bytes(id, edited, &mut bench.log);
+
+        bench.act(vec![Act::SaveDoc(id)]);
+        let expect = bench.device.queued().into_iter().find_map(|cmd| match cmd {
+            DeviceCmd::Put { expect, .. } => Some(expect.clone()),
+            _ => None,
+        });
+        let as_read = Expect::Holds {
+            crc: Some(read_as.crc),
+            len: read_as.len,
+            name: "Africa Split".into(),
+        };
+        assert_eq!(expect, Some(as_read));
+
+        bench.device.pretend(DeviceEvent::Changed {
+            id,
+            class: ObjectClass::Program,
+            at: at(3),
+            holds: Some(program_slot(at(3), "Squabble B")),
+        });
+        poll(&mut bench);
+        assert!(bench.workspace.get(id).unwrap().is_unsaved());
+        let (_, said) = bench.log.status();
+        assert_eq!(
+            said,
+            "“Africa Split.ne5p” was not sent: Programs 7:4 changed on the keyboard."
         );
     }
 
@@ -2898,6 +3080,8 @@ mod tests {
             mut log,
             ..
         } = Bench::new();
+        device.pretend_scanned(ObjectClass::Program, 7, &["", ""]);
+        device.pretend_scanned(ObjectClass::SetList, 7, &[""]);
         let bytes = Fresh::Program.bytes().unwrap();
         for (class, slot) in [
             (ObjectClass::Program, 0),
@@ -3180,6 +3364,9 @@ mod tests {
             &mut bench.tabs,
             &mut bench.queue,
         );
+        bench
+            .device
+            .pretend_scanned(class, 7, &["Africa Split", ""]);
         bench.device.pretend_attached_as("Nord Stage 4");
         let made = bench
             .workspace

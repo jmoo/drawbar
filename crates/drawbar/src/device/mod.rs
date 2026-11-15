@@ -119,12 +119,14 @@ pub enum DeviceCmd {
         at: Location,
         name: String,
         payload: Payload,
+        expect: Expect,
     },
     /// Every queued object of one class, written inside a single session.
     ///
     /// Each item runs the same read-back, delete, write and restore flow as a lone
     /// [`DeviceCmd::Put`]; only the session is shared, and a restore runs in one of its
-    /// own after it. A refusal stops the batch there.
+    /// own after it. A refusal stops the batch there; an item whose slot is not as it
+    /// expects is skipped.
     SendAll {
         class: ObjectClass,
         items: Vec<Outgoing>,
@@ -191,6 +193,61 @@ pub struct Outgoing {
     pub at: Location,
     pub name: String,
     pub payload: Payload,
+    pub expect: Expect,
+}
+
+/// What a write expects its slot to hold, as the user was shown it when they sent it.
+/// The worker reads the slot just before the write and writes nothing over anything
+/// else.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Expect {
+    Vacant,
+    /// ⚠️ `crc` is `None` where the class or the read that found the occupant reports no
+    /// checksum; the occupant is then known by its name and body length.
+    Holds {
+        crc: Option<u32>,
+        len: u32,
+        name: String,
+    },
+}
+
+impl Expect {
+    /// What a read reporting `info` found, `None` for an empty slot.
+    pub fn of(info: Option<&ProgramInfo>) -> Expect {
+        match info {
+            None => Expect::Vacant,
+            Some(info) => Expect::Holds {
+                crc: info.crc32,
+                len: info.body_len,
+                name: info.name.trim().to_string(),
+            },
+        }
+    }
+
+    /// Whether a slot found holding `now` holds what this expects: the same checksum and
+    /// length, or where either side has no checksum, the same name and length.
+    pub fn matches(&self, now: &Expect) -> bool {
+        match (self, now) {
+            (Expect::Vacant, Expect::Vacant) => true,
+            (
+                Expect::Holds { crc, len, name },
+                Expect::Holds {
+                    crc: c,
+                    len: l,
+                    name: n,
+                },
+            ) => {
+                let same = match (crc, c) {
+                    (Some(crc), Some(now)) => crc == now,
+                    _ => name == n,
+                };
+                len == l && same
+            }
+            (Expect::Vacant, Expect::Holds { .. }) | (Expect::Holds { .. }, Expect::Vacant) => {
+                false
+            }
+        }
+    }
 }
 
 /// What a write sends: the bytes an asset holds, or the file it rests in, which the
@@ -520,6 +577,14 @@ pub enum DeviceEvent {
         /// asset may hold something else by now, since a write takes as long as the
         /// instrument takes.
         sent: Payload,
+    },
+    /// A write found its slot holding something other than it expected, and wrote
+    /// nothing. `holds` is what the slot holds now, `None` where it is empty.
+    Changed {
+        id: u64,
+        class: ObjectClass,
+        at: Location,
+        holds: Option<ProgramInfo>,
     },
     /// A slot's former contents, which a failed write and a failed restore, or a delete
     /// that may have landed, left in the file they were read into.
@@ -2202,7 +2267,7 @@ impl Device {
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
-                    crate::queue::recheck(workspace, self, queue, log);
+                    crate::queue::refresh(workspace, self, queue, log);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
@@ -2302,6 +2367,20 @@ impl Device {
                     if let Some(print) = print {
                         link_sent(&self.state, workspace, id, (class, at, &name), print);
                     }
+                }
+                DeviceEvent::Changed {
+                    id,
+                    class,
+                    at,
+                    holds,
+                } => {
+                    let slot = (id, class, at);
+                    crate::queue::changed_under(workspace, self, queue, log, slot, holds.as_ref());
+                    let name = workspace.get(id).map_or("", |entity| entity.name.as_str());
+                    log.trouble(format!(
+                        "“{name}” was not sent: {} changed on the keyboard.",
+                        place(class, at)
+                    ));
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -3088,6 +3167,7 @@ mod tests {
                     at,
                     name: "Africa Split".into(),
                     payload: Payload::Bytes(vec![0; 4]),
+                    expect: Expect::Vacant,
                 },
                 &mut log,
             );
@@ -3139,6 +3219,7 @@ mod tests {
                 at,
                 name: "Africa Split".into(),
                 payload: Payload::Bytes(vec![0; 4]),
+                expect: Expect::Vacant,
             };
             device.send(put, &mut Log::default());
             device.pump();
@@ -3232,6 +3313,7 @@ mod tests {
             at: Location { bank: 6, slot: 3 },
             name: "Africa Split".into(),
             payload: Payload::Bytes(Vec::new()),
+            expect: Expect::Vacant,
         };
         let words = cmd.words();
         assert_eq!(words.doing, "Sending “Africa Split” to Programs 7:4…");
