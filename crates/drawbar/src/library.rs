@@ -19,6 +19,7 @@ use crate::device::{fit, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
 use crate::panel::{cut, list_width, pill_at, row_ink, view_header, Track, ROW_INSET};
+use crate::plays::Catalog;
 use crate::queue::{Diff, Queue};
 use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
@@ -116,9 +117,9 @@ impl Where {
 
 /// The library (piano or sample) a row plays, which the row's bytes do not name.
 ///
-/// ⚠️ A name can only come from the instrument, because a program file stores a bare id
-/// and no name. `Wanted` is an id nothing has resolved, never one the instrument said
-/// it did not hold. No read this app makes reports a missing library.
+/// ⚠️ A program file stores a bare id, and a name is found by hashing the names of the
+/// pianos and samples on this computer and on the attached instrument. `Wanted` is an id
+/// none of those has; an instrument not attached, or not fully read, may still hold it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Needs {
     Nothing,
@@ -143,13 +144,11 @@ impl Needs {
         match self {
             Needs::Nothing => "Nothing here says what it plays.".to_string(),
             Needs::Named { class, name } => format!(
-                "It plays the {} the instrument calls “{name}”.",
+                "It plays the {} “{name}”.",
                 Kind::from_class(*class).chip()
             ),
             Needs::Wanted { class, id } => format!(
-                "This names a {} the instrument has not listed by id ({id:#010x}). Only the \
-                 instrument can put a name to one, and nothing it has been asked about \
-                 names this id.",
+                "It plays a {} that is not here ({id:#010x}).",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -209,13 +208,14 @@ pub fn rows(
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
     let kept = Kept::of(workspace);
     let instrument = device.product().and_then(Family::from_product);
+    let catalog = Catalog::of(workspace, device);
     for entity in workspace.listed() {
         // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = entity.spot() {
             claimed.push(slot);
         }
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, queue, worn.len(), &kept, instrument);
+        let row = local(entity, device, queue, worn.len(), &kept, instrument, &catalog);
         let state = state(row.item, row.where_, queue);
         if admits(filter, &row, worn, state) {
             rows.push(row);
@@ -280,10 +280,12 @@ pub fn row_of(
 ) -> Option<Row> {
     let instrument = device.product().and_then(Family::from_product);
     let kept = Kept::of(workspace);
-    row_with(item, workspace, device, queue, tags, &kept, instrument)
+    let catalog = Catalog::of(workspace, device);
+    row_with(item, workspace, device, queue, tags, &kept, instrument, &catalog)
 }
 
 /// [`row_of`], with what it reads of the whole list already taken.
+#[allow(clippy::too_many_arguments)]
 fn row_with(
     item: Item,
     workspace: &Workspace,
@@ -292,12 +294,13 @@ fn row_with(
     tags: &Tags,
     kept: &Kept,
     instrument: Option<Family>,
+    catalog: &Catalog,
 ) -> Option<Row> {
     match item {
         Item::Local(id) => {
             let entity = workspace.get(id)?;
             let worn = tags.worn(id).len();
-            Some(local(entity, device, queue, worn, kept, instrument))
+            Some(local(entity, device, queue, worn, kept, instrument, catalog))
         }
         Item::Slot { class, at } => {
             Some(slot(class, at, device.slot(class, at).flatten()?, device))
@@ -313,6 +316,7 @@ fn local(
     tags: usize,
     kept: &Kept,
     instrument: Option<Family>,
+    catalog: &Catalog,
 ) -> Row {
     Row {
         item: Item::Local(entity.id),
@@ -324,7 +328,7 @@ fn local(
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
         size: entity.size(),
-        needs: wanted(entity, device),
+        needs: wanted(entity, catalog),
     }
 }
 
@@ -450,22 +454,18 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState, queue: &Queue) 
     whereabouts(entity, device, queue).mark(queue.holds(entity.id))
 }
 
-/// The library a program names, and its name if the instrument has reported one. A
-/// program not read this session names what a read of it found before.
-pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let plays = match (&entity.entity, entity.remembered()) {
-        (Some(_), _) => entity.plays,
-        (None, Some(known)) => known.plays,
-        (None, None) => None,
-    };
-    let Some(plays) = plays else {
+/// The first library a program names, by name where a piano or sample here or on the
+/// attached instrument goes by its id. A program not read this session names what a
+/// read of it found before.
+pub(crate) fn wanted(entity: &LocalEntity, catalog: &Catalog) -> Needs {
+    let Some(plays) = crate::plays::named(entity).first() else {
         return Needs::Nothing;
     };
-    let (class, id) = (plays.class(), plays.id());
-    match device.dependency_name(class, id) {
-        Some(name) => Needs::Named {
+    let (class, id) = plays.key();
+    match catalog.get((class, id)) {
+        Some(found) => Needs::Named {
             class,
-            name: name.to_string(),
+            name: found.name.clone(),
         },
         None => Needs::Wanted { class, id },
     }
@@ -1093,6 +1093,7 @@ impl Library {
                 let shown = items.get(shown).unwrap_or_default();
                 let kept = Kept::of(workspace);
                 let instrument = device.state.product().and_then(Family::from_product);
+                let catalog = Catalog::of(workspace, &device.state);
                 let tags = browser.tags();
                 let rows: Vec<Row> = shown
                     .iter()
@@ -1105,6 +1106,7 @@ impl Library {
                             tags,
                             &kept,
                             instrument,
+                            &catalog,
                         )
                     })
                     .collect();

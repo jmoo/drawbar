@@ -451,7 +451,7 @@ impl Document {
         let mut details = None;
         let mut typed = false;
         let mut asked = Vec::new();
-        let mut lookup = piano_lookup(entity, registry.as_deref(), device);
+        let mut lookup = piano_lookup(registry.as_deref(), workspace, device);
         // A child `Ui` with a salted id keeps the body's scroll state under one id,
         // whatever the header drew above it. See [`PAGE`].
         let mut page = ui.new_child(
@@ -535,13 +535,6 @@ impl Document {
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
                 Asked::Audition => self.audition(id, workspace, log),
-            }
-        }
-        if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            match lookup.asked {
-                true => device.ask_deps_again(class, at, log),
-                false if lookup.wants_a_name() => device.read_deps(class, at, log),
-                false => {}
             }
         }
         if let Some(name) = act.rename {
@@ -1526,23 +1519,19 @@ fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud>
 
 /// What is known about the piano a program plays.
 ///
-/// ⚠️ The name can only come from the instrument. A `.ne5p` stores the piano's id and no
-/// name, and the category and model beside it are the panel's dial positions, which do
-/// not identify a piano. A document opened with no instrument attached shows the id and
-/// says so.
+/// A `.ne5p` stores the piano's id and no name. The id is found by name among the pianos
+/// on this computer and on the attached instrument. The category and model beside it are
+/// the panel's dial positions, which name a piano only on the attached instrument.
 fn piano_lookup(
-    entity: &LocalEntity,
     registry: Option<&[Field]>,
+    workspace: &Workspace,
     device: &Device,
 ) -> panel::PianoLookup {
     let stored = registry
         .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
         .and_then(|field| library_id(&field.value));
     let id = stored.filter(|id| *id != 0);
-    let slot = entity.origin.slot();
-    let name = id
-        .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
-        .map(str::to_string);
+    let name = id.and_then(|id| crate::plays::name_of((ObjectClass::Piano, id), workspace, &device.state));
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
@@ -1551,11 +1540,7 @@ fn piano_lookup(
         .and_then(current_model)
         .and_then(|n| models.iter().find(|(i, _)| *i == n))
         .map(|(_, piano)| piano.trim().to_string());
-    let dialed_unnamed = dialed
-        .as_deref()
-        .is_some_and(|piano| device.state.library_id(ObjectClass::Piano, piano).is_none());
-    // Dependency ids are authoritative; disagreement means the scanned position mapping
-    // is wrong.
+    // The instrument plays the piano the id names, wherever the dials point.
     let scan_disagrees = match (&name, registry) {
         (Some(named), Some(fields)) => current_model(fields)
             .and_then(|n| models.iter().find(|(i, _)| *i == n))
@@ -1568,11 +1553,6 @@ fn piano_lookup(
         id,
         name,
         dialed,
-        dialed_unnamed,
-        can_ask: slot.is_some_and(|(class, _)| class.reports_dependencies())
-            && device.state.connected(),
-        refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
-        asked: false,
         models,
         scan_disagrees,
     }
@@ -1583,8 +1563,8 @@ fn piano_lookup(
 ///
 /// The instrument's bank list names the piano banks after the panel's categories, in
 /// panel order, and a program's stored category and model match the bank and slot the
-/// instrument reports for the piano it depends on. The dependency name remains the
-/// check; see `scan_disagrees` in [`piano_lookup`].
+/// instrument reports for the piano it depends on. Where the id names another piano, the
+/// id wins; see `scan_disagrees` in [`piano_lookup`].
 fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
     let Some(category) = fields
         .iter()
@@ -1617,7 +1597,8 @@ fn stored_category(category: &Field, value: &str) -> Option<u8> {
 }
 
 /// The id an edit that moves the Type or Model dial also writes, unless it sets the id
-/// itself: the id the instrument has given the piano now at that position, or 0.
+/// itself: the id of the piano the attached instrument holds at that position, or 0
+/// where no walk has read one there.
 ///
 /// ⚠️ The Electro 5 plays the piano the id names, whatever the dials say, and plays the
 /// piano at the dials' position only where the id is 0. Confirmed on hardware.
@@ -1643,8 +1624,7 @@ fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(Stri
     .zip(model.trim().parse::<usize>().ok());
     let id = at
         .and_then(|(category, model)| device.state.piano_at(category, model))
-        .and_then(|name| device.state.library_id(ObjectClass::Piano, name))
-        .unwrap_or(0);
+        .map_or(0, |name| crate::plays::slot_key(ObjectClass::Piano, name).1);
     Some((panel::PIANO_ID.to_string(), id.to_string()))
 }
 
@@ -2785,130 +2765,57 @@ mod tests {
         );
     }
 
-    /// A program stores its piano's id; only the instrument knows the name.
+    /// A program stores its piano's id, and the piano is named by the file or slot whose
+    /// name hashes to it. 0x92e0cba2 is the id an Electro 5 gave a piano written as
+    /// `drawbar-tine`.
     #[test]
-    fn a_pianos_name_comes_only_from_the_instrument() {
-        use nord_usb::{Location, ObjectClass};
-
+    fn a_pianos_name_is_that_of_the_file_or_slot_its_id_hashes_from() {
         let Bench {
             mut workspace,
-            device,
+            mut device,
             mut log,
             ..
         } = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0x92e0cba2".into())])
+            .unwrap()
+            .0;
+        let named = |workspace: &Workspace, device: &Device| {
+            piano_lookup(Some(&fields), workspace, device).name
+        };
+        assert_eq!(named(&workspace, &device), None, "no piano goes by that name");
 
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.to_vec();
-        let fields = fields::apply(&bytes, &[]).unwrap().0;
-        let local = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
-        assert!(local.name.is_none(), "nothing has been asked");
-        assert!(!local.can_ask, "and nothing can be asked");
+        device.pretend_lengths(ObjectClass::Piano, 4, &[Some(("drawbar-tine", 1000))]);
+        assert_eq!(named(&workspace, &device).as_deref(), Some("drawbar-tine"));
 
-        let from_device = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 3 },
-            },
-            bytes,
+        let offline = Device::new(egui::Context::default());
+        workspace.ingest(
+            "drawbar-tine.npno".into(),
+            Origin::Fresh,
+            crate::testing::piano(1),
             &mut log,
         );
-        let copied = piano_lookup(workspace.get(from_device).unwrap(), Some(&fields), &device);
-        assert!(copied.name.is_none(), "still nothing has been asked");
-        // A fresh program stores 0, so its dials pick its piano.
-        assert_eq!(copied.id, None);
+        assert_eq!(
+            named(&workspace, &offline).as_deref(),
+            Some("drawbar-tine"),
+            "a piano file on this computer"
+        );
     }
 
-    /// The piano's name survives a read of another slot.
+    /// A program's name for its piano is worked out, so a document asks the instrument
+    /// nothing about what its slot plays.
     #[test]
-    fn a_document_asks_what_its_slot_plays_and_keeps_the_answer() {
-        use nord_usb::wire::Dependency;
-
-        let class = ObjectClass::Program;
+    fn a_document_from_a_slot_asks_nothing_about_what_it_plays() {
         let at = Location { bank: 6, slot: 3 };
-        let piano = 0x0102_0304;
-
         let mut open = Open::empty();
         open.device.pretend_attached();
-        let fresh = open
-            .workspace
-            .create(Fresh::Program, &mut open.log)
-            .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
-        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
+        let bytes = Fresh::Program.bytes().unwrap();
+        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), "16909060".into())])
             .expect("a program can name a piano");
         open.id = open.workspace.ingest(
             "Africa-Split.ne5p".into(),
-            Origin::Device { class, at },
-            plays,
-            &mut open.log,
-        );
-
-        let reads = |open: &Open| {
-            open.device
-                .queued()
-                .iter()
-                .filter(|cmd| {
-                    matches!(cmd, crate::device::DeviceCmd::Deps { at: asked, .. }
-                    if *asked == at)
-                })
-                .count()
-        };
-        open.frame(Vec::new());
-        assert_eq!(reads(&open), 1, "the document asked what the slot plays");
-        open.frame(Vec::new());
-        assert_eq!(reads(&open), 1, "and asked only once");
-
-        let named = |open: &Open| {
-            let registry = fields::apply(&open.entity().bytes, &[])
-                .expect("the registry reads it")
-                .0;
-            piano_lookup(open.entity(), Some(&registry), &open.device)
-                .name
-                .clone()
-        };
-        assert_eq!(named(&open), None, "nothing has answered yet");
-
-        open.device.pretend_deps(
-            class,
-            at,
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: piano,
-                name: "Royal Grand 3D".into(),
-                location: None,
-            }],
-        );
-        assert_eq!(named(&open).as_deref(), Some("Royal Grand 3D"));
-
-        open.device
-            .pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
-        assert_eq!(
-            named(&open).as_deref(),
-            Some("Royal Grand 3D"),
-            "the name survives another slot's read"
-        );
-    }
-
-    /// The instrument refuses the dependency read for live slots, so a live slot's
-    /// document shows its piano by id and never asks.
-    #[test]
-    fn a_live_slot_document_never_asks_what_it_plays() {
-        let at = Location { bank: 0, slot: 0 };
-        let mut open = Open::empty();
-        open.device.pretend_attached();
-        let fresh = open
-            .workspace
-            .create(Fresh::Program, &mut open.log)
-            .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
-        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), "16909060".into())])
-            .expect("a live slot can name a piano");
-        open.id = open.workspace.ingest(
-            "Live-1.ne5l".into(),
             Origin::Device {
-                class: ObjectClass::Live,
+                class: ObjectClass::Program,
                 at,
             },
             plays,
@@ -2928,8 +2835,6 @@ mod tests {
     /// Without a scan, the dial stays numeric and never shows a guessed name.
     #[test]
     fn the_model_dial_lists_the_scanned_pianos_of_the_current_category() {
-        use nord_usb::ObjectClass;
-
         let Bench {
             mut workspace,
             mut device,
@@ -2941,13 +2846,12 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
 
-        // Nothing scanned: the dial stays numeric.
-        let unscanned = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        let unscanned = piano_lookup(Some(&fields), &workspace, &device);
         assert!(unscanned.models.is_empty());
 
         // A fresh program's category sits at stored position 0, so its bank is 1.
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
-        let scanned = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        let scanned = piano_lookup(Some(&fields), &workspace, &device);
         assert_eq!(
             scanned.models,
             vec![
@@ -2956,70 +2860,65 @@ mod tests {
             ],
             "empty slots keep their positions"
         );
-        // No dependency name is in hand, so there is nothing to disagree with.
-        assert!(scanned.scan_disagrees.is_none());
+        assert!(scanned.scan_disagrees.is_none(), "the id is 0");
 
-        // Another bank belongs to another category.
         let mut other = Device::new(egui::Context::default());
         other.pretend_scanned(ObjectClass::Piano, 3, &["Clav D6"]);
-        let elsewhere = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &other);
-        assert!(elsewhere.models.is_empty());
+        let elsewhere = piano_lookup(Some(&fields), &workspace, &other);
+        assert!(elsewhere.models.is_empty(), "another bank, another category");
     }
 
-    /// The instrument plays the piano at the dials where the id is 0, and its
-    /// dependency reply gives that piano's id, which a bundle names it by.
+    /// The instrument plays the piano the id names, whatever the dials say.
     #[test]
-    fn a_zero_id_shows_the_dialed_piano_and_asks_for_its_id() {
-        use nord_usb::wire::Dependency;
+    fn dials_pointing_away_from_the_piano_the_id_names_are_called_out() {
+        let Bench { workspace, mut device, .. } = Bench::new();
+        let white = crate::plays::slot_key(ObjectClass::Piano, "White Grand").1;
+        let sets = [
+            (panel::PIANO_ID.into(), white.to_string()),
+            (panel::PIANO_MODEL.into(), "0".into()),
+        ];
+        let fields = fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .0;
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
 
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
+        assert_eq!(lookup.name.as_deref(), Some("White Grand"));
+        assert_eq!(lookup.scan_disagrees.as_deref(), Some("Royal Grand"));
+    }
+
+    /// The instrument plays the piano at the dials where the id is 0.
+    #[test]
+    fn a_zero_id_shows_the_dialed_piano() {
         let Bench {
-            mut workspace,
+            workspace,
             mut device,
-            mut log,
             ..
         } = Bench::new();
-        let at = Location { bank: 6, slot: 3 };
         let bytes = Fresh::Program.bytes().unwrap();
         let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0".into())])
             .unwrap()
             .0;
-        let origin = Origin::Device {
-            class: ObjectClass::Program,
-            at,
-        };
-        let id = workspace.ingest("Dialed.ne5p".into(), origin, bytes, &mut log);
         let stored = fields
             .iter()
             .find(|field| field.path == panel::PIANO_ID)
             .unwrap();
-        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
-
-        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
-        assert_eq!(lookup.names(stored), Some("Royal Grand"));
-        assert!(
-            lookup.wants_a_name(),
-            "the instrument has not given it an id"
+        assert_eq!(
+            piano_lookup(Some(&fields), &workspace, &device).names(stored),
+            None,
+            "no instrument to dial"
         );
 
-        let royal = Dependency {
-            flag: 1,
-            class: ObjectClass::Piano,
-            id: 0x0102_0304,
-            name: "Royal Grand".into(),
-            location: None,
-        };
-        device.pretend_deps(ObjectClass::Program, at, vec![royal]);
-        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
         assert_eq!(lookup.names(stored), Some("Royal Grand"));
-        assert!(!lookup.wants_a_name());
     }
 
     /// The Electro 5 plays the piano the id names, so a dial moved under an old id would
-    /// keep playing the old piano.
+    /// keep playing the old piano. 0x92e0cba2 is the id an Electro 5 gave a piano written
+    /// as `drawbar-tine`.
     #[test]
     fn moving_the_piano_dials_points_the_id_at_the_piano_now_there() {
-        use nord_usb::wire::Dependency;
-
         let Bench {
             mut workspace,
             mut device,
@@ -3031,18 +2930,7 @@ mod tests {
         let plays_royal = [(panel::PIANO_ID.to_string(), "0x01020304".to_string())];
         let fields = fields::apply(&bytes, &plays_royal).unwrap().0;
 
-        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
-        device.pretend_deps(
-            ObjectClass::Program,
-            Location { bank: 6, slot: 3 },
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: 0x0a0b_0c0d,
-                name: "White Grand".into(),
-                location: None,
-            }],
-        );
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "drawbar-tine"]);
         let follows = |device: &Device, sets: &[(&str, &str)]| {
             let sets: Sets = sets
                 .iter()
@@ -3050,26 +2938,16 @@ mod tests {
                 .collect();
             piano_follows(&sets, &fields, device).map(|(_, id)| id)
         };
-        let names = |device: &mut Device, slot, id, name: &str| {
-            let dep = Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id,
-                name: name.into(),
-                location: None,
-            };
-            device.pretend_deps(ObjectClass::Program, Location { bank: 6, slot }, vec![dep]);
-        };
 
         assert_eq!(
             follows(&device, &[(panel::PIANO_MODEL, "2")]),
-            Some(0x0a0b_0c0d.to_string()),
-            "a piano the instrument has named"
+            Some(0x92e0_cba2_u32.to_string()),
+            "the id of the name the scan read there"
         );
         assert_eq!(
-            follows(&device, &[(panel::PIANO_MODEL, "0")]),
+            follows(&device, &[(panel::PIANO_MODEL, "1")]),
             Some("0".to_string()),
-            "a piano with no id in hand is left for the instrument to find by position"
+            "an empty position"
         );
         assert_eq!(
             follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
@@ -3086,19 +2964,11 @@ mod tests {
         );
         assert_eq!(follows(&device, &[("piano_panel.touch", "2")]), None);
 
-        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1"]);
-        names(&mut device, 4, 0x0b0c_0d0e, "Upright U1");
+        device.pretend_scanned(ObjectClass::Piano, 2, &["drawbar-tine"]);
         assert_eq!(
             follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
-            Some(0x0b0c_0d0e.to_string()),
+            Some(0x92e0_cba2_u32.to_string()),
             "the Type dial counts in its own bank"
-        );
-
-        names(&mut device, 5, 0x0c0d_0e0f, "White Grand");
-        assert_eq!(
-            follows(&device, &[(panel::PIANO_MODEL, "2")]),
-            Some("0".to_string()),
-            "two pianos the instrument calls White Grand"
         );
     }
 

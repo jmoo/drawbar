@@ -177,7 +177,7 @@ impl Stands {
                 place(ObjectClass::Program, at)
             ),
             Stands::Needs { class, id } => format!(
-                "the program is there, and it plays a {} the instrument has not named ({id:#010x})",
+                "the program is there, and it plays a {} that is not here ({id:#010x})",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -253,7 +253,7 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
     (
         Some(display_name(&kept.name).to_string()),
         Some(Item::Local(kept.id)),
-        plays(kept, seen.device),
+        plays(kept, seen),
     )
 }
 
@@ -270,11 +270,11 @@ fn stands_on(at: Location, workspace: &Workspace) -> Option<&LocalEntity> {
 /// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
 /// piano id is normal ([`Needs::Wanted`] means unresolved, not missing), and flagging it
 /// would flag every entry of every set list opened from disk.
-fn plays(program: &LocalEntity, device: &DeviceState) -> Stands {
-    if !device.connected() {
+fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
+    if !seen.device.connected() {
         return Stands::Resolves;
     }
-    match wanted(program, device) {
+    match wanted(program, &crate::plays::Catalog::of(seen.workspace, seen.device)) {
         Needs::Wanted { class, id } => Stands::Needs { class, id },
         Needs::Named { .. } | Needs::Nothing => Stands::Resolves,
     }

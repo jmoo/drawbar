@@ -2202,10 +2202,6 @@ mod tests {
             id: None,
             name: None,
             dialed: None,
-            dialed_unnamed: false,
-            can_ask: false,
-            refused: false,
-            asked: false,
             models: Vec::new(),
             scan_disagrees: None,
         }

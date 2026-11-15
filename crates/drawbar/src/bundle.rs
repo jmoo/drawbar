@@ -9,6 +9,7 @@ use nord_format::bundle::archive::{Directory, DosTime, Entry};
 #[cfg(target_arch = "wasm32")]
 use nord_format::bundle::archive::{Tail, TAIL_MAX};
 use nord_format::bundle::{manifest, Class, Item, Key, Plan};
+use nord_format::components::library_id;
 use nord_format::cbin::Header;
 use nord_format::{Entity, Program};
 use nord_usb::{Location, ObjectClass};
@@ -115,9 +116,9 @@ pub enum Laid {
 /// Lay out a bundle of `ids`, with every piano, sample and program they need that this
 /// computer holds.
 ///
-/// A program names a piano or sample by an id its file does not hold, so one is found
-/// by the name the instrument gave that id. A set list names programs by slot, so one is
-/// found where exactly one program on this computer claims that slot.
+/// A program names a piano or sample by the id of its name, so one is found by hashing
+/// the names of the files here. A set list names programs by slot, so one is found
+/// where exactly one program on this computer claims that slot.
 pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Result<Laid, String> {
     let mut chosen: Vec<u64> = Vec::new();
     let mut members: Vec<(Item, Body)> = Vec::new();
@@ -152,10 +153,13 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
             .filter(|need| !provided(need))
             .collect();
         for need in unmet {
-            match provider(need, workspace, device) {
+            match provider(need, workspace) {
                 Provider::One(id) if !chosen.contains(&id) => adding.push(id),
                 Provider::Many => {
-                    let why = format!("more than one file on this computer is {}", needed(need));
+                    let why = format!(
+                        "more than one file on this computer is {}",
+                        needed(need, workspace, device)
+                    );
                     if !left_out.contains(&why) {
                         left_out.push(why);
                     }
@@ -240,7 +244,7 @@ fn member(
         }
         _ => None,
     };
-    let name = stem(entity);
+    let name = crate::device::slot_label(&entity.name).ok_or_else(carried)?;
     let mut item = Item::of(&header, &name, decoded).ok_or_else(carried)?;
     // The instrument's own list of what the slot an object came from needs counts over
     // the file's while the slot still holds these bytes: it can name a piano or sample
@@ -259,19 +263,15 @@ fn member(
     if let Some(needs) = listed.and_then(|(class, at)| device.needs_of(class, at)) {
         item.needs = needs.to_vec();
     } else if let Some((category, model)) = dialed(decoded) {
-        let piano = device.piano_at(category, model);
-        match piano.and_then(|piano| device.library_id(ObjectClass::Piano, piano)) {
-            Some(id) => item.needs.insert(0, Key::Piano(id)),
-            None => unnamed = Some(unnamed_piano(&name, piano)),
+        match device.piano_at(category, model) {
+            Some(piano) => item.needs.insert(0, Key::Piano(library_id(piano))),
+            None => {
+                unnamed = Some(format!(
+                    "the piano “{name}” plays, as no scan of the instrument names it"
+                ))
+            }
         }
     }
-    item.provides = item.provides.or_else(|| match item.class {
-        Class::Piano => device.library_id(ObjectClass::Piano, &name).map(Key::Piano),
-        Class::Sample => device
-            .library_id(ObjectClass::Sample, &name)
-            .map(Key::Sample),
-        Class::Program | Class::SetList => None,
-    });
     Ok(((item, body), unnamed))
 }
 
@@ -288,23 +288,19 @@ fn dialed(decoded: Option<&Entity>) -> Option<(u8, usize)> {
     (panel.id.id() == 0).then_some(dials)
 }
 
-/// Why a piano a program plays by its dials stays out of a bundle: no id to name it by.
-fn unnamed_piano(program: &str, piano: Option<&str>) -> String {
-    match piano {
-        Some(piano) => {
-            format!(
-                "“{piano}”, the piano “{program}” plays, as the instrument has not given its id"
-            )
-        }
-        None => format!("the piano “{program}” plays, as no scan of the instrument names it"),
-    }
-}
-
-/// What a need names, in words.
-pub fn needed(need: Key) -> String {
+/// What a need names, in words: a piano or sample by its name, where a file here or a
+/// slot on the instrument goes by its id.
+pub fn needed(need: Key, workspace: &Workspace, device: &DeviceState) -> String {
+    let named = |class, id| crate::plays::name_of((class, id), workspace, device);
     match need {
-        Key::Piano(id) => format!("the piano the instrument knows as {id:#010x}"),
-        Key::Sample(id) => format!("the sample the instrument knows as {id:#010x}"),
+        Key::Piano(id) => match named(ObjectClass::Piano, id) {
+            Some(name) => format!("“{name}”"),
+            None => format!("the piano {id:#010x}"),
+        },
+        Key::Sample(id) => match named(ObjectClass::Sample, id) {
+            Some(name) => format!("“{name}”"),
+            None => format!("the sample {id:#010x}"),
+        },
         Key::Program(bank, slot) => format!(
             "the program at {}",
             crate::strings::shown(nord_usb::Location {
@@ -312,19 +308,6 @@ pub fn needed(need: Key) -> String {
                 slot: slot.into()
             },)
         ),
-    }
-}
-
-/// An asset's name without the extension its file carries.
-fn stem(entity: &LocalEntity) -> String {
-    let name = entity.name.trim();
-    match name.rsplit_once('.') {
-        Some((stem, extension))
-            if crate::browser::tagged(name).is_some() && !extension.is_empty() =>
-        {
-            stem.to_string()
-        }
-        _ => name.to_string(),
     }
 }
 
@@ -339,24 +322,18 @@ enum Provider {
 }
 
 /// The asset on this computer that provides `need`.
-fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Provider {
+fn provider(need: Key, workspace: &Workspace) -> Provider {
+    let library = |key| {
+        workspace
+            .entities()
+            .iter()
+            .filter(|e| crate::plays::key_of(e) == Some(key))
+            .map(|e| e.id)
+            .collect()
+    };
     let found: Vec<u64> = match need {
-        Key::Piano(id) | Key::Sample(id) => {
-            let (class, tag) = match need {
-                Key::Piano(_) => (ObjectClass::Piano, "npno"),
-                _ => (ObjectClass::Sample, "nsmp"),
-            };
-            let Some(name) = device.dependency_name(class, id) else {
-                return Provider::None;
-            };
-            let name = name.trim();
-            workspace
-                .entities()
-                .iter()
-                .filter(|e| stem(e) == name && e.format_tag() == tag)
-                .map(|e| e.id)
-                .collect()
-        }
+        Key::Piano(id) => library((ObjectClass::Piano, id)),
+        Key::Sample(id) => library((ObjectClass::Sample, id)),
         Key::Program(bank, slot) => workspace
             .entities()
             .iter()
@@ -565,12 +542,12 @@ mod tests {
         );
     }
 
+    /// 0x92e0cba2 is the id an Electro 5 gave a piano written as `drawbar-tine`.
     #[test]
     fn a_program_whose_piano_id_is_zero_needs_the_piano_its_dials_pick() {
         use crate::device::Device;
         use crate::log::Log;
         use crate::workspace::{Fresh, Origin};
-        use nord_usb::wire::Dependency;
 
         let ctx = crate::testing::context();
         let mut log = Log::default();
@@ -586,7 +563,6 @@ mod tests {
         let id = workspace.ingest("Dialed.ne5p".into(), Origin::Fresh, bytes, &mut log);
         let entity = workspace.get(id).unwrap();
         let mut device = Device::new(ctx);
-        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1", "", "Upright U3"]);
         let laid = |device: &Device| {
             let ((item, _), unnamed) = member(entity, &device.state).unwrap();
             (item.needs, unnamed)
@@ -595,23 +571,11 @@ mod tests {
         let (needs, unnamed) = laid(&device);
         assert_eq!(needs, []);
         assert!(
-            unnamed
-                .as_deref()
-                .is_some_and(|why| why.contains("Upright U3")),
+            unnamed.as_deref().is_some_and(|why| why.contains("Dialed")),
             "{unnamed:?}"
         );
 
-        device.pretend_deps(
-            ObjectClass::Program,
-            Location { bank: 6, slot: 3 },
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: 0x0a0b_0c0d,
-                name: "Upright U3".into(),
-                location: None,
-            }],
-        );
-        assert_eq!(laid(&device), (vec![Key::Piano(0x0a0b_0c0d)], None));
+        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1", "", "drawbar-tine"]);
+        assert_eq!(laid(&device), (vec![Key::Piano(0x92e0_cba2)], None));
     }
 }

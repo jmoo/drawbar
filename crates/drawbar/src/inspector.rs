@@ -1344,13 +1344,6 @@ mod tests {
             None,
             "a program nothing has asked about"
         );
-        // A dependency returned with a blank name has only its id to show.
-        assert_eq!(
-            device
-                .state
-                .dependency_name(ObjectClass::Sample, 0x0999_0999),
-            None,
-        );
     }
 
     #[test]

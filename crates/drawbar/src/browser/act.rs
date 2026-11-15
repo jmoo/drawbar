@@ -1185,9 +1185,11 @@ fn export_bundle(
                 log.trouble(format!("Left out of the bundle: {why}."));
             }
             for (path, need) in &export.plan.unmet {
+                let stem = path.rsplit('/').next().unwrap_or(path);
+                let program = stem.rsplit_once('.').map_or(stem, |(stem, _)| stem);
                 log.trouble(format!(
-                    "{path} needs {}, which is not on this computer.",
-                    crate::bundle::needed(*need)
+                    "Left out: {}, which “{program}” plays, is not on this computer.",
+                    crate::bundle::needed(*need, workspace, &device.state)
                 ));
             }
             workspace.export_bundle(export);
