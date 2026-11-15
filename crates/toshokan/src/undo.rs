@@ -40,7 +40,8 @@ pub enum Entering {
     Step,
     /// As the undo or redo of this entry.
     Reversing(EntryHash),
-    /// Not at all: it only joins entities, or settles another writer's record.
+    /// Not at all: it only joins entities, settles another writer's record, or its
+    /// writer commits it as final.
     Final,
 }
 
@@ -50,7 +51,7 @@ impl Entering {
         let only_joins = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
         match plan.reverses {
             Some(entry) => Entering::Reversing(entry),
-            None if only_joins && !plan.joins.is_empty() => Entering::Final,
+            None if plan.r#final || (only_joins && !plan.joins.is_empty()) => Entering::Final,
             None => Entering::Step,
         }
     }

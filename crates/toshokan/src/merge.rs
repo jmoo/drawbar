@@ -718,6 +718,18 @@ impl Folded {
             .unwrap_or_default()
     }
 
+    /// The names of `entity`'s sets that hold a member.
+    pub fn sets(&self, entity: EntityId) -> Vec<&str> {
+        let Some(state) = self.entities.get(&entity) else {
+            return Vec::new();
+        };
+        let held = state.sets.iter().filter(|(_, members)| {
+            let added = |writes: &Writes<bool>| writes.iter().any(|held| held.value);
+            members.values().any(added)
+        });
+        held.map(|(key, _)| &**key).collect()
+    }
+
     /// The bytes `writer` displaced into its trash and has not emptied, oldest
     /// first, as its entries logged them.
     pub fn trash(&self, writer: WriterId) -> Vec<TrashItem> {

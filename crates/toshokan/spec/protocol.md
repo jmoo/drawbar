@@ -415,7 +415,8 @@ An intent may join one entity into another, as the app does for each entity a
 scan reports joined. It logs an `add` to the other of each member of each set
 the one holds and the other does not, a `write` to the other of each register
 the one holds a value of and the other holds none of, the one's shown value
-where its writes conflict, and then the one's `delete`. A register both hold a
+where its writes conflict, and then the one's `delete`, under every key the one
+holds, declared by the joining writer's schema or not. A register both hold a
 value of keeps the other's. Two writers joining the same entity converge: an
 add of a member already held and a second delete of one entity change nothing
 shown. The delete observes only the writes its writer saw, so a change to the
@@ -705,9 +706,10 @@ it ends when the instance closes. Each intent is kept with what it replaced, as
 the merged state showed it when it committed, and with where the binding found
 each file it changed or whose entity it deleted, so a file moved outside the app
 that no commit had pinned yet goes back where it was moved to. An intent that only
-dismisses runs or joins entities, or settles another writer's record, is final: it
-is not kept and leaves redo as it was, so an undo after it reverses the intent
-before it. Undo takes what a join or a settlement wrote for another writer's.
+dismisses runs or joins entities, or settles another writer's record, is final, as
+is one its writer commits as final: it is not kept and leaves redo as it was, so an
+undo after it reverses the intent before it. Undo takes what a final intent wrote
+for another writer's.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.
