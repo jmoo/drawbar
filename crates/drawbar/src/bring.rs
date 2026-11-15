@@ -1985,6 +1985,34 @@ mod tests {
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }
 
+    #[test]
+    fn an_undo_names_only_the_files_still_here_and_says_nothing_when_none_are() {
+        let undone = |removed: &[usize]| {
+            let mut bench = Bench::new();
+            let (a, b) = (body(), gained("40"));
+            walked_named(&mut bench, &[Some(("B", crc(&b))), Some(("A", crc(&a)))]);
+            let ids = [
+                linked(&mut bench, "A.ne5p", a.clone(), 1, &a),
+                linked(&mut bench, "B.ne5p", b.clone(), 2, &b),
+            ];
+            heard(&mut bench);
+            bring_in(
+                &mut bench.device,
+                &mut bench.workspace,
+                &mut bench.queue,
+                &mut bench.log,
+            );
+            for nth in removed {
+                bench.workspace.forget(ids[*nth]);
+            }
+            let before = bench.log.len();
+            let said = undo(&mut bench, "2 files follow their sounds to other slots.");
+            (bench.log.len() > before).then_some(said)
+        };
+        assert_eq!(undone(&[0]).as_deref(), Some("Linked “B” again."));
+        assert_eq!(undone(&[0, 1]), None);
+    }
+
     /// Two files whose slots hold other sounds now, unlinked by Bring them in.
     fn replaced(bench: &mut Bench) -> [u64; 2] {
         let slots = [

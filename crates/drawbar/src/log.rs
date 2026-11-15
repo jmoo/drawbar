@@ -89,19 +89,21 @@ pub struct Restored {
 impl Undo {
     /// Take the change back, and say what was taken back. A file that is gone is left
     /// alone; a file brought in is put back only while it is as bringing it in left it.
+    /// `None` when every file it names is gone.
     pub fn perform(
         self,
         workspace: &mut Workspace,
         queue: &mut Queue,
         asks: &mut Asks,
         log: &mut Log,
-    ) -> String {
+    ) -> Option<String> {
         match self {
-            Undo::Unlink { keyboard, ids } => {
+            Undo::Unlink { keyboard, mut ids } => {
+                ids.retain(|id| here(workspace, *id));
                 for id in &ids {
                     workspace.keep_off(*id, &keyboard);
                 }
-                format!("Unlinked {}.", named(workspace, &ids, "files"))
+                (!ids.is_empty()).then(|| format!("Unlinked {}.", named(workspace, &ids, "files")))
             }
             Undo::Unqueue(entries) => {
                 let still = |&(id, class, at): &Waiting| {
@@ -115,16 +117,20 @@ impl Undo {
                     .map(|it| it.0)
                     .collect();
                 ids.iter().for_each(|id| queue.forget(*id));
-                match ids.is_empty() {
+                Some(match ids.is_empty() {
                     true => "Not undone: the queue changed since.".to_string(),
                     false => format!(
                         "Took {} out of the queue.",
                         named(workspace, &ids, "sounds")
                     ),
-                }
+                })
             }
             Undo::Restore(kept) => restore(kept, workspace, asks, log),
-            Undo::Relink { keyboard, links } => {
+            Undo::Relink {
+                keyboard,
+                mut links,
+            } => {
+                links.retain(|(id, _)| here(workspace, *id));
                 let ours = |id| links.iter().any(|(it, _)| *it == id);
                 let taken = links.iter().find_map(|(_, held)| {
                     let other = workspace.linked_at(&keyboard, held.class(), &held.spot)?;
@@ -132,11 +138,20 @@ impl Undo {
                 });
                 if let Some((other, held)) = taken {
                     let name = named(workspace, &[other], "files");
-                    return format!("Not undone: {name} is linked to {} now.", spot(held));
+                    return Some(format!(
+                        "Not undone: {name} is linked to {} now.",
+                        spot(held)
+                    ));
                 }
                 relink(workspace, &keyboard, links)
             }
-            Undo::Reclaim { keyboard, links } => relink(workspace, &keyboard, links),
+            Undo::Reclaim {
+                keyboard,
+                mut links,
+            } => {
+                links.retain(|(id, _)| here(workspace, *id));
+                relink(workspace, &keyboard, links)
+            }
         }
     }
 
@@ -158,7 +173,7 @@ fn restore(
     workspace: &mut Workspace,
     asks: &mut Asks,
     log: &mut Log,
-) -> String {
+) -> Option<String> {
     let mut put = Vec::new();
     let mut changed = Vec::new();
     for Restored {
@@ -190,19 +205,28 @@ fn restore(
         named(workspace, &changed, "sounds"),
     );
     match (put.is_empty(), changed.is_empty()) {
-        (true, true) => "Nothing to put back.".to_string(),
-        (true, false) => format!("Not undone: {changed} changed since."),
-        (false, true) => format!("Put back {put}."),
-        (false, false) => format!("Put back {put}; {changed} changed since."),
+        (true, true) => None,
+        (true, false) => Some(format!("Not undone: {changed} changed since.")),
+        (false, true) => Some(format!("Put back {put}.")),
+        (false, false) => Some(format!("Put back {put}; {changed} changed since.")),
     }
 }
 
-fn relink(workspace: &mut Workspace, keyboard: &Keyboard, links: Vec<(u64, Held)>) -> String {
+fn relink(
+    workspace: &mut Workspace,
+    keyboard: &Keyboard,
+    links: Vec<(u64, Held)>,
+) -> Option<String> {
     let ids: Vec<u64> = links.iter().map(|(id, _)| *id).collect();
     for (id, held) in links {
         workspace.link(id, keyboard, held);
     }
-    format!("Linked {} again.", named(workspace, &ids, "files"))
+    (!ids.is_empty()).then(|| format!("Linked {} again.", named(workspace, &ids, "files")))
+}
+
+/// Whether a file is still on this computer.
+fn here(workspace: &Workspace, id: u64) -> bool {
+    workspace.get(id).is_some_and(|it| it.kept)
 }
 
 /// One file by its name, several by their count, none as nothing.
@@ -321,8 +345,9 @@ impl Log {
         let Some(undo) = self.pressed.take() else {
             return;
         };
-        let said = undo.perform(workspace, queue, asks, self);
-        self.say(said);
+        if let Some(said) = undo.perform(workspace, queue, asks, self) {
+            self.say(said);
+        }
     }
 
     /// Press the Undo of the newest entry that says `text`, as a click in the popover
