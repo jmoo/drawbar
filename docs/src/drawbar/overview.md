@@ -27,6 +27,8 @@ browser, a few keys use ⌥ (⌃ on a Mac) in place of ⌘.
 
 Click the status line, or press ⌥⌘L, for the log. **Problems** shows only what
 went wrong. The copy button puts the whole log on the clipboard for a bug report.
+What drawbar does on its own, such as linking files or bringing in a changed slot,
+has an **Undo** beside it.
 
 ## Selecting
 

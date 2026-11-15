@@ -15,7 +15,9 @@ To the right are the two faces, **Revert**, **Export…**, and the document's
 main action. It is **Send to…** for a document linked to no slot, which queues it
 for a free slot; **Load on instrument** when its slot holds it, which makes the
 panel play that slot; and **Send to 1:7** when the slot holds an earlier version.
-A document whose slot the keyboard changed has none. The action is grayed out when
+A document whose slot the keyboard changed has **Choose…**, which shows the fields
+that differ: **Use the keyboard’s** saves the slot's version into the document, and
+**Use mine** queues the document's to the slot. The action is grayed out when
 there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
 over` when the send cannot happen yet. The panel plays what the instrument holds,
 so edits you have not sent are not heard.
