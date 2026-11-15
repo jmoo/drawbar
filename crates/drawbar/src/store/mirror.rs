@@ -2314,19 +2314,9 @@ impl Store {
         }
         if let Some(unlisted) = unlisted {
             let unlisted: BTreeSet<LibPath> = unlisted.into_iter().collect();
-            const SHOWN: usize = 3;
-            let mut unread: Vec<&LibPath> = Vec::new();
-            for path in unlisted.difference(&browser.folders.unwalked) {
-                match names::refused_here(path.leaf()) {
-                    Some(why) => log.trouble(format!("drawbar could not read “{path}”: {why}.")),
-                    None => unread.push(path),
-                }
-            }
-            if !unread.is_empty() {
-                log.trouble(format!(
-                    "drawbar could not read {}, so what is in it is not shown.",
-                    crate::strings::quoted_some(&unread, SHOWN)
-                ));
+            let new = unlisted.difference(&browser.folders.unwalked);
+            for said in unread_said(new, names::refused_here) {
+                log.trouble(said);
             }
             browser.folders.unwalked = unlisted;
         }
@@ -4722,6 +4712,32 @@ fn shown_path(path: &str) -> String {
     }
 }
 
+/// What a scan says of the folders it newly could not read, in their order: why, for each
+/// of the first few whose name `refusal` refuses, then one line that names the rest.
+fn unread_said<'a>(
+    new: impl IntoIterator<Item = &'a LibPath>,
+    refusal: fn(&str) -> Option<&'static str>,
+) -> Vec<String> {
+    const SHOWN: usize = 3;
+    let mut said = Vec::new();
+    let mut unread = Vec::new();
+    for path in new {
+        match refusal(path.leaf()) {
+            Some(why) if said.len() < SHOWN => {
+                said.push(format!("drawbar could not read “{path}”: {why}."));
+            }
+            _ => unread.push(path),
+        }
+    }
+    if !unread.is_empty() {
+        said.push(format!(
+            "drawbar could not read {}, so what is in it is not shown.",
+            crate::strings::quoted_some(&unread, SHOWN)
+        ));
+    }
+    said
+}
+
 /// What one change to an asset kept apart does, to the asset named `name` where the
 /// window holds it.
 fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> String {
@@ -4925,6 +4941,23 @@ mod tests {
         assert!(
             history.done.is_empty(),
             "a step that never landed is not undone"
+        );
+    }
+
+    #[test]
+    fn unread_folders_say_why_windows_refuses_the_first_few_and_list_the_rest() {
+        let mut paths = vec!["Live/space ".to_string(), "Locked".to_string()];
+        paths.extend((0..9).map(|n| format!("d{n}.")));
+        let new: BTreeSet<LibPath> = paths.iter().map(|p| LibPath::parse(p).unwrap()).collect();
+        assert_eq!(
+            unread_said(&new, names::windows_refusal),
+            [
+                "drawbar could not read “Live/space ”: it ends with a space, which Windows drops.",
+                "drawbar could not read “d0.”: it ends with a dot, which Windows drops.",
+                "drawbar could not read “d1.”: it ends with a dot, which Windows drops.",
+                "drawbar could not read “Locked”, “d2.”, “d3.” and 5 more, so what is in it is \
+                 not shown.",
+            ]
         );
     }
 }
