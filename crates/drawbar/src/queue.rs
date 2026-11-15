@@ -301,10 +301,10 @@ fn missing_plays(
         })
         .filter(|key| !waiting(*key))
         .filter_map(|key| {
-            let file = workspace
+            workspace
                 .listed()
-                .find(|file| plays::key_of(file) == Some(key))?;
-            Some(file.id)
+                .find(|file| plays::key_of(file) == Some(key))
+                .map(|file| file.id)
         })
         .collect()
 }

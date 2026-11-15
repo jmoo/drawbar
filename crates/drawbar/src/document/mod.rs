@@ -1519,8 +1519,8 @@ fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud>
 
 /// What is known about the piano a program plays.
 ///
-/// A `.ne5p` stores the piano's id and no name. The id is found by name among the pianos
-/// on this computer and on the attached instrument. The category and model beside it are
+/// A `.ne5p` stores the piano's id and no name. The piano is the one here or on the
+/// attached instrument whose name hashes to the id. The category and model beside it are
 /// the panel's dial positions, which name a piano only on the attached instrument.
 fn piano_lookup(
     registry: Option<&[Field]>,

@@ -2512,9 +2512,7 @@ mod tests {
         let picked: Vec<&Row> = going.iter().collect();
         assert_eq!(
             consequence(&picked, &device.state, &queue).as_deref(),
-            Some(
-                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano that is not here"
-            )
+            Some("→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano that is not here")
         );
 
         // One of them is already in the queue.

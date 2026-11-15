@@ -33,7 +33,7 @@ pub struct PianoPanel {
     /// The id is the [`library_id`](crate::components::library_id) of the piano's name,
     /// so a piano file is matched by hashing the name it is written under. The file does
     /// not store the name. Where the id is `0`, the instrument plays the piano at the
-    /// dials' position.
+    /// dials' position. Confirmed on hardware.
     #[bits(22..=53)]
     pub id: PianoRef,
 }
