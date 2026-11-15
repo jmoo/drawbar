@@ -20,9 +20,9 @@ pub struct Summary {
     /// The format tag, which names the family and model: `ne5p`. See
     /// [`LocalEntity::tag`].
     pub tag: String,
-    /// The checksum a slot holding these bytes would report. See
-    /// [`crate::workspace::Baseline::crc32`].
-    pub crc32: Option<u32>,
+    /// What a slot holding these bytes would report. See
+    /// [`crate::workspace::Baseline::print`].
+    pub slot: Option<crate::link::Print>,
     /// The library a program plays.
     pub plays: Option<Plays>,
     pub verdict: Verdict,
@@ -49,7 +49,7 @@ impl Summary {
         Some(Summary {
             kind: Kind::of(entity),
             tag: entity.tag(),
-            crc32: entity.saved.crc32(),
+            slot: entity.saved.print(),
             plays: entity.plays,
             verdict,
             generation: entity.generation(),
@@ -69,7 +69,7 @@ impl Summary {
         Summary {
             kind: Kind::Wav,
             tag: crate::document::wav::EXTENSION.to_string(),
-            crc32: None,
+            slot: None,
             plays: None,
             verdict: Verdict::NotApplicable,
             generation: None,

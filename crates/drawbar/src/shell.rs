@@ -2422,7 +2422,7 @@ mod tests {
                     content: crate::workspace::Content::Unread {
                         len: 1,
                         failed: None,
-                        slot_crc: None,
+                        slot: None,
                     },
                     unsaved: None,
                 };

@@ -16,6 +16,7 @@ use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
 use nord_usb::{Location, ObjectClass};
 
+use crate::link::Print;
 use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
@@ -228,6 +229,16 @@ impl Container {
     pub fn body_len(&self) -> u64 {
         self.body.len() as u64
     }
+
+    /// What a slot holding this body reports. `None` for a body longer than a slot's
+    /// length can say.
+    pub fn print(&self) -> Option<Print> {
+        let len = u32::try_from(self.body_len()).ok()?;
+        Some(Print {
+            crc: self.body_crc32,
+            len,
+        })
+    }
 }
 
 /// Where the body sits in a file `inspect` read.
@@ -309,12 +320,12 @@ pub enum Content {
     /// A file nothing has read this session, `len` bytes long, as its listing gave it.
     /// `failed` is why the last read of it failed.
     ///
-    /// ⚠️ `slot_crc` is a slot checksum a former read or summary left behind, which
-    /// nothing vouches for any longer. It still matches the asset to a slot.
+    /// ⚠️ `slot` is what a slot holding it reports, as a former read or summary left it
+    /// behind, which nothing vouches for any longer. It still matches the asset to a slot.
     Unread {
         len: u64,
         failed: Option<String>,
-        slot_crc: Option<u32>,
+        slot: Option<Print>,
     },
     /// A file nothing has read this session, `len` bytes long, and what a read of it
     /// found before, which it draws as until something needs its bytes.
@@ -331,12 +342,12 @@ pub enum Content {
 pub struct Facts {
     /// CRC-32 over all the bytes, where it was taken as they arrived.
     whole_crc: Option<u32>,
-    /// The checksum a slot holding them reports, where it has been taken.
+    /// What a slot holding them reports, where it has been taken.
     ///
     /// ⚠️ `Baseline::read` takes it from the header at once. A baseline that is the
     /// asset's own bytes, still to be decoded, has none until `decoded()` takes it from
     /// the decode.
-    slot_crc: Option<u32>,
+    slot: Option<Print>,
 }
 
 /// How far the check of a resting file's stored checksum has got.
@@ -368,7 +379,7 @@ impl Content {
         Content::Unread {
             len,
             failed: None,
-            slot_crc: None,
+            slot: None,
         }
     }
 
@@ -434,14 +445,30 @@ impl Baseline {
     /// not been checked. See [`Container::body_crc32`].
     pub fn crc32(&self) -> Option<u32> {
         match &self.content {
-            Content::Unread { slot_crc, .. } => *slot_crc,
-            Content::Remembered { summary, .. } => summary.crc32,
-            Content::Resident { facts, .. } => facts.slot_crc,
             Content::Resting { check, .. } => match check {
                 Check::Checking { reported } => *reported,
                 Check::Checked(container) => Some(container.body_crc32),
                 Check::Unchecked | Check::Failed(_) => None,
             },
+            Content::Unread { .. } | Content::Remembered { .. } | Content::Resident { .. } => {
+                self.print().map(|print| print.crc)
+            }
+        }
+    }
+
+    /// What a slot holding these bytes would report: [`Baseline::crc32`] and the body's
+    /// length. `None` where either is unknown, as for a file whose check has not
+    /// answered.
+    pub fn print(&self) -> Option<Print> {
+        match &self.content {
+            Content::Unread { slot, .. } => *slot,
+            Content::Remembered { summary, .. } => summary.slot,
+            Content::Resident { facts, .. } => facts.slot,
+            Content::Resting {
+                check: Check::Checked(container),
+                ..
+            } => container.print(),
+            Content::Resting { .. } => None,
         }
     }
 
@@ -464,7 +491,7 @@ impl Baseline {
     pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
         let facts = Facts {
             whole_crc: Some(nord_format::crc::crc32(&bytes)),
-            slot_crc: Container::read(&bytes).map(|held| held.body_crc32),
+            slot: Container::read(&bytes).and_then(|held| held.print()),
         };
         Baseline::new(Content::Resident { bytes, facts }, stamp)
     }
@@ -536,15 +563,15 @@ impl Baseline {
     /// The baseline an edit is measured against: of a file nothing has read, only its
     /// length and the slot checksum it had.
     fn under_edit(&mut self) {
-        let (len, slot_crc) = match &self.content {
-            Content::Unread { len, slot_crc, .. } => (*len, *slot_crc),
-            Content::Remembered { len, summary } => (*len, summary.crc32),
+        let (len, slot) = match &self.content {
+            Content::Unread { len, slot, .. } => (*len, *slot),
+            Content::Remembered { len, summary } => (*len, summary.slot),
             Content::Resident { .. } | Content::Resting { .. } => return,
         };
         self.content = Content::Unread {
             len,
             failed: None,
-            slot_crc,
+            slot,
         };
     }
 
@@ -743,7 +770,7 @@ impl LocalEntity {
             Content::Unread {
                 len,
                 failed: None,
-                slot_crc: None,
+                slot: None,
             } => Content::listed(held.by_name, len),
             content => content,
         };
@@ -843,10 +870,10 @@ impl LocalEntity {
     /// Take what its bytes decode to. They are what it was saved as, since nothing can
     /// edit an asset still being read.
     fn decoded(&mut self, decoded: Decoded) {
-        let slot_crc = decoded.container.as_ref().map(|held| held.body_crc32);
+        let container = decoded.container.as_ref();
         match &mut self.saved.content {
             Content::Resident { facts, .. } => {
-                facts.slot_crc = slot_crc;
+                facts.slot = container.and_then(Container::print);
                 facts.whole_crc = decoded.crc;
             }
             // ⚠️ Writes the slot checksum of the decoded bytes over the one a send
@@ -856,7 +883,7 @@ impl LocalEntity {
             Content::Resting {
                 check: Check::Checking { reported },
                 ..
-            } => *reported = slot_crc,
+            } => *reported = container.map(|held| held.body_crc32),
             Content::Resting { .. } | Content::Unread { .. } | Content::Remembered { .. } => {}
         }
         self.container = decoded.container;
@@ -1079,10 +1106,15 @@ impl LocalEntity {
     fn baseline(&self) -> Baseline {
         let facts = Facts {
             whole_crc: None,
-            slot_crc: self.container.as_ref().map(|held| held.body_crc32),
+            slot: self.container.as_ref().and_then(Container::print),
         };
         let bytes = self.bytes.clone();
         Baseline::new(Content::Resident { bytes, facts }, self.stamp)
+    }
+
+    /// What a slot holding its saved bytes would report. See [`Baseline::print`].
+    pub fn saved_print(&self) -> Option<Print> {
+        self.saved.print()
     }
 
     /// The slot this asset stands for: its link, or else the slot it came off.
@@ -2506,7 +2538,7 @@ impl Workspace {
         entity.saved.content = Content::Unread {
             len: entity.saved.size(),
             failed: Some(why),
-            slot_crc: entity.saved.crc32(),
+            slot: entity.saved.print(),
         };
         self.revision += 1;
     }
@@ -2610,14 +2642,14 @@ impl Workspace {
     pub fn evict(&mut self, id: u64) -> Option<u64> {
         self.evictable(id)?;
         let entity = self.get(id)?;
-        let (len, crc32, known) = (entity.size(), entity.saved.crc32(), Summary::of(entity));
+        let (len, slot, known) = (entity.size(), entity.saved.print(), Summary::of(entity));
         let stamp = self.stamp();
         self.swap(id, |held| {
             let (name, origin) = (held.name.clone(), held.origin.clone());
             let unread = Content::Unread {
                 len,
                 failed: None,
-                slot_crc: crc32,
+                slot,
             };
             let mut listed = LocalEntity::listed_as(id, name, origin, unread, stamp);
             if let Some(known) = known {
@@ -2647,7 +2679,7 @@ impl Workspace {
                 entity.saved.content = Content::listed(entity.by_name, *len);
                 true
             }
-            Content::Unread { slot_crc, .. } => slot_crc.take().is_some(),
+            Content::Unread { slot, .. } => slot.take().is_some(),
             Content::Resident { .. } | Content::Resting { .. } => false,
         };
         if forgot {
@@ -5754,5 +5786,41 @@ mod tests {
         let entity = workspace.get(1).unwrap();
         assert_eq!(entity.verify().badge(), "ok");
         assert_eq!(entity.saved.crc32(), slot_of(&sample));
+    }
+
+    /// The print of the saved bytes is what a walk reports for a slot holding the body
+    /// they wrap, whether the bytes are held whole, let go of, or rest in their file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_saved_print_is_what_a_slot_holding_the_same_body_reports() {
+        let reported = |file: &[u8]| {
+            let body = nord_usb::envelope::unwrap(file).unwrap().body.0;
+            let len = u32::try_from(body.len()).unwrap();
+            Print {
+                crc: nord_format::crc::crc32(&body),
+                len,
+            }
+        };
+        let program = Fresh::Program.bytes().unwrap();
+        let (mut workspace, mut log) = restored(Content::unread(program.len() as u64), None);
+        assert_eq!(workspace.get(1).unwrap().saved_print(), None, "unread");
+        workspace.took(1, Some(program.clone()), None);
+        workspace.settle_files(&mut log);
+        assert_eq!(
+            workspace.get(1).unwrap().saved_print(),
+            Some(reported(&program))
+        );
+        workspace.evict(1).expect("a clean asset nothing needs");
+        let evicted = workspace.get(1).unwrap();
+        assert_eq!(evicted.saved_print(), Some(reported(&program)), "let go of");
+
+        let dir = crate::testing::Temp::new();
+        let sample = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        workspace.settle_files(&mut log);
+        let resting = workspace.get(id).unwrap();
+        assert!(resting.rests().is_some());
+        assert_eq!(resting.saved_print(), Some(reported(&sample)), "resting");
     }
 }
