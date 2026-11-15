@@ -63,6 +63,12 @@ impl Generation {
         }
     }
 
+    /// The body length of a container `len` bytes long, or `None` for one too short to
+    /// hold its header and trailer.
+    pub fn body_len(self, len: u64) -> Option<u64> {
+        len.checked_sub(self.body_start() + self.trailer_len())
+    }
+
     /// Where a file of `len` bytes keeps its checksum, or `None` for a file too short
     /// to hold one.
     ///
@@ -1220,6 +1226,21 @@ mod tests {
         let crc = crc16(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out
+    }
+
+    #[test]
+    fn a_containers_length_states_its_body_length_in_both_generations() {
+        let body = [0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        for (generation, bytes) in [(Generation::V1, v1_file(&body)), (Generation::V0, v0_file(&body))] {
+            assert_eq!(
+                generation.body_len(bytes.len() as u64),
+                Some(body.len() as u64),
+                "{generation:?}"
+            );
+            let empty = (bytes.len() - body.len()) as u64;
+            assert_eq!(generation.body_len(empty), Some(0), "{generation:?}");
+            assert_eq!(generation.body_len(empty - 1), None, "{generation:?}");
+        }
     }
 
     /// Type 1 adds 20 header bytes of checksum and pad; type 0 adds a 2-byte trailer.

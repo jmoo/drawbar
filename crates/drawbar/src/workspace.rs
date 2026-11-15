@@ -463,7 +463,7 @@ impl Baseline {
 
     /// What a slot holding these bytes would report: [`Baseline::crc32`] and the body's
     /// length. `None` where either is unknown, as for a file whose check has not
-    /// answered.
+    /// answered and that no send has reported a checksum for.
     pub fn print(&self) -> Option<Print> {
         match &self.content {
             Content::Unread { slot, .. } => *slot,
@@ -473,6 +473,18 @@ impl Baseline {
                 check: Check::Checked(container),
                 ..
             } => container.print(),
+            Content::Resting {
+                file,
+                check: Check::Checking {
+                    reported: Some(crc),
+                },
+            } => {
+                let len = file.index.header().generation.body_len(file.len)?;
+                Some(Print {
+                    crc: *crc,
+                    len: u32::try_from(len).ok()?,
+                })
+            }
             Content::Resting { .. } => None,
         }
     }
@@ -4367,6 +4379,23 @@ mod tests {
             .is_some_and(|file| Arc::ptr_eq(file, &edited)));
         assert!(!entity.is_unsaved(), "the edit is saved");
         assert_ne!(entity.saved.crc32(), Some(crc32), "so the slot is behind");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_asset_sent_from_a_file_reads_as_what_its_slot_reports_before_the_file_is_checked() {
+        let dir = crate::testing::Temp::new();
+        let now = crate::testing::piano(5);
+        let sent = crate::testing::on_disk(&dir, "Sent.npno", &now);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let piano = crate::testing::piano(4);
+        let id = workspace.ingest("Upright.npno".into(), Origin::Fresh, piano, &mut log);
+        let reported = print_of(&now).expect("a piano is a container");
+
+        workspace.landed_file(id, sent, reported.crc);
+
+        assert_eq!(workspace.get(id).unwrap().saved_print(), Some(reported));
     }
 
     #[test]
