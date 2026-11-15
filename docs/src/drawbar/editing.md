@@ -56,8 +56,9 @@ Every control answers the keyboard. Tab reaches it, the arrow keys step a knob,
 Page Up and Page Down jump it, Home and End take it to its stops, and Space flips
 a lamp. Double-click a knob to type a value.
 
-Where a program refers to a piano or sample by id, drawbar asks the connected
-instrument for its name and shows it. With an instrument connected, the piano
+Where a program refers to a piano or sample, drawbar shows its name when that
+piano or sample is on this computer or on the instrument. With an instrument
+connected, the piano
 **Model** lists its pianos of the chosen **Type**. Changing either one points the
 program at the piano now chosen, which is what the instrument plays. Sections the
 program stores but is not using are folded away.

@@ -54,6 +54,9 @@ what it will hold after sending.
 **Send all** writes everything. If the instrument refuses something, the rest
 stays queued.
 
+Queueing a program also queues the piano or sample it plays when that is on this
+computer and not on the instrument, and sends it first.
+
 When sounds on this computer no longer match the slots they came from, a
 **Queue** button appears beside **Send**. Click it to queue them all.
 

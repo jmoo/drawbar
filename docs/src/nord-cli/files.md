@@ -47,7 +47,7 @@ nord bundle pack gig -o gig.ne5pbundle              # and back
 `get` reads only. It finds each piano and sample by the name the instrument gives
 it, and warns about one it cannot find in exactly one slot. `pack` keeps a
 `meta.xml` it finds at the top of the folder; without one, it lists which songs
-play which programs. [What is supported](../getting-started/support.md)
+play which programs and which programs play which pianos and samples. [What is supported](../getting-started/support.md)
 says which instruments' bundles these commands handle.
 
 `inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
