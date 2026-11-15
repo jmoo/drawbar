@@ -42,6 +42,7 @@ pub mod newproject;
 pub mod ondisk;
 pub mod panel;
 pub mod platform;
+mod plays;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod presence;
 pub mod queue;

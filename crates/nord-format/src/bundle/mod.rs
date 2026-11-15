@@ -9,6 +9,7 @@ pub mod archive;
 pub mod manifest;
 
 use crate::cbin::Header;
+use crate::components::library_id;
 use crate::fields::Library;
 use crate::{Entity, Program, Song};
 use manifest::{Dependencies, Manifest};
@@ -85,12 +86,16 @@ pub struct Item {
 impl Item {
     /// The item for an Electro 5 file named `name`, or `None` for one a bundle does not
     /// carry. A program provides its slot and needs what it plays; a set list needs its
-    /// programs. A piano or sample file does not hold the id programs know it by, so
-    /// its item provides nothing until the caller sets that id from the instrument.
+    /// programs. A piano or sample provides the [`library_id`] of `name`, which is the
+    /// id programs know it by once the instrument holds it under that name.
     pub fn of(header: &Header, name: &str, entity: Option<&Entity>) -> Option<Item> {
         let class = Class::of(header)?;
         let mut needs = Vec::new();
-        let mut provides = None;
+        let mut provides = match class {
+            Class::Piano => Some(Key::Piano(library_id(name))),
+            Class::Sample => Some(Key::Sample(library_id(name))),
+            Class::Program | Class::SetList => None,
+        };
         match entity {
             Some(program @ Entity::Program(Program::Electro5(file))) => {
                 let (bank, slot) = file.header.slot();

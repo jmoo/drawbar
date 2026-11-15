@@ -34,6 +34,7 @@ pub use act::{
     apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
     LOAD_ON_INSTRUMENT,
 };
+pub(crate) use act::{bound_for, Bound};
 #[cfg(test)]
 pub(crate) use drag::TAGGED;
 pub use drag::{

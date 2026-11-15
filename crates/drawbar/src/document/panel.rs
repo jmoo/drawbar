@@ -1,6 +1,6 @@
 //! What is known about the piano a program plays, the one fact in a field document that
-//! the file alone cannot supply: the id the file stores, the name only an attached
-//! instrument has for it, and the Model dial as that instrument's list of pianos.
+//! the file alone cannot supply: the id the file stores, the name of the piano that id
+//! names, and the Model dial as the attached instrument's list of pianos.
 
 use eframe::egui;
 use nord_format::fields::{ControlKind, Field, Library};
@@ -18,46 +18,30 @@ pub const PIANO_CATEGORY: &str = "piano_panel.category";
 /// The id of the piano the program plays.
 pub const PIANO_ID: &str = "piano_panel.id";
 
-/// What is known about the piano a program plays, and what it would take to know more.
+/// What is known about the piano a program plays.
 ///
 /// ⚠️ The file stores the piano's id and, separately, the panel's category and Model dial
-/// position, which mean something only in the instrument's own library. Only the
-/// instrument resolves the id to a name, so a name shown here never comes from the file.
+/// position, which mean something only in the instrument's own library. The file stores
+/// no name: a name shown here is that of a piano file or slot whose name hashes to the id.
 pub struct PianoLookup {
     /// The id the file names, or `None` where it stores 0 and the dials pick the piano.
     pub id: Option<u32>,
-    /// What the instrument called that id, where it has named it.
+    /// The name of the piano that id names, where one here or on the instrument has it.
     pub name: Option<String>,
     /// Where the file stores 0, the scan's name for the piano the dials pick.
     pub dialed: Option<String>,
-    /// Whether the instrument has yet to give the dialed piano an id, which a bundle
-    /// names it by.
-    pub dialed_unnamed: bool,
-    /// Whether asking is possible: an attached instrument, and a slot to ask about.
-    pub can_ask: bool,
-    /// Whether the instrument refused the last read of the slot's dependencies.
-    pub refused: bool,
-    /// Set when the operator asks again after a refusal.
-    pub asked: bool,
     /// The Pianos folder's names for the current category, by Model dial position.
     /// Empty when the scan cannot answer, and the Model dial stays numeric.
     pub models: Vec<(u32, String)>,
-    /// The scan's name for the current position, where it disagrees with the
-    /// instrument's dependency reply. A disagreement means the position mapping is wrong.
+    /// The scan's name for the current position, where the id names another piano.
     pub scan_disagrees: Option<String>,
 }
 
 impl PianoLookup {
-    /// Whether the instrument could put a name to the piano this program plays, or an id
-    /// to the piano its dials pick, and has not done so yet.
-    pub(super) fn wants_a_name(&self) -> bool {
-        self.can_ask && (self.id.is_some() && self.name.is_none() || self.dialed_unnamed)
-    }
-
-    /// The catalog's name for a library reference, where this lookup resolves it.
+    /// The name of a library reference, where this lookup resolves it.
     ///
-    /// Only the piano library has a catalog here: the id the instrument has named, and 0
-    /// for the piano the dials pick. Every other reference shows the id the file stores.
+    /// Only the piano is resolved here: the piano the id names, and 0 for the piano the
+    /// dials pick. Every other reference shows the id the file stores.
     pub(super) fn names(&self, field: &Field) -> Option<&str> {
         if field.spec.control != ControlKind::Reference(Library::Piano) {
             return None;
@@ -100,32 +84,15 @@ impl PianoLookup {
         true
     }
 
-    /// ⚠️ The dependency reply is the instrument's own answer about the piano this
-    /// program plays; the model list is the scan's reading of a dial position. Where the
-    /// two disagree, the position mapping is wrong and the reader has to be told.
-    pub(super) fn ui(&mut self, ui: &mut egui::Ui) {
-        if self.refused && self.wants_a_name() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new("the instrument did not say which piano this plays")
-                        .small()
-                        .weak(),
-                );
-                self.asked |= ui
-                    .small_button("Ask again")
-                    .on_hover_text("read this program's dependencies again")
-                    .clicked();
-            });
-        }
+    /// ⚠️ The instrument plays the piano the id names, whatever the dials say, so the
+    /// reader is told where the dials point elsewhere.
+    pub(super) fn ui(&self, ui: &mut egui::Ui) {
         let Some(scanned) = &self.scan_disagrees else {
             return;
         };
         ui.colored_label(
             crate::app::warn(ui.visuals()),
-            format!(
-                "the model list calls this position {scanned:?}, but the instrument's \
-                 dependency reply names the piano below. Trust the instrument.",
-            ),
+            format!("The dials point at “{scanned}”; this plays the piano below."),
         );
     }
 }

@@ -20,6 +20,7 @@ use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
 use crate::link::{Standing, There};
 use crate::panel::{cut, list_width, pill_at, row_ink, view_header, Track, ROW_INSET};
+use crate::plays::Catalog;
 use crate::queue::{Diff, Queue};
 use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
@@ -95,9 +96,9 @@ impl Where {
 
 /// The library (piano or sample) a row plays, which the row's bytes do not name.
 ///
-/// ⚠️ A name can only come from the instrument, because a program file stores a bare id
-/// and no name. `Wanted` is an id nothing has resolved, never one the instrument said
-/// it did not hold. No read this app makes reports a missing library.
+/// ⚠️ A program file stores a bare id, and a name is found by hashing the names of the
+/// pianos and samples on this computer and on the attached instrument. `Wanted` is an id
+/// none of those has; an instrument not attached, or not fully read, may still hold it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Needs {
     Nothing,
@@ -121,14 +122,11 @@ impl Needs {
     pub fn sentence(&self) -> String {
         match self {
             Needs::Nothing => "Nothing here says what it plays.".to_string(),
-            Needs::Named { class, name } => format!(
-                "It plays the {} the instrument calls “{name}”.",
-                Kind::from_class(*class).chip()
-            ),
+            Needs::Named { class, name } => {
+                format!("It plays the {} “{name}”.", Kind::from_class(*class).chip())
+            }
             Needs::Wanted { class, id } => format!(
-                "This names a {} the instrument has not listed by id ({id:#010x}). Only the \
-                 instrument can put a name to one, and nothing it has been asked about \
-                 names this id.",
+                "It plays a {} that is not here ({id:#010x}).",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -192,9 +190,10 @@ pub fn rows(
     let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
     let kept = Kept::of(workspace);
     let instrument = device.product().and_then(Family::from_product);
+    let catalog = Catalog::of(workspace, device);
     for entity in workspace.listed() {
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, worn.len(), &kept, instrument);
+        let row = local(entity, device, worn.len(), &kept, instrument, &catalog);
         // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = row.at.filter(|_| device.connected()) {
             claimed.push(slot);
@@ -257,10 +256,12 @@ pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
 pub fn row_of(item: Item, workspace: &Workspace, device: &DeviceState, tags: &Tags) -> Option<Row> {
     let instrument = device.product().and_then(Family::from_product);
     let kept = Kept::of(workspace);
-    row_with(item, workspace, device, tags, &kept, instrument)
+    let catalog = Catalog::of(workspace, device);
+    row_with(item, workspace, device, tags, &kept, instrument, &catalog)
 }
 
 /// [`row_of`], with what it reads of the whole list already taken.
+#[allow(clippy::too_many_arguments)]
 fn row_with(
     item: Item,
     workspace: &Workspace,
@@ -268,12 +269,13 @@ fn row_with(
     tags: &Tags,
     kept: &Kept,
     instrument: Option<Family>,
+    catalog: &Catalog,
 ) -> Option<Row> {
     match item {
         Item::Local(id) => {
             let entity = workspace.get(id)?;
             let worn = tags.worn(id).len();
-            Some(local(entity, device, worn, kept, instrument))
+            Some(local(entity, device, worn, kept, instrument, catalog))
         }
         Item::Slot { class, at } => {
             Some(slot(class, at, device.slot(class, at).flatten()?, device))
@@ -288,6 +290,7 @@ fn local(
     tags: usize,
     kept: &Kept,
     instrument: Option<Family>,
+    catalog: &Catalog,
 ) -> Row {
     let linked = standing_of(device, entity);
     let (at, faint) = match &linked {
@@ -309,7 +312,7 @@ fn local(
         faint,
         mark: linked.and_then(|linked| Mark::of(linked.standing)),
         size: entity.size(),
-        needs: wanted(entity, device),
+        needs: wanted(entity, catalog),
     }
 }
 
@@ -415,22 +418,18 @@ pub fn counts(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> [us
     counts
 }
 
-/// The library a program names, and its name if the instrument has reported one. A
-/// program not read this session names what a read of it found before.
-pub(crate) fn wanted(entity: &LocalEntity, device: &DeviceState) -> Needs {
-    let plays = match (&entity.entity, entity.remembered()) {
-        (Some(_), _) => entity.plays,
-        (None, Some(known)) => known.plays,
-        (None, None) => None,
-    };
-    let Some(plays) = plays else {
+/// The first library a program names, by name where a piano or sample here or on the
+/// attached instrument goes by its id. A program not read this session names what a
+/// read of it found before.
+pub(crate) fn wanted(entity: &LocalEntity, catalog: &Catalog) -> Needs {
+    let Some(plays) = crate::plays::named(entity).first() else {
         return Needs::Nothing;
     };
-    let (class, id) = (plays.class(), plays.id());
-    match device.dependency_name(class, id) {
-        Some(name) => Needs::Named {
+    let (class, id) = plays.key();
+    match catalog.get((class, id)) {
+        Some(found) => Needs::Named {
             class,
-            name: name.to_string(),
+            name: found.name.clone(),
         },
         None => Needs::Wanted { class, id },
     }
@@ -759,8 +758,8 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option
         let named = Kind::from_class(class).chip();
         match short {
             0 => {}
-            1 => said.push(format!("1 needs a {named} the instrument has not named")),
-            n => said.push(format!("{n} need a {named} the instrument has not named")),
+            1 => said.push(format!("1 needs a {named} that is not here")),
+            n => said.push(format!("{n} need a {named} that is not here")),
         }
     }
     (!said.is_empty()).then(|| said.join(" · "))
@@ -1055,11 +1054,20 @@ impl Library {
                 let shown = items.get(shown).unwrap_or_default();
                 let kept = Kept::of(workspace);
                 let instrument = device.state.product().and_then(Family::from_product);
+                let catalog = Catalog::of(workspace, &device.state);
                 let tags = browser.tags();
                 let rows: Vec<Row> = shown
                     .iter()
                     .filter_map(|item| {
-                        row_with(*item, workspace, &device.state, tags, &kept, instrument)
+                        row_with(
+                            *item,
+                            workspace,
+                            &device.state,
+                            tags,
+                            &kept,
+                            instrument,
+                            &catalog,
+                        )
                     })
                     .collect();
                 workspace.in_view(rows.iter().filter_map(|row| row.item.local()));
@@ -1473,8 +1481,8 @@ fn paint(
         &crate::room::measure(row.size),
         mono(MONO),
     );
-    // ⚠️ Weak ink even for a bare id. An unresolved id is a question nobody has asked
-    // the instrument, not a library reported missing.
+    // ⚠️ Weak ink even for a bare id: an instrument not attached or not fully read may
+    // still hold it.
     write(cell(Column::Needs), &row.needs.text(), plain(TEXT, quiet));
 
     // A table row drags like a tree row, with the same payload, so it has the same drop
@@ -2125,10 +2133,7 @@ mod tests {
         let picked: Vec<&Row> = going.iter().collect();
         assert_eq!(
             consequence(&picked, &device.state, &queue).as_deref(),
-            Some(
-                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not \
-                 named"
-            )
+            Some("→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano that is not here")
         );
 
         // One of them is already in the queue.

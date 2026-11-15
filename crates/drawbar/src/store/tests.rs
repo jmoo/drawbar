@@ -3076,6 +3076,73 @@ fn a_set_list_waits_for_unread_programs_and_names_two_that_claim_its_slot() {
     );
 }
 
+/// A bundle's program finds the piano and sample it plays by their names, so the bundle
+/// unpacks and exports again whole with nothing attached.
+#[test]
+fn an_unpacked_bundle_exports_again_with_what_its_program_plays() {
+    use crate::bundle::{lay_out, Laid};
+    use nord_format::components::library_id;
+
+    let (root, outside) = (Temp::new(), Temp::new());
+    let plays = [
+        ("piano_panel.id".into(), library_id("Tine").to_string()),
+        ("sample_panel.id".into(), library_id("Marimba").to_string()),
+    ];
+    let program = crate::fields::apply(&Fresh::Program.bytes().unwrap(), &plays)
+        .unwrap()
+        .1;
+    let (piano, sample) = (crate::testing::piano(1), crate::testing::sample_bytes());
+    let bundle = bundle_of(&[
+        ("Piano/Grand/Tine.npno", &piano),
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Keys.ne5p", &program),
+    ]);
+    fs::write(outside.at("Keys.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Keys.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Keys.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    let keys = session.named("Keys.ne5p");
+    let export = loop {
+        let state = &session.bench.device.state;
+        match lay_out(&[keys], &session.bench.workspace, state) {
+            Ok(Laid::Ready(export)) => break export,
+            Ok(Laid::Read(ids)) => session.read(&ids),
+            Err(why) => panic!("no bundle: {why}"),
+        }
+    };
+    let paths: Vec<&str> = export
+        .plan
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "Piano/Grand/Tine.npno",
+            "Samp Lib/Samp Lib/Marimba.nsmp",
+            "Program/Bank 1/Keys.ne5p",
+        ]
+    );
+    assert_eq!(export.plan.unmet, []);
+    assert!(export.left_out.is_empty(), "{:?}", export.left_out);
+}
+
 /// An object the instrument was read into a file for lands at the top of the library
 /// under its slot's name, past one already there, and the file it was read into goes.
 #[test]

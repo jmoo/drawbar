@@ -15,7 +15,6 @@ use crate::app::{accent, caption, tint, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Browser, Held, Item, Kind, Onto};
 use crate::device::{occupancy, read_only, Device};
 use crate::icon::{painted, Glyph};
-use crate::library::Needs;
 use crate::panel::{
     cut, list_width, row_ink, tonal_button, view_header, Track, GAP, GLYPH, PAD, ROW_INSET,
     VIEW_PAD,
@@ -893,9 +892,7 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
     let unknown = || "—".to_string();
     match view.class {
         ObjectClass::SetList => plays(at, view.workspace, view.device).unwrap_or_else(unknown),
-        ObjectClass::Sample => {
-            played_by(info.name.trim(), view.workspace, view.device).unwrap_or_else(unknown)
-        }
+        ObjectClass::Sample => played_by(info.name.trim(), view.workspace).unwrap_or_else(unknown),
         ObjectClass::Piano => view
             .device
             .state
@@ -929,20 +926,9 @@ fn plays(at: Location, workspace: &Workspace, device: &Device) -> Option<String>
 }
 
 /// The programs on this computer that play this sample.
-///
-/// ⚠️ A program's file stores a bare library id and a walk reports a bare name, so they
-/// can be matched only through the dependency list the instrument gave for that
-/// program's slot. An unmatched sample shows as unknown, not as unused.
-fn played_by(name: &str, workspace: &Workspace, device: &Device) -> Option<String> {
-    let played: Vec<&str> = workspace
-        .entities()
-        .iter()
-        .filter(|entity| {
-            matches!(
-                crate::library::wanted(entity, &device.state),
-                Needs::Named { class, name: held } if class == ObjectClass::Sample && held == name
-            )
-        })
+fn played_by(name: &str, workspace: &Workspace) -> Option<String> {
+    let key = crate::plays::slot_key(ObjectClass::Sample, name);
+    let played: Vec<&str> = crate::plays::played_by(workspace, key)
         .map(|entity| entity.name.as_str())
         .collect();
     (!played.is_empty()).then(|| played.join(", "))

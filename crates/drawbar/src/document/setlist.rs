@@ -177,7 +177,7 @@ impl Stands {
                 place(ObjectClass::Program, at)
             ),
             Stands::Needs { class, id } => format!(
-                "the program is there, and it plays a {} the instrument has not named ({id:#010x})",
+                "the program is there, and it plays a {} that is not here ({id:#010x})",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -219,6 +219,19 @@ impl Row {
     }
 }
 
+/// The programs a set list plays, in order, each with its name where one resolves.
+pub(crate) fn programs(
+    entity: &Entity,
+    seen: &Catalog<'_>,
+) -> Option<Vec<(Location, Option<String>)>> {
+    let file = song(entity)?;
+    let resolved = file.body.programs().map(|at| {
+        let at = panel(at);
+        (at, resolve(at, seen).0)
+    });
+    Some(resolved.to_vec())
+}
+
 /// The address one-indexed, as the instrument shows it, in the [`Location`] the rest of
 /// the app addresses a slot with.
 fn panel(at: program::Location) -> Location {
@@ -252,7 +265,7 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
     (
         Some(display_name(&kept.name).to_string()),
         Some(Item::Local(kept.id)),
-        plays(kept, seen.device),
+        plays(kept, seen),
     )
 }
 
@@ -270,11 +283,14 @@ fn stands_on<'w>(
 /// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
 /// piano id is normal ([`Needs::Wanted`] means unresolved, not missing), and flagging it
 /// would flag every entry of every set list opened from disk.
-fn plays(program: &LocalEntity, device: &DeviceState) -> Stands {
-    if !device.connected() {
+fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
+    if !seen.device.connected() {
         return Stands::Resolves;
     }
-    match wanted(program, device) {
+    match wanted(
+        program,
+        &crate::plays::Catalog::of(seen.workspace, seen.device),
+    ) {
         Needs::Wanted { class, id } => Stands::Needs { class, id },
         Needs::Named { .. } | Needs::Nothing => Stands::Resolves,
     }
@@ -304,7 +320,7 @@ pub fn claim(entity: &Entity, seen: &Catalog<'_>) -> Option<super::StateLine> {
         words,
         ink,
         hint: "an entry points at a slot with no program, or at a program playing a \
-               library the instrument has not named"
+               library that is not here"
             .to_string(),
     })
 }
@@ -1091,7 +1107,7 @@ mod tests {
             claim.hint
         );
         assert!(
-            claim.hint.contains("has not named"),
+            claim.hint.contains("not here"),
             "the unnamed library: {}",
             claim.hint
         );

@@ -23,8 +23,8 @@ pub struct Summary {
     /// What a slot holding these bytes would report. See
     /// [`crate::workspace::Baseline::print`].
     pub slot: Option<crate::link::Print>,
-    /// The library a program plays.
-    pub plays: Option<Plays>,
+    /// The pianos and samples a program plays, piano first.
+    pub plays: Vec<Plays>,
     pub verdict: Verdict,
     /// For a sample instrument, its generation. See [`LocalEntity::generation`].
     pub generation: Option<&'static str>,
@@ -50,7 +50,7 @@ impl Summary {
             kind: Kind::of(entity),
             tag: entity.tag(),
             slot: entity.saved.print(),
-            plays: entity.plays,
+            plays: entity.plays.clone(),
             verdict,
             generation: entity.generation(),
             wavs: match decoded {
@@ -70,7 +70,7 @@ impl Summary {
             kind: Kind::Wav,
             tag: crate::document::wav::EXTENSION.to_string(),
             slot: None,
-            plays: None,
+            plays: Vec::new(),
             verdict: Verdict::NotApplicable,
             generation: None,
             wavs: Vec::new(),
@@ -78,7 +78,7 @@ impl Summary {
     }
 }
 
-/// The library a program plays: its class, and the id the instrument knows it by.
+/// A piano or sample a program plays: its class, and the id the program names it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plays {
     Piano(u32),
@@ -86,16 +86,18 @@ pub enum Plays {
 }
 
 impl Plays {
-    /// The first library a program names, piano before sample.
-    pub fn of(entity: &Entity) -> Option<Plays> {
+    /// Every piano and sample a program names, piano first.
+    pub fn of(entity: &Entity) -> Vec<Plays> {
         entity
-            .plays()?
+            .plays()
+            .unwrap_or_default()
             .into_iter()
-            .find_map(|reference| match reference.library {
+            .filter_map(|reference| match reference.library {
                 Library::Piano => Some(Plays::Piano(reference.id)),
                 Library::Sample => Some(Plays::Sample(reference.id)),
                 Library::Program | Library::SetList => None,
             })
+            .collect()
     }
 
     pub fn class(self) -> ObjectClass {

@@ -205,10 +205,9 @@ need: the programs a song plays, and the pianos and samples a program plays.
 Sounds on the instrument are copied to this computer first. In the browser the
 bundle arrives in your downloads.
 
-A program's file names its piano and sample by a number only the instrument can
-put a name to. A piano or sample already on this computer is added when the
-instrument has named it, which happens when drawbar copies the program from its
-slot. The activity log lists anything the bundle had to leave out.
+A program's file names its piano and sample by a number worked out from their
+names, so a piano or sample on this computer is added with or without an
+instrument attached. The activity log lists anything the bundle had to leave out.
 
 ## Changes made outside drawbar
 

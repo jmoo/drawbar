@@ -48,10 +48,14 @@ sounds alone link nothing; the inspector shows them as **also at**.
 A file's mark says how it stands with its slot: none when the two are the same,
 yellow when the file is newer and a send would settle it, and red when the
 keyboard changed the slot, which only you can settle. An address in gray
-is a slot not read yet, or the slot on a keyboard that is not attached. While an
-instrument is attached, the **Needs** column names the sample or piano a sound
-plays. A name in italics with a `*` has unsaved edits. Hover anything for an
-explanation.
+is a slot not read yet, or the slot on a keyboard that is not attached. The
+**Needs** column names the piano or sample a program plays, once it is on this
+computer or on the keyboard. A name in italics with a `*` has unsaved edits.
+Hover anything for an explanation.
+
+Select one program and the inspector's **Plays** card lists what it plays, with
+`!` beside one that is in neither place. A piano's or sample's **Played by** card
+lists the programs on this computer that play it.
 
 ## Folders and tags
 

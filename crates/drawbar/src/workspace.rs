@@ -603,7 +603,7 @@ impl Baseline {
 struct Decoded {
     container: Option<Container>,
     entity: Option<Box<Entity>>,
-    plays: Option<Plays>,
+    plays: Vec<Plays>,
     parse_error: Option<String>,
     verify: VerifyState,
     words: bool,
@@ -617,7 +617,7 @@ impl Decoded {
         Decoded {
             container: None,
             entity: None,
-            plays: None,
+            plays: Vec::new(),
             parse_error: Some(why.to_string()),
             verify: VerifyState::Failed(why.to_string()),
             words: false,
@@ -638,7 +638,7 @@ impl Decoded {
         };
         Decoded {
             container: Container::read(bytes),
-            plays: entity.as_deref().and_then(Plays::of),
+            plays: entity.as_deref().map(Plays::of).unwrap_or_default(),
             entity,
             parse_error,
             verify,
@@ -684,11 +684,11 @@ pub struct LocalEntity {
     pub bytes: Bytes,
     /// Boxed, since a decode is kilobytes and most assets of a large library have none.
     pub entity: Option<Box<Entity>>,
-    /// The library its decode plays, taken with the decode.
+    /// The pianos and samples its decode plays, taken with the decode.
     ///
-    /// ⚠️ Taken off the frame: finding it lists every field of the body, and every listed
-    /// row asks for it.
-    pub plays: Option<Plays>,
+    /// ⚠️ Taken off the frame: finding them lists every field of the body, and every
+    /// listed row asks for them.
+    pub plays: Vec<Plays>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     /// Whether the bytes are words a note may hold, from `document::text::is_text`.
@@ -788,7 +788,7 @@ impl LocalEntity {
             ),
             bytes,
             entity: None,
-            plays: None,
+            plays: Vec::new(),
             parse_error: None,
             container: None,
             words: false,
@@ -898,7 +898,7 @@ impl LocalEntity {
             origin,
             bytes: Bytes::default(),
             entity: None,
-            plays: None,
+            plays: Vec::new(),
             parse_error: None,
             container: None,
             words: false,

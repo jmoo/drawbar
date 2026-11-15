@@ -587,14 +587,8 @@ pub struct DeviceState {
     /// means unknown, not an instrument with no folders.
     partitions: Vec<Partition>,
     banks: HashMap<(ObjectClass, u32), Vec<Option<ProgramInfo>>>,
-    /// What the instrument called a library object, by class and id, from every
-    /// dependency list it has answered with.
-    ///
-    /// ⚠️ An id names an object only in the library as it is now, so this is cleared when
-    /// the instrument reports a change or disconnects.
-    named: HashMap<(ObjectClass, u32), String>,
     /// What each set list or program the instrument has listed dependencies for needs,
-    /// by class and slot. Cleared with [`DeviceState::named`].
+    /// by class and slot. Cleared when the instrument reports a change or disconnects.
     needs: HashMap<(ObjectClass, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
 }
@@ -669,20 +663,13 @@ impl DeviceState {
         self.focus.contains_key(&class)
     }
 
-    /// Record what a slot said it depends on. The list belongs to that slot, and each name
-    /// in it names its object wherever that object is referenced.
+    /// Record what a slot said it depends on. The list belongs to that slot.
     fn depends(&mut self, class: ObjectClass, at: Location, deps: Vec<Dependency>) {
         if self.detail.at != Some((class, at)) {
             self.detail = Detail {
                 at: Some((class, at)),
                 ..Detail::default()
             };
-        }
-        for dep in &deps {
-            let name = dep.name.trim();
-            if !name.is_empty() {
-                self.named.insert((dep.class, dep.id), name.to_string());
-            }
         }
         let key = (class, at.bank, at.slot);
         self.needs.insert(key, nord_usb::bundle::needs(&deps));
@@ -712,25 +699,15 @@ impl DeviceState {
         Some(piano.name.trim())
     }
 
-    /// What the instrument called a library object, by class and id.
-    ///
-    /// ⚠️ Only the wire carries these names; a program's file stores its piano and sample
-    /// as bare ids. `None` means no dependency list has named it yet, not that it has no
-    /// name.
-    pub fn dependency_name(&self, class: ObjectClass, id: u32) -> Option<&str> {
-        self.named.get(&(class, id)).map(String::as_str)
-    }
-
-    /// The id the instrument has given a library object of this name, where it has named
-    /// exactly one so.
-    pub fn library_id(&self, class: ObjectClass, name: &str) -> Option<u32> {
-        let mut ids = self
-            .named
-            .iter()
-            .filter(|((held, _), named)| *held == class && named.trim() == name)
-            .map(|((_, id), _)| *id);
-        let id = ids.next()?;
-        ids.next().is_none().then_some(id)
+    /// Whether every bank the class declares has been read, so a slot missing from the
+    /// cache is missing from the instrument.
+    pub fn read_whole(&self, class: ObjectClass) -> bool {
+        self.geometry.get(&class).is_some_and(|banks| {
+            !banks.is_empty()
+                && banks.iter().all(|bank| {
+                    user_bank(bank.index).is_some_and(|n| self.banks.contains_key(&(class, n)))
+                })
+        })
     }
 
     /// A scanned bank's slots, or `None` if it has not been scanned.
@@ -887,7 +864,6 @@ impl DeviceState {
         self.geometry.clear();
         self.partitions.clear();
         self.inventory.clear();
-        self.named.clear();
         self.needs.clear();
         self.detail = Detail::default();
         self.scan.clear();
@@ -1331,7 +1307,7 @@ pub fn name_taken(
 }
 
 /// Every slot of `class` a walk found holding something, lowest address first.
-fn occupied(
+pub(crate) fn occupied(
     state: &DeviceState,
     class: ObjectClass,
 ) -> impl Iterator<Item = (Location, &ProgramInfo)> + '_ {
@@ -1383,13 +1359,6 @@ pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     }
 }
 
-/// What came of the last request for a slot's dependencies.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Asked {
-    Sent,
-    Refused,
-}
-
 /// Why nothing can be connected, in a browser with no WebUSB.
 pub const NO_USB: &str = "This browser can't reach an instrument over USB. Open drawbar in \
      Chrome, Edge or Brave to connect.";
@@ -1409,8 +1378,6 @@ pub struct Device {
     pending: VecDeque<DeviceCmd>,
     /// What the command in flight leaves to do when it finishes or fails.
     running: Option<Running>,
-    /// The slot [`Device::read_deps`] last asked about, and the outcome.
-    asked_deps: Option<((ObjectClass, Location), Asked)>,
     /// The list revision [`link_found`] last looked at. It looks again when the list or
     /// the instrument changes, and not every frame.
     linked: u64,
@@ -1439,8 +1406,6 @@ struct Running {
     /// The class the command writes into, so a refusal can be recorded against the queue
     /// entry it stopped on.
     writing: Option<ObjectClass>,
-    /// The slot a `DEPENDENCIES` read is about, so a refusal is recorded against it.
-    deps: Option<(ObjectClass, Location)>,
     /// A rescan or reload the app queued after a change. Its success stays off the status
     /// line, which keeps saying what the change did.
     follow_up: bool,
@@ -1486,7 +1451,6 @@ impl Device {
             link: Link::new(ctx, sender, Scratch::default()),
             pending: VecDeque::new(),
             running: None,
-            asked_deps: None,
             linked: 0,
             fetched: Vec::new(),
             gathered: None,
@@ -1591,31 +1555,6 @@ impl Device {
         std::mem::take(&mut self.fetched)
     }
 
-    /// Ask what a slot depends on, unless it is the slot last asked about.
-    ///
-    /// A document that wants a library object's name calls this every frame; remembering
-    /// the last slot makes that one read. The memory is cleared when the instrument
-    /// changes or disconnects, and when a write touches the slot's bank. A refused read
-    /// stays refused until [`Device::ask_deps_again`].
-    pub fn read_deps(&mut self, class: ObjectClass, at: Location, log: &mut Log) {
-        if self.asked_deps.is_some_and(|(held, _)| held == (class, at)) {
-            return;
-        }
-        self.asked_deps = Some(((class, at), Asked::Sent));
-        self.send(DeviceCmd::Deps { class, at }, log);
-    }
-
-    /// Ask what a slot depends on, whatever came of asking before.
-    pub fn ask_deps_again(&mut self, class: ObjectClass, at: Location, log: &mut Log) {
-        self.asked_deps = None;
-        self.read_deps(class, at, log);
-    }
-
-    /// Whether the instrument refused the last read of this slot's dependencies.
-    pub fn deps_refused(&self, class: ObjectClass, at: Location) -> bool {
-        self.asked_deps == Some(((class, at), Asked::Refused))
-    }
-
     /// Walk `class` again, in one session.
     ///
     /// Cached names stay until each bank's replacement arrives. Banks a mutation touches
@@ -1681,16 +1620,6 @@ impl Device {
                 held == class && slots.iter().any(|at| at.bank == *bank && at.slot == *slot)
             };
             self.state.needs.retain(|key, _| !slot_touched(key));
-            // ⚠️ A library object written over may come back under another id.
-            if class.is_library() {
-                self.state.named.retain(|(held, _), _| held != class);
-            }
-        }
-        let rewritten = |((class, at), _): &((ObjectClass, Location), Asked)| {
-            user_bank(at.bank).is_some_and(|bank| rescan.contains(&(*class, bank)))
-        };
-        if self.asked_deps.as_ref().is_some_and(rewritten) {
-            self.asked_deps = None;
         }
         // Writing the Electro 5's loaded slot requires SELECT to reload it. Confirmed on
         // hardware. Another model is assumed alike.
@@ -1715,10 +1644,6 @@ impl Device {
             reload,
             writing: match &cmd {
                 DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
-                _ => None,
-            },
-            deps: match &cmd {
-                DeviceCmd::Deps { class, at } => Some((*class, *at)),
                 _ => None,
             },
             follow_up: matches!(cmd, DeviceCmd::ScanBank { .. } | DeviceCmd::Reload { .. }),
@@ -1896,7 +1821,6 @@ impl Device {
     /// owed.
     fn forget(&mut self) {
         self.state.forget_everything();
-        self.asked_deps = None;
         self.running = None;
         self.revision += 1;
     }
@@ -2142,11 +2066,6 @@ impl Device {
                     self.failed = true;
                     if let Some(running) = self.running.as_mut() {
                         running.reload = None;
-                        if let Some(slot) = running.deps.take() {
-                            if self.asked_deps == Some((slot, Asked::Sent)) {
-                                self.asked_deps = Some((slot, Asked::Refused));
-                            }
-                        }
                         if let Some(class) = running.writing {
                             queue.stumbled(class, &text);
                         }
@@ -2163,9 +2082,7 @@ impl Device {
                 // External changes invalidate every cached name used by later dialogs.
                 DeviceEvent::InstrumentChanged => {
                     log.warn("the instrument changed; every cached name is dropped");
-                    self.state.named.clear();
                     self.state.needs.clear();
-                    self.asked_deps = None;
                     log.say("Something changed on the instrument. Reading it again…");
                     self.resync();
                 }
@@ -2932,10 +2849,10 @@ mod tests {
         assert_eq!(owed(false, false), None, "this panel loads no programs");
     }
 
-    /// A program written back changes what it needs, and a piano written over may come
-    /// back under another id, so neither cached answer outlives the write.
+    /// A program written back changes what it needs, so the cached answer does not
+    /// outlive the write; a write elsewhere leaves it.
     #[test]
-    fn a_write_forgets_what_its_slot_needed_and_the_ids_of_its_class() {
+    fn a_write_forgets_what_its_slot_needed() {
         let program = ObjectClass::Program;
         let (written, beside) = (Location { bank: 6, slot: 0 }, Location { bank: 6, slot: 1 });
         let plays = |id| {
@@ -2970,14 +2887,7 @@ mod tests {
             state.needs_of(program, beside),
             Some(&[nord_format::bundle::Key::Piano(2)][..])
         );
-        assert_eq!(
-            state.library_id(ObjectClass::Piano, "Grand 2"),
-            Some(2),
-            "a program write leaves the pianos' ids"
-        );
-
         let state = after_a_put(ObjectClass::Piano, Location { bank: 0, slot: 0 });
-        assert_eq!(state.library_id(ObjectClass::Piano, "Grand 2"), None);
         assert!(state.needs_of(program, written).is_some());
     }
 
@@ -3047,190 +2957,6 @@ mod tests {
             finish(&mut device, &mut log, &mut workspace);
         }
         assert_eq!(log.status().1, copied);
-    }
-
-    /// A slot's dependencies are read once however often they are wanted, and a refused
-    /// read waits until asked again.
-    #[test]
-    fn a_dependency_read_is_repeated_after_a_refusal_a_write_or_a_change() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
-        let class = ObjectClass::Program;
-        let at = Location { bank: 6, slot: 3 };
-        device.pretend_attached();
-
-        let asks = |device: &mut Device, log: &mut Log| {
-            device.read_deps(class, at, log);
-            let asked = device
-                .queued()
-                .iter()
-                .filter(|cmd| matches!(cmd, DeviceCmd::Deps { at: held, .. } if *held == at))
-                .count();
-            device.pump();
-            asked
-        };
-        let answer = |device: &mut Device, log: &mut Log, workspace: &mut Workspace, event| {
-            device.pretend(event);
-            device.pretend(DeviceEvent::Finished);
-            device.poll(log, workspace, &mut Tabs::default(), &mut Queue::default());
-        };
-
-        assert_eq!(asks(&mut device, &mut log), 1);
-        answer(
-            &mut device,
-            &mut log,
-            &mut workspace,
-            DeviceEvent::OpFailed("deps 6:3: timed out".into()),
-        );
-        assert!(device.deps_refused(class, at));
-        assert_eq!(
-            asks(&mut device, &mut log),
-            0,
-            "a refusal is not retried every frame"
-        );
-
-        device.ask_deps_again(class, at, &mut log);
-        assert!(!device.deps_refused(class, at));
-        device.pump();
-        answer(
-            &mut device,
-            &mut log,
-            &mut workspace,
-            DeviceEvent::Deps {
-                class,
-                at,
-                deps: Vec::new(),
-            },
-        );
-        assert_eq!(asks(&mut device, &mut log), 0, "answered");
-
-        device.send(
-            DeviceCmd::Put {
-                id: 1,
-                class,
-                at: Location { bank: 6, slot: 9 },
-                name: "Africa Split".into(),
-                payload: Payload::Bytes(vec![0; 4]),
-            },
-            &mut log,
-        );
-        device.pump();
-        answer(
-            &mut device,
-            &mut log,
-            &mut workspace,
-            DeviceEvent::OpOk("put".into()),
-        );
-        assert_eq!(
-            asks(&mut device, &mut log),
-            1,
-            "a write into the slot's bank"
-        );
-        while device.state.in_flight.is_some() {
-            answer(
-                &mut device,
-                &mut log,
-                &mut workspace,
-                DeviceEvent::Note("done".into()),
-            );
-            device.pump();
-        }
-
-        answer(
-            &mut device,
-            &mut log,
-            &mut workspace,
-            DeviceEvent::InstrumentChanged,
-        );
-        assert_eq!(asks(&mut device, &mut log), 1, "a change on the instrument");
-    }
-
-    /// A name belongs to the library object, not to the slot whose list carried it, and
-    /// lasts as long as the instrument's library does.
-    #[test]
-    fn a_name_the_instrument_gave_a_library_id_stands_wherever_that_id_does() {
-        let ctx = egui::Context::default();
-        let mut workspace = Workspace::new(ctx.clone());
-        let mut device = Device::new(ctx);
-        let mut log = Log::default();
-        let class = ObjectClass::Program;
-        let at = Location { bank: 6, slot: 3 };
-
-        device.pretend_deps(
-            class,
-            at,
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: 0x0102_0304,
-                name: "Royal Grand 3D ".into(),
-                location: None,
-            }],
-        );
-        let piano = |device: &Device, id| {
-            device
-                .state
-                .dependency_name(ObjectClass::Piano, id)
-                .map(str::to_string)
-        };
-        assert_eq!(
-            piano(&device, 0x0102_0304).as_deref(),
-            Some("Royal Grand 3D")
-        );
-        assert_eq!(piano(&device, 0x0999_0999), None, "an id nothing has named");
-        assert_eq!(
-            device
-                .state
-                .dependency_name(ObjectClass::Sample, 0x0102_0304),
-            None,
-            "a piano is not a sample"
-        );
-
-        device.pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
-        assert_eq!(
-            piano(&device, 0x0102_0304).as_deref(),
-            Some("Royal Grand 3D"),
-            "another slot's list"
-        );
-
-        device.pretend(DeviceEvent::InstrumentChanged);
-        device.poll(
-            &mut log,
-            &mut workspace,
-            &mut Tabs::default(),
-            &mut Queue::default(),
-        );
-        assert_eq!(
-            piano(&device, 0x0102_0304),
-            None,
-            "the library may have changed"
-        );
-
-        device.pretend_deps(
-            class,
-            at,
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: 0x0102_0304,
-                name: "Royal Grand 3D".into(),
-                location: None,
-            }],
-        );
-        device.pretend(DeviceEvent::Disconnected { lost: false });
-        device.poll(
-            &mut log,
-            &mut workspace,
-            &mut Tabs::default(),
-            &mut Queue::default(),
-        );
-        assert_eq!(
-            piano(&device, 0x0102_0304),
-            None,
-            "another instrument names its own"
-        );
     }
 
     /// The status strip names places and things; the protocol line keeps the verbs.
