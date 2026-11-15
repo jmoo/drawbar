@@ -180,7 +180,7 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
     let mut written = Vec::new();
     for (out, bytes) in planned {
         write_file(ui, out, &bytes)?;
-        written.push(out.display().to_string());
+        written.push(quoted(&out.display().to_string()));
     }
     ui.note(format!(
         "build a library from them with `nord piano build {}`",
@@ -299,14 +299,18 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
                     Fate::Kept { value, .. } => Some((*value, sustain_of(&p.fate, rate))),
                     _ => None,
                 });
-                let (bytes, _) = marked(file, loaded, &plan, true)?;
-                planned.push((out, bytes));
-                let (value, sustain) = kept.unwrap_or_default();
-                (
-                    Some(*note),
-                    format!("layer {layer} of {of}, value {value}"),
-                    sustain,
-                )
+                match kept {
+                    Some((value, sustain)) => {
+                        let (bytes, _) = marked(file, loaded, &plan, true)?;
+                        planned.push((out, bytes));
+                        (
+                            Some(*note),
+                            format!("layer {layer} of {of}, value {value}"),
+                            sustain,
+                        )
+                    }
+                    None => (Some(*note), "no hit kept".into(), String::new()),
+                }
             }
             (Some(Placed::Duplicate { note, of }), _) => (
                 Some(*note),
@@ -361,7 +365,10 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
             sustain
         ));
     }
-    if rows.iter().any(|row| row.3.is_none()) {
+    if found
+        .iter()
+        .any(|f| !f.rests && f.unread.is_none() && f.hit.is_some())
+    {
         ui.note(format!(
             "a floor of - rests under {} s, too little to read its noise on, so it is not \
              held to --min-snr",
@@ -380,13 +387,23 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         write_file(ui, out, &bytes)?;
-        written.push(out.display().to_string());
+        written.push(quoted(&out.display().to_string()));
     }
     ui.note(format!(
         "build a library from them with `nord piano build {}`",
         written.join(" ")
     ));
     Ok(())
+}
+
+/// `path` as a shell reads it back: in double quotes where it holds anything but
+/// letters, digits and `/\._-:`.
+fn quoted(path: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:".contains(c);
+    match path.chars().all(plain) {
+        true => path.to_string(),
+        false => format!("\"{}\"", path.replace('"', "\\\"")),
+    }
 }
 
 /// The WAV files under `dir`, in its subfolders too, in path order, leaving out any
@@ -1065,9 +1082,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_printed_path_is_quoted_where_a_shell_would_split_it() {
+        assert_eq!(quoted("out/C4.wav"), "out/C4.wav");
+        assert_eq!(
+            quoted("out/Upright Piano/C4.wav"),
+            "\"out/Upright Piano/C4.wav\""
+        );
+        assert_eq!(quoted("a\"b.wav"), "\"a\\\"b.wav\"");
+    }
+
     /// A folder of one-note files, named for nothing they hold: each is placed by its
     /// pitch and level, written under the -o folder at its own path, and they build one
-    /// library. A file with no hit is left out, and a note list is refused.
+    /// library. A file with no hit, or one that does not read, is left out, linked
+    /// folders are not followed, and a note list and -o as the folder are refused.
     #[test]
     fn a_folder_of_one_note_files_preps_into_one_library() {
         let dir = crate::edit::tests::scratch("piano-prep-folder");
