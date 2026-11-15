@@ -3193,12 +3193,12 @@ mod tests {
             said.extend(painted_sheet(&mut bench));
         }
         for slot in [
-            "to 7:1 · replaces “Africa Split”",
-            "to 7:2 · new",
-            "to 8:1 · checking",
-            "Programs 7:1",
-            "Programs 7:2",
-            "Programs 8:1",
+            "replaces “Africa Split”",
+            "new",
+            "checking",
+            "7:1",
+            "7:2",
+            "8:1",
         ] {
             assert!(said.iter().any(|word| word == slot), "{slot}: {said:?}");
         }

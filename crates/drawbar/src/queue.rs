@@ -617,7 +617,7 @@ struct Drawn<'a> {
 
 /// The sheet: one row per sound that differs between this computer and the keyboard, the
 /// way each goes, and how the picked one differs. Nothing is written or brought in until
-/// Sync. It lists nothing until the read it asked for has landed.
+/// Sync. It shows once the read it asked for has landed.
 pub fn sheet(
     ctx: &egui::Context,
     device: &mut Device,
@@ -630,7 +630,10 @@ pub fn sheet(
         return;
     };
     let pressed = sheet.pressed();
-    let read = sheet.read(state) && pressed.is_none();
+    if pressed.is_none() && !sheet.read(state) {
+        return;
+    }
+    let read = pressed.is_none();
     let rows = match read {
         true => sync.list.clone(),
         false => Vec::new(),
@@ -669,7 +672,7 @@ pub fn sheet(
             ui.spacing_mut().item_spacing.y = 0.0;
             open &= head(ui, state);
             open &= foot(ui, sheet, &drawn, read, acts);
-            body(ui, sheet, &drawn, read, acts);
+            body(ui, sheet, &drawn, acts);
         });
     let left = acts[before..].iter().any(|act| matches!(act, Act::Open(_)));
     if !open || shown.should_close() || left {
@@ -746,10 +749,9 @@ fn foot(
     };
     let live = read && !plan.is_empty();
     let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live)
-        .on_disabled_hover_text(match (pressed, read) {
-            (Some(_), _) => SYNCING,
-            (None, true) => "Pick a direction for a row first.",
-            (None, false) => "Reading the keyboard…",
+        .on_disabled_hover_text(match pressed {
+            Some(_) => SYNCING,
+            None => "Pick a direction for a row first.",
         });
     let up = plan.iter().filter(|step| step.way == Way::Up);
     let up = up.filter_map(|step| Some((step.row.class, drawn.workspace.get(step.row.id)?)));
@@ -778,7 +780,7 @@ fn foot(
 }
 
 /// The rows beside how the picked one differs.
-fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &mut Vec<Act>) {
+fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, acts: &mut Vec<Act>) {
     let whole = ui.max_rect();
     let body = egui::Rect::from_min_max(
         egui::pos2(whole.left() + 10.0, ui.cursor().top() + 4.0),
@@ -790,10 +792,9 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &
         ui.add_space(GAP);
         ui.horizontal(|ui| {
             ui.add_space(PAD);
-            let said = match (sheet.pressed(), read) {
-                (Some(_), _) => SYNCING,
-                (None, true) => "Nothing to sync.",
-                (None, false) => "Reading the keyboard…",
+            let said = match sheet.pressed() {
+                Some(_) => SYNCING,
+                None => "Nothing to sync.",
             };
             ui.label(
                 egui::RichText::new(said)
@@ -1033,7 +1034,11 @@ fn item(
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
-    let words = row.said(drawn.workspace, drawn.queue);
+    // The chip beside a send placed by hand already says where it goes.
+    let words = match (placed, &row.change) {
+        (Some(_), Change::Placed { waits: None }) => placed_words(row.id, drawn.queue),
+        _ => row.said(drawn.workspace, drawn.queue),
+    };
     let failed = placed.is_some_and(|held| held.failure.is_some());
     let note_ink = match (failed, selected) {
         (true, false) => bad(&visuals),
@@ -1194,11 +1199,9 @@ fn destination(
     queue: &Queue,
     acts: &mut Vec<Act>,
 ) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        place(held.class, held.at),
-        egui::FontId::monospace(MONO),
-        ink,
-    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(shown(held.at), egui::FontId::monospace(MONO), ink);
     let size = chip_size(&galley);
     let box_ = egui::Rect::from_min_size(
         egui::pos2(right - size.x, row.center().y - CHIP / 2.0),
@@ -1949,13 +1952,13 @@ mod tests {
             testing::painted(&frame())
         };
         let shown = painted(tine);
-        let row = testing::where_(&shown, "to 1:3 · replaces “Bright Wurly”");
+        let row = testing::where_(&shown, "replaces “Bright Wurly”");
         assert!(
             row.top() > testing::where_(&shown, "Tine").bottom() - 1.0,
             "the word sits under the name: {row:?}"
         );
         assert!(shown.iter().any(|word| word.text == "newer here"));
-        assert!(shown.iter().any(|word| word.text == "to 1:1 · new"));
+        assert!(shown.iter().any(|word| word.text == "new"));
     }
 
     /// Retargeting a waiting asset moves its entry without adding a second. The entry
