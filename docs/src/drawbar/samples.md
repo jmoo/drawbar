@@ -73,4 +73,5 @@ Instruments drawbar makes from WAVs are v2.
 
 ## Sending
 
-Send an instrument from its header like anything else.
+**Send to…** in its header places an instrument on a slot, and **Sync** writes
+it, like anything else.

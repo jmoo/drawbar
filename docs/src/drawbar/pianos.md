@@ -85,5 +85,5 @@ have been played on an instrument.
 
 ## Sending
 
-Send a library from its header. It is checked against the instrument and its
-free space first.
+**Send to…** in its header places a library on a slot, and **Sync** writes it.
+It is checked against the instrument and its free space first.

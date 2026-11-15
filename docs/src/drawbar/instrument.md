@@ -1,6 +1,6 @@
 # Your instrument
 
-Back up your instrument before you send anything. Nord Sound Manager makes a full
+Back up your instrument before you sync. Nord Sound Manager makes a full
 backup. [What is supported](../getting-started/support.md) says which instruments
 have been tested.
 
@@ -44,14 +44,14 @@ Drag to move things:
 
 ## Sync
 
-Nothing is written until you sync. **Sync** in the top bar, or ⇧⌘S, reads the
-instrument and lists what differs. `↑` writes a sound to the instrument, `↓`
-brings one here; click the arrow to turn it. A `!` row waits for your pick. When
-an instrument attaches with changes of its own, the list opens by itself.
+Nothing is written until you sync. **Sync** in the top bar, or **Instrument ▸
+Sync…** (⇧⌘S), reads the instrument and lists what differs. `↑` writes a sound to
+the keyboard, `↓` brings one to this computer; click the arrow to turn it. A `!`
+row waits for your pick. When an instrument attaches with changes of its own, the
+list opens by itself.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
-`Africa-Split` on the panel. Writing a sound renamed on this computer renames its
-slot, even when the slot already holds the same sound.
+`Africa-Split` on the panel.
 
 Library undo, or **Undo** in the activity log, puts back a file Sync brought in, or
 a link it moved or removed.
@@ -63,7 +63,7 @@ a link it moved or removed.
   it puts the old one back. If that fails too, the old sound is kept on this
   computer, and the activity log says where.
 - In the browser, a page left open while drawbar.app is updated cannot copy the
-  old sound, so it writes over none until you reload it. Sending to an empty
+  old sound, so it writes over none until you reload it. Writing to an empty
   slot still works.
 - An interrupted transfer cannot leave the instrument stuck on its progress
   screen.

@@ -47,8 +47,7 @@ sending a file to a slot links the two; **Link to** and **Unlink** in a row's me
 change a link.
 
 The mark before a name says how a file stands with its slot: `↑` when the file is
-newer, `↓` when the slot is, and `!` (Needs attention) when both changed or the
-keyboard emptied the slot. An address in gray is a slot not read yet, or the slot on a
+newer, `↓` when the slot is, and `!` when it waits for your pick. An address in gray is a slot not read yet, or the slot on a
 keyboard that is not attached. The **Needs** column names the piano or sample a
 program plays, once it is on this computer or on the keyboard. A name in italics
 with a `*` has unsaved edits. Hover anything for an explanation.

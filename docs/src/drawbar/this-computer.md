@@ -136,7 +136,7 @@ Unsaved edits are kept when you quit: those of sounds in your library, and those
 of a sound you were viewing in a slot of the instrument. A slot's edits come
 back when you view that slot of the same instrument again with the same library
 open; if the slot changed since, drawbar asks which to keep. **Keep mine** keeps
-your edits, to send when you choose, **Take theirs** discards them, and **Keep
+your edits, to sync when you choose, **Take theirs** discards them, and **Keep
 both** keeps yours as a new file on this computer. Where edits kept from an
 earlier session meet edits you made since, **Take theirs** puts the earlier
 edits back, and **Keep both** keeps the earlier edits as a new file. drawbar also keeps
