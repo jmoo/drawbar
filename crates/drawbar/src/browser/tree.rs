@@ -20,6 +20,7 @@ use crate::filter::{Filter, Narrow, Place, State};
 use crate::folders::{Folder, Folders, SHOW_HIDDEN_FILES};
 use crate::icon::Glyph;
 use crate::libraries::Picking;
+use crate::link::Standing;
 use crate::menu::{self, marked, new_menu, IMPORT, OPEN_FOLDER, SHOW_FOLDER};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
@@ -1347,8 +1348,18 @@ impl Browser {
             return;
         };
         let item = Item::Local(id);
+        let slot = slot_items(entity, workspace, &device.state);
         offer(ui, "Open", None, Act::Open(item), acts);
-        self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
+        for (label, act) in slot.sends {
+            offer(ui, &label, None, act, acts);
+        }
+        if !slot.link_to.is_empty() {
+            menu::button(ui, "Link to", |ui| {
+                for (label, act) in slot.link_to {
+                    offer(ui, &label, None, act, acts);
+                }
+            });
+        }
         offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);
@@ -1359,6 +1370,9 @@ impl Browser {
         self.filing_menu(ui, id, self.folders.holding(entity), acts);
         self.tag_menu(ui, &self.selection.locals(), acts);
         ui.separator();
+        if let Some((label, act)) = slot.unlink {
+            offer(ui, &label, None, act, acts);
+        }
         if ui.button("Delete…").clicked() {
             self.ask_delete(&entity.name, Act::Remove(id));
             ui.close();
@@ -1917,6 +1931,78 @@ fn new_tag_row(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     );
     if drawn.response.clicked() {
         acts.push(Act::NewTag(Vec::new()));
+    }
+}
+
+/// What a row's menu offers about an asset's slot on the attached keyboard, each with
+/// its label.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SlotItems {
+    pub sends: Vec<(String, Act)>,
+    /// The slots holding exactly its saved bytes that no other asset is linked to.
+    pub link_to: Vec<(String, Act)>,
+    pub unlink: Option<(String, Act)>,
+}
+
+/// For an asset with no link on the attached keyboard, Send to… and Link to; for a
+/// linked one, Load on instrument, the send to its slot while that is ready, Send to
+/// another slot… and Unlink. Nothing while no keyboard is attached, or for an asset it
+/// does not take.
+pub(crate) fn slot_items(
+    entity: &LocalEntity,
+    workspace: &Workspace,
+    state: &DeviceState,
+) -> SlotItems {
+    let id = entity.id;
+    let writable = Kind::of(entity)
+        .home()
+        .is_some_and(|class| !read_only(class));
+    if state.keyboard().is_none() || !writable || !crate::device::fit(state, entity).allowed() {
+        return SlotItems::default();
+    }
+    let Some(linked) = crate::device::standing_of(state, entity) else {
+        let link_to = crate::device::link_offers(state, workspace, entity)
+            .into_iter()
+            .map(|(class, at)| {
+                let name = state
+                    .slot(class, at)
+                    .flatten()
+                    .map_or("", |info| info.name.trim());
+                (format!("{} {name}", shown(at)), Act::Link { id, class, at })
+            })
+            .collect();
+        return SlotItems {
+            sends: vec![("Send to…".to_string(), Act::SendTo(id))],
+            link_to,
+            unlink: None,
+        };
+    };
+    let class = linked.class;
+    let mut sends = Vec::new();
+    if let Some(at) = linked
+        .at
+        .filter(|at| crate::device::loadable(state, class, *at))
+    {
+        sends.push((
+            LOAD_ON_INSTRUMENT.to_string(),
+            Act::LoadOnInstrument { class, at },
+        ));
+    }
+    if let (Standing::Ahead, Some(at)) = (linked.standing, linked.at) {
+        sends.push((
+            format!("Send to {}", shown(at)),
+            Act::Send { id, class, at },
+        ));
+    }
+    sends.push(("Send to another slot…".to_string(), Act::SendTo(id)));
+    let unlink = match linked.at {
+        Some(at) => format!("Unlink from {}", shown(at)),
+        None => "Unlink".to_string(),
+    };
+    SlotItems {
+        sends,
+        link_to: Vec::new(),
+        unlink: Some((unlink, Act::Unlink(id))),
     }
 }
 

@@ -1099,6 +1099,15 @@ fn found(state: &DeviceState, keyboard: &Keyboard, entity: &LocalEntity) -> Opti
     if holding.next().is_some() || !state.read_through(class) {
         return None;
     }
+    named_slots(entity, class)
+        .any(|named| named == at)
+        .then(|| Held::new(class, Spot::at(at), print))
+        .flatten()
+}
+
+/// The slots of `class` an asset names: the address its header stores, then the slot it
+/// came off.
+pub fn named_slots(entity: &LocalEntity, class: ObjectClass) -> impl Iterator<Item = Location> {
     let stored = entity
         .container
         .as_ref()
@@ -1107,10 +1116,12 @@ fn found(state: &DeviceState, keyboard: &Keyboard, entity: &LocalEntity) -> Opti
             bank: bank.into(),
             slot: slot.into(),
         });
-    let named = stored == Some(at) || entity.origin.slot() == Some((class, at));
-    named
-        .then(|| Held::new(class, Spot::at(at), print))
-        .flatten()
+    let came_off = entity
+        .origin
+        .slot()
+        .filter(|(from, _)| *from == class)
+        .map(|(_, at)| at);
+    stored.into_iter().chain(came_off)
 }
 
 /// Link a view just kept to the slot it shows, as it was read.
@@ -1244,6 +1255,30 @@ pub fn also_at(state: &DeviceState, entity: &LocalEntity) -> Vec<Location> {
         (false, Some(class), Some(print)) => holding(state, class, print.crc).collect(),
         _ => Vec::new(),
     }
+}
+
+/// The slots [`also_at`] finds that no other asset is linked to: those Link to offers.
+pub fn link_offers(
+    state: &DeviceState,
+    workspace: &Workspace,
+    entity: &LocalEntity,
+) -> Vec<(ObjectClass, Location)> {
+    let (Some(keyboard), Some(class)) = (state.keyboard(), home(entity)) else {
+        return Vec::new();
+    };
+    also_at(state, entity)
+        .into_iter()
+        .filter(|at| {
+            let name = state
+                .slot(class, *at)
+                .flatten()
+                .map_or("", |info| info.name.trim());
+            workspace
+                .linked_at(&keyboard, class, &Spot::of(class, *at, name))
+                .is_none()
+        })
+        .map(|at| (class, at))
+        .collect()
 }
 
 /// The folder an asset belongs in.

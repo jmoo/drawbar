@@ -1426,7 +1426,10 @@ impl DrawbarApp {
             acts.push(browser::Act::LoadOnInstrument { class, at });
         }
         if wants.pick {
-            acts.push(browser::Act::SendChecked(vec![id]));
+            acts.push(browser::Act::SendTo(id));
+        }
+        if wants.save {
+            acts.push(browser::Act::SaveDoc(id));
         }
         if wants.keep {
             acts.push(browser::Act::Keep(id));

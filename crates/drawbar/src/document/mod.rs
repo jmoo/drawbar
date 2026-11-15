@@ -167,8 +167,10 @@ pub struct Around<'a> {
 pub struct Wants {
     /// The write the header queued.
     pub send: Option<SendBack>,
-    /// Whether the header queued the document for a free slot.
+    /// Whether the header asked to send the document to a slot the user picks.
     pub pick: bool,
+    /// Whether the header asked to save the document.
+    pub save: bool,
     /// The slot the header asked the panel to play.
     pub load: Option<(ObjectClass, Location)>,
     /// The banner's offer to put a view of a slot on this computer.
@@ -447,6 +449,7 @@ impl Document {
         let mut wants = Wants {
             send: act.send,
             pick: act.pick,
+            save: act.save,
             load: act.load,
             build: act.build,
             ..Wants::default()
@@ -1372,7 +1375,6 @@ fn extras(
                 ink: Ink::Warn,
                 hint: format!("raw ≠ bits on {pending} fields"),
             }),
-            loud: queued(entity, device, pending),
             ..header::Extras::default()
         },
         Shape::SetList => header::Extras {
@@ -1502,35 +1504,6 @@ fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
         });
     });
     keep
-}
-
-/// The header's loud action for a field document, with the pending count added.
-///
-/// ⚠️ The count is added only when the document is linked to a slot it can be sent to. A document
-/// with nothing to send to says so, and a count beside that message would read as an
-/// offer.
-fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud> {
-    if pending == 0 {
-        return None;
-    }
-    let loud = header::action(entity, &device.state)?;
-    let click = match loud.click {
-        header::Click::Send(class, at) | header::Click::Load(class, at) => {
-            header::Click::Send(class, at)
-        }
-        _ => return None,
-    };
-    if loud.tone != Tone::Ready {
-        return None;
-    }
-    Some(Loud {
-        click,
-        glyph: crate::icon::Glyph::Upload,
-        label: format!("Queue send · {pending}"),
-        short: format!("Send {pending}"),
-        hint: format!("{pending} pending edits. All are applied together, or none are applied."),
-        ..loud
-    })
 }
 
 /// What is known about the piano a program plays.
@@ -2080,7 +2053,15 @@ mod tests {
         }
         // The controls, and the glyphs painted where their icons would load. The kind
         // glyph at the far left is the only glyph that is not a control.
-        const CONTROLS: [&str; 6] = ["Send", "Send to…", "Basic", "Advanced", "Revert", "Export…"];
+        const CONTROLS: [&str; 7] = [
+            "Send",
+            "Send to…",
+            "Save",
+            "Basic",
+            "Advanced",
+            "Revert",
+            "Export…",
+        ];
         type Placed<'a> = Vec<&'a (String, egui::Rect)>;
         let (right, left): (Placed, Placed) = header.iter().partition(|(word, rect)| {
             CONTROLS.contains(&word.as_str()) || (word == "⚠" && rect.left() > 300.0)
@@ -2334,47 +2315,6 @@ mod tests {
         open.set(&[("center_panel.split", "true")]);
         let said = open.twice();
         assert!(said.iter().any(|word| word == "2 pending"), "{said:?}");
-    }
-
-    /// A count on a dashed action would read as an offer.
-    #[test]
-    fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
-        let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.to_vec();
-        open.id = open.workspace.ingest(
-            "Africa Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 3 },
-            },
-            bytes,
-            &mut open.log,
-        );
-        open.set(&[("center_panel.gain", "96")]);
-
-        let unattached = open.twice();
-        assert!(
-            unattached.iter().any(|word| word == "Send to…"),
-            "with nothing attached, the action carries no count: {unattached:?}"
-        );
-
-        open.device
-            .pretend_scanned(ObjectClass::Program, 7, &["", "", "", "Africa Split"]);
-        let print = open.workspace.get(open.id).unwrap().saved_print().unwrap();
-        let (class, at) = (ObjectClass::Program, Location { bank: 6, slot: 3 });
-        crate::device::link_copy(
-            &open.device.state,
-            &mut open.workspace,
-            open.id,
-            class,
-            at,
-            print,
-        );
-        let attached = open.twice();
-        assert!(
-            attached.iter().any(|word| word == "Queue send · 1"),
-            "{attached:?}"
-        );
     }
 
     /// A group is not in use when the file's state leaves its controls without effect.

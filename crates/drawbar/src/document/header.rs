@@ -9,11 +9,11 @@ use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
 use super::{piano, project, sample, setlist, text, wav, SendBack, Shape};
-use crate::app::{accent, caption, good, warn};
+use crate::app::{accent, caption, good, tint, warn};
 use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT};
 use crate::device::{loadable, read_only, standing_of, DeviceState, Linked};
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{keyboard_mark, mark_words, Mark};
+use crate::library::{away, mark_ink, mark_sign, mark_words, Mark};
 use crate::link::Standing;
 use crate::panel::caps;
 use crate::queue::Queue;
@@ -172,8 +172,8 @@ impl Learned {
 
 /// The ink a header phrase or stroke may use.
 ///
-/// ⚠️ There is no `bad` ink. The header never shows red; red is reserved for the
-/// hatches in a key map.
+/// ⚠️ There is no `bad` ink. A phrase never shows red; on the strip only the place
+/// badge's `!` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ink {
     Good,
@@ -239,6 +239,8 @@ pub enum Click {
     Pick,
     /// Play the slot on the instrument.
     Load(ObjectClass, Location),
+    /// Save the edits, as ⌘S does.
+    Save,
     /// Build this project into the instrument it describes.
     Build,
 }
@@ -301,8 +303,9 @@ pub(super) struct Clicked {
     pub revert: bool,
     pub export: bool,
     pub send: Option<SendBack>,
-    /// Whether the document is to be queued for a free slot.
+    /// Whether the document is to be sent to a slot the user picks.
     pub pick: bool,
+    pub save: bool,
     pub build: bool,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
@@ -449,8 +452,45 @@ fn left(
     }
 
     let place = lives(entity, facts.device);
-    place.hash(&mut shows);
-    mono(ui, &place, quiet).on_hover_text(entity.origin.label());
+    let shown = place.shown();
+    shown.hash(&mut shows);
+    let (ink, stroke) = match place.mark {
+        Some(mark) => {
+            let ink = mark_ink(mark, &visuals);
+            (ink, tint(ink, 0.45))
+        }
+        None => (
+            visuals
+                .widgets
+                .inactive
+                .fg_stroke
+                .color
+                .gamma_multiply(0.85),
+            visuals.widgets.noninteractive.bg_stroke.color,
+        ),
+    };
+    let ink = match place.faint {
+        true => ink.gamma_multiply(0.5),
+        false => ink,
+    };
+    let drawn = pill(
+        ui,
+        Pill {
+            glyph: None,
+            label: Some(&shown),
+            ink,
+            mono: true,
+            stroke,
+            dashed: false,
+            pad: 6.0,
+            height: CONTROL,
+            live: false,
+        },
+    );
+    match place.mark {
+        Some(mark) => drawn.on_hover_text(mark_words(mark)),
+        None => drawn.on_hover_text(entity.origin.label()),
+    };
 
     let own = sized(entity);
     if let Some(size) = facts.extras.size.as_ref().or(own.as_ref()) {
@@ -547,6 +587,7 @@ fn right(
                 })
             }
             (true, Click::Pick) => act.pick = true,
+            (true, Click::Save) => act.save = true,
             (true, Click::Load(class, at)) => act.load = Some((class, at)),
             (true, Click::Build) => act.build = true,
             (false, _) | (true, Click::Nothing) => {}
@@ -1100,19 +1141,46 @@ fn stream_version(entity: &LocalEntity) -> Option<u16> {
     }
 }
 
-/// Where the document lives: the slot it is linked to on the attached keyboard, or else
-/// where it is [`stored`].
-pub(super) fn lives(entity: &LocalEntity, device: &DeviceState) -> String {
-    match standing_of(device, entity) {
-        Some(Linked {
-            class,
-            at: Some(at),
-            ..
-        }) => place(class, at),
-        Some(Linked {
-            class, at: None, ..
-        }) => folder(class).to_string(),
-        None => stored(entity),
+/// Where a document lives, as its place badge shows it.
+pub(super) struct Lives {
+    pub text: String,
+    pub mark: Option<Mark>,
+    /// Whether the address says nothing yet of what the slot holds.
+    pub faint: bool,
+}
+
+impl Lives {
+    /// The badge's text: the mark's sign, if any, before the place.
+    pub fn shown(&self) -> String {
+        match self.mark {
+            Some(mark) => format!("{} {}", mark_sign(mark), self.text),
+            None => self.text.clone(),
+        }
+    }
+}
+
+/// Where the document lives: the slot it is linked to on the attached keyboard, its one
+/// link while nothing is attached, or else where it is [`stored`].
+pub(super) fn lives(entity: &LocalEntity, device: &DeviceState) -> Lives {
+    let linked = standing_of(device, entity);
+    let (text, faint) = match (linked, away(entity, device)) {
+        (
+            Some(Linked {
+                class,
+                at: Some(at),
+                standing,
+                ..
+            }),
+            _,
+        ) => (place(class, at), standing == Standing::Unread),
+        (Some(Linked { class, .. }), _) => (folder(class).to_string(), true),
+        (None, Some((class, at))) => (place(class, at), true),
+        (None, None) => (stored(entity), false),
+    };
+    Lives {
+        text,
+        mark: linked.and_then(|linked| Mark::of(linked.standing)),
+        faint,
     }
 }
 
@@ -1186,47 +1254,31 @@ fn sized(entity: &LocalEntity) -> Option<SizeLine> {
     })
 }
 
-/// The one state the header shows for this document: that it has unsaved edits, or how
-/// it compares with what the attached instrument holds in its slot.
-///
-/// ⚠️ Unsaved is checked first: a slot that matches the saved bytes says nothing about
-/// the edited ones in front of the reader.
+/// The one state the header shows for this document: that it has unsaved edits, what
+/// its editor claims, or that a write of it is waiting. How it stands with its slot is
+/// the place badge's.
 fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
-    let waiting = facts.queue.holds(entity.id);
     if entity.is_unsaved() {
         return Some(match &facts.extras.edited {
             Some(line) => line.clone(),
-            None => phrase(Mark::Unsaved, waiting, Standing::Same),
+            None => StateLine {
+                words: "edited".to_string(),
+                ink: Ink::Warn,
+                hint: mark_words(Mark::Unsaved).to_string(),
+            },
         });
     }
     if let Some(claim) = &facts.extras.state {
         return Some(claim.clone());
     }
-    let linked = standing_of(facts.device, entity)?;
-    let mark = keyboard_mark(entity, facts.device)?;
-    Some(phrase(mark, waiting, linked.standing))
-}
-
-/// The strip's short phrase for a mark, never in red.
-///
-/// ⚠️ Exhaustive over [`Mark`], and every arm's ink is an [`Ink`], which has no `bad`.
-fn phrase(mark: Mark, waiting: bool, standing: Standing) -> StateLine {
-    let hint = mark_words(mark).to_string();
-    let words = match (mark, waiting, standing) {
-        (Mark::Unsaved, _, _) => "edited",
-        (Mark::Ahead, true, _) => "waiting to send",
-        (Mark::Ahead, false, _) => "ready to send",
-        (Mark::Attention, _, Standing::Both) => "changed here and on the keyboard",
-        (Mark::Attention, _, _) => "changed on the keyboard",
-    };
-    StateLine {
-        words: words.to_string(),
+    facts.queue.holds(entity.id).then(|| StateLine {
+        words: "waiting to send".to_string(),
         ink: Ink::Warn,
-        hint,
-    }
+        hint: "Send in the toolbar writes it".to_string(),
+    })
 }
 
-/// The one loud action, and which of its three states it is in: a send to a free slot
+/// The one loud action: Save while it is edited, else a send to a slot the user picks
 /// for a document with no link, a load of a slot that holds it, or a send to a slot that
 /// holds an earlier version. `None` where only the user can say which of the two is
 /// current.
@@ -1251,6 +1303,20 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         ..send(SEND_TO.to_string(), hint, Click::Nothing)
     };
 
+    if entity.is_unsaved() {
+        let queues = crate::device::slot_of(device, entity).filter(|(class, _)| !read_only(*class));
+        return Some(Loud {
+            short: "Save".to_string(),
+            glyph: Glyph::Save,
+            ..send(
+                "Save".to_string(),
+                queues.map_or_else(String::new, |(_, at)| {
+                    format!("Saving queues the send to {}.", shown(at))
+                }),
+                Click::Save,
+            )
+        });
+    }
     let kind = Kind::of(entity);
     let linked = standing_of(device, entity);
     let Some(class) = linked.map(|linked| linked.class).or(kind.home()) else {
@@ -1271,11 +1337,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         )));
     }
     let Some(linked) = linked else {
-        return Some(send(
-            SEND_TO.to_string(),
-            "queues it for a free slot".to_string(),
-            Click::Pick,
-        ));
+        return Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick));
     };
     match (linked.standing, linked.at) {
         (Standing::Theirs | Standing::Both, _) => None,
@@ -1294,11 +1356,7 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
             "{} has not been found on the instrument yet",
             folder(class)
         ))),
-        (Standing::Ahead, None) => Some(send(
-            SEND_TO.to_string(),
-            "queues it for a free slot".to_string(),
-            Click::Pick,
-        )),
+        (Standing::Ahead, None) => Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick)),
         (Standing::Ahead, Some(at)) => Some(match over(entity, class, at, device) {
             Some((over, free)) => Loud {
                 label: format!("Won't fit · {} over", room::measure(over)),
@@ -1322,8 +1380,9 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
     }
 }
 
-/// The action that queues a document with no link for a free slot.
+/// The action that sends a document with no link to a slot the user picks, and its hover.
 const SEND_TO: &str = "Send to…";
+const PICK: &str = "opens the review to pick its slot";
 
 /// The slot the panel can be asked to play for this document: the one it is linked to.
 ///
@@ -1516,7 +1575,7 @@ mod tests {
         device.pretend_attached();
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(
-            lives(workspace.get(fresh).unwrap(), &device.state),
+            lives(workspace.get(fresh).unwrap(), &device.state).shown(),
             "This computer"
         );
 
@@ -1529,7 +1588,7 @@ mod tests {
         let copied = workspace.ingest("Africa.ne5p".to_string(), origin, bytes, &mut log);
         let copy = workspace.get(copied).unwrap();
         assert_eq!(
-            lives(copy, &device.state),
+            lives(copy, &device.state).shown(),
             "This computer",
             "a copy with no link"
         );
@@ -1544,10 +1603,13 @@ mod tests {
             spot,
             print,
         );
-        assert_eq!(
-            lives(workspace.get(copied).unwrap(), &device.state),
-            "Programs 7:4"
-        );
+        let linked = lives(workspace.get(copied).unwrap(), &device.state);
+        assert_eq!(linked.shown(), "Programs 7:4");
+        assert!(linked.faint, "its bank is not read yet");
+
+        let unattached = crate::device::Device::new(egui::Context::default());
+        let away = lives(workspace.get(copied).unwrap(), &unattached.state);
+        assert_eq!((away.shown().as_str(), away.faint), ("Programs 7:4", true));
     }
 
     /// The badge names the format, and the hover gives the content or stream version.
@@ -1640,29 +1702,6 @@ mod tests {
         assert_eq!(tagged("notes.txt", "list"), "list.txt");
     }
 
-    /// One phrase per mark, the queue's word where a write is waiting, and never red.
-    #[test]
-    fn every_mark_has_one_phrase_and_none_of_them_is_red() {
-        let marks = [Mark::Unsaved, Mark::Ahead, Mark::Attention];
-        let standings = [Standing::Ahead, Standing::Theirs, Standing::Both];
-        for (mark, standing) in marks.into_iter().zip(standings) {
-            for waiting in [false, true] {
-                let held = phrase(mark, waiting, standing);
-                assert!(!held.words.is_empty(), "{mark:?} says something");
-                // Only `dark_mode` decides an ink, so egui's two defaults cover every case.
-                for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-                    assert_ne!(
-                        held.ink.color(&visuals),
-                        crate::app::bad(&visuals),
-                        "{mark:?} in the header"
-                    );
-                }
-            }
-        }
-        let ahead = phrase(Mark::Ahead, true, Standing::Ahead);
-        assert_eq!(ahead.words, "waiting to send");
-    }
-
     fn facts<'a>(device: &'a DeviceState, queue: &'a Queue, tags: &'a Tags) -> Facts<'a> {
         Facts {
             faces: &[Face::Basic],
@@ -1752,6 +1791,10 @@ mod tests {
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(held.label, LOAD_ON_INSTRUMENT, "the slot holds it");
         assert_eq!(held.click, Click::Load(class, at));
+        let badge = |workspace: &Workspace, device: &Device| {
+            lives(workspace.get(id).unwrap(), &device.state).shown()
+        };
+        assert_eq!(badge(&workspace, &device), "Set lists 7:4");
 
         device.pretend_bodies(
             class,
@@ -1765,12 +1808,39 @@ mod tests {
         );
         assert_eq!(held.label, "Send to 7:4");
         assert_eq!(held.hint, "replaces Set lists 7:4");
+        assert_eq!(badge(&workspace, &device), "↑ Set lists 7:4");
 
         device.pretend_bodies(class, 7, &[None, None, None, Some(("Blue Room", 7))]);
         assert!(
             action(workspace.get(id).unwrap(), &device.state).is_none(),
             "the keyboard changed it"
         );
+        assert_eq!(badge(&workspace, &device), "! Set lists 7:4");
+
+        let mut edited = workspace.get(id).unwrap().bytes.to_vec();
+        *edited.last_mut().expect("a byte to move") ^= 0xff;
+        workspace.replace_bytes(id, edited, &mut log);
+        let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
+        assert_eq!((held.label.as_str(), held.click), ("Save", Click::Save));
+        assert_eq!(held.hint, "Saving queues the send to 7:4.");
+    }
+
+    /// The strip says nothing of a saved document's slot: the place badge does.
+    #[test]
+    fn a_saved_document_states_nothing_of_how_it_stands_with_its_slot() {
+        let (queue, tags) = (Queue::default(), Tags::default());
+        let (mut workspace, mut log) = workspace();
+        let class = ObjectClass::SetList;
+        let bytes = Fresh::SetList.bytes().unwrap();
+        let id = workspace.ingest("Blue Room.ne5t".into(), Origin::Fresh, bytes, &mut log);
+        let mut device = crate::device::Device::new(egui::Context::default());
+        device.pretend_bodies(class, 7, &[Some(("Blue Room", 7))]);
+        let earlier = older(&workspace, id);
+        let spot = crate::link::Spot::at(Location { bank: 6, slot: 0 });
+        link_at(&mut workspace, &device.state, id, class, spot, earlier);
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(lives(entity, &device.state).mark, Some(Mark::Attention));
+        assert!(state(entity, &facts(&device.state, &queue, &tags)).is_none());
     }
 
     /// A piano ahead of its slot is sent like anything else, unless its partition has no

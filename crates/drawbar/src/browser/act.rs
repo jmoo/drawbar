@@ -163,6 +163,18 @@ pub enum Act {
         class: ObjectClass,
         at: Location,
     },
+    /// Queue a local asset for a slot it names, or else the first free one, and open the
+    /// review, whose chip picks another.
+    SendTo(u64),
+    /// Link a local asset to the slot `at` of `class` on the attached keyboard, as it holds
+    /// the asset's saved body.
+    Link {
+        id: u64,
+        class: ObjectClass,
+        at: Location,
+    },
+    /// Unlink a local asset from the attached keyboard, and keep it off.
+    Unlink(u64),
     /// Send something already waiting to another slot instead.
     Retarget {
         id: u64,
@@ -295,6 +307,7 @@ impl Act {
             | Act::WriteBack(id)
             | Act::Export(id)
             | Act::Send { id, .. }
+            | Act::SendTo(id)
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. } => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
@@ -317,6 +330,7 @@ impl Act {
             | Act::KeepBoth(id)
             | Act::Build(id)
             | Act::Send { id, .. }
+            | Act::SendTo(id)
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. }
             | Act::DuplicateLocal(id)
@@ -356,6 +370,8 @@ impl Act {
             | Act::CopyAll { .. }
             | Act::Arrive(_)
             | Act::LoadOnInstrument { .. }
+            | Act::Link { .. }
+            | Act::Unlink(_)
             | Act::Unqueue(_)
             | Act::ClearQueue
             | Act::SendAll
@@ -766,6 +782,12 @@ pub fn apply(
             Act::Replace { id, class, at } => {
                 send(browser, workspace, device, queue, log, id, class, at, false)
             }
+            Act::SendTo(id) => {
+                send_to(workspace, device, queue, log, id);
+                shell.review_open = device.state.connected();
+            }
+            Act::Link { id, class, at } => link_to(workspace, &device.state, log, id, class, at),
+            Act::Unlink(id) => unlink(workspace, &device.state, log, id),
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
@@ -1632,10 +1654,40 @@ pub(super) fn spare_slot(
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
 pub(crate) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
+    bound_at(entity, state, queue, owed(entity, state))
+}
+
+/// Where Send to… first puts an asset: a slot its header or origin names that a walk has
+/// read, unless it is the slot the asset is linked to or another asset waits for it, or
+/// else the first free slot of its folder.
+pub(crate) fn first_pick(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
+    let linked = crate::device::slot_of(state, entity);
+    let named = Kind::of(entity).home().and_then(|class| {
+        crate::device::named_slots(entity, class)
+            .map(|at| (class, at))
+            .filter(|(class, at)| state.slot(*class, *at).is_some())
+            .filter(|slot| Some(*slot) != linked)
+            .find(|(class, at)| {
+                queue
+                    .waiting(*class, *at)
+                    .is_none_or(|held| held.id == entity.id)
+            })
+    });
+    bound_at(entity, state, queue, named)
+}
+
+/// `wanted` for an asset the attached instrument takes, or else the first free slot of
+/// its folder.
+fn bound_at(
+    entity: &LocalEntity,
+    state: &DeviceState,
+    queue: &Queue,
+    wanted: Option<(ObjectClass, Location)>,
+) -> Bound {
     if let Fit::Refuses(why) = fit(state, entity) {
         return Bound::Refused(why);
     }
-    if let Some((class, at)) = owed(entity, state) {
+    if let Some((class, at)) = wanted {
         return Bound::At(class, at);
     }
     let home = Kind::of(entity).home();
@@ -1647,6 +1699,80 @@ pub(crate) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
         Some(at) => Bound::At(class, at),
         None => Bound::Full(class),
     }
+}
+
+/// Queue an asset for the slot [`first_pick`] gives, picked in the review it opens.
+fn send_to(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log, id: u64) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    let bound = first_pick(entity, &device.state, queue);
+    if let Bound::At(class, at) = bound {
+        enqueue(workspace, device, queue, log, id, class, at);
+        queue.picked = Some(id);
+        return;
+    }
+    log.say(match unqueued(&entity.name, bound, &device.state) {
+        Some(said) => said,
+        None => format!(
+            "“{}” belongs in no folder the instrument has, so it was not queued.",
+            entity.name
+        ),
+    });
+}
+
+/// Why an asset bound nowhere it can go was not queued. `None` for one bound for a slot,
+/// or for no folder the instrument has, which [`queue_all`] counts.
+fn unqueued(name: &str, bound: Bound, state: &DeviceState) -> Option<String> {
+    match bound {
+        Bound::Full(class) => Some(format!(
+            "“{name}” was not queued: no slot of {} is both read and still free.",
+            state.folder_name(class)
+        )),
+        Bound::Refused(why) => Some(format!("“{name}” was not queued. {why}")),
+        Bound::At(..) | Bound::Nowhere => None,
+    }
+}
+
+/// Link an asset to a slot of the attached keyboard that holds its saved body.
+fn link_to(
+    workspace: &mut Workspace,
+    state: &DeviceState,
+    log: &mut Log,
+    id: u64,
+    class: ObjectClass,
+    at: Location,
+) {
+    let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
+        return;
+    };
+    let name = state
+        .slot(class, at)
+        .flatten()
+        .map_or("", |info| info.name.trim());
+    let spot = crate::link::Spot::of(class, at, name);
+    let Some(held) = entity
+        .saved_print()
+        .and_then(|print| crate::link::Held::new(class, spot, print))
+    else {
+        return;
+    };
+    let said = format!("“{}” is linked to {}.", entity.name, place(class, at));
+    workspace.link(id, &keyboard, held);
+    log.say(said);
+}
+
+/// Unlink an asset from the attached keyboard, so nothing links it there on its own.
+fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64) {
+    let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
+        return;
+    };
+    let said = match crate::device::slot_of(state, entity) {
+        Some((class, at)) => format!("“{}” is unlinked from {}.", entity.name, place(class, at)),
+        None => format!("“{}” is unlinked from the keyboard.", entity.name),
+    };
+    workspace.unlink(id, &keyboard, true);
+    log.say(said);
 }
 
 /// Queue a set of assets, each for the slot [`bound_for`] gives, and say what was not
@@ -1672,22 +1798,13 @@ fn queue_all(
         };
         let name = entity.name.clone();
         asked += 1;
-        match bound_for(entity, &device.state, queue) {
-            Bound::At(class, at) => {
-                fits += 1;
-                enqueue(workspace, device, queue, log, id, class, at);
-            }
-            Bound::Full(class) => {
-                fits += 1;
-                log.say(format!(
-                    "“{name}” was not queued: no slot of {} is both read and still free.",
-                    device.state.folder_name(class)
-                ));
-            }
-            Bound::Refused(why) => log.say(format!("“{name}” was not queued. {why}")),
-            Bound::Nowhere => {
-                fits += 1;
-                nowhere += 1;
+        let bound = bound_for(entity, &device.state, queue);
+        fits += usize::from(!matches!(bound, Bound::Refused(_)));
+        match bound {
+            Bound::At(class, at) => enqueue(workspace, device, queue, log, id, class, at),
+            Bound::Nowhere => nowhere += 1,
+            Bound::Full(_) | Bound::Refused(_) => {
+                log.say(unqueued(&name, bound, &device.state).unwrap_or_default())
             }
         }
     }
@@ -1844,6 +1961,7 @@ fn send(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tree::{slot_items, SlotItems};
     use super::*;
     use crate::strings::folder;
     use crate::testing::Bench;
@@ -2440,6 +2558,127 @@ mod tests {
         let taken = fits(&[Item::Local(mine)], &bench.workspace, &bench.device.state);
         assert_eq!(taken.label(), Bulk::Queue.label());
         assert_eq!(taken.why, None);
+    }
+
+    /// A program copied from 7:1 whose bytes 7:3 also holds, with 7:2 empty.
+    fn hinted(bench: &mut Bench) -> u64 {
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.ingest(
+            "Africa Split.ne5p".to_string(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: at(0),
+            },
+            bytes,
+            &mut bench.log,
+        );
+        let crc = bench.workspace.get(id).unwrap().saved_print().unwrap().crc;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_bodies(
+            ObjectClass::Program,
+            7,
+            &[Some(("Bright Wurly", 1)), None, Some(("First", crc))],
+        );
+        id
+    }
+
+    #[test]
+    fn a_file_with_no_slot_offers_send_to_and_a_link_to_each_slot_holding_its_bytes() {
+        let mut bench = Bench::new();
+        let id = hinted(&mut bench);
+        let items = slot_items(
+            bench.workspace.get(id).unwrap(),
+            &bench.workspace,
+            &bench.device.state,
+        );
+        let class = ObjectClass::Program;
+        assert_eq!(items.sends, [("Send to…".to_string(), Act::SendTo(id))]);
+        assert_eq!(
+            items.link_to,
+            [(
+                "7:3 First".to_string(),
+                Act::Link {
+                    id,
+                    class,
+                    at: at(2)
+                }
+            )]
+        );
+        assert_eq!(items.unlink, None);
+
+        let unattached = crate::device::Device::new(eframe::egui::Context::default());
+        let entity = bench.workspace.get(id).unwrap();
+        let away = slot_items(entity, &bench.workspace, &unattached.state);
+        assert_eq!(away, SlotItems::default(), "nothing to send to");
+    }
+
+    #[test]
+    fn link_to_links_the_file_and_its_menu_then_offers_load_and_unlink() {
+        let mut bench = Bench::new();
+        let id = hinted(&mut bench);
+        let class = ObjectClass::Program;
+        bench.act(vec![Act::Link {
+            id,
+            class,
+            at: at(2),
+        }]);
+        let entity = bench.workspace.get(id).unwrap();
+        let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
+        assert_eq!((linked.at, linked.standing), (Some(at(2)), Standing::Same));
+
+        let items = slot_items(entity, &bench.workspace, &bench.device.state);
+        let labels: Vec<&str> = items
+            .sends
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
+        assert_eq!(labels, [LOAD_ON_INSTRUMENT, "Send to another slot…"]);
+        assert!(items.link_to.is_empty());
+        assert_eq!(
+            items.unlink,
+            Some(("Unlink from 7:3".to_string(), Act::Unlink(id)))
+        );
+
+        bench.act(vec![Act::Unlink(id)]);
+        let entity = bench.workspace.get(id).unwrap();
+        let keyboard = bench.device.state.keyboard().unwrap();
+        assert_eq!(
+            crate::device::standing_of(&bench.device.state, entity),
+            None
+        );
+        assert!(
+            entity.kept_off(&keyboard),
+            "nothing links it there on its own"
+        );
+    }
+
+    #[test]
+    fn send_to_queues_for_the_slot_the_file_came_off_and_opens_the_review() {
+        let mut bench = Bench::new();
+        let id = hinted(&mut bench);
+        bench.act(vec![Act::SendTo(id)]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(0)));
+        assert_eq!(bench.queue.picked, Some(id));
+        assert!(bench.shell.review_open);
+    }
+
+    #[test]
+    fn send_to_another_slot_queues_a_linked_file_for_the_first_free_one() {
+        let mut bench = Bench::new();
+        let id = hinted(&mut bench);
+        let class = ObjectClass::Program;
+        bench.act(vec![Act::Link {
+            id,
+            class,
+            at: at(0),
+        }]);
+        bench.act(vec![Act::SendTo(id)]);
+        let said = bench.log.transcript();
+        assert_eq!(
+            bench.queue.entry(id).map(|held| held.at),
+            Some(at(1)),
+            "{said}"
+        );
     }
 
     /// ⚠️ A refused asset never gets a queue entry, however it was aimed: a send writes
