@@ -14,6 +14,7 @@ use nord_usb::op::Received;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
+use crate::link::{Held, Keyboard, Spot, Standing, There};
 use crate::log::Log;
 use crate::ondisk::OnDisk;
 use crate::queue::Queue;
@@ -613,6 +614,15 @@ impl DeviceState {
         }
     }
 
+    /// The keyboard attached, as a library knows one.
+    pub fn keyboard(&self) -> Option<Keyboard> {
+        let card = self.card()?;
+        Some(Keyboard {
+            model: card.product.clone(),
+            serial: card.serial.clone(),
+        })
+    }
+
     /// The firmware version as the panel writes it (`2.04`), where the transport could ask
     /// for it.
     pub fn firmware(&self) -> Option<String> {
@@ -763,6 +773,17 @@ impl DeviceState {
     /// scanned so far ([`DeviceState::banks_of`]). Zero until that geometry arrives.
     pub fn banks(&self, class: ObjectClass) -> usize {
         self.geometry.get(&class).map_or(0, Vec::len)
+    }
+
+    /// Whether a walk has read every bank the class declares. Not before its geometry has
+    /// arrived.
+    fn read_through(&self, class: ObjectClass) -> bool {
+        let Some(banks) = self.geometry.get(&class).filter(|banks| !banks.is_empty()) else {
+            return false;
+        };
+        banks.iter().all(|bank| {
+            user_bank(bank.index).is_some_and(|read| self.banks.contains_key(&(class, read)))
+        })
     }
 
     /// The banks of a class that have been read, in order.
@@ -1022,6 +1043,64 @@ pub fn link(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, L
         Some(at) => Some((class, at)),
         None => stands(state, entity).or_else(|| Some((class, named(state, class, entity)?))),
     }
+}
+
+/// Where the slot `held` names is, and what a walk says it holds there. A slot kept by
+/// its name has no address until a walk finds it, and is vacant only once every bank of
+/// its class has been read.
+pub fn there(state: &DeviceState, held: &Held) -> (Option<Location>, There) {
+    let class = held.class();
+    let holds = |info: &ProgramInfo| There::Holds {
+        crc: info.crc32,
+        len: info.body_len,
+    };
+    let name = match &held.spot {
+        Spot::At { bank, slot } => {
+            let at = Location {
+                bank: *bank,
+                slot: *slot,
+            };
+            let there = match state.slot(class, at) {
+                None => There::Unread,
+                Some(None) => There::Vacant,
+                Some(Some(info)) => holds(info),
+            };
+            return (Some(at), there);
+        }
+        Spot::Named(name) => name,
+    };
+    let mut occupied = state
+        .all_slots(class)
+        .filter_map(|(at, info)| Some((at, info.as_ref()?)));
+    match occupied.find(|(_, info)| info.name.trim() == name) {
+        Some((at, info)) => (Some(at), holds(info)),
+        None if state.read_through(class) => (None, There::Vacant),
+        None => (None, There::Unread),
+    }
+}
+
+/// An asset's link on the attached keyboard, and how the asset compares with its slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Linked {
+    pub class: ObjectClass,
+    /// The slot's address, once known: a slot kept by its name has none until a walk
+    /// finds it.
+    pub at: Option<Location>,
+    pub there: There,
+    pub standing: Standing,
+}
+
+/// How an asset compares with the slot it is linked to on the attached keyboard. `None`
+/// while nothing is attached, or the asset has no link there.
+pub fn standing_of(state: &DeviceState, entity: &LocalEntity) -> Option<Linked> {
+    let held = entity.held_on(&state.keyboard()?)?;
+    let (at, there) = there(state, held);
+    Some(Linked {
+        class: held.class(),
+        at,
+        there,
+        standing: crate::link::standing(held, entity.saved_print(), there),
+    })
 }
 
 /// How many further slots hold what this asset was saved as, beyond the one it is
@@ -3390,5 +3469,84 @@ mod tests {
         let at = Location { bank: 0, slot: 0 };
         assert_eq!(place(ObjectClass::SetList, at), "Set lists 1:1");
         assert_eq!(folder(ObjectClass::Unknown(9)), "Other");
+    }
+
+    fn linked_at(class: ObjectClass, spot: Spot, len: u32) -> Held {
+        Held::new(class, spot, crate::link::Print { crc: 7, len }).unwrap()
+    }
+
+    #[test]
+    fn a_slot_kept_by_its_address_is_unread_vacant_or_what_a_walk_reported() {
+        let mut device = Device::new(egui::Context::default());
+        let program = |slot| linked_at(ObjectClass::Program, Spot::At { bank: 0, slot }, 121);
+        let at = |slot| Some(Location { bank: 0, slot });
+        assert_eq!(there(&device.state, &program(0)), (at(0), There::Unread));
+        device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Tine", 9)), None]);
+        let holds = There::Holds {
+            crc: Some(9),
+            len: 121,
+        };
+        assert_eq!(there(&device.state, &program(0)), (at(0), holds));
+        assert_eq!(there(&device.state, &program(1)), (at(1), There::Vacant));
+    }
+
+    #[test]
+    fn a_slot_kept_by_its_name_is_found_anywhere_and_vacant_once_every_bank_is_read() {
+        let mut device = Device::new(egui::Context::default());
+        let piano = |name: &str| linked_at(ObjectClass::Piano, Spot::Named(name.into()), 900);
+        device.pretend_geometry(ObjectClass::Piano, &[("Grand", 4), ("Upright", 4)]);
+        device.pretend_lengths(ObjectClass::Piano, 2, &[None, Some((" Yamaha ", 900))]);
+        let found = (
+            Some(Location { bank: 1, slot: 1 }),
+            There::Holds {
+                crc: None,
+                len: 900,
+            },
+        );
+        assert_eq!(there(&device.state, &piano("Yamaha")), found);
+        let absent = there(&device.state, &piano("Steinway"));
+        assert_eq!(absent, (None, There::Unread), "a bank is unread");
+        device.pretend_lengths(ObjectClass::Piano, 1, &[None]);
+        assert_eq!(
+            there(&device.state, &piano("Steinway")),
+            (None, There::Vacant)
+        );
+    }
+
+    #[test]
+    fn an_asset_stands_against_its_slot_only_on_the_keyboard_it_is_linked_on() {
+        let ctx = egui::Context::default();
+        let mut device = Device::new(ctx.clone());
+        let mut workspace = Workspace::new(ctx);
+        let mut log = Log::default();
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let id = workspace.ingest("A.ne5p".into(), Origin::Fresh, program, &mut log);
+        workspace.settle_files(&mut log);
+        let print = workspace.get(id).unwrap().saved_print().expect("read");
+        let held = Held::new(ObjectClass::Program, Spot::At { bank: 0, slot: 0 }, print).unwrap();
+        let elsewhere = Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: Some("B2".into()),
+        };
+        workspace.link(id, &elsewhere, held.clone());
+        let standing = |device: &Device, workspace: &Workspace| {
+            standing_of(&device.state, workspace.get(id).unwrap())
+        };
+        assert_eq!(standing(&device, &workspace), None, "nothing attached");
+
+        device.pretend_bodies(ObjectClass::Program, 1, &[Some(("A", print.crc))]);
+        assert_eq!(standing(&device, &workspace), None, "linked elsewhere");
+        let here = device.state.keyboard().expect("attached");
+        workspace.link(id, &here, held);
+        let linked = Linked {
+            class: ObjectClass::Program,
+            at: Some(Location { bank: 0, slot: 0 }),
+            there: There::Holds {
+                crc: Some(print.crc),
+                len: 121,
+            },
+            standing: Standing::Same,
+        };
+        assert_eq!(standing(&device, &workspace), Some(linked));
     }
 }
