@@ -64,8 +64,8 @@ nord program put "nord-rescued-7-50 (Grand).ne5p" 7:50
 ```
 
 A name with a character other than a letter, a digit, a space or one of
-`-_.,'&+!` is left out of the file's name, and `put` then leaves the slot
-unnamed.
+`-_.,'&+!` is left out of the file's name, and `put` then names the slot after
+the file, as `nord-rescued-7-50`.
 
 While the old sound is read, its file is named
 `nord-rescued-7-50 (Grand).ne5p.partial`.

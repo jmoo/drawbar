@@ -881,8 +881,9 @@ pub fn put(
 /// time, before anything touches the device. With it, the name the slot takes, and the
 /// file's modification time, as Nord Sound Manager sends.
 ///
-/// The name is the one a [rescue](envelope::Rescued) carries, where the file is one, so a
-/// slot put back takes its own name again; any other file names the slot by its stem.
+/// The name is the one a [rescue](envelope::Rescued) carries, where the file is one and
+/// carries one, so a slot put back takes its own name again; any other file names the
+/// slot by its stem.
 fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u32>), String> {
     let at_path = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut file = std::fs::File::open(path)
@@ -896,9 +897,9 @@ fn open_put(path: &Path) -> Result<(Positional<std::fs::File>, String, Option<u3
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(envelope::Rescued::parse);
-    let name = match rescued {
-        Some(rescued) => rescued.name,
-        None => stem_of(path)?,
+    let name = match rescued.map(|rescued| rescued.name) {
+        Some(name) if !name.is_empty() => name,
+        _ => stem_of(path)?,
     };
     let stamp = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -3179,7 +3180,7 @@ mod tests {
         }
 
         /// A rescue names the slot it is put into as the slot was named, and one that
-        /// carries no name leaves it unnamed.
+        /// carries no name names it by its stem, as any other file does.
         #[test]
         fn a_rescue_put_back_names_its_slot_as_it_was_named() {
             let dir = crate::edit::tests::scratch("put-rescue-name");
@@ -3187,7 +3188,7 @@ mod tests {
             for (rescue, slot) in [
                 ("nord-rescued-7-10 (Bass 2.0).ne5p", "Bass 2.0"),
                 ("nord-rescued-7-10 (Grand)-2.ne5p", "Grand"),
-                ("nord-rescued-7-10.ne5p", ""),
+                ("nord-rescued-7-10.ne5p", "nord-rescued-7-10"),
                 ("Grand Piano.ne5p", "Grand Piano"),
             ] {
                 let path = dir.join(rescue);
