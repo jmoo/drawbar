@@ -644,12 +644,10 @@ pub enum Intent {
     },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
-    /// Give a file these links and no others, making an entity for it where it has none.
-    /// No undo takes it back: a link changes on its own as sends land.
-    Link {
-        file: Key,
-        links: Vec<crate::link::Link>,
-    },
+    /// Give each file its link on each keyboard named, making an entity for it where it
+    /// has none, and leave its links on other keyboards as they are. No undo takes it
+    /// back: a link changes on its own as sends land.
+    Link { files: Vec<Relink> },
     /// Take changes another branch of a writer's history made, which are kept apart
     /// from the library ([`KeptApart`]): each of `changes`, or every one it can take
     /// where none is named.
@@ -724,6 +722,14 @@ fn gesture(parts: &[Intent]) -> Option<&Intent> {
         .find(taking)
         .or_else(|| parts.iter().find(folder));
     named.or(parts.first())
+}
+
+/// A file's links as an [`Intent::Link`] leaves them: on each keyboard named, the link,
+/// or `None` for none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relink {
+    pub file: Key,
+    pub on: Vec<(crate::link::Keyboard, Option<crate::link::Link>)>,
 }
 
 /// What the Edit menu calls the take-in of the list an older drawbar kept.
@@ -1176,6 +1182,8 @@ pub enum Event {
     /// The entities two drawbars each made of one file could not be joined: why. The
     /// file shows the tags of each all the same.
     Unjoined(String),
+    /// The links of a file whose entity an undo or redo ended could not be kept: why.
+    Unlinked(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
     /// Files of other drawbars' history that could not be read, each said once a
@@ -1209,6 +1217,7 @@ impl Event {
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
             Event::Unjoined(_) => one("join"),
+            Event::Unlinked(_) => one("link"),
             Event::Unread(_) => one("unread"),
             Event::Restored(Err(_)) => one("restore"),
             Event::Copied(Err(_)) => one("copy"),

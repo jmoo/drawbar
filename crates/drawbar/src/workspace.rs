@@ -1651,12 +1651,16 @@ pub enum FileAsk {
     Delete { id: u64, path: LibPath },
 }
 
+/// Assets whose links changed, with the keyboards each changed on.
+pub type LinkAsks = std::collections::BTreeMap<u64, std::collections::BTreeSet<Keyboard>>;
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// The changes to files asked for and not yet taken.
     file_asks: Vec<FileAsk>,
-    /// The assets whose links changed here, for the library to keep, not yet taken.
-    link_asks: std::collections::BTreeSet<u64>,
+    /// The assets whose links changed here, with the keyboards they changed on, for the
+    /// library to keep, not yet taken.
+    link_asks: LinkAsks,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
     at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
@@ -2085,12 +2089,11 @@ impl Workspace {
             let other = link.held.as_ref().filter(|_| link.keyboard == *keyboard);
             other.is_some_and(|other| other.class() == held.class() && other.spot == held.spot)
         };
-        for entity in self.entities.iter_mut().filter(|entity| entity.id != id) {
-            let before = entity.links.len();
-            entity.links.retain(|link| !there(link));
-            if entity.links.len() != before {
-                self.link_asks.insert(entity.id);
-            }
+        let others = self.entities.iter().filter(|entity| entity.id != id);
+        let others = others.filter(|entity| entity.links.iter().any(there));
+        let others: Vec<u64> = others.map(|entity| entity.id).collect();
+        for other in others {
+            self.change_links(other, keyboard, |links| links.retain(|link| !there(link)));
         }
         let keyboard = keyboard.clone();
         self.set_link(
@@ -2105,16 +2108,17 @@ impl Workspace {
     /// Unlink an asset from `keyboard`. `apart` keeps it off that keyboard: nothing links
     /// it there again on its own.
     pub fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
-        let keyboard = keyboard.clone();
         match apart {
             true => self.set_link(
                 id,
                 Link {
-                    keyboard,
+                    keyboard: keyboard.clone(),
                     held: None,
                 },
             ),
-            false => self.change_links(id, |links| links.retain(|link| link.keyboard != keyboard)),
+            false => self.change_links(id, keyboard, |links| {
+                links.retain(|link| link.keyboard != *keyboard)
+            }),
         }
     }
 
@@ -2156,11 +2160,10 @@ impl Workspace {
             })
             .collect();
         for (id, held) in moved {
-            let keyboard = keyboard.clone();
-            self.change_links(id, |links| {
-                links.retain(|link| link.keyboard != keyboard);
+            self.change_links(id, keyboard, |links| {
+                links.retain(|link| link.keyboard != *keyboard);
                 links.extend(held.map(|held| Link {
-                    keyboard,
+                    keyboard: keyboard.clone(),
                     held: Some(held),
                 }));
             });
@@ -2169,13 +2172,15 @@ impl Workspace {
 
     /// Give an asset `link` in place of any link it had on that keyboard.
     fn set_link(&mut self, id: u64, link: Link) {
-        self.change_links(id, |links| {
+        let keyboard = link.keyboard.clone();
+        self.change_links(id, &keyboard, |links| {
             links.retain(|held| held.keyboard != link.keyboard);
             links.push(link);
         });
     }
 
-    fn change_links(&mut self, id: u64, change: impl FnOnce(&mut Vec<Link>)) {
+    /// Change an asset's links on `keyboard`, and on no other.
+    fn change_links(&mut self, id: u64, keyboard: &Keyboard, change: impl FnOnce(&mut Vec<Link>)) {
         let Some(entity) = self.get_mut(id).filter(|entity| entity.kept) else {
             return;
         };
@@ -2186,7 +2191,8 @@ impl Workspace {
             return;
         }
         entity.links = links;
-        self.link_asks.insert(id);
+        let asked = self.link_asks.entry(id).or_default();
+        asked.insert(keyboard.clone());
         self.revision += 1;
     }
 
@@ -2199,8 +2205,9 @@ impl Workspace {
         self.revision += 1;
     }
 
-    /// The assets whose links changed since the last call.
-    pub fn take_link_asks(&mut self) -> std::collections::BTreeSet<u64> {
+    /// The assets whose links changed since the last call, with the keyboards each
+    /// changed on.
+    pub fn take_link_asks(&mut self) -> LinkAsks {
         std::mem::take(&mut self.link_asks)
     }
 
@@ -5879,7 +5886,12 @@ mod tests {
         assert_eq!(linked(first, &there), Some(program_at(6)));
         assert_eq!(linked(second, &here), Some(program_at(6)));
         let asked = workspace.take_link_asks();
-        assert_eq!(asked, [first, second].into(), "both are kept");
+        let on_here = [(first, [here.clone()].into()), (second, [here].into())];
+        assert_eq!(
+            asked,
+            on_here.into(),
+            "both are kept, on that keyboard alone"
+        );
     }
 
     #[test]
@@ -5935,7 +5947,7 @@ mod tests {
         workspace.take_link_asks();
         workspace.link(view, &here, program_at(6));
         assert_eq!(workspace.get(view).unwrap().links, []);
-        assert_eq!(workspace.take_link_asks(), [].into());
+        assert_eq!(workspace.take_link_asks(), LinkAsks::new());
     }
 
     /// The print of the saved bytes is what a walk reports for a slot holding the body

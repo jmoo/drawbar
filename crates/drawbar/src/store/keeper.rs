@@ -25,7 +25,7 @@ use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
-    Part, Source, Stat, Unwritable, Viewed, Waiting,
+    Part, Relink, Source, Stat, Unwritable, Viewed, Waiting,
 };
 use crate::link::Link;
 use crate::rewrite::{self, Pieces};
@@ -169,12 +169,12 @@ impl<F: Fs> Keeper<F> {
                 self.made(label, finished, committed, false, answer).await;
             }
             Cmd::Undo => {
-                let (undone, forgot) = self.undone(false).await;
+                let (undone, forgot) = self.undone(false, answer).await;
                 self.made("Undo".to_string(), finished, undone, forgot, answer)
                     .await;
             }
             Cmd::Redo => {
-                let (redone, forgot) = self.undone(true).await;
+                let (redone, forgot) = self.undone(true, answer).await;
                 self.made("Redo".to_string(), finished, redone, forgot, answer)
                     .await;
             }
@@ -662,15 +662,20 @@ impl<F: Fs> Keeper<F> {
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
     /// bound to that it moved for the app to follow. One refused is let go of, which
     /// the second value says.
-    async fn undone(&mut self, again: bool) -> (Result<(Option<Made>, Viewed), String>, bool) {
+    async fn undone(
+        &mut self,
+        again: bool,
+        answer: &mut impl FnMut(Event),
+    ) -> (Result<(Option<Made>, Viewed), String>, bool) {
         let Some(library) = self.library.as_mut() else {
             return (Err("the library is not open".to_string()), false);
         };
+        let before = library.view();
         let committed = match again {
             true => library.redo().await,
             false => library.undo().await,
         };
-        let committed = match committed {
+        let mut committed = match committed {
             Ok(committed) => committed,
             // A step another drawbar changed since, or whose trash item went, can
             // never be taken back; any other refusal may pass once the files are
@@ -684,11 +689,16 @@ impl<F: Fs> Keeper<F> {
             }
             Err(e) => return (Err(told(&e)), false),
         };
+        let mut changes = std::mem::take(&mut committed.changes);
+        match relink(library, &before).await {
+            Ok(relinked) => changes.extend(relinked.into_iter().flat_map(|done| done.changes)),
+            Err(e) => answer(Event::Unlinked(told(&e))),
+        }
         let viewed = Viewed {
             followed: Some(followed(&committed)),
             dirs: folders(library.fs()).await,
             left: shown_paths(&committed.left),
-            ..committed_view(library, &mut self.shown, committed.changes)
+            ..committed_view(library, &mut self.shown, changes)
         };
         (
             Ok((Some((committed.intent, committed.undoable)), viewed)),
@@ -800,12 +810,11 @@ impl<F: Fs> Keeper<F> {
                 let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
                 Some(forgot.await?)
             }
-            Intent::Link { file, links } => {
-                let mut changes = adopting(library, std::slice::from_ref(&file)).await?;
-                let mut committed = facts(library, label, |built, view| {
-                    link(built, view, &file, links)
-                })
-                .await?;
+            Intent::Link { files } => {
+                let keys: Vec<Key> = files.iter().map(|relink| relink.file.clone()).collect();
+                let mut changes = adopting(library, &keys).await?;
+                let mut committed =
+                    facts(library, label, |built, view| link(built, view, &files)).await?;
                 changes.append(&mut committed.changes);
                 Some(toshokan::Committed {
                     changes,
@@ -1051,26 +1060,81 @@ fn tag<'l, F: Fs + 'l>(
     Ok(built)
 }
 
-/// Give the file `key` names these links and no others, on its entity ([`entity_of`]).
+/// Give each file of `files` its link on each keyboard named, on its entity
+/// ([`entity_of`]), removing what is stored for that keyboard as it is stored.
 fn link<'l, F: Fs + 'l>(
-    built: Built<'l, F>,
+    mut built: Built<'l, F>,
     view: &View,
-    key: &Key,
-    links: Vec<Link>,
+    files: &[Relink],
 ) -> Result<Built<'l, F>, String> {
-    let (built, entity) = entity_of(built, view, key)?;
-    let held: BTreeSet<Link> = view
-        .entity(entity)
-        .map(|held| held.members(LINKS).values.into_iter().collect())
-        .unwrap_or_default();
-    let wanted: BTreeSet<Link> = links.into_iter().collect();
-    let built = held
-        .difference(&wanted)
-        .fold(built, |built, gone| built.remove(entity, LINKS, gone));
-    Ok(wanted
-        .difference(&held)
-        .fold(built, |built, new| built.add(entity, LINKS, new.clone())))
+    for relink in files {
+        let (next, entity) = entity_of(built, view, &relink.file)?;
+        let stored = stored_links(view, entity);
+        built = relink.on.iter().fold(next, |built, (keyboard, link)| {
+            let on = stored.iter().filter(|(_, held)| held.keyboard == *keyboard);
+            let kept = link
+                .as_ref()
+                .and_then(|link| on.clone().find(|(_, held)| held == link));
+            let kept = kept.map(|(raw, _)| raw);
+            let gone = on.filter(|(raw, _)| Some(raw) != kept);
+            let built = gone.fold(built, |built, (raw, _)| {
+                built.remove_stored(entity, LINKS, raw.clone())
+            });
+            match (link, kept) {
+                (Some(link), None) => built.add(entity, LINKS, link.clone()),
+                _ => built,
+            }
+        });
+    }
+    Ok(built)
 }
+
+/// The links stored on `entity`, each as it is stored and as this build reads it.
+fn stored_links(view: &View, entity: toshokan::EntityId) -> Vec<(toshokan::Raw, Link)> {
+    let stored = view.folded().members(entity, LINKS.name()).into_iter();
+    let read = stored.filter_map(|raw| Some((raw.clone(), raw.decode().ok()?)));
+    read.collect()
+}
+
+/// Give the links each entity of `before` held to a new entity of its file, where the
+/// change since ended the entity and left its file to none: an undo of the tag that made
+/// an entity of a file takes nothing a link keeps. Final, so redo stays as it was.
+async fn relink<F: Fs>(
+    library: &mut Library<F>,
+    before: &View,
+) -> Result<Option<toshokan::Committed>, Error> {
+    let view = library.view();
+    let ended = before.with(LINKS).into_iter();
+    let ended = ended.filter(|entity| view.entity(*entity).is_none());
+    let left: Vec<(RelPath, Expect, Vec<toshokan::Raw>)> = ended
+        .filter_map(|entity| {
+            let path = before.entity(entity)?.file()?.path;
+            let listed = view.listed(&path).filter(|_| view.is_unbound(&path))?;
+            let expect = Expect::Listed {
+                len: listed.len,
+                modified: listed.modified,
+            };
+            let links = before.folded().members(entity, LINKS.name());
+            Some((path, expect, links))
+        })
+        .collect();
+    if left.is_empty() {
+        return Ok(None);
+    }
+    let built = left
+        .into_iter()
+        .fold(library.intent(RELINK), |built, (path, expect, links)| {
+            let (built, entity) = built.create(|e| {
+                e.adopt(&path, expect);
+            });
+            let links = links.into_iter();
+            links.fold(built, |built, link| built.add_stored(entity, LINKS, link))
+        });
+    built.as_final().commit().await.map(Some)
+}
+
+/// What the history and other writers call the change that keeps links an undo left.
+const RELINK: &str = "Link";
 
 /// Where a write goes, what it expects to find there, and where a new file came from.
 #[derive(Clone, Copy)]
@@ -2476,6 +2540,60 @@ mod tests {
         assert_eq!(answers.iter().filter(|event| refused(event)).count(), FILES);
         assert!((0..FILES).all(|n| root.at(&name(n)).exists()));
         assert_eq!(keeper.trash_now(), []);
+    }
+
+    /// A newer build's member, with a field this one does not read, and an older member
+    /// another writer left beside it, both on one keyboard: a write for that keyboard
+    /// replaces both as they are stored, and leaves another keyboard's alone.
+    #[test]
+    fn a_link_write_replaces_every_member_stored_for_its_keyboard_and_no_other() {
+        use crate::link::{Held, Keyboard, Print, Spot};
+        use nord_usb::ObjectClass;
+
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&root);
+        let keyboard = |serial: &str| Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: Some(serial.into()),
+        };
+        let link = |serial, slot| Link {
+            keyboard: keyboard(serial),
+            held: Held::new(
+                ObjectClass::Program,
+                Spot::At { bank: 0, slot },
+                Print {
+                    crc: slot,
+                    len: 121,
+                },
+            ),
+        };
+        let raw = |link: &Link| toshokan::Raw::of(link).unwrap();
+        let read = serde_json::to_string(&link("A1", 1)).unwrap();
+        let newer = toshokan::Raw::new(&format!(r#"{{"seen":7,{}"#, &read[1..])).unwrap();
+        let stored = [newer, raw(&link("A1", 2)), raw(&link("B2", 4))];
+        let expect = keeper.listed("Grand.ne5p");
+        let library = keeper.library.as_mut().unwrap();
+        let at = RelPath::new("Grand.ne5p").unwrap();
+        let (made, entity) = library.intent("Link").create(|e| {
+            e.adopt(&at, expect);
+        });
+        let made = stored
+            .into_iter()
+            .fold(made, |made, member| made.add_stored(entity, LINKS, member));
+        nord_usb::block_on(made.commit()).unwrap();
+
+        keeper.run_one(Cmd::Intent(Intent::Link {
+            files: vec![Relink {
+                file: Key::Entity(entity),
+                on: vec![(keyboard("A1"), Some(link("A1", 3)))],
+            }],
+        }));
+        let view = keeper.library.as_ref().unwrap().view();
+        let held = view.folded().members(entity, LINKS.name());
+        let mut kept = vec![raw(&link("A1", 3)), raw(&link("B2", 4))];
+        kept.sort();
+        assert_eq!(held, kept);
     }
 
     /// A save to the path of a tagged file deleted outside drawbar writes that entity's

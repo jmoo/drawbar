@@ -20,7 +20,7 @@ use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::Shown;
 use super::{
     names, older, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
+    LibPath, Moving, Opened, Relink, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
     TAKE_IN,
 };
 use crate::browser::{Browser, Rescuing};
@@ -30,7 +30,8 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::tags::Asked;
 use crate::workspace::{
-    library_filename, precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
+    library_filename, precious, Content, FileAsk, Leaving, LinkAsks, LocalEntity, Origin, Saved,
+    Workspace,
 };
 
 /// How far opening has got.
@@ -202,12 +203,15 @@ pub struct Store {
     shown: Option<Shown>,
     /// Changes to the tags the user asked for that wait for a file to name.
     asked: Vec<Asked>,
-    /// The assets whose links changed here and wait to be sent: for the library to open,
-    /// or for the file to be written.
-    link_asks: BTreeSet<u64>,
-    /// The assets whose links changed here since the library last answered every change.
-    /// A projection leaves their links as they are until it has.
+    /// The assets whose links changed here, with the keyboards they changed on, that wait
+    /// to be sent: for the library to open, or for the file to be written.
+    link_asks: LinkAsks,
+    /// The assets whose links changed here since the library last answered every change,
+    /// or since it opened where it cannot keep them. A projection leaves their links as
+    /// they are until it has.
     linking: BTreeSet<u64>,
+    /// Whether the log has said the library cannot keep links.
+    told_unlinked: bool,
     /// Changes to files the user asked for, each carried out once the one before it has
     /// gone and nothing it waits on is in flight.
     asks: VecDeque<(FileAsk, u64)>,
@@ -377,8 +381,9 @@ impl Store {
             ids: Ids::default(),
             shown: None,
             asked: Vec::new(),
-            link_asks: BTreeSet::new(),
+            link_asks: LinkAsks::new(),
             linking: BTreeSet::new(),
+            told_unlinked: false,
             asks: VecDeque::new(),
             passes: 0,
             batch: Batch::default(),
@@ -1794,6 +1799,9 @@ impl Store {
                     ));
                 }
             }
+            Event::Unlinked(why) => {
+                log.trouble(format!("The links of a file could not be kept: {why}."));
+            }
             Event::Unjoined(why) => {
                 log.error(format!("joining the tags of one file: {why}"));
                 log.trouble(format!(
@@ -2676,10 +2684,12 @@ impl Store {
 
     /// Bring the assets' links level with the view, but for those whose links changed here
     /// and wait to be sent or answered: once every change has been answered, the view is
-    /// all there is.
+    /// all there is. Where the library cannot keep them, what changed here stands for the
+    /// session.
     fn project_links(&mut self, shown: &Shown, workspace: &mut Workspace) {
         self.take_link_asks(workspace);
-        if self.link_asks.is_empty() && self.committing == 0 {
+        let answered = self.link_asks.is_empty() && self.committing == 0;
+        if answered && matches!(self.phase, Phase::Open) {
             self.linking.clear();
         }
         let projected: Vec<(u64, Vec<Link>)> = self
@@ -2698,14 +2708,15 @@ impl Store {
 
     /// Take the changes to links the workspace asked for.
     fn take_link_asks(&mut self, workspace: &mut Workspace) {
-        let asked = workspace.take_link_asks();
-        self.linking.extend(&asked);
-        self.link_asks.extend(asked);
+        for (id, keyboards) in workspace.take_link_asks() {
+            self.linking.insert(id);
+            self.link_asks.entry(id).or_default().extend(keyboards);
+        }
     }
 
-    /// Send each asset's links as it holds them now, once its file has a key the library
-    /// knows. One whose file is still to be written waits for it, and for the answer that
-    /// lists it.
+    /// Send as one change each asset's links on the keyboards they changed on, as it
+    /// holds them now, once its file has a key the library knows. One whose file is still
+    /// to be written waits for it, and for the answer that lists it.
     fn ask_links(&mut self, workspace: &mut Workspace, log: &mut Log) {
         self.take_link_asks(workspace);
         if self.link_asks.is_empty() {
@@ -2715,21 +2726,37 @@ impl Store {
             Phase::Opening => return,
             Phase::Open => {}
             Phase::ReadOnly(why) | Phase::Unfinished(why) | Phase::Failed(why) => {
-                log.error(format!("keeping links: {why}"));
                 self.link_asks.clear();
+                if !std::mem::replace(&mut self.told_unlinked, true) {
+                    log.trouble(format!(
+                        "The links are kept only until drawbar closes: {why}."
+                    ));
+                }
                 return;
             }
         }
-        for id in std::mem::take(&mut self.link_asks) {
+        let mut files = Vec::new();
+        for (id, keyboards) in std::mem::take(&mut self.link_asks) {
             let key = self.ids.key(id).cloned();
-            let links = workspace.get(id).map(|entity| entity.links.clone());
-            match (key, links) {
-                (Some(file), Some(links)) => self.commit(Intent::Link { file, links }),
+            match (key, workspace.get(id)) {
+                (Some(file), Some(entity)) => {
+                    let on = keyboards.into_iter().map(|keyboard| {
+                        let link = entity.links.iter().find(|link| link.keyboard == keyboard);
+                        (keyboard, link.cloned())
+                    });
+                    files.push(Relink {
+                        file,
+                        on: on.collect(),
+                    });
+                }
                 (None, Some(_)) if self.committing > 0 || self.writes(id, workspace) => {
-                    self.link_asks.insert(id);
+                    self.link_asks.insert(id, keyboards);
                 }
                 _ => {}
             }
+        }
+        if !files.is_empty() {
+            self.commit(Intent::Link { files });
         }
     }
 

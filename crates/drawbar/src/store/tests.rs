@@ -9304,6 +9304,112 @@ fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
     assert_eq!(held.spot, Spot::at(at));
 }
 
+#[test]
+fn a_link_kept_on_one_keyboard_leaves_the_link_another_drawbar_kept_on_another() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    first.link(first.only(), &here, program_at(6));
+    second.link(second.only(), &there, program_at(7));
+    first.refresh();
+    let grand = first.bench.workspace.get(first.only()).unwrap();
+    assert_eq!(grand.held_on(&here), Some(&program_at(6)));
+    assert_eq!(grand.held_on(&there), Some(&program_at(7)));
+}
+
+/// How many entries this library's writers logged under `label`.
+fn logged(root: &Temp, label: &str) -> usize {
+    let entry = format!(r#""label":"{label}""#);
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    let segments = writers.flat_map(|writer| fs::read_dir(writer.unwrap().path()).unwrap());
+    let segments = segments.map(|segment| segment.unwrap().path());
+    let text = segments.filter_map(|segment| fs::read_to_string(segment).ok());
+    text.map(|text| text.lines().filter(|line| line.contains(&entry)).count())
+        .sum()
+}
+
+#[test]
+fn links_changed_in_one_pass_are_kept_as_one_change() {
+    let root = Temp::new();
+    for name in ["Grand.ne5p", "Tine.ne5p"] {
+        fs::write(root.at(name), Fresh::Program.bytes().unwrap()).unwrap();
+    }
+    let here = electro("A1");
+    let mut session = Session::listed(&root);
+    let (grand, tine) = (session.named("Grand.ne5p"), session.named("Tine.ne5p"));
+    session.bench.workspace.link(grand, &here, program_at(6));
+    session.link(tine, &here, program_at(7));
+    assert_eq!(logged(&root, "Link"), 1);
+    session.close();
+
+    let again = Session::listed(&root);
+    let held = |name| {
+        again
+            .bench
+            .workspace
+            .get(again.named(name))
+            .unwrap()
+            .held_on(&here)
+    };
+    assert_eq!(held("Grand.ne5p"), Some(&program_at(6)));
+    assert_eq!(held("Tine.ne5p"), Some(&program_at(7)));
+}
+
+#[test]
+fn undoing_the_tag_that_made_an_entity_of_a_linked_file_keeps_its_links() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    session.tag(&[id], "Live");
+    session.link(id, &here, program_at(6));
+    session.unlink(id, &there, true);
+    let linked = session.links(id);
+    session.undo();
+    assert_eq!(session.worn(id), Vec::<String>::new());
+    assert_eq!(session.links(id), linked, "undone");
+    session.redo();
+    assert_eq!(session.worn(id), ["Live"]);
+    assert_eq!(session.links(id), linked, "redone");
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(again.links(again.only()), linked);
+}
+
+#[test]
+fn a_link_made_where_the_library_cannot_keep_it_stays_for_the_session_and_is_said_once() {
+    let (root, _) = newer_drawbar_wrote();
+    for name in ["Grand.ne5p", "Tine.ne5p"] {
+        fs::write(root.at(name), Fresh::Program.bytes().unwrap()).unwrap();
+    }
+    let here = electro("A1");
+    let mut session = Session::listed(&root);
+    assert!(session.store.read_only().is_some());
+    let (grand, tine) = (session.named("Grand.ne5p"), session.named("Tine.ne5p"));
+    session.link(grand, &here, program_at(6));
+    session.link(tine, &here, program_at(7));
+    session.refresh();
+    let held = |id| {
+        session
+            .bench
+            .workspace
+            .get(id)
+            .unwrap()
+            .held_on(&here)
+            .cloned()
+    };
+    assert_eq!(held(grand), Some(program_at(6)));
+    assert_eq!(held(tine), Some(program_at(7)));
+    assert_eq!(
+        session.said("The links are kept only until drawbar closes"),
+        1
+    );
+}
+
 impl Session {
     /// Drain what the instrument reported, as a frame does.
     fn heard(&mut self) {
