@@ -38,8 +38,9 @@ pub enum Change {
     Removed(Option<Location>),
 }
 
+/// A linked file, and what happened to its sound on the keyboard.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Found {
+pub struct Noticed {
     pub id: u64,
     pub class: ObjectClass,
     pub change: Change,
@@ -48,29 +49,29 @@ pub struct Found {
 /// What changed on the attached keyboard to the files linked there, for the question
 /// asked once its walk has finished. A file with unsaved edits is left to its mark. A
 /// sound two files would move to has moved for neither.
-pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Found> {
+pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Noticed> {
     let Some(keyboard) = state.keyboard() else {
         return Vec::new();
     };
-    let claims = claims(workspace, &keyboard);
-    let judged: Vec<(Found, &Held)> = workspace
+    let claims = claims(workspace, keyboard);
+    let judged: Vec<(Noticed, &Held)> = workspace
         .listed()
         .filter(|entity| !entity.is_unsaved())
         .filter_map(|entity| {
-            let held = entity.held_on(&keyboard)?;
+            let held = entity.held_on(keyboard)?;
             if claims[&(held.class(), &held.spot)] > 1 {
                 return None;
             }
-            let change = change(state, workspace, &keyboard, entity, held)?;
+            let change = change(state, workspace, keyboard, entity, held)?;
             let (id, class) = (entity.id, held.class());
-            Some((Found { id, class, change }, held))
+            Some((Noticed { id, class, change }, held))
         })
         .collect();
-    let target = |found: &Found| match found.change {
+    let target = |found: &Noticed| match found.change {
         Change::Moved { to, .. } => Some((found.class, to)),
         Change::Changed(_) | Change::Replaced { .. } | Change::Removed(_) => None,
     };
-    let contested = |found: &Found| {
+    let contested = |found: &Noticed| {
         let mut claims = judged
             .iter()
             .filter(|(other, _)| target(other) == target(found));
@@ -80,7 +81,7 @@ pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Found> {
         .iter()
         .filter_map(|(found, held)| match contested(found) {
             false => Some(found.clone()),
-            true => Some(Found {
+            true => Some(Noticed {
                 change: unmoved(state, held)?,
                 ..found.clone()
             }),
@@ -223,7 +224,7 @@ fn walked(state: &DeviceState, workspace: &Workspace) -> bool {
     !classes.is_empty()
         && workspace
             .listed()
-            .filter_map(|entity| Some(entity.held_on(&keyboard)?.class()))
+            .filter_map(|entity| Some(entity.held_on(keyboard)?.class()))
             .filter(|class| classes.contains(class))
             .all(|class| state.read_whole(class) && !running(class))
 }
@@ -243,11 +244,13 @@ struct Pull {
 pub struct Asks {
     /// Whether this attach's question was asked, or found nothing to ask.
     settled: bool,
+    /// Whether [`since`] found anything, as of the last [`follow`].
+    changed: bool,
     /// Whether the user said Bring them in: a slot changed on the keyboard from then on is
     /// brought in without asking.
     bringing: bool,
     /// The question asked on attach, while it shows.
-    pub since: Option<Vec<Found>>,
+    pub since: Option<Vec<Noticed>>,
     /// The question asked about one file, while it shows.
     pub choosing: Option<Choosing>,
     /// Slots read to be brought in, until their bytes land. A read that fails, or lands
@@ -309,6 +312,11 @@ impl Asks {
     pub fn answered(&self) -> bool {
         self.settled && self.since.is_none()
     }
+
+    /// Whether anything changed on the keyboard to ask about again.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
 }
 
 /// Settle the question for this attach once the walk allows, and bring in what changed
@@ -318,11 +326,12 @@ impl Asks {
 /// ⚠️ Nothing is asked or brought in while a write is running or waiting: a send changes
 /// the slots it is asked about.
 pub fn follow(device: &mut Device, workspace: &Workspace, log: &mut Log) {
+    let found = since(&device.state, workspace);
+    device.asks.changed = !found.is_empty();
     if device.sending() {
         return;
     }
     if !device.asks.settled && walked(&device.state, workspace) {
-        let found = since(&device.state, workspace);
         device.asks.settled = true;
         device.asks.since = (!found.is_empty()).then_some(found);
     }
@@ -334,7 +343,7 @@ pub fn follow(device: &mut Device, workspace: &Workspace, log: &mut Log) {
 /// Read every slot [`since`] finds changed to be brought in, but for a file whose earlier
 /// bringing in was undone.
 fn bring_changed(device: &mut Device, workspace: &Workspace, log: &mut Log, first: bool) {
-    let Some(keyboard) = device.state.keyboard() else {
+    let Some(keyboard) = device.state.keyboard().cloned() else {
         return;
     };
     for found in since(&device.state, workspace) {
@@ -370,8 +379,8 @@ fn pull(device: &mut Device, log: &mut Log, pull: Pull) {
 }
 
 /// Once per attach, after the walk of every class holding a linked file and the question
-/// it asks: queue each file ahead of its
-/// slot for that slot, as saving it would have, and say so in one line that Undo takes back.
+/// it asks: queue each file ahead of its slot for that slot, as saving it would have, and
+/// say so in one line that Undo takes back.
 pub fn queue_ahead(device: &mut Device, workspace: &Workspace, queue: &mut Queue, log: &mut Log) {
     let read = walked(&device.state, workspace);
     if device.asks.queued || !device.asks.answered() || !read || device.sending() {
@@ -419,15 +428,15 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     };
     device.asks.bringing = true;
     device.asks.brought = None;
-    let now: Vec<Found> = since(&device.state, workspace)
+    let now: Vec<Noticed> = since(&device.state, workspace)
         .into_iter()
         .filter(|found| asked.contains(found))
         .collect();
-    let moved: Vec<(&Found, Location, bool, Held)> = now
+    let moved: Vec<(&Noticed, Location, bool, Held)> = now
         .iter()
         .filter_map(|found| match found.change {
             Change::Moved { to, agrees, .. } => {
-                let held = workspace.get(found.id)?.held_on(&keyboard)?.clone();
+                let held = workspace.get(found.id)?.held_on(keyboard)?.clone();
                 Some((found, to, agrees, held))
             }
             _ => None,
@@ -445,15 +454,15 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
             .filter(|(found, ..)| found.class == class)
             .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to)), None))
             .collect();
-        workspace.respot(&keyboard, class, &moves);
+        workspace.respot(keyboard, class, &moves);
     }
     for (found, to, agrees, before) in moved {
         let entity = workspace.get(found.id);
         let saved = entity.and_then(LocalEntity::saved_print);
-        let now = entity.and_then(|it| it.held_on(&keyboard)).cloned();
+        let now = entity.and_then(|it| it.held_on(keyboard)).cloned();
         if let (true, Some(print), Some(now)) = (agrees, saved, now) {
             let name = name_at(&device.state, found.class, to);
-            workspace.link(found.id, &keyboard, now.agreed(print, &name));
+            workspace.link(found.id, keyboard, now.agreed(print, &name));
         }
         let name = workspace.get(found.id).map_or("", |it| it.name.as_str());
         log.say(format!("“{}” is now at {}.", display_name(name), shown(to)));
@@ -465,7 +474,7 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     }
     for found in &now {
         if let Change::Removed(_) | Change::Replaced { .. } = found.change {
-            workspace.unlink(found.id, &keyboard);
+            workspace.unlink(found.id, keyboard);
         }
     }
     if !device.sending() {
@@ -486,11 +495,11 @@ fn bring(
 ) -> Option<Restored> {
     let keyboard = device.state.keyboard()?;
     let spot = Spot::at(at);
-    if workspace.linked_at(&keyboard, class, &spot) != Some(id) {
+    if workspace.linked_at(keyboard, class, &spot) != Some(id) {
         return None;
     }
     let entity = workspace.get(id)?;
-    let before = entity.held_on(&keyboard)?.clone();
+    let before = entity.held_on(keyboard)?.clone();
     if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
@@ -504,7 +513,7 @@ fn bring(
     device.asks.agreed.push((id, held.base));
     workspace.replace_bytes(id, bytes, log);
     workspace.mark_saved(id);
-    workspace.link(id, &keyboard, held);
+    workspace.link(id, keyboard, held);
     device.state.uncontest(id);
     Some(restored)
 }
@@ -526,10 +535,10 @@ pub fn landed(
     let (id, first) = (pull.id, pull.first);
     let agreed = device.state.keyboard().is_some_and(|keyboard| {
         workspace.get(id).is_some_and(|entity| {
-            let held = entity.held_on(&keyboard);
+            let held = entity.held_on(keyboard);
             held.is_some_and(|held| {
                 entity.saved_print() == Some(held.base)
-                    && claims(workspace, &keyboard)[&(held.class(), &held.spot)] == 1
+                    && claims(workspace, keyboard)[&(held.class(), &held.spot)] == 1
             })
         })
     });
@@ -643,11 +652,11 @@ pub fn use_mine(device: &mut Device, workspace: &mut Workspace, queue: &mut Queu
     let Some(keyboard) = device.state.keyboard() else {
         return;
     };
-    let Some(held) = workspace.get(id).and_then(|it| it.held_on(&keyboard)) else {
+    let Some(held) = workspace.get(id).and_then(|it| it.held_on(keyboard)) else {
         return;
     };
     let (_, there) = there(&device.state, held);
-    workspace.link(id, &keyboard, held.superseding(there));
+    workspace.link(id, keyboard, held.superseding(there));
     device.state.uncontest(id);
     crate::queue::enqueue(workspace, device, queue, log, id, class, at);
 }
@@ -664,7 +673,11 @@ const WIDTH: f32 = 440.0;
 
 /// The question asked once after an attach, while it shows: "Bring them in" is
 /// [`Answer::Yes`], "Not now" [`Answer::No`].
-pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) -> Option<Answer> {
+pub fn since_sheet(
+    ctx: &egui::Context,
+    found: &[Noticed],
+    workspace: &Workspace,
+) -> Option<Answer> {
     let name = |id| {
         workspace
             .get(id)
@@ -907,7 +920,7 @@ mod tests {
         let log = &mut bench.log;
         let id = bench.workspace.ingest(name.into(), origin, bytes, log);
         bench.workspace.settle_files(log);
-        let keyboard = bench.device.state.keyboard().expect("attached");
+        let keyboard = bench.device.state.keyboard().cloned().expect("attached");
         let held = Held::new(PROGRAM, at(slot), "", print(base)).unwrap();
         bench.workspace.link(id, &keyboard, held);
         id
@@ -920,7 +933,7 @@ mod tests {
 
     fn slot_of(bench: &Bench, id: u64) -> Option<Spot> {
         let keyboard = bench.device.state.keyboard()?;
-        Some(bench.workspace.get(id)?.held_on(&keyboard)?.spot.clone())
+        Some(bench.workspace.get(id)?.held_on(keyboard)?.spot.clone())
     }
 
     fn pulls(bench: &Bench) -> Vec<Location> {
@@ -964,9 +977,9 @@ mod tests {
         }
     }
 
-    fn found(id: u64, change: Change) -> Found {
+    fn found(id: u64, change: Change) -> Noticed {
         let class = PROGRAM;
-        Found { id, class, change }
+        Noticed { id, class, change }
     }
 
     #[test]
@@ -1042,7 +1055,7 @@ mod tests {
         let mut bench = Bench::new();
         walked_named(&mut bench, &[Some((now, crc(&gained("40"))))]);
         let id = linked(&mut bench, file, body(), 1, &body());
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         if let Some(slot) = slot {
             let held = Held::new(PROGRAM, at(1), slot, print(&body())).unwrap();
             bench.workspace.link(id, &keyboard, held);
@@ -1499,7 +1512,7 @@ mod tests {
                     use_mine(device, workspace, queue, log);
                     assert_eq!(standing(&bench, id), Some(Standing::Ahead));
                     assert!(bench.queue.holds(id), "queued for its slot");
-                    let keyboard = bench.device.state.keyboard().unwrap();
+                    let keyboard = bench.device.state.keyboard().cloned().unwrap();
                     let entity = bench.workspace.get(id).unwrap();
                     let held = entity.held_on(&keyboard).unwrap();
                     assert!(held.knew(crc(&theirs)), "the keyboard's counts as earlier");
@@ -1641,7 +1654,7 @@ mod tests {
             .log
             .undo_pressed(&mut bench.workspace, &mut bench.queue);
         heard(&mut bench);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         assert!(bench.workspace.get(id).unwrap().kept_off(&keyboard));
         assert!(!bench.log.press("linked to the slot"), "once");
     }

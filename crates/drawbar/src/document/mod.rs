@@ -2742,8 +2742,7 @@ mod tests {
     }
 
     /// A program stores its piano's id, and the piano is named by the file or slot whose
-    /// name hashes to it. 0x92e0cba2 is the id an Electro 5 gave a sample written as
-    /// `drawbar-tine`.
+    /// name hashes to it. 0x92e0cba2 is the `library_id` of `drawbar-tine`.
     #[test]
     fn a_pianos_name_is_that_of_the_file_or_slot_its_id_hashes_from() {
         let Bench {
@@ -2900,7 +2899,6 @@ mod tests {
         assert_eq!(lookup.names(stored), Some("Marimba"));
     }
 
-    /// The instrument plays the piano at the dials where the id is 0.
     #[test]
     fn a_zero_id_shows_the_dialed_piano() {
         let Bench {
@@ -2927,9 +2925,7 @@ mod tests {
         assert_eq!(lookup.names(stored), Some("Royal Grand"));
     }
 
-    /// The Electro 5 plays the piano the id names, so a dial moved under an old id would
-    /// keep playing the old piano. 0x92e0cba2 is the id an Electro 5 gave a piano written
-    /// as `drawbar-tine`.
+    /// 0x92e0cba2 is the `library_id` of `drawbar-tine`.
     #[test]
     fn moving_the_piano_dials_points_the_id_at_the_piano_now_there() {
         let Bench {

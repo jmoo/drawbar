@@ -168,10 +168,9 @@ impl<L: Driver> Intent<L> {
 
     /// Gives `into` each member of each set `entity` holds that `into` does not,
     /// and `entity`'s shown value of each register `into` holds no value of, under
-    /// every key, the schema's or not, then
-    /// deletes `entity`. Refused unless both are shown and differ. An intent that
-    /// only joins entities is no step of undo, which takes its writes for another
-    /// writer's.
+    /// every key, the schema's or not, then deletes `entity`. Refused unless both are
+    /// shown and differ. An intent that only joins entities is no step of undo, which
+    /// takes its writes for another writer's.
     pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
         self.plan.joins.push(Joined { entity, into });
         self

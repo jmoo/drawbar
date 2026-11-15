@@ -641,7 +641,7 @@ impl DrawbarApp {
                 attached.then_some(plain)?
             }
             Command::KeyboardChanges => Offer {
-                enabled: !crate::bring::since(&self.device.state, &self.workspace).is_empty(),
+                enabled: self.device.asks.changed(),
                 ..attached.then_some(plain)?
             },
             Command::ReadAgain => {

@@ -1513,7 +1513,8 @@ mod tests {
     use super::*;
     use crate::fields::{ControlKind, Library, Unit};
 
-    /// Observed on an Electro 5: the id it reported for a sample written under each name.
+    /// The id an Electro 5 reported for a sample written under each name. Confirmed on
+    /// hardware.
     #[test]
     fn a_library_id_is_the_id_the_instrument_gives_that_name() {
         let observed = [

@@ -1649,9 +1649,9 @@ pub(super) fn spare_slot(
     state.first_free(class, &queue.waiting_in(class))
 }
 
-/// The slot an asset is linked to ([`crate::device::owed`]), or else the first free slot of its folder
-/// that nothing in the queue is waiting for: where a piano or sample gone from the
-/// keyboard goes, and an asset with no link.
+/// The slot an asset is linked to ([`crate::device::owed`]), or else the first free slot
+/// of its folder that nothing in the queue is waiting for: where a piano or sample gone
+/// from the keyboard goes, and an asset with no link.
 ///
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
@@ -1757,7 +1757,7 @@ fn link_to(
         return;
     };
     let said = format!("“{}” is linked to {}.", entity.name, place(class, at));
-    workspace.link(id, &keyboard, held);
+    workspace.link(id, keyboard, held);
     log.say(said);
 }
 
@@ -1770,10 +1770,11 @@ fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64
         Some((class, at)) => format!("“{}” is unlinked from {}.", entity.name, place(class, at)),
         None => format!("“{}” is unlinked from the keyboard.", entity.name),
     };
-    let before = entity.held_on(&keyboard).cloned();
-    workspace.keep_off(id, &keyboard);
+    let before = entity.held_on(keyboard).cloned();
+    workspace.keep_off(id, keyboard);
     log.say(said);
     if let Some(held) = before {
+        let keyboard = keyboard.clone();
         log.offer(crate::log::Undo::Relink { id, keyboard, held });
     }
 }
@@ -1868,7 +1869,7 @@ fn save_doc(
         let keyboard = device.state.keyboard();
         let waiting = queue
             .entry(id)
-            .filter(|held| held.keyboard == keyboard)
+            .filter(|held| held.keyboard.as_ref() == keyboard)
             .map(|held| (held.class, held.at));
         match bound {
             // Already waiting for that slot, so the save only moved the baseline.
@@ -2245,7 +2246,7 @@ mod tests {
 
         assert!(bench.queue.is_empty(), "it is no longer owed");
         let entity = bench.workspace.get(id).unwrap();
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = entity.held_on(&keyboard).expect("linked where it landed");
         assert_eq!(held.spot, crate::link::Spot::Named("Upright".into()));
         assert_eq!(Some(held.base.crc), crc32);
@@ -2658,7 +2659,7 @@ mod tests {
 
         bench.act(vec![Act::Unlink(id)]);
         let entity = bench.workspace.get(id).unwrap();
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         assert_eq!(
             crate::device::standing_of(&bench.device.state, entity),
             None
@@ -4064,7 +4065,7 @@ mod tests {
         bench
             .device
             .pretend_bodies(class, 7, &[Some(("New program", print.crc))]);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = crate::link::Held::new(class, at(0), "", print).unwrap();
         bench.workspace.link(id, &keyboard, held);
         let linked = |bench: &Bench| {
@@ -4181,10 +4182,9 @@ mod tests {
         );
     }
 
-    /// The instrument keeps one sample of each name, so a sample the slot of its name
-    /// holds, at its length, is linked to that slot and queued to replace it. Sent to any
-    /// other slot it is refused before it reaches the queue, as the instrument would
-    /// refuse it.
+    /// A sample the slot of its name holds, at its length, is linked to that slot and
+    /// queued to replace it. Sent to any other slot it is refused before it reaches the
+    /// queue.
     #[test]
     fn a_sample_whose_name_the_library_has_goes_to_that_slot_and_nowhere_else() {
         let mut bench = Bench::new();

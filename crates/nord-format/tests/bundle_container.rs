@@ -414,7 +414,7 @@ fn a_plan_stores_libraries_first_and_lists_set_lists_first() {
     assert_eq!(plan.unmet, [("A.ne5p".to_string(), Key::Sample(9))]);
 }
 
-/// 0x92e0cba2 is the id an Electro 5 gave a piano written as `drawbar-tine`.
+/// 0x92e0cba2 is the `library_id` of `drawbar-tine`.
 #[test]
 fn a_piano_member_provides_the_id_of_its_name() {
     let program = item(

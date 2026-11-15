@@ -1491,10 +1491,9 @@ impl Browser {
                     let label = format!("Send all ({waiting})");
                     offer(ui, &label, None, Act::AskSendAll, acts);
                 }
-                let changes = crate::bring::since(&device.state, workspace);
                 if ui
                     .add_enabled(
-                        !changes.is_empty(),
+                        device.asks.changed(),
                         egui::Button::new(crate::bring::KEYBOARD_CHANGES),
                     )
                     .clicked()

@@ -545,7 +545,7 @@ mod tests {
         );
     }
 
-    /// 0x92e0cba2 is the id an Electro 5 gave a sample written as `drawbar-tine`.
+    /// 0x92e0cba2 is the `library_id` of `drawbar-tine`.
     #[test]
     fn a_program_whose_piano_id_is_zero_needs_the_piano_its_dials_pick() {
         use crate::device::Device;

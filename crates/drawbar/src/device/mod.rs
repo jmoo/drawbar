@@ -615,6 +615,8 @@ pub struct DeviceState {
     /// known to be the one the slot holds. Two libraries can each link one before they
     /// sync.
     contested: std::collections::BTreeSet<u64>,
+    /// The keyboard the card last attached names. See [`DeviceState::keyboard`].
+    keyboard: Option<Keyboard>,
 }
 
 impl DeviceCard {
@@ -643,12 +645,16 @@ impl DeviceState {
     }
 
     /// The keyboard attached, as a library knows one.
-    pub fn keyboard(&self) -> Option<Keyboard> {
-        let card = self.card()?;
-        Some(Keyboard {
+    pub fn keyboard(&self) -> Option<&Keyboard> {
+        self.keyboard.as_ref().filter(|_| self.connected())
+    }
+
+    fn attach(&mut self, card: DeviceCard) {
+        self.keyboard = Some(Keyboard {
             model: card.product.clone(),
             serial: card.serial.clone(),
-        })
+        });
+        self.connection = Connection::Connected(card);
     }
 
     /// The firmware version as the panel writes it (`2.04`), where the transport could ask
@@ -1062,8 +1068,8 @@ pub fn link_copy(
     let Some(held) = Held::new(class, at, &name, print) else {
         return;
     };
-    if workspace.linked_at(&keyboard, class, &held.spot).is_none() {
-        workspace.link(id, &keyboard, held);
+    if workspace.linked_at(keyboard, class, &held.spot).is_none() {
+        workspace.link(id, keyboard, held);
     }
 }
 
@@ -1098,11 +1104,11 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
     let by_name = by_name(state);
     let found: Vec<(u64, Held)> = workspace
         .listed()
-        .filter_map(|entity| Some((entity.id, found(state, &by_name, &keyboard, entity)?)))
+        .filter_map(|entity| Some((entity.id, found(state, &by_name, keyboard, entity)?)))
         .collect();
     let mut claims: HashMap<(ObjectClass, &Spot), usize> = HashMap::new();
     let linked = workspace.entities().iter();
-    let linked = linked.filter_map(|entity| entity.held_on(&keyboard));
+    let linked = linked.filter_map(|entity| entity.held_on(keyboard));
     for held in linked.chain(found.iter().map(|(_, held)| held)) {
         *claims.entry((held.class(), &held.spot)).or_default() += 1;
     }
@@ -1116,7 +1122,7 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
     }
     let linked: Vec<u64> = found.iter().map(|(id, _)| *id).collect();
     for (id, held) in found {
-        workspace.link(id, &keyboard, held);
+        workspace.link(id, keyboard, held);
     }
     log.say(format!(
         "{} linked to {}.",
@@ -1127,7 +1133,7 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
         }
     ));
     log.offer(crate::log::Undo::Unlink {
-        keyboard,
+        keyboard: keyboard.clone(),
         ids: linked,
     });
 }
@@ -1167,7 +1173,7 @@ fn found(
 /// holds, the others are unlinked, in one log line. Where none or several are, all of
 /// them wait for the user.
 fn settle_claims(state: &mut DeviceState, workspace: &mut Workspace, log: &mut Log) {
-    let Some(keyboard) = state.keyboard() else {
+    let Some(keyboard) = state.keyboard().cloned() else {
         return;
     };
     let mut slots: std::collections::BTreeMap<(u32, Spot), Vec<(&LocalEntity, &Held)>> =
@@ -1257,11 +1263,11 @@ fn link_sent(
     let Some(fresh) = Held::new(class, at, &name, print) else {
         return;
     };
-    let held = match entity.held_on(&keyboard) {
+    let held = match entity.held_on(keyboard) {
         Some(held) if held.class() == class && held.spot == fresh.spot => held.agreed(print, &name),
         _ => fresh,
     };
-    workspace.link(id, &keyboard, held);
+    workspace.link(id, keyboard, held);
 }
 
 /// Where the slot `held` names is, and what a walk says it holds there. A slot kept by
@@ -1384,7 +1390,7 @@ pub fn standing_on<'w>(
     at: Location,
 ) -> Option<&'w LocalEntity> {
     let linked = state.keyboard().zip(spot_at(state, class, at));
-    let linked = linked.and_then(|(keyboard, spot)| workspace.linked_at(&keyboard, class, &spot));
+    let linked = linked.and_then(|(keyboard, spot)| workspace.linked_at(keyboard, class, &spot));
     match linked.and_then(|id| workspace.get(id)) {
         Some(entity) => Some(entity),
         None => workspace
@@ -1416,7 +1422,7 @@ fn offers(state: &DeviceState, workspace: &Workspace, entity: &LocalEntity) -> V
     let label = slot_label(&entity.name).filter(|_| !matches!(entity.origin, Origin::Fresh));
     let free = |at: &Location| {
         let spot = spot_at(state, class, *at);
-        spot.is_none_or(|spot| workspace.linked_at(&keyboard, class, &spot).is_none())
+        spot.is_none_or(|spot| workspace.linked_at(keyboard, class, &spot).is_none())
     };
     let offer = |at: Location| {
         let info = state.slot(class, at).flatten()?;
@@ -1593,7 +1599,7 @@ pub struct Device {
     running: Option<Running>,
     /// The list revision [`link_found`] last looked at. It looks again when the list or
     /// the instrument changes, and not every frame.
-    linked: u64,
+    list_seen: u64,
     /// Objects read into files, waiting to be copied into the library.
     fetched: Vec<Fetched>,
     /// The slots the last [`DeviceCmd::Gather`] found, until taken.
@@ -1669,7 +1675,7 @@ impl Device {
             link: Link::new(ctx, sender, Scratch::default()),
             pending: VecDeque::new(),
             running: None,
-            linked: 0,
+            list_seen: 0,
             fetched: Vec::new(),
             gathered: None,
             failed: false,
@@ -1901,7 +1907,7 @@ impl Device {
     /// model.
     #[cfg(test)]
     pub fn pretend_attached_as(&mut self, product: &str) {
-        self.state.connection = Connection::Connected(DeviceCard {
+        self.state.attach(DeviceCard {
             build: Some(7),
             firmware: Some(204),
             interface: Some(3),
@@ -1913,6 +1919,14 @@ impl Device {
             serial: None,
             vendor_id: 0x0ffc,
         });
+    }
+
+    /// Attach the card attached now again, reporting `serial`.
+    #[cfg(test)]
+    pub fn pretend_serial(&mut self, serial: &str) {
+        let card = self.state.card().expect("attached").clone();
+        let serial = Some(serial.to_string());
+        self.state.attach(DeviceCard { serial, ..card });
     }
 
     /// Fill in a bank as though a walk had answered, under the panel's bank number, which
@@ -2110,7 +2124,7 @@ impl Device {
                         card.product, card.vendor_id, card.product_id
                     ));
                     log.say(format!("{} is attached.", card.product));
-                    self.state.connection = Connection::Connected(card);
+                    self.state.attach(card);
                     self.forget();
                     self.pending.clear();
                 }
@@ -2295,7 +2309,7 @@ impl Device {
                     let respot = self.running.as_mut().and_then(|run| run.respot.take());
                     if let (Some((class, moves)), Some(keyboard)) = (respot, self.state.keyboard())
                     {
-                        workspace.respot(&keyboard, class, &moves);
+                        workspace.respot(keyboard, class, &moves);
                         queue.respot(class, &moves);
                     }
                     let follow_up = self.running.as_ref().is_some_and(|run| run.follow_up);
@@ -2333,7 +2347,7 @@ impl Device {
         }
         // An asset that arrives while an instrument is attached is linked against what
         // the cache already shows, without waiting for the next walk.
-        if heard || self.linked != workspace.revision() {
+        if heard || self.list_seen != workspace.revision() {
             let before = workspace.revision();
             settle_claims(&mut self.state, workspace, log);
             link_found(&self.state, workspace, log);
@@ -2342,7 +2356,7 @@ impl Device {
             if heard || workspace.revision() != before {
                 self.revision += 1;
             }
-            self.linked = workspace.revision();
+            self.list_seen = workspace.revision();
         }
     }
 }
@@ -2809,7 +2823,7 @@ mod tests {
             .file()
             .is_some_and(|held| Arc::ptr_eq(held, &file)));
         assert_eq!(entity.saved.crc32(), Some(crc32));
-        let keyboard = device.state.keyboard().unwrap();
+        let keyboard = device.state.keyboard().cloned().unwrap();
         let held = entity.held_on(&keyboard).map(|held| held.spot.clone());
         assert_eq!(held, Some(Spot::Named("Upright".into())));
         assert_eq!(file.take_reads(), [], "nothing read the file");
@@ -3044,7 +3058,7 @@ mod tests {
         assert_eq!(*entity.saved.bytes(), sent, "the instrument holds these");
         assert_eq!(entity.bytes, edited);
         assert!(entity.is_unsaved(), "the edit was never sent");
-        let keyboard = device.state.keyboard().unwrap();
+        let keyboard = device.state.keyboard().cloned().unwrap();
         let held = entity.held_on(&keyboard).map(|held| held.location());
         assert_eq!(held, Some(Some(at)));
         assert!(!queue.holds(id), "it landed");
@@ -3308,7 +3322,7 @@ mod tests {
 
         device.pretend_bodies(ObjectClass::Program, 1, &[Some(("A", print.crc))]);
         assert_eq!(standing(&device, &workspace), None, "linked elsewhere");
-        let here = device.state.keyboard().expect("attached");
+        let here = device.state.keyboard().cloned().expect("attached");
         workspace.link(id, &here, held);
         let linked = Linked {
             class: ObjectClass::Program,
@@ -3345,7 +3359,7 @@ mod tests {
     }
 
     fn held_at(bench: &crate::testing::Bench, id: u64) -> Option<Spot> {
-        let keyboard = bench.device.state.keyboard().expect("attached");
+        let keyboard = bench.device.state.keyboard().cloned().expect("attached");
         let entity = bench.workspace.get(id).unwrap();
         entity.held_on(&keyboard).map(|held| held.spot.clone())
     }
@@ -3429,7 +3443,7 @@ mod tests {
             .replace_bytes(second, gained("41"), &mut bench.log);
         bench.workspace.mark_saved(second);
         sent(&mut bench, second, 2, gained("41"));
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = bench
             .workspace
             .get(second)
@@ -3444,7 +3458,7 @@ mod tests {
     }
 
     fn name_held(bench: &crate::testing::Bench, id: u64) -> Option<String> {
-        let keyboard = bench.device.state.keyboard().expect("attached");
+        let keyboard = bench.device.state.keyboard().cloned().expect("attached");
         let held = bench.workspace.get(id)?.held_on(&keyboard)?;
         held.name().map(str::to_string)
     }
@@ -3485,7 +3499,7 @@ mod tests {
         bench
             .device
             .pretend_bodies(class, 1, &[Some(("A", 1)), Some(("B", 2))]);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let [first, second] = ["A.ne5p", "B.ne5p"].map(|name| file(&mut bench, name, body()));
         for (id, slot, name) in [(first, 1, "A"), (second, 2, "B")] {
             let held = Held::new(class, at(slot), name, print(&body())).unwrap();
@@ -3552,7 +3566,7 @@ mod tests {
         bench
             .device
             .pretend_lengths(class, 1, &[Some((names[0], 10)), Some((names[1], 10))]);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let ids = names.map(|name| {
             let id = file(&mut bench, &format!("{name}.npno"), body());
             let held = Held::new(
@@ -3619,7 +3633,7 @@ mod tests {
                 .workspace
                 .ingest("Off.ne5p".into(), origin, gained("40"), &mut bench.log);
         bench.workspace.settle_files(&mut bench.log);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         bench.workspace.keep_off(kept_off, &keyboard);
         heard(&mut bench);
         assert_eq!(held_at(&bench, copied), Some(Spot::at(at(2))));
@@ -3667,7 +3681,7 @@ mod tests {
             Some(("X", print(&mine).crc)),
         ];
         bench.device.pretend_bodies(class, 1, &slots);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let taken = file(&mut bench, "X.ne5p", mine.clone());
         let held = Held::new(class, at(4), "", print(&mine)).unwrap();
         bench.workspace.link(taken, &keyboard, held);
@@ -3771,7 +3785,7 @@ mod tests {
         bench
             .device
             .pretend_bodies(class, 1, &[slot.map(|crc| ("A", crc))]);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = Held::new(class, at(1), "", print(&body())).unwrap();
         let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
             .map(|(name, bytes)| file(bench, name, bytes));
@@ -3835,7 +3849,7 @@ mod tests {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_attached();
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let original = file(&mut bench, "A.ne5p", body());
         let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(original, &keyboard, held);
@@ -3860,7 +3874,7 @@ mod tests {
         let class = ObjectClass::Program;
         bench.device.pretend_scanned(class, 1, &["", ""]);
         let id = file(&mut bench, "A.ne5p", body());
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(id, &keyboard, held);
         crate::queue::enqueue(
@@ -3874,9 +3888,7 @@ mod tests {
         );
         bench.device.pending.clear();
 
-        if let Connection::Connected(card) = &mut bench.device.state.connection {
-            card.serial = Some("B2".into());
-        }
+        bench.device.pretend_serial("B2");
         let entity = bench.workspace.get(id).unwrap();
         assert_eq!(standing_of(&bench.device.state, entity), None);
         crate::queue::refit(
@@ -3898,13 +3910,11 @@ mod tests {
         );
         assert!(bench.queue.holds(id), "it keeps its place");
 
-        let other = bench.device.state.keyboard().unwrap();
+        let other = bench.device.state.keyboard().cloned().unwrap();
         bench
             .device
             .pretend_bodies(class, 1, &[Some(("A", print(&body()).crc)), None]);
-        if let Connection::Connected(card) = &mut bench.device.state.connection {
-            card.serial = Some("B2".into());
-        }
+        bench.device.pretend_serial("B2");
         let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(id, &other, held);
         let gain = [("center_panel.gain".into(), "40".into())];

@@ -293,7 +293,7 @@ pub fn enqueue(
         }
     }
     let holds = Occupancy::of(&device.state, class, at);
-    let keyboard = device.state.keyboard();
+    let keyboard = device.state.keyboard().cloned();
     let put = queue.put(entity, class, at, holds, keyboard);
     if let Some((class, at)) = queue.unread(id) {
         read_occupant(device, log, class, at);
@@ -554,7 +554,7 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
         let elsewhere = held
             .keyboard
             .as_ref()
-            .is_some_and(|keyboard| attached.is_some_and(|attached| attached != *keyboard));
+            .is_some_and(|keyboard| attached.is_some_and(|attached| attached != keyboard));
         let refusal = match (fit(state, entity), elsewhere) {
             (Fit::Refuses(why), _) => Some(why),
             (_, true) => Some("It was queued for another keyboard.".to_string()),
@@ -941,7 +941,8 @@ impl Queue {
 }
 
 /// [`compare`] against what an asset holds. One resting in its file is compared by the
-/// checksum a slot holding it reports, and is never read. One not read yet, or whose check has not answered, has no diff yet.
+/// checksum a slot holding it reports, and is never read. One not read yet, or whose
+/// check has not answered, has no diff yet.
 fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
     if entity.unread() {
         return Diff::Pending;
@@ -2132,7 +2133,7 @@ mod tests {
 
     /// Link an asset to a slot of the attached keyboard, as what it is saved as now.
     fn link_to(workspace: &mut Workspace, device: &Device, id: u64, at: Location) {
-        let keyboard = device.state.keyboard().expect("attached");
+        let keyboard = device.state.keyboard().cloned().expect("attached");
         let print = workspace.get(id).unwrap().saved_print().unwrap();
         let held = crate::link::Held::new(ObjectClass::Program, at, "", print).unwrap();
         workspace.link(id, &keyboard, held);
@@ -2825,7 +2826,7 @@ mod tests {
         );
         let base = crate::link::Print { crc: 1, len: 121 };
         let at = Location::from_user(1, 2);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let held = crate::link::Held::new(class, at, "", base).unwrap();
         bench.workspace.link(jazzy, &keyboard, held);
         for (id, slot) in [(soul, 1), (jazzy, 2), (tine, 3)] {

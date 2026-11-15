@@ -273,8 +273,8 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
 /// Whether the library a resolved program plays has a name.
 ///
 /// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
-/// piano id is normal ([`crate::library::Needs::Wanted`] means unresolved, not missing), and flagging it
-/// would flag every entry of every set list opened from disk.
+/// piano id is normal ([`crate::library::Needs::Wanted`] means unresolved, not missing),
+/// and flagging it would flag every entry of every set list opened from disk.
 fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
     if !seen.device.connected() {
         return Stands::Resolves;

@@ -132,8 +132,8 @@ mod tests {
             .1
     }
 
-    /// 0x92e0cba2 is the id an Electro 5 gave a sample written as `drawbar-tine`, and
-    /// 0xaeb35621 one written as `tine-other`.
+    /// 0x92e0cba2 is the `library_id` of `drawbar-tine`, and 0xaeb35621 that of
+    /// `tine-other`.
     #[test]
     fn a_piano_is_found_by_the_name_it_is_written_under() {
         let Bench {

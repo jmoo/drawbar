@@ -1569,7 +1569,7 @@ mod tests {
         (at, name): (Location, &str),
         base: crate::link::Print,
     ) {
-        let keyboard = device.keyboard().expect("attached");
+        let keyboard = device.keyboard().cloned().expect("attached");
         let held = crate::link::Held::new(class, at, name, base).unwrap();
         workspace.link(id, &keyboard, held);
     }

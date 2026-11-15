@@ -1915,7 +1915,7 @@ mod tests {
             len: 121,
         };
         let held = crate::link::Held::new(class, Location { bank: 4, slot: 0 }, "", base);
-        let keyboard = bench.device.state.keyboard().unwrap();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
         bench.workspace.link(id, &keyboard, held.unwrap());
         bench
             .device

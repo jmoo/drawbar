@@ -1659,7 +1659,7 @@ mod tests {
 
     /// Link an asset to a program slot of the attached keyboard, as what it is saved as.
     fn link(workspace: &mut Workspace, device: &Device, id: u64, at: Location) {
-        let keyboard = device.state.keyboard().expect("attached");
+        let keyboard = device.state.keyboard().cloned().expect("attached");
         let print = workspace.get(id).unwrap().saved_print().expect("read");
         let held = crate::link::Held::new(ObjectClass::Program, at, "", print).unwrap();
         workspace.link(id, &keyboard, held);

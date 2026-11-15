@@ -184,7 +184,7 @@ pub enum There {
     /// No walk has reached its bank.
     Unread,
     Vacant,
-    /// A piano, a sample and the settings report no checksum.
+    /// `crc` is `None` for a slot that reports no checksum.
     Holds {
         crc: Option<u32>,
         len: u32,

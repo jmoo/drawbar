@@ -9277,7 +9277,7 @@ fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
     let class = ObjectClass::Program;
     let at = Location::from_user(8, 1);
     session.bench.device.pretend_attached();
-    let keyboard = session.bench.device.state.keyboard().unwrap();
+    let keyboard = session.bench.device.state.keyboard().cloned().unwrap();
     let sent = session.bench.workspace.get(id).unwrap().bytes.to_vec();
     session
         .bench
@@ -9444,7 +9444,7 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     device.pretend_partitions(&crate::device::ELECTRO5);
     device.pretend_geometry(class, &[("A", 1)]);
     device.pretend_bodies(class, 1, &[Some(("untitled", print(&new).crc))]);
-    let keyboard = device.state.keyboard().unwrap();
+    let keyboard = device.state.keyboard().cloned().unwrap();
     let held = Held::new(class, at, "", print(&old)).unwrap();
     session.link(id, &keyboard, held);
     session.heard();
