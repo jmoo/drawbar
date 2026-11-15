@@ -182,8 +182,6 @@ pub enum Purpose {
     Compare,
     /// The slot's content, to be saved as the file linked to it. See [`crate::bring`].
     Pull,
-    /// The slot's content, for the question of which of it and its file is current.
-    Choose,
 }
 
 /// One object waiting to go back to the instrument.
@@ -321,7 +319,7 @@ impl DeviceCmd {
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
             DeviceCmd::Get { at, why, .. } => match why {
-                Purpose::Compare | Purpose::Choose => format!("get {} (to compare)", shown(*at)),
+                Purpose::Compare => format!("get {} (to compare)", shown(*at)),
                 Purpose::Pull => format!("get {} (to bring in)", shown(*at)),
                 Purpose::Copy | Purpose::View => format!("get {}", shown(*at)),
             },
@@ -357,11 +355,7 @@ impl DeviceCmd {
             DeviceCmd::ScanBank { class, .. } => ("scan-bank", class, false),
             DeviceCmd::SlotInfo { class, .. } => ("info", class, false),
             DeviceCmd::Deps { class, .. } => ("deps", class, false),
-            DeviceCmd::Get { class, why, .. } => (
-                "get",
-                class,
-                !matches!(why, Purpose::Compare | Purpose::Choose),
-            ),
+            DeviceCmd::Get { class, why, .. } => ("get", class, !matches!(why, Purpose::Compare)),
             DeviceCmd::Put { class, .. } => ("put", class, true),
             DeviceCmd::SendAll { class, .. } => ("send-all", class, true),
             DeviceCmd::Move { class, .. } => ("move", class, true),
@@ -402,7 +396,7 @@ impl DeviceCmd {
             DeviceCmd::Get {
                 class,
                 at,
-                why: Purpose::Compare | Purpose::Choose,
+                why: Purpose::Compare,
             } => words(READING, format!("what is in {}", place(*class, *at))),
             DeviceCmd::Get {
                 class,
@@ -1720,8 +1714,7 @@ pub struct Device {
     kept: Vec<Location>,
     /// Counts what the instrument has reported and the links that moved since.
     revision: u64,
-    /// What drawbar asks, and has been told, about linked files while this keyboard is
-    /// attached.
+    /// The Sync sheet, and what Sync is bringing in, while this keyboard is attached.
     pub asks: crate::bring::Asks,
 }
 
@@ -2359,16 +2352,12 @@ impl Device {
                     Purpose::Compare => {
                         if let Some((class, at)) = origin.slot() {
                             queue.arrived(class, at, &info, &bytes, workspace);
+                            self.asks.read(class, at, &bytes, workspace);
                         }
                     }
                     Purpose::Pull => {
                         if let Some((class, at)) = origin.slot() {
                             crate::bring::landed(self, workspace, queue, log, class, at, bytes);
-                        }
-                    }
-                    Purpose::Choose => {
-                        if let Some((class, at)) = origin.slot() {
-                            self.asks.read(class, at, bytes, workspace);
                         }
                     }
                 },
@@ -2388,8 +2377,11 @@ impl Device {
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {
-                    Purpose::Compare => queue.vacant(class, at),
-                    Purpose::Pull | Purpose::Choose => self.asks.vacant(class, at),
+                    Purpose::Compare => {
+                        queue.vacant(class, at);
+                        self.asks.vacant(class, at);
+                    }
+                    Purpose::Pull => self.asks.vacant(class, at),
                     Purpose::Copy | Purpose::View => {
                         self.failed = true;
                         log.error(format!("{} holds nothing to read", shown(at)));
@@ -2437,7 +2429,7 @@ impl Device {
                     if let Some(DeviceCmd::Reload { written, .. }) = reload {
                         written.retain(|it| *it != at);
                     }
-                    // The rest of this Send all waits, so no program goes out ahead of
+                    // The rest of this batch waits, so no program goes out ahead of
                     // what it plays.
                     self.pending
                         .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
@@ -2499,8 +2491,7 @@ impl Device {
             let before = workspace.revision();
             settle_claims(&self.state, workspace, log);
             link_found(&self.state, workspace, log);
-            crate::bring::follow(self, workspace, log);
-            crate::bring::queue_ahead(self, workspace, queue, log);
+            crate::bring::follow(self, workspace, queue, log);
             if heard || workspace.revision() != before {
                 self.revision += 1;
             }
@@ -3282,7 +3273,7 @@ mod tests {
     }
 
     /// A write refused or failed in one folder holds back the folders after it in the
-    /// same Send all, so no program goes out ahead of the piano it plays.
+    /// same batch, so no program goes out ahead of the piano it plays.
     #[test]
     fn a_refused_write_holds_back_the_rest_of_its_send() {
         let refusals = [
@@ -3740,7 +3731,7 @@ mod tests {
         );
         let said = "“C” is no longer waiting to send.";
         assert!(bench.log.iter().any(|entry| entry.text == said));
-        bench.act(vec![crate::browser::Act::SendAll]);
+        bench.sync();
         let sends = bench.device.queued().into_iter();
         let mut sends = sends.filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }));
         assert!(sends.next().is_none(), "nothing is written to either slot");
@@ -4108,11 +4099,7 @@ mod tests {
         assert!(bench
             .log
             .press("1 file unlinked from a slot another file is linked to."));
-        bench.log.undo_pressed(
-            &mut bench.workspace,
-            &mut bench.queue,
-            &mut bench.device.asks,
-        );
+        bench.log.undo_pressed(&mut bench.workspace);
         heard(&mut bench);
         assert_eq!(linked(&bench), [false, true], "the other one, in its place");
         assert_eq!(bench.log.status().1, "Linked “B” again.");
@@ -4240,7 +4227,7 @@ mod tests {
         );
         let why = bench.queue.entry(id).and_then(|held| held.failure.clone());
         assert_eq!(why.as_deref(), Some("It was queued for another keyboard."));
-        bench.act(vec![crate::browser::Act::SendAll]);
+        bench.sync();
         assert!(
             !bench
                 .device
@@ -4262,17 +4249,16 @@ mod tests {
         let edited = crate::fields::apply(&body(), &gain).unwrap().1;
         bench.workspace.replace_bytes(id, edited, &mut bench.log);
         bench.act(vec![crate::browser::Act::SaveDoc(id)]);
-        crate::queue::refit(
-            &bench.workspace,
-            &bench.device.state,
-            &mut bench.queue,
-            &mut bench.log,
-        );
+        bench.sync();
         let entry = bench.queue.entry(id).unwrap();
         assert_eq!(
             (entry.keyboard.as_ref(), entry.failure.as_deref()),
             (Some(&other), None),
-            "saving queues it for the keyboard attached now"
+            "Sync writes it to the keyboard attached now"
         );
+        let written = bench.device.queued().into_iter().any(|cmd| {
+            matches!(cmd, DeviceCmd::SendAll { items, .. } if items.iter().any(|it| it.id == id))
+        });
+        assert!(written);
     }
 }

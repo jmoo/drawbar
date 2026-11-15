@@ -333,10 +333,7 @@ impl Shown {
                         )
                     })
                     .flatten();
-                (
-                    about(&checked, &rows, browser, workspace, device, queue),
-                    going,
-                )
+                (about(&checked, &rows, browser, workspace, device), going)
             }
         };
         let one = checked.len() == 1;
@@ -421,7 +418,6 @@ struct Single {
     /// The slot's place, or `None` for an asset with no slot.
     at: Option<String>,
     mark: Option<Mark>,
-    queued: bool,
     faint: bool,
     /// The asset's id; a slot has none.
     id: Option<u64>,
@@ -491,7 +487,6 @@ fn about(
     browser: &Browser,
     workspace: &Workspace,
     device: &Device,
-    queue: &Queue,
 ) -> About {
     let picked = checked.len();
     if let [item] = checked {
@@ -520,7 +515,6 @@ fn about(
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),
         mark: row.mark,
-        queued: entity.is_some_and(|entity| queue.holds(entity.id)),
         faint: row.faint,
         id: entity.map(|entity| entity.id),
         action,
@@ -532,12 +526,11 @@ fn about(
 /// What a click on the document header's action asks for, from the inspector.
 fn clicked(click: Click, id: u64) -> Option<Act> {
     match click {
-        Click::Send(class, at) => Some(Act::Send { id, class, at }),
         Click::Pick => Some(Act::SendTo(id)),
         Click::Load(class, at) => Some(Act::LoadOnInstrument { class, at }),
         Click::Save => Some(Act::SaveDoc(id)),
         Click::Build => Some(Act::Build(id)),
-        Click::Choose => Some(Act::Choose(id)),
+        Click::Sync => Some(Act::Sync(Some(id))),
         Click::Nothing => None,
     }
 }
@@ -558,7 +551,7 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
         };
         ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
         if let Some(mark) = picked.mark {
-            let said = format!(" · {}", mark_words(mark, picked.queued).to_lowercase());
+            let said = format!(" · {}", mark_words(mark).to_lowercase());
             let ink = mark_ink(mark, ui.visuals());
             ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
         }
@@ -1927,7 +1920,7 @@ mod tests {
             .device
             .pretend_bodies(class, 5, &[Some(("Jazzy", !crc))]);
         let said = inspected(&mut bench);
-        for word in ["Programs 5:1", " · ready to send", "Send to 5:1"] {
+        for word in ["Programs 5:1", " · newer here", "Sync…"] {
             assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
         }
         assert!(

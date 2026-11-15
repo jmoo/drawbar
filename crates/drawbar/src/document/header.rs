@@ -8,17 +8,17 @@ use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
 use super::controls::{self, Sets};
-use super::{piano, project, sample, setlist, text, wav, SendBack, Shape};
+use super::{piano, project, sample, setlist, text, wav, Shape};
 use crate::app::{accent, caption, good, tint, warn};
-use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT};
-use crate::device::{loadable, owed, place_of, read_only, standing_of, DeviceState};
+use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT, SYNC};
+use crate::device::{loadable, place_of, read_only, standing_of, DeviceState};
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{mark_ink, mark_sign, mark_words, Mark};
 use crate::link::Standing;
 use crate::panel::caps;
 use crate::queue::Queue;
 use crate::room;
-use crate::strings::{counted, display_name, folder, kind_word, place, shown, tagged};
+use crate::strings::{counted, display_name, folder, kind_word, place, tagged};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Origin};
 
@@ -233,8 +233,6 @@ pub struct Loud {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Click {
     Nothing,
-    /// Queue a write of this document to the slot.
-    Send(ObjectClass, Location),
     /// Queue a write of this document to a free slot.
     Pick,
     /// Play the slot on the instrument.
@@ -243,8 +241,8 @@ pub enum Click {
     Save,
     /// Build this project into the instrument it describes.
     Build,
-    /// Ask which of this document and its slot is current.
-    Choose,
+    /// Read the keyboard and show the Sync sheet on this document's row.
+    Sync,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
@@ -304,12 +302,11 @@ pub(super) struct Facts<'a> {
 pub(super) struct Clicked {
     pub revert: bool,
     pub export: bool,
-    pub send: Option<SendBack>,
     /// Whether the document is to be sent to a slot the user picks.
     pub pick: bool,
     pub save: bool,
     pub build: bool,
-    pub choose: bool,
+    pub sync: bool,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
@@ -491,7 +488,7 @@ fn left(
         },
     );
     match place.mark {
-        Some(mark) => drawn.on_hover_text(mark_words(mark, facts.queue.holds(entity.id))),
+        Some(mark) => drawn.on_hover_text(mark_words(mark)),
         None => drawn.on_hover_text(entity.origin.label()),
     };
 
@@ -582,18 +579,11 @@ fn right(
         .on_hover_text(&loud.hint)
         .clicked();
         match (clicked, loud.click) {
-            (true, Click::Send(class, at)) => {
-                act.send = Some(SendBack {
-                    id: entity.id,
-                    class,
-                    at,
-                })
-            }
             (true, Click::Pick) => act.pick = true,
             (true, Click::Save) => act.save = true,
             (true, Click::Load(class, at)) => act.load = Some((class, at)),
             (true, Click::Build) => act.build = true,
-            (true, Click::Choose) => act.choose = true,
+            (true, Click::Sync) => act.sync = true,
             (false, _) | (true, Click::Nothing) => {}
         }
     }
@@ -1263,7 +1253,7 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
             None => StateLine {
                 words: "edited".to_string(),
                 ink: Ink::Warn,
-                hint: mark_words(Mark::Unsaved, false).to_string(),
+                hint: mark_words(Mark::Unsaved).to_string(),
             },
         });
     }
@@ -1273,13 +1263,13 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     facts.queue.holds(entity.id).then(|| StateLine {
         words: "waiting to send".to_string(),
         ink: Ink::Warn,
-        hint: "Send in the toolbar writes it".to_string(),
+        hint: "Sync writes it".to_string(),
     })
 }
 
 /// The one loud action: Save while it is edited, else a send to a slot the user picks
-/// for a document with no link, a load of a slot that holds it, a send to a slot that
-/// holds an earlier version, or the question of which of the two is current.
+/// for a document with no link, a load of a slot that holds it, or Sync where the two
+/// differ.
 ///
 /// A project's is its build, which [`project::loud`] gives.
 ///
@@ -1296,23 +1286,21 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         hint,
         click,
     };
+    let sync = |glyph| Loud {
+        short: "Sync".to_string(),
+        glyph,
+        ..send(SYNC.to_string(), String::new(), Click::Sync)
+    };
     let idle = |hint: String| Loud {
         tone: Tone::Idle,
         ..send(SEND_TO.to_string(), hint, Click::Nothing)
     };
 
     if entity.is_unsaved() {
-        let queues = owed(device, entity);
         return Some(Loud {
             short: "Save".to_string(),
             glyph: Glyph::Save,
-            ..send(
-                "Save".to_string(),
-                queues.map_or_else(String::new, |(_, at)| {
-                    format!("Saving queues the send to {}.", shown(at))
-                }),
-                Click::Save,
-            )
+            ..send("Save".to_string(), String::new(), Click::Save)
         });
     }
     let kind = Kind::of(entity);
@@ -1338,15 +1326,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         return Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick));
     };
     match (linked.standing, linked.at) {
-        (Standing::Theirs | Standing::Both, _) => Some(Loud {
-            short: "Choose".to_string(),
-            glyph: Glyph::CircleAlert,
-            ..send(
-                "Choose…".to_string(),
-                "which of this and the keyboard’s is current".to_string(),
-                Click::Choose,
-            )
-        }),
+        (Standing::Theirs | Standing::Both, _) => Some(sync(Glyph::RefreshCw)),
         (Standing::Same | Standing::Unread, Some(at)) if loadable(device, class, at) => {
             Some(Loud {
                 short: "Load".to_string(),
@@ -1382,14 +1362,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
                     ),
                     click: Click::Nothing,
                 },
-                None => send(
-                    format!("Send to {}", shown(at)),
-                    match linked.standing {
-                        Standing::Gone => format!("puts it back in {}", place(class, at)),
-                        _ => format!("updates {}", place(class, at)),
-                    },
-                    Click::Send(class, at),
-                ),
+                None => sync(Glyph::RefreshCw),
             })
         }
     }
@@ -1397,7 +1370,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
 
 /// The action that sends a document with no link to a slot the user picks, and its hover.
 const SEND_TO: &str = "Send to…";
-const PICK: &str = "opens the review to pick its slot";
+const PICK: &str = "opens Sync to pick its slot";
 
 /// The slot the panel can be asked to play for this document: the one it is linked to.
 ///
@@ -1806,19 +1779,15 @@ mod tests {
             &[None, None, None, Some(("Blue Room", earlier.crc))],
         );
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
-        assert_eq!(
-            (held.tone, held.click),
-            (Tone::Ready, Click::Send(class, at))
-        );
-        assert_eq!(held.label, "Send to 7:4");
-        assert_eq!(held.hint, "updates Set lists 7:4");
+        assert_eq!((held.tone, held.click), (Tone::Ready, Click::Sync));
+        assert_eq!(held.label, "Sync…");
         assert_eq!(badge(&workspace, &device), "↑ Set lists 7:4");
 
         device.pretend_bodies(class, 7, &[None, None, None, Some(("Blue Room", 7))]);
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(
             (held.label.as_str(), held.click),
-            ("Choose…", Click::Choose),
+            ("Sync…", Click::Sync),
             "the keyboard changed it"
         );
         assert_eq!(badge(&workspace, &device), "! Set lists 7:4");
@@ -1828,7 +1797,6 @@ mod tests {
         workspace.replace_bytes(id, edited, &mut log);
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!((held.label.as_str(), held.click), ("Save", Click::Save));
-        assert_eq!(held.hint, "Saving queues the send to 7:4.");
     }
 
     /// The strip says nothing of a saved document's slot: the place badge does.
@@ -1867,12 +1835,11 @@ mod tests {
         let spot = (Location { bank: 0, slot: 3 }, "Grand");
         let earlier = older(&workspace, id);
         link_at(&mut workspace, &device.state, id, class, spot, earlier);
-        let in_pianos = Location { bank: 0, slot: 3 };
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
-        assert_eq!(held.click, Click::Send(class, in_pianos));
         assert_eq!(
-            held.hint, "updates Pianos 1:4",
+            held.click,
+            Click::Sync,
             "no free space reported is no refusal"
         );
 
@@ -1927,7 +1894,7 @@ mod tests {
         link_at(&mut workspace, &device.state, id, class, (at, ""), earlier);
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
-        assert_eq!(held.click, Click::Send(class, at));
+        assert_eq!(held.click, Click::Sync);
     }
 
     #[test]

@@ -32,7 +32,7 @@ mod tree;
 
 pub use act::{
     apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
-    LOAD_ON_INSTRUMENT,
+    LOAD_ON_INSTRUMENT, SYNC,
 };
 pub(crate) use act::{bound_for, Bound};
 #[cfg(test)]
@@ -1870,7 +1870,7 @@ mod tests {
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }
 
-    /// The review warns once per format, however many items carry it.
+    /// The sheet warns once per format, however many items carry it.
     ///
     /// The instrument reports a model the acceptance table does not know, so the only
     /// check left is against the folder's own formats. A known family would refuse these

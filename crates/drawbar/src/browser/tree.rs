@@ -11,7 +11,7 @@ use eframe::egui;
 use nord_format::accept::Family;
 use nord_usb::{Location, ObjectClass};
 
-use super::act::{spare_slot, will_write, Act, Bulk, LOAD_ON_INSTRUMENT};
+use super::act::{spare_slot, Act, Bulk, LOAD_ON_INSTRUMENT, SYNC};
 use super::drag::{kinds_present, qualifier, Item, Kept, Kind, Onto};
 use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click, Verb};
@@ -404,7 +404,7 @@ struct Frame {
     /// The slots open as views.
     viewed: Vec<(ObjectClass, Location)>,
     /// How many are waiting to be sent, are ready to send, and need the user.
-    counts: [usize; 3],
+    counts: [usize; 2],
 }
 
 /// Where a row's contents start.
@@ -572,7 +572,7 @@ impl Browser {
         self.follow_jump(device);
         let counts = match self.sections.places {
             true => self.counts.of(workspace, device, queue),
-            false => [0; 3],
+            false => [0; 2],
         };
         let frame = self.frame(workspace, device, counts);
         let around = self.lines_around(workspace, device, filter, &frame);
@@ -701,7 +701,7 @@ impl Browser {
         }
     }
 
-    fn frame(&self, workspace: &Workspace, device: &Device, counts: [usize; 3]) -> Frame {
+    fn frame(&self, workspace: &Workspace, device: &Device, counts: [usize; 2]) -> Frame {
         let library = self.sections.places && self.open.contains(&Branch::Computer);
         let naming = Naming {
             kept: match library {
@@ -760,7 +760,7 @@ impl Browser {
             if device.state.connected() {
                 self.instrument_lines(device, &mut below);
             }
-            for (state, count) in [State::Waiting, State::Ready, State::Attention]
+            for (state, count) in [State::Sync, State::Attention]
                 .into_iter()
                 .zip(frame.counts)
             {
@@ -964,7 +964,7 @@ impl Browser {
             Line::Stranger { index, depth } => self.stranger_row(ui, index, depth),
             Line::Lost(id) => self.lost_row(ui, id, acts),
             Line::Note { said, depth, .. } => nothing(ui, depth, said),
-            Line::Instrument => self.instrument_row(ui, workspace, device, queue, filter, acts),
+            Line::Instrument => self.instrument_row(ui, workspace, device, filter, acts),
             Line::Class(class) => self.class_row(ui, device, class, workspace, acts),
             Line::Bank(class, bank) => self.bank_row(ui, device, class, bank),
             Line::Slot {
@@ -980,9 +980,8 @@ impl Browser {
             }
             Line::State(state) => {
                 let count = match state {
-                    State::Waiting => frame.counts[0],
-                    State::Ready => frame.counts[1],
-                    State::Attention => frame.counts[2],
+                    State::Sync => frame.counts[0],
+                    State::Attention => frame.counts[1],
                 };
                 state_row(ui, state, count, filter, acts);
             }
@@ -1242,7 +1241,7 @@ impl Browser {
                 name: &entity.name,
                 note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: mark(entity, &device.state, queue, ui.visuals()),
+                dot: mark(entity, &device.state, ui.visuals()),
                 tags: wears,
                 child: true,
                 gray: !self.followed,
@@ -1360,10 +1359,6 @@ impl Browser {
                 }
             });
         }
-        let standing = crate::device::standing_of(&device.state, entity);
-        if standing.is_some_and(|linked| linked.standing.needs_attention()) {
-            offer(ui, "Choose…", None, Act::Choose(id), acts);
-        }
         offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);
@@ -1424,7 +1419,6 @@ impl Browser {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         device: &Device,
-        queue: &Queue,
         filter: &Filter,
         acts: &mut Vec<Act>,
     ) {
@@ -1470,9 +1464,6 @@ impl Browser {
             .into_iter()
             .filter_map(|class| device.state.scan.progress(class))
             .any(|progress| progress.running);
-        // The label counts what the batch would write, which leaves out entries this
-        // instrument has refused.
-        let waiting = will_write(queue).count();
         // What this row stands for on this computer: every asset that stands for a slot.
         let off_it = Browser::standing_for(workspace, |entity| {
             crate::device::slot_of(&device.state, entity).is_some()
@@ -1487,20 +1478,7 @@ impl Browser {
                     acts.push(Act::Resync);
                     ui.close();
                 }
-                if waiting > 0 {
-                    let label = format!("Send all ({waiting})");
-                    offer(ui, &label, None, Act::AskSendAll, acts);
-                }
-                if ui
-                    .add_enabled(
-                        device.asks.changed(),
-                        egui::Button::new(crate::bring::KEYBOARD_CHANGES),
-                    )
-                    .clicked()
-                {
-                    acts.push(Act::KeyboardChanges);
-                    ui.close();
-                }
+                offer(ui, "Sync…", None, Act::Sync(None), acts);
                 ui.separator();
                 offer(ui, "Disconnect", None, Act::Disconnect, acts);
             });
@@ -1888,8 +1866,7 @@ impl Browser {
 /// A row that narrows the library to what is in one state.
 fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, acts: &mut Vec<Act>) {
     let (glyph, dot) = match state {
-        State::Waiting => (Glyph::Clock, crate::app::accent(ui.visuals())),
-        State::Ready => (Glyph::Upload, crate::app::warn(ui.visuals())),
+        State::Sync => (Glyph::RefreshCw, crate::app::warn(ui.visuals())),
         State::Attention => (Glyph::CircleAlert, crate::app::bad(ui.visuals())),
     };
     let asked = Narrow::State(state);
@@ -2002,11 +1979,8 @@ pub(crate) fn slot_items(
             Act::LoadOnInstrument { class, at },
         ));
     }
-    if let (Standing::Ahead | Standing::Gone, Some(at)) = (linked.standing, linked.at) {
-        sends.push((
-            format!("Send to {}", shown(at)),
-            Act::Send { id, class, at },
-        ));
+    if !matches!(linked.standing, Standing::Same | Standing::Unread) {
+        sends.push((SYNC.to_string(), Act::Sync(Some(id))));
     }
     sends.push(("Send to another slot…".to_string(), Act::SendTo(id)));
     let unlink = match linked.at {
@@ -2024,13 +1998,12 @@ pub(crate) fn slot_items(
 fn mark(
     entity: &LocalEntity,
     device: &DeviceState,
-    queue: &Queue,
     visuals: &egui::Visuals,
 ) -> Option<(egui::Color32, &'static str)> {
     let mark = crate::library::keyboard_mark(entity, device)?;
     Some((
         crate::library::mark_ink(mark, visuals),
-        crate::library::mark_words(mark, queue.holds(entity.id)),
+        crate::library::mark_words(mark),
     ))
 }
 
@@ -2615,8 +2588,8 @@ mod tests {
             Narrow::Kind(Kind::Program),
             Narrow::Tag(1),
             Narrow::Place(Place::Computer),
-            Narrow::State(State::Waiting),
-            Narrow::State(State::Ready),
+            Narrow::State(State::Sync),
+            Narrow::State(State::Attention),
         ] {
             let mut bench = Bench::new();
             let id = bench

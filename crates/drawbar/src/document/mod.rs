@@ -144,14 +144,6 @@ fn shape(entity: &LocalEntity) -> Shape {
     }
 }
 
-/// A write to the instrument that the header asked for. The browser asks any question
-/// the write needs first.
-pub struct SendBack {
-    pub id: u64,
-    pub class: ObjectClass,
-    pub at: Location,
-}
-
 /// The window state a document reads: the send queue, this computer's tags, and what a
 /// MIDI controller played since the last frame.
 pub struct Around<'a> {
@@ -166,8 +158,6 @@ pub struct Around<'a> {
 /// What a document's frame asked the app for.
 #[derive(Default)]
 pub struct Wants {
-    /// The write the header queued.
-    pub send: Option<SendBack>,
     /// Whether the header asked to send the document to a slot the user picks.
     pub pick: bool,
     /// Whether the header asked to save the document.
@@ -178,8 +168,8 @@ pub struct Wants {
     pub keep: bool,
     /// The header's build of this project.
     pub build: bool,
-    /// The header's question of which of this document and its slot is current.
-    pub choose: bool,
+    /// The header's Sync of this document.
+    pub sync: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -450,12 +440,11 @@ impl Document {
         self.views.insert(id, act.face.unwrap_or(face));
 
         let mut wants = Wants {
-            send: act.send,
             pick: act.pick,
             save: act.save,
             load: act.load,
             build: act.build,
-            choose: act.choose,
+            sync: act.sync,
             ..Wants::default()
         };
         let mut details = None;
@@ -1956,7 +1945,11 @@ mod tests {
         } = &mut open;
         document.apply(id, sets.clone(), workspace, log).unwrap();
         open.twice();
-        open.act(vec![Act::SendAll]);
+        open.act(vec![Act::Sync(None)]);
+        while let Some(class) = open.device.state.scan.take() {
+            open.device.state.scan.finished(class);
+        }
+        open.act(vec![Act::SyncAll]);
         let sent = |open: &Open| {
             let batch = open.device.queued().into_iter().find_map(|cmd| match cmd {
                 DeviceCmd::SendAll { items, .. } => Some(items),

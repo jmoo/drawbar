@@ -61,9 +61,7 @@ pub enum Command {
     Disconnect,
     ReadEverything,
     ReadAgain,
-    KeyboardChanges,
-    ReviewQueue,
-    SendAll,
+    Sync,
     ClearQueue,
     Unqueue,
     Listen,
@@ -156,9 +154,7 @@ pub fn label(command: Command) -> String {
         Command::Disconnect => "Disconnect",
         Command::ReadEverything => "Read everything",
         Command::ReadAgain => "Read again",
-        Command::KeyboardChanges => crate::bring::KEYBOARD_CHANGES,
-        Command::ReviewQueue => "Review send queue…",
-        Command::SendAll => "Send all",
+        Command::Sync => "Sync…",
         Command::ClearQueue => "Clear send queue",
         Command::Unqueue => "Remove from queue",
         Command::Listen => "Listen to MIDI controllers",
@@ -324,10 +320,8 @@ fn instrument_entries() -> Vec<Entry> {
         Rule,
         Do(C::ReadEverything),
         Do(C::ReadAgain),
-        Do(C::KeyboardChanges),
         Rule,
-        Do(C::ReviewQueue),
-        Do(C::SendAll),
+        Do(C::Sync),
         Do(C::ClearQueue),
         Do(C::Unqueue),
         Rule,
@@ -390,7 +384,7 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
         Command::Inspector => command_and(With::ALT, Key::I),
         Command::Activity => command_and(With::ALT, Key::L),
         Command::ReadEverything => Shortcut::new(With::COMMAND, Key::R),
-        Command::ReviewQueue => command_and(With::SHIFT, Key::S),
+        Command::Sync => command_and(With::SHIFT, Key::S),
         // A browser zooms its page with these, so the web build leaves them to it.
         Command::Zoom(step) if platform.windowed() => Shortcut::new(
             With::COMMAND,
@@ -438,7 +432,7 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
 const KEYED: [Command; 17] = [
-    Command::ReviewQueue,
+    Command::Sync,
     Command::Redo,
     Command::Undo,
     Command::Export,
@@ -637,19 +631,12 @@ impl DrawbarApp {
                     ..plain
                 })?
             }
-            Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
+            Command::Disconnect | Command::ReadEverything | Command::Sync => {
                 attached.then_some(plain)?
             }
-            Command::KeyboardChanges => Offer {
-                enabled: self.device.asks.changed(),
-                ..attached.then_some(plain)?
-            },
             Command::ReadAgain => {
                 let class = self.open_class().filter(|_| attached)?;
                 relabeled(format!("Read {} again", folder(class)))
-            }
-            Command::SendAll => {
-                (attached && waiting > 0).then(|| relabeled(format!("Send all ({waiting})")))?
             }
             Command::ClearQueue => (attached && waiting > 0).then_some(plain)?,
             Command::Unqueue => (attached && !self.queued_picks().is_empty()).then_some(plain)?,
@@ -732,9 +719,7 @@ impl DrawbarApp {
             Command::Disconnect => acts.push(Act::Disconnect),
             Command::ReadEverything => acts.push(Act::Resync),
             Command::ReadAgain => acts.extend(self.open_class().map(Act::ReadAgain)),
-            Command::KeyboardChanges => acts.push(Act::KeyboardChanges),
-            Command::ReviewQueue => acts.push(Act::ReviewQueue),
-            Command::SendAll => acts.push(Act::AskSendAll),
+            Command::Sync => acts.push(Act::Sync(None)),
             Command::ClearQueue => acts.push(Act::ClearQueue),
             Command::Unqueue => acts.extend(self.queued_picks().into_iter().map(Act::Unqueue)),
             Command::Listen => match self.midi.on() {

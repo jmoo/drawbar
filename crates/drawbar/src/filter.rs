@@ -12,17 +12,11 @@ pub enum Place {
 }
 
 /// What a row needs done, if anything.
-///
-/// ⚠️ The two are exclusive. A waiting write is what the instrument will hold, so a row
-/// that differs and is queued counts as waiting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
-    /// A write to its slot is waiting to go.
-    Waiting,
-    /// Its slot holds an earlier version or nothing, and no write is waiting to settle
-    /// that.
-    Ready,
-    /// The keyboard changed its slot, and only the user can settle that.
+    /// Sync writes it, or brings its slot in.
+    Sync,
+    /// The keyboard changed or emptied its slot, and only the user can settle that.
     Attention,
 }
 
@@ -30,8 +24,7 @@ impl State {
     /// The label of the tree row that filters by it.
     pub fn title(self) -> &'static str {
         match self {
-            State::Waiting => "Waiting to send",
-            State::Ready => "Ready to send",
+            State::Sync => "To sync",
             State::Attention => "Needs attention",
         }
     }
@@ -39,10 +32,9 @@ impl State {
     /// The full description, shown on hover.
     pub fn sentence(self) -> &'static str {
         match self {
-            State::Waiting => "everything waiting to be sent to the keyboard",
-            State::Ready => "newer on this computer than in its slot, and not waiting",
+            State::Sync => "newer here or on the keyboard, or sent to a slot by hand",
             State::Attention => {
-                "changed or emptied on the keyboard since it was last sent or copied"
+                "changed on both sides, or emptied on the keyboard, since it was last synced"
             }
         }
     }
@@ -185,7 +177,7 @@ mod tests {
             Narrow::Kind(Kind::Program),
             Narrow::Tag(1),
             Narrow::Place(Place::Computer),
-            Narrow::State(State::Waiting),
+            Narrow::State(State::Sync),
         ] {
             filter.narrow(narrow);
             assert!(filter.on(narrow), "{narrow:?}");
@@ -201,23 +193,23 @@ mod tests {
         let admits = |filter: &Filter, state| {
             filter.admits(Kind::Program, Place::Computer, &worn(&[]), state)
         };
-        for state in [None, Some(State::Waiting), Some(State::Ready)] {
+        for state in [None, Some(State::Sync), Some(State::Attention)] {
             assert!(admits(&filter, state), "{state:?}");
         }
 
-        filter.narrow(Narrow::State(State::Waiting));
-        assert!(admits(&filter, Some(State::Waiting)));
-        assert!(!admits(&filter, Some(State::Ready)));
+        filter.narrow(Narrow::State(State::Sync));
+        assert!(admits(&filter, Some(State::Sync)));
+        assert!(!admits(&filter, Some(State::Attention)));
         assert!(!admits(&filter, None));
 
         // One state at a time: selecting the other replaces the first.
-        filter.narrow(Narrow::State(State::Ready));
-        assert!(admits(&filter, Some(State::Ready)));
-        assert!(!admits(&filter, Some(State::Waiting)));
+        filter.narrow(Narrow::State(State::Attention));
+        assert!(admits(&filter, Some(State::Attention)));
+        assert!(!admits(&filter, Some(State::Sync)));
 
         // It combines with the other filters.
         filter.narrow(Narrow::Kind(Kind::Live));
-        assert!(!admits(&filter, Some(State::Ready)));
+        assert!(!admits(&filter, Some(State::Attention)));
     }
 
     #[test]

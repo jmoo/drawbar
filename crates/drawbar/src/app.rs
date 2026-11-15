@@ -559,7 +559,7 @@ impl DrawbarApp {
     /// Hold a send to the instrument until the library's files have been checked for
     /// changes made outside this app. The store lets it go once they have.
     fn hold_sends(&mut self, acts: Vec<browser::Act>) -> Vec<browser::Act> {
-        let sending = acts.iter().any(|act| matches!(act, browser::Act::SendAll));
+        let sending = acts.iter().any(|act| matches!(act, browser::Act::SyncAll));
         let Some(store) = self.store.as_mut().filter(|_| sending) else {
             return acts;
         };
@@ -567,7 +567,7 @@ impl DrawbarApp {
             return acts;
         }
         acts.into_iter()
-            .filter(|act| !matches!(act, browser::Act::SendAll))
+            .filter(|act| !matches!(act, browser::Act::SyncAll))
             .collect()
     }
 
@@ -1187,7 +1187,7 @@ impl eframe::App for DrawbarApp {
             self.tell_risk();
         }
         if released {
-            arrived.push(browser::Act::SendAll);
+            arrived.push(browser::Act::SyncAll);
         }
         drop_hint(ctx);
         // Drawn before anything else this frame: it is a modal over the whole window.
@@ -1237,17 +1237,6 @@ impl eframe::App for DrawbarApp {
         self.browser_card(ctx, &mut acts);
         self.inspector_cards(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
-        // An instrument that goes away takes its queue's review with it.
-        self.shell.review_open &= self.attached();
-        if self.shell.review_open {
-            self.shell.review_open = crate::queue::review(
-                ctx,
-                &mut self.queue,
-                &self.workspace,
-                &self.device.state,
-                &mut acts,
-            );
-        }
         if self.shell.log_open {
             self.shell.log_open =
                 self.log
@@ -1256,7 +1245,7 @@ impl eframe::App for DrawbarApp {
         if self.shell.zoom_open {
             self.shell.zoom_open = self.zoom_popover(ctx, frame);
         }
-        self.asks(ctx);
+        self.asks(ctx, &mut acts);
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
@@ -1304,34 +1293,12 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
-    /// The questions drawbar asks about linked files and the answers given, and an Undo
-    /// pressed in the activity log.
-    fn asks(&mut self, ctx: &egui::Context) {
-        use crate::bring::Answer;
-
+    /// The Sync sheet, and an Undo pressed in the activity log.
+    fn asks(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
         let (device, workspace, log) = (&mut self.device, &mut self.workspace, &mut self.log);
-        if let Some(found) = &device.asks.since {
-            match crate::bring::since_sheet(ctx, found, workspace) {
-                Some(Answer::Yes) => {
-                    crate::bring::bring_in(device, workspace, &mut self.queue, log)
-                }
-                Some(Answer::Other | Answer::No) => device.asks.since = None,
-                None => {}
-            }
-        }
-        if let Some(choosing) = &device.asks.choosing {
-            match crate::bring::choice_sheet(ctx, choosing, workspace, &device.state) {
-                Some(Answer::Yes) => {
-                    crate::bring::use_mine(device, workspace, &mut self.queue, log)
-                }
-                Some(Answer::Other) => {
-                    crate::bring::use_keyboards(device, workspace, &mut self.queue, log)
-                }
-                Some(Answer::No) => device.asks.choosing = None,
-                None => {}
-            }
-        }
-        log.undo_pressed(workspace, &mut self.queue, &mut device.asks);
+        crate::queue::sheet(ctx, device, &self.queue, workspace, acts);
+        crate::bring::show_picked(device, workspace, &self.queue, log);
+        log.undo_pressed(workspace);
     }
 
     /// The row of tabs between the two panel toggles, and the front tab's view in the
@@ -1446,13 +1413,6 @@ impl DrawbarApp {
             &mut self.log,
             &around,
         );
-        if let Some(send) = wants.send {
-            acts.push(browser::Act::Send {
-                id: send.id,
-                class: send.class,
-                at: send.at,
-            });
-        }
         if let Some((class, at)) = wants.load {
             acts.push(browser::Act::LoadOnInstrument { class, at });
         }
@@ -1468,8 +1428,8 @@ impl DrawbarApp {
         if wants.build {
             acts.push(browser::Act::Build(id));
         }
-        if wants.choose {
-            acts.push(browser::Act::Choose(id));
+        if wants.sync {
+            acts.push(browser::Act::Sync(Some(id)));
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));

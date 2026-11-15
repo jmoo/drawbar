@@ -239,18 +239,13 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>
         .any(|place| filter.admits(row.kind, *place, tags, state))
 }
 
-/// What a row needs: a write already waiting, a send to its slot, or the user. A slot
-/// on the instrument needs nothing, since it is what the instrument holds.
-///
-/// ⚠️ A queued row counts as waiting, never as ready to send: the queued write settles
-/// the two, so counting the row under both would ask twice for one thing. A row whose
-/// slot the keyboard changed needs the user even while queued, since that write is held.
+/// What a row needs: Sync, or the user. A slot on the instrument needs nothing, since it
+/// is what the instrument holds.
 pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
     match (item, mark) {
-        (Item::Local(_), Some(Mark::Attention)) => Some(State::Attention),
-        (Item::Local(id), _) if queue.holds(id) => Some(State::Waiting),
-        (Item::Local(_), Some(Mark::Ahead)) => Some(State::Ready),
-        (Item::Local(_), Some(Mark::Gone)) => Some(State::Attention),
+        (Item::Local(_), Some(Mark::Attention | Mark::Gone)) => Some(State::Attention),
+        (Item::Local(id), _) if queue.holds(id) => Some(State::Sync),
+        (Item::Local(_), Some(Mark::Ahead | Mark::Theirs)) => Some(State::Sync),
         _ => None,
     }
 }
@@ -348,11 +343,13 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, linked: Option<&Linke
 /// [`mark_words`] explains each one wherever it is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
-    /// Its slot holds an earlier version: a send settles it.
+    /// Its slot holds an earlier version.
     Ahead,
-    /// The keyboard changed its slot, and only the user can settle it.
+    /// Its slot holds a later version, and the file has not changed.
+    Theirs,
+    /// Both it and its slot changed, and only the user can settle it.
     Attention,
-    /// The keyboard emptied its slot. Only an explicit send puts it back.
+    /// The keyboard emptied its slot, and only the user can settle it.
     Gone,
     Unsaved,
 }
@@ -362,7 +359,8 @@ impl Mark {
     pub fn of(standing: Standing) -> Option<Mark> {
         match standing {
             Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs | Standing::Both => Some(Mark::Attention),
+            Standing::Theirs => Some(Mark::Theirs),
+            Standing::Both => Some(Mark::Attention),
             Standing::Gone => Some(Mark::Gone),
             Standing::Same | Standing::Unread => None,
         }
@@ -372,21 +370,20 @@ impl Mark {
 /// The color a mark is painted in, everywhere it is painted.
 pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     match mark {
-        Mark::Ahead => warn(visuals),
+        Mark::Ahead | Mark::Theirs => warn(visuals),
         Mark::Attention | Mark::Gone => crate::app::bad(visuals),
         Mark::Unsaved => visuals.text_color(),
     }
 }
 
-/// What a mark means, in words, wherever a hover or hint explains one, as [`state`]
-/// counts it.
-pub fn mark_words(mark: Mark, queued: bool) -> &'static str {
-    match (mark, queued) {
-        (Mark::Unsaved, _) => "Edited since it was last saved",
-        (Mark::Attention, _) => State::Attention.title(),
-        (_, true) => State::Waiting.title(),
-        (Mark::Ahead, false) => State::Ready.title(),
-        (Mark::Gone, false) => "Its slot is empty",
+/// What a mark means, in words, wherever a hover or hint explains one.
+pub fn mark_words(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Unsaved => "Edited since it was last saved",
+        Mark::Ahead => "Newer here",
+        Mark::Theirs => "Newer on the keyboard",
+        Mark::Attention => State::Attention.title(),
+        Mark::Gone => "Its slot is empty",
     }
 }
 
@@ -394,6 +391,7 @@ pub fn mark_words(mark: Mark, queued: bool) -> &'static str {
 pub fn mark_sign(mark: Mark) -> &'static str {
     match mark {
         Mark::Ahead => "↑",
+        Mark::Theirs => "↓",
         Mark::Attention | Mark::Gone => "!",
         Mark::Unsaved => "*",
     }
@@ -405,15 +403,15 @@ pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState) -> Option<Mark>
     Mark::of(standing_of(device, entity)?.standing)
 }
 
-/// How many assets wait to be sent, are ready to send, and need the user: [`state`]
-/// counted over the whole list.
-pub fn counts(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> [usize; 3] {
-    let mut counts = [queue.len(), 0, 0];
+/// How many assets Sync acts on, and how many need the user: [`state`] counted over the
+/// whole list.
+pub fn counts(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> [usize; 2] {
+    let mut counts = [0, 0];
     for entity in workspace.listed() {
         match state(Item::Local(entity.id), keyboard_mark(entity, device), queue) {
-            Some(State::Ready) => counts[1] += 1,
-            Some(State::Attention) => counts[2] += 1,
-            Some(State::Waiting) | None => {}
+            Some(State::Sync) => counts[0] += 1,
+            Some(State::Attention) => counts[1] += 1,
+            None => {}
         }
     }
     counts
@@ -918,12 +916,12 @@ struct Counted {
 
 /// [`counts`], and what they were counted from.
 #[derive(Default)]
-pub struct Counts(Option<(Counted, [usize; 3])>);
+pub struct Counts(Option<(Counted, [usize; 2])>);
 
 impl Counts {
     /// [`counts`], counted again only when the list, the instrument or the queue has
     /// changed.
-    pub fn of(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 3] {
+    pub fn of(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 2] {
         let now = Counted {
             revision: workspace.revision(),
             device: device.revision(),
@@ -1035,7 +1033,7 @@ impl Library {
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
-    ) -> [usize; 3] {
+    ) -> [usize; 2] {
         self.counts.of(workspace, device, queue)
     }
 
@@ -1239,11 +1237,11 @@ impl Library {
 /// asking for attention.
 ///
 /// ⚠️ Both counts cover the whole list, not this view. They match the numbers on the
-/// tree's rows and what the toolbar's Send acts on. A chip counting only what passes its
-/// own filter would change the moment it was clicked.
+/// tree's rows. A chip counting only what passes its own filter would change the moment
+/// it was clicked.
 fn header(
     ui: &mut egui::Ui,
-    counts: [usize; 3],
+    counts: [usize; 2],
     tags: &Tags,
     filter: &Filter,
     acts: &mut Vec<Act>,
@@ -1252,9 +1250,8 @@ fn header(
     let shows = over(filter);
     view_header(ui, Glyph::LibraryBig, accent, "Library", &shows, |ui| {
         let states = [
-            (State::Attention, Glyph::CircleAlert, counts[2]),
-            (State::Ready, Glyph::Upload, counts[1]),
-            (State::Waiting, Glyph::Clock, counts[0]),
+            (State::Attention, Glyph::CircleAlert, counts[1]),
+            (State::Sync, Glyph::RefreshCw, counts[0]),
         ];
         for (state, glyph, count) in states {
             let on = filter.on(Narrow::State(state));
@@ -1265,8 +1262,7 @@ fn header(
             }
             let text = format!("{} {count}", state.title());
             let signal = match state {
-                State::Waiting => accent,
-                State::Ready => warn(ui.visuals()),
+                State::Sync => warn(ui.visuals()),
                 State::Attention => crate::app::bad(ui.visuals()),
             };
             if filter_chip(ui, glyph, Some(signal), &text, on)
@@ -1403,8 +1399,8 @@ fn where_look(
     visuals: &egui::Visuals,
 ) -> (egui::Color32, egui::Color32) {
     let signal = match state {
-        Some(State::Waiting) => Some(accent(visuals)),
-        Some(State::Ready | State::Attention) | None => None,
+        Some(State::Sync) => Some(accent(visuals)),
+        Some(State::Attention) | None => None,
     };
     match (selected, signal) {
         (true, _) => {
@@ -1545,7 +1541,7 @@ fn paint(
     }
 
     let said = under(&response, content, tracks)
-        .map(|column| tooltip(row, column, browser.tags(), workspace, device, queue))
+        .map(|column| tooltip(row, column, browser.tags(), workspace, device))
         .filter(|said| !said.is_empty());
     let response = match said {
         Some(said) => response.on_hover_text(said),
@@ -1570,14 +1566,12 @@ fn tooltip(
     tags: &Tags,
     workspace: &Workspace,
     device: &Device,
-    queue: &Queue,
 ) -> String {
-    let queued = row.item.local().is_some_and(|id| queue.holds(id));
     match column {
         Column::Glyph | Column::Kind => word(row),
         Column::Mark => row
             .mark
-            .map_or_else(String::new, |mark| mark_words(mark, queued).to_string()),
+            .map_or_else(String::new, |mark| mark_words(mark).to_string()),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -1986,7 +1980,7 @@ mod tests {
         assert!(!fit(&device.state, entity).allowed(), "a Stage 4 program");
         assert_eq!(whereabouts(entity, &device.state, None), Where::Foreign);
         assert_eq!(keyboard_mark(entity, &device.state), None);
-        assert!(crate::queue::changed(&workspace, &device.state, &queue).is_empty());
+        assert!(crate::bring::rows(&device.state, &workspace, &queue).is_empty());
     }
 
     /// An edit an editor has not yet applied to the bytes gets the same star as any other.
@@ -2072,14 +2066,7 @@ mod tests {
                 .filter(|row| matches!(row.item, Item::Local(_)))
                 .count()
         }
-        assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Ready),
-            1
-        );
-        assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Waiting),
-            0
-        );
+        assert_eq!(narrowed(&workspace, &device, &queue, &tags, State::Sync), 1);
 
         crate::queue::enqueue(
             &workspace,
@@ -2092,18 +2079,19 @@ mod tests {
         );
         assert!(queue.holds(id), "it is owed to the slot it is linked to");
         let said = |mark| state(Item::Local(id), Some(mark), &queue);
-        assert_eq!(said(Mark::Gone), Some(State::Waiting));
+        assert_eq!(said(Mark::Ahead), Some(State::Sync));
         assert_eq!(
             said(Mark::Attention),
             Some(State::Attention),
-            "a write held for the user's choice is not waiting"
+            "a write held for the user's choice is not Sync's to make"
         );
         assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Waiting),
-            1
+            narrowed(&workspace, &device, &queue, &tags, State::Sync),
+            1,
+            "counted once"
         );
         assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Ready),
+            narrowed(&workspace, &device, &queue, &tags, State::Attention),
             0
         );
     }
@@ -2112,8 +2100,14 @@ mod tests {
     /// mark has its own color: an emptied slot needs the user as a changed one does.
     #[test]
     fn every_mark_is_painted_and_said_apart_from_the_others() {
-        let all = [Mark::Ahead, Mark::Attention, Mark::Gone, Mark::Unsaved];
-        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark, false)).collect();
+        let all = [
+            Mark::Ahead,
+            Mark::Theirs,
+            Mark::Attention,
+            Mark::Gone,
+            Mark::Unsaved,
+        ];
+        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark)).collect();
         assert_eq!(said.len(), all.len(), "{said:?}");
 
         let kinds = [Mark::Ahead, Mark::Attention, Mark::Unsaved];
@@ -2125,30 +2119,16 @@ mod tests {
             assert_eq!(inks.len(), kinds.len(), "{inks:?}");
             let gone = mark_ink(Mark::Gone, &visuals);
             assert_eq!(gone, mark_ink(Mark::Attention, &visuals));
+            let theirs = mark_ink(Mark::Theirs, &visuals);
+            assert_eq!(theirs, mark_ink(Mark::Ahead, &visuals));
         }
     }
 
     #[test]
-    fn a_queued_file_is_said_to_wait_unless_the_keyboard_changed_its_slot() {
-        for mark in [Mark::Ahead, Mark::Gone] {
-            assert_eq!(mark_words(mark, true), State::Waiting.title(), "{mark:?}");
-        }
-        assert_eq!(
-            mark_words(Mark::Attention, true),
-            State::Attention.title(),
-            "its queued write is held until the user chooses"
-        );
-        assert_eq!(
-            mark_words(Mark::Unsaved, true),
-            mark_words(Mark::Unsaved, false)
-        );
-    }
-
-    #[test]
-    fn a_row_is_marked_up_when_ready_to_send_and_bang_when_it_needs_attention() {
+    fn a_row_is_marked_by_the_side_that_is_newer_and_bang_when_it_needs_attention() {
         let sign = |standing| Mark::of(standing).map(mark_sign);
         assert_eq!(sign(Standing::Ahead), Some("↑"));
-        assert_eq!(sign(Standing::Theirs), Some("!"));
+        assert_eq!(sign(Standing::Theirs), Some("↓"));
         assert_eq!(sign(Standing::Both), Some("!"));
         assert_eq!(sign(Standing::Gone), Some("!"));
         assert_eq!(sign(Standing::Same), None);
@@ -2168,11 +2148,12 @@ mod tests {
             Some(at(6, 0)),
             121,
         );
-        let queue = Queue::default();
-        let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device, &queue);
+        let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device);
         assert_eq!(hover(&held), "");
         held.mark = Some(Mark::Ahead);
-        assert_eq!(hover(&held), "Ready to send");
+        assert_eq!(hover(&held), "Newer here");
+        held.mark = Some(Mark::Theirs);
+        assert_eq!(hover(&held), "Newer on the keyboard");
         held.mark = Some(Mark::Attention);
         assert_eq!(hover(&held), "Needs attention");
         held.mark = Some(Mark::Gone);
@@ -2993,14 +2974,12 @@ mod tests {
         assert_eq!(slot_rows(&bench), [at(0, 0)], "the slot keeps its own row");
         bench.act(vec![Act::SaveDoc(id)]);
         assert!(bench.queue.is_empty(), "saving it queues nothing");
-        assert_eq!(
-            crate::queue::offer(&bench.workspace, &bench.device.state, &bench.queue),
-            None
-        );
+        let rows = crate::bring::rows(&bench.device.state, &bench.workspace, &bench.queue);
+        assert_eq!(rows, [], "Sync has nothing to do with it");
     }
 
     #[test]
-    fn a_linked_file_reads_its_slot_through_its_link_and_only_a_newer_file_is_sent() {
+    fn a_linked_file_reads_its_slot_through_its_link_and_saving_queues_nothing() {
         let mut bench = Bench::new();
         bench.device.pretend_partitions(&crate::device::ELECTRO5);
         let class = ObjectClass::Program;
@@ -3023,11 +3002,7 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &held(crc ^ 1));
         assert_eq!(
             looks(&bench),
-            (Where::Both(Standing::Theirs), Some(Mark::Attention))
-        );
-        assert_eq!(
-            crate::queue::offer(&bench.workspace, &bench.device.state, &bench.queue),
-            None
+            (Where::Both(Standing::Theirs), Some(Mark::Theirs))
         );
         bench.act(vec![Act::SaveDoc(id)]);
         assert!(
@@ -3041,7 +3016,7 @@ mod tests {
             looks(&bench),
             (Where::Both(Standing::Ahead), Some(Mark::Ahead))
         );
-        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(6, 0)));
+        assert!(bench.queue.is_empty(), "Save only saves");
 
         let sent = bench.workspace.get(id).unwrap().bytes.to_vec();
         bench.device.pretend(crate::device::DeviceEvent::Sent {

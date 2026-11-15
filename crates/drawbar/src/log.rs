@@ -10,10 +10,8 @@ use std::collections::VecDeque;
 use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
-use crate::bring::Asks;
 use crate::icon::{painted, sized, Glyph};
 use crate::link::{Held, Keyboard};
-use crate::queue::{Queue, Waiting};
 use crate::strings::{display_name, place};
 use crate::workspace::Workspace;
 
@@ -57,9 +55,6 @@ pub struct Entry {
 pub enum Undo {
     /// Files linked on their own: unlink each, and keep it off that keyboard.
     Unlink { keyboard: Keyboard, ids: Vec<u64> },
-    /// Sends queued for drawbar's own reasons: take each entry out of the queue, while it
-    /// still waits for the slot it was queued for.
-    Unqueue(Vec<Waiting>),
     /// Files brought in from the keyboard, each as it was before.
     Restore(Vec<Restored>),
     /// Links drawbar moved or removed: put each back, unless another file is linked to
@@ -90,13 +85,7 @@ impl Undo {
     /// Take the change back, and say what was taken back. A file that is gone is left
     /// alone; a file brought in is put back only while it is as bringing it in left it.
     /// `None` when every file it names is gone.
-    pub fn perform(
-        self,
-        workspace: &mut Workspace,
-        queue: &mut Queue,
-        asks: &mut Asks,
-        log: &mut Log,
-    ) -> Option<String> {
+    pub fn perform(self, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
         match self {
             Undo::Unlink { keyboard, mut ids } => {
                 ids.retain(|id| here(workspace, *id));
@@ -105,27 +94,7 @@ impl Undo {
                 }
                 (!ids.is_empty()).then(|| format!("Unlinked {}.", named(workspace, &ids, "files")))
             }
-            Undo::Unqueue(entries) => {
-                let still = |&(id, class, at): &Waiting| {
-                    queue
-                        .entry(id)
-                        .is_some_and(|held| (held.class, held.at) == (class, at))
-                };
-                let ids: Vec<u64> = entries
-                    .iter()
-                    .filter(|it| still(it))
-                    .map(|it| it.0)
-                    .collect();
-                ids.iter().for_each(|id| queue.forget(*id));
-                Some(match ids.is_empty() {
-                    true => "Not undone: the queue changed since.".to_string(),
-                    false => format!(
-                        "Took {} out of the queue.",
-                        named(workspace, &ids, "sounds")
-                    ),
-                })
-            }
-            Undo::Restore(kept) => restore(kept, workspace, asks, log),
+            Undo::Restore(kept) => restore(kept, workspace, log),
             Undo::Relink {
                 keyboard,
                 mut links,
@@ -159,21 +128,14 @@ impl Undo {
     pub fn weight(&self) -> usize {
         match self {
             Undo::Restore(kept) => kept.iter().map(|kept| kept.bytes.len()).sum(),
-            Undo::Unlink { .. } | Undo::Unqueue(_) | Undo::Relink { .. } | Undo::Reclaim { .. } => {
-                0
-            }
+            Undo::Unlink { .. } | Undo::Relink { .. } | Undo::Reclaim { .. } => 0,
         }
     }
 }
 
 /// Put back each file still as bringing it in left it: saved as what it was brought in as,
-/// and linked as bringing it in linked it. It is not brought in again on its own.
-fn restore(
-    kept: Vec<Restored>,
-    workspace: &mut Workspace,
-    asks: &mut Asks,
-    log: &mut Log,
-) -> Option<String> {
+/// and linked as bringing it in linked it.
+fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
     let mut put = Vec::new();
     let mut changed = Vec::new();
     for Restored {
@@ -197,7 +159,6 @@ fn restore(
         workspace.replace_bytes(id, bytes, log);
         workspace.mark_saved(id);
         workspace.link(id, &keyboard, before);
-        asks.undid(id);
         put.push(id);
     }
     let (put, changed) = (
@@ -341,11 +302,11 @@ impl Log {
 
     /// Take back what the Undo pressed in the popover since the last call undoes, and say
     /// what it took back.
-    pub fn undo_pressed(&mut self, workspace: &mut Workspace, queue: &mut Queue, asks: &mut Asks) {
+    pub fn undo_pressed(&mut self, workspace: &mut Workspace) {
         let Some(undo) = self.pressed.take() else {
             return;
         };
-        if let Some(said) = undo.perform(workspace, queue, asks, self) {
+        if let Some(said) = undo.perform(workspace, self) {
             self.say(said);
         }
     }

@@ -12,7 +12,6 @@ use crate::device::{
 };
 use crate::filter::Narrow;
 use crate::folders::{Clash, Occupant};
-use crate::link::Standing;
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
@@ -24,6 +23,9 @@ use crate::workspace::{Fresh, LocalEntity, Origin, Unbundled, VerifyState, Works
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
+
+/// What [`Act::Sync`] is called wherever a file offers it.
+pub const SYNC: &str = "Sync…";
 
 /// What the browser asks the rest of the app to do.
 #[derive(PartialEq, Eq, Debug)]
@@ -164,7 +166,7 @@ pub enum Act {
         at: Location,
     },
     /// Queue a local asset for a slot it names, or else the first free one, and open the
-    /// review, whose chip picks another.
+    /// Sync sheet, whose chip picks another.
     SendTo(u64),
     /// Link a local asset to the slot `at` of `class` on the attached keyboard, as it holds
     /// the asset's saved body.
@@ -183,19 +185,12 @@ pub enum Act {
     },
     /// Stop waiting to send this one. Nothing is deleted.
     Unqueue(u64),
-    /// Ask which of a file and its slot on the attached keyboard is current.
-    Choose(u64),
-    /// Ask again what changed on the attached keyboard since drawbar last saw it.
-    KeyboardChanges,
+    /// Read the attached keyboard and show the Sync sheet, with this file's row picked.
+    Sync(Option<u64>),
     /// Empty the queue. Nothing is deleted, so it asks nothing.
     ClearQueue,
-    /// Write everything in the queue, grouped by folder. Already confirmed.
-    SendAll,
-    /// Queue every asset [`crate::queue::changed`] finds, each for its own slot.
-    QueueChanged,
-    /// Ask before sending everything waiting: the review of the queue, whose Send all
-    /// runs `SendAll`.
-    AskSendAll,
+    /// The sheet's Sync, pressed: each row goes the way the sheet shows.
+    SyncAll,
     /// A Send already confirmed, so it does not ask again.
     Replace {
         id: u64,
@@ -250,8 +245,6 @@ pub enum Act {
     /// Close the tab the center is showing.
     CloseTab,
     ToggleDock(Dock),
-    /// Open the review of what is waiting to be sent.
-    ReviewQueue,
     /// Show or hide the activity popover.
     ToggleLog,
     /// Open the activity popover on the problems alone.
@@ -316,7 +309,7 @@ impl Act {
             | Act::Replace { id, .. } => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
             Act::ExportBundle { ids, .. } => ids.clone(),
-            Act::SendAll => will_write(queue).map(|held| held.id).collect(),
+            Act::SyncAll => will_write(queue).map(|held| held.id).collect(),
             _ => Vec::new(),
         }
     }
@@ -341,7 +334,6 @@ impl Act {
             | Act::Export(id)
             | Act::SaveDoc(id)
             | Act::WriteBack(id)
-            | Act::Choose(id)
             | Act::Revert(id) => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
             Act::ExportBundle { ids, reading, .. } => [ids.as_slice(), reading].concat(),
@@ -379,10 +371,8 @@ impl Act {
             | Act::Unlink(_)
             | Act::Unqueue(_)
             | Act::ClearQueue
-            | Act::SendAll
-            | Act::QueueChanged
-            | Act::KeyboardChanges
-            | Act::AskSendAll
+            | Act::SyncAll
+            | Act::Sync(_)
             | Act::Rearrange { .. }
             | Act::RenameLocal { .. }
             | Act::RenameFolder { .. }
@@ -396,7 +386,6 @@ impl Act {
             | Act::Reveal(_)
             | Act::CloseTab
             | Act::ToggleDock(_)
-            | Act::ReviewQueue
             | Act::ToggleLog
             | Act::ShowProblems
             | Act::CopyLog
@@ -790,15 +779,14 @@ pub fn apply(
             }
             Act::SendTo(id) => {
                 send_to(workspace, device, queue, log, id);
-                shell.review_open = device.state.connected();
+                crate::bring::open(device, Some(id));
             }
             Act::Link { id, class, at } => link_to(workspace, &device.state, log, id, class, at),
             Act::Unlink(id) => unlink(workspace, &device.state, log, id),
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
-            Act::Choose(id) => crate::bring::choose(device, workspace, log, id),
-            Act::KeyboardChanges => crate::bring::ask_again(device, workspace),
+            Act::Sync(picked) => crate::bring::open(device, picked),
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
@@ -812,11 +800,11 @@ pub fn apply(
                 queue.clear();
                 log.say("The send queue is empty.");
             }
-            Act::SendAll => send_batch(queue, workspace, device, log),
-            Act::QueueChanged => crate::queue::queue_changed(workspace, device, queue, log),
-            // ⚠️ The queue always belongs to an attached instrument; with none there is
-            // nothing to review.
-            Act::AskSendAll | Act::ReviewQueue => shell.review_open = device.state.connected(),
+            Act::SyncAll => {
+                if crate::bring::apply(device, workspace, queue, log) {
+                    send_batch(queue, workspace, device, log);
+                }
+            }
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -835,8 +823,8 @@ pub fn apply(
             }
             Act::Remove(id) => remove(browser, workspace, tabs, queue, log, id),
             Act::Export(id) => workspace.export(id),
-            Act::SaveDoc(id) => save_doc(browser, workspace, device, queue, log, id, true),
-            Act::WriteBack(id) => save_doc(browser, workspace, device, queue, log, id, false),
+            Act::SaveDoc(id) => save_doc(browser, workspace, device, log, id, true),
+            Act::WriteBack(id) => save_doc(browser, workspace, device, log, id, false),
             Act::Revert(id) => workspace.revert(id, log),
             Act::ShowTab(spot) => tabs.show(spot),
             Act::ShowClass(class) => {
@@ -1494,7 +1482,7 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
 /// Every queued write goes through here, with the same refusal, grouping and per-item
 /// flow. An entry leaves the queue when its [`crate::device::DeviceEvent::Sent`] arrives,
 /// so a batch that stops halfway leaves the rest of the queue in place. Each write
-/// expects its slot to hold what the review shows; one whose slot has not been read waits
+/// expects its slot to hold what the sheet shows; one whose slot has not been read waits
 /// for the read.
 fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
@@ -1724,7 +1712,7 @@ fn bound_at(
     }
 }
 
-/// Queue an asset for the slot [`first_pick`] gives, picked in the review it opens.
+/// Queue an asset for the slot [`first_pick`] gives, picked in the Sync sheet it opens.
 fn send_to(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log, id: u64) {
     let Some(entity) = workspace.get(id) else {
         return;
@@ -1732,7 +1720,6 @@ fn send_to(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &
     let bound = first_pick(entity, &device.state, queue);
     if let Bound::At(class, at) = bound {
         enqueue(workspace, device, queue, log, id, class, at);
-        queue.picked = Some(id);
         return;
     }
     log.say(match unqueued(&entity.name, bound, &device.state) {
@@ -1857,8 +1844,7 @@ fn queue_all(
 /// What ⌘S does for each kind of document.
 ///
 /// Saving a view writes it back to its slot at once, and its baseline moves when the
-/// instrument confirms the write. Saving anything on this computer moves its baseline
-/// and, if it belongs to a slot, queues it for that slot.
+/// instrument confirms the write. Saving anything on this computer moves its baseline.
 ///
 /// `ask` is false once the user has confirmed the write's warnings.
 #[allow(clippy::too_many_arguments)]
@@ -1866,7 +1852,6 @@ fn save_doc(
     browser: &mut Browser,
     workspace: &mut Workspace,
     device: &mut Device,
-    queue: &mut Queue,
     log: &mut Log,
     id: u64,
     ask: bool,
@@ -1884,27 +1869,7 @@ fn save_doc(
             ),
         };
         workspace.mark_saved(id);
-        let Some(entity) = workspace.get(id) else {
-            return;
-        };
-        let linked = crate::device::standing_of(&device.state, entity);
-        let ahead = linked.is_some_and(|linked| linked.standing == Standing::Ahead);
-        let bound = ahead.then(|| bound_for(entity, &device.state, queue));
-        let keyboard = device.state.keyboard();
-        let waiting = queue
-            .entry(id)
-            .filter(|held| held.keyboard.as_ref() == keyboard)
-            .map(|held| (held.class, held.at));
-        match bound {
-            // Already waiting for that slot, so the save only moved the baseline.
-            Some(Bound::At(class, at)) if waiting != Some((class, at)) => {
-                let queued = enqueue(workspace, device, queue, log, id, class, at);
-                if !queued.is_empty() {
-                    log.offer(crate::log::Undo::Unqueue(queued));
-                }
-            }
-            _ => log.say(saved),
-        }
+        log.say(saved);
         return;
     }
     let Some((class, at)) = crate::device::owed(&device.state, entity) else {
@@ -1975,7 +1940,7 @@ fn save_doc(
 ///
 /// ⚠️ It asks only when the write both carries a warning (a foreign format, or a settings
 /// write that reloads the panel) and replaces an occupant. Every other warning waits for
-/// [`Act::AskSendAll`], the confirmation before anything is written.
+/// [`Act::Sync`], the confirmation before anything is written.
 #[allow(clippy::too_many_arguments)]
 fn send(
     browser: &mut Browser,
@@ -2026,6 +1991,7 @@ fn send(
 mod tests {
     use super::super::tree::{slot_items, SlotItems};
     use super::*;
+    use crate::link::Standing;
     use crate::strings::folder;
     use crate::testing::Bench;
     use crate::workspace::Origin;
@@ -2217,7 +2183,7 @@ mod tests {
             class,
             at(0),
         );
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         let shown = |name: &str| Expect::Holds {
             crc: None,
             len: 121,
@@ -2243,7 +2209,7 @@ mod tests {
         let (_, said) = bench.log.status();
         assert!(said.contains("“Mine.ne5p” was not sent"), "{said}");
 
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         assert_eq!(
             batches(&bench).last(),
             Some(&vec![(id, shown("Squabble B"))]),
@@ -2269,7 +2235,7 @@ mod tests {
             at(0),
         );
 
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         assert_eq!(batches(&bench), Vec::<Vec<(u64, Expect)>>::new());
         assert!(bench.queue.holds(id));
         let reads = bench.device.queued().into_iter().any(|cmd| {
@@ -2456,7 +2422,7 @@ mod tests {
         bench.act(vec![Act::Send { id, class, at }]);
         assert!(!bench.queue.is_empty(), "queued while its check runs");
         bench.workspace.poll(&mut bench.log);
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         let batch = |bench: &Bench| {
             bench
                 .device
@@ -2476,7 +2442,7 @@ mod tests {
         bench.workspace.settle_files(&mut bench.log);
         assert_eq!(verdict(&bench), "ok");
         assert_eq!(file.take_checks(), 1, "the check read it through");
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         assert!(batch(&bench), "written once checked");
     }
 
@@ -2500,7 +2466,8 @@ mod tests {
         let class = ObjectClass::Piano;
         let at = Location::from_user(1, 1);
         bench.device.pretend_scanned(class, 1, &[""]);
-        bench.act(vec![Act::Send { id, class, at }, Act::SendAll]);
+        bench.act(vec![Act::Send { id, class, at }]);
+        bench.sync();
 
         let Some(DeviceCmd::SendAll { items, .. }) = bench.device.queued().back().copied() else {
             panic!("a batch was asked for")
@@ -2549,7 +2516,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_linked_asset_settles_its_baseline_and_queues_it_for_its_slot() {
+    fn saving_a_linked_asset_settles_its_baseline_and_leaves_it_to_sync() {
         let mut bench = Bench::new();
         let bytes = Fresh::Program.bytes().unwrap();
         let crc = crate::workspace::print_of(&bytes).unwrap().crc;
@@ -2585,24 +2552,8 @@ mod tests {
 
         assert!(!bench.workspace.get(linked).unwrap().is_unsaved());
         assert!(!bench.workspace.get(alone).unwrap().is_unsaved());
-        assert_eq!(
-            bench.queue.ids(),
-            vec![linked],
-            "only the one that belongs to a slot"
-        );
-        assert_eq!(bench.queue.entry(linked).map(|held| held.at), Some(at(3)));
-
-        // Saving it again reads nothing from the instrument, because it is already
-        // waiting for that slot, and the log still says what the save did.
-        let reads = bench.device.queued().len();
-        bench.log.clear();
-        bench.act(vec![Act::SaveDoc(linked)]);
-        assert_eq!(bench.queue.ids(), vec![linked]);
-        assert_eq!(
-            bench.device.queued().len(),
-            reads,
-            "the slot was not read again"
-        );
+        assert!(bench.queue.is_empty(), "saving queues nothing");
+        assert!(bench.device.queued().is_empty(), "and reads nothing");
         assert!(
             bench
                 .log
@@ -2611,6 +2562,9 @@ mod tests {
             "{}",
             bench.log.transcript()
         );
+        let rows = crate::bring::rows(&bench.device.state, &bench.workspace, &bench.queue);
+        let rows: Vec<u64> = rows.iter().map(|row| row.id).collect();
+        assert_eq!(rows, [linked], "only the one that belongs to a slot");
     }
 
     /// Queueing and exporting act on this computer's rows, copying on the instrument's,
@@ -2962,24 +2916,20 @@ mod tests {
         );
 
         assert!(bench.log.press("is unlinked from"));
-        bench.log.undo_pressed(
-            &mut bench.workspace,
-            &mut bench.queue,
-            &mut bench.device.asks,
-        );
+        bench.log.undo_pressed(&mut bench.workspace);
         let entity = bench.workspace.get(id).unwrap();
         let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
         assert_eq!((linked.at, linked.standing), (Some(at(2)), Standing::Same));
     }
 
     #[test]
-    fn send_to_queues_for_the_slot_the_file_came_off_and_opens_the_review() {
+    fn send_to_queues_for_the_slot_the_file_came_off_and_opens_the_sheet_on_it() {
         let mut bench = Bench::new();
         let id = hinted(&mut bench);
         bench.act(vec![Act::SendTo(id)]);
         assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(0)));
-        assert_eq!(bench.queue.picked, Some(id));
-        assert!(bench.shell.review_open);
+        let sheet = bench.device.asks.sheet.as_ref().expect("the sheet opens");
+        assert_eq!(sheet.picked, Some(id));
     }
 
     #[test]
@@ -3151,7 +3101,7 @@ mod tests {
     }
 
     /// Queueing says where the asset is going on the status line and leaves the window as
-    /// it was: the review opens only when asked for.
+    /// it was: the sheet opens only when asked for.
     #[test]
     fn queueing_says_where_it_goes_without_opening_the_review() {
         let mut bench = Bench::new();
@@ -3173,12 +3123,9 @@ mod tests {
         }]);
 
         assert!(bench.queue.holds(id));
-        assert!(!bench.shell.review_open);
+        assert!(bench.device.asks.sheet.is_none());
         let (_, said) = bench.log.status();
         assert!(said.contains("waiting to be sent to Programs"), "{said}");
-
-        bench.act(vec![Act::AskSendAll]);
-        assert!(bench.shell.review_open, "asking to send all is the review");
     }
 
     /// A session belongs to a folder, so a batch is one command per folder, in queue
@@ -3266,7 +3213,7 @@ mod tests {
             "an empty slot carrying no warning asks nothing"
         );
 
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         match bench
             .device
             .queued()
@@ -3294,7 +3241,7 @@ mod tests {
     /// bank is not reported as empty. With no warnings, nothing comes before the
     /// destinations.
     #[test]
-    fn the_review_says_what_is_known_about_each_slot() {
+    fn the_sheet_says_what_is_known_about_each_slot() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         // Bank 7 was scanned: 7:1 holds something and 7:2 is empty. Bank 8 was not read.
@@ -3320,28 +3267,24 @@ mod tests {
             );
         }
 
-        bench.act(vec![Act::AskSendAll]);
-        assert!(bench.shell.review_open);
+        bench.act(vec![Act::Sync(None)]);
+        bench.land();
 
         let mut said = Vec::new();
         for id in bench.queue.ids() {
-            bench.queue.picked = Some(id);
+            bench.device.asks.sheet.as_mut().expect("open").picked = Some(id);
             said.extend(reviewed(&mut bench));
         }
-        for slot in [
-            "replaces “Africa Split” at 7:1",
-            "new at 7:2",
-            "checking 8:1",
-        ] {
+        for slot in ["replaces “Africa Split”", "new", "checking"] {
             assert!(said.iter().any(|word| word == slot), "{slot}: {said:?}");
         }
     }
 
-    /// ⚠️ The review counts what the batch would write. An entry the attached instrument
+    /// ⚠️ The sheet counts what the batch would write. An entry the attached instrument
     /// has refused stays in the queue and is not written, so counting it would promise a
     /// write that will not happen.
     #[test]
-    fn the_review_counts_only_what_the_batch_would_write() {
+    fn the_sheet_counts_only_what_the_batch_would_write() {
         use crate::device::DeviceEvent;
 
         let mut bench = Bench::new();
@@ -3410,25 +3353,26 @@ mod tests {
             "both are still waiting"
         );
 
-        bench.act(vec![Act::AskSendAll]);
+        bench.act(vec![Act::Sync(None)]);
+        bench.land();
 
         let said = reviewed(&mut bench);
-        for word in ["Send 1 to Nord Stage 4", "1 cannot go", "Send all 1"] {
+        for word in ["Sync with Nord Stage 4", "Sync 1"] {
             assert!(said.iter().any(|it| it == word), "{word}: {said:?}");
         }
     }
 
-    /// Every string the review paints, after a frame to settle its layout.
+    /// Every string the sheet paints, after a frame to settle its layout.
     fn reviewed(bench: &mut Bench) -> Vec<String> {
         let mut said = Vec::new();
         for _ in 0..2 {
             let input = crate::testing::screen(eframe::egui::vec2(1280.0, 800.0), Vec::new());
             let output = crate::testing::run(&bench.ctx, input, |ctx| {
-                crate::queue::review(
+                crate::queue::sheet(
                     ctx,
-                    &mut bench.queue,
+                    &mut bench.device,
+                    &bench.queue,
                     &bench.workspace,
-                    &bench.device.state,
                     &mut Vec::new(),
                 );
             });
@@ -3516,7 +3460,7 @@ mod tests {
             .entry(electro)
             .is_some_and(|held| held.failure.is_some()));
 
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
 
         let batch = bench
             .device
@@ -3592,7 +3536,7 @@ mod tests {
             })
             .collect();
 
-        bench.act(vec![Act::SendAll]);
+        bench.sync();
         let batch = bench
             .device
             .queued()

@@ -711,7 +711,15 @@ fn list(
                 .frame(egui::Frame::new())
                 .show_inside(ui, |ui| {
                     boxed(ui, |ui| {
-                        crate::queue::table(ui, held, name, workspace, &device.state)
+                        crate::queue::table(
+                            ui,
+                            &held.diff,
+                            held.renames(name),
+                            Some(crate::bring::Way::Up),
+                            (held.class, held.at),
+                            workspace,
+                            &device.state,
+                        )
                     })
                 });
         }

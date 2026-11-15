@@ -9448,20 +9448,16 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     let held = Held::new(class, at, "", print(&old)).unwrap();
     session.link(id, &keyboard, held);
     session.heard();
-    let Bench {
-        device,
-        workspace,
-        queue,
-        log,
-        ..
-    } = &mut session.bench;
-    crate::bring::bring_in(device, workspace, queue, log);
-    device.pretend(crate::device::DeviceEvent::Got {
-        info: crate::device::reported(at, "untitled"),
-        origin: Origin::Device { class, at },
-        bytes: new.clone(),
-        why: crate::device::Purpose::Pull,
-    });
+    session.bench.sync();
+    session
+        .bench
+        .device
+        .pretend(crate::device::DeviceEvent::Got {
+            info: crate::device::reported(at, "untitled"),
+            origin: Origin::Device { class, at },
+            bytes: new.clone(),
+            why: crate::device::Purpose::Pull,
+        });
     session.heard();
     session.decided();
     assert_eq!(root.read("untitled.ne5p"), new, "brought in");

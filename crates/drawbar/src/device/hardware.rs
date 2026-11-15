@@ -412,6 +412,9 @@ pub(super) struct Rig {
     pub(super) library: Temp,
     pub(super) store: Store,
     pub(super) bench: Bench,
+    /// Whether Sync was pressed and its sheet waits to be confirmed once its read lands,
+    /// as the user would.
+    pub(super) syncing: bool,
 }
 
 impl Rig {
@@ -427,6 +430,7 @@ impl Rig {
             library,
             store,
             bench,
+            syncing: false,
         };
         let names: Vec<String> = files.iter().map(|(name, _)| name.to_string()).collect();
         rig.until(
@@ -472,14 +476,18 @@ impl Rig {
         }
         crate::queue::follow(workspace, device, queue, log);
         let mut acts = acts;
-        if released {
-            acts.push(Act::SendAll);
+        self.syncing &= device.asks.sheet.is_some();
+        self.syncing |= acts.iter().any(|act| matches!(act, Act::Sync(_)));
+        let read = device.asks.sheet.as_ref();
+        if released || (self.syncing && read.is_some_and(|sheet| sheet.read(&device.state))) {
+            self.syncing = false;
+            acts.push(Act::SyncAll);
         }
         // As the app holds a send until the library's files are checked for outside
         // changes.
-        let sending = acts.iter().any(|act| matches!(act, Act::SendAll));
+        let sending = acts.iter().any(|act| matches!(act, Act::SyncAll));
         if !released && sending && self.store.hold_send() {
-            acts.retain(|act| !matches!(act, Act::SendAll));
+            acts.retain(|act| !matches!(act, Act::SyncAll));
         }
         apply(
             browser, shell, acts, workspace, device, tabs, queue, builds, log,
@@ -679,6 +687,7 @@ impl Rig {
             library,
             store,
             bench,
+            syncing: false,
         };
         rig.until("the library opens", ATTACH_LIMIT, |rig| {
             rig.store.takes_files() && !rig.store.listing()
@@ -789,7 +798,7 @@ fn send_into_vacant(rig: &mut Rig, id: u64, class: ObjectClass, slot: Location) 
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -871,7 +880,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -943,7 +952,7 @@ fn s3_a_file_changed_mid_send_restores_the_occupant() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1049,7 +1058,7 @@ fn s4_a_file_cut_short_mid_send_leaves_an_empty_slot_empty() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1146,7 +1155,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1435,7 +1444,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,

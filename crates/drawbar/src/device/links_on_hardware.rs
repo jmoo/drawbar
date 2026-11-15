@@ -18,6 +18,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::hardware::{attached, place, Cli, Rig, ATTACH_LIMIT, HEADER, MARK, SEND_LIMIT};
 use super::{link_offers, standing_of, Linked};
+use crate::bring::Change;
 use crate::browser::Act;
 use crate::link::{Standing, There};
 use crate::store::{Pass, Store};
@@ -269,6 +270,7 @@ fn open(files: &[(&str, &Path)]) -> Rig {
         library,
         store,
         bench,
+        syncing: false,
     };
     let names: Vec<String> = files.iter().map(|(name, _)| name.to_string()).collect();
     wait(
@@ -396,12 +398,13 @@ fn duplicate(rig: &mut Rig, id: u64) -> u64 {
     arrived(rig, &before).expect("made")
 }
 
-/// Write everything queued, as Send all does, and wait for the walk after it.
-fn send_queued(rig: &mut Rig) {
+/// Press Sync, confirm its sheet once its read lands, and wait for the walk after the
+/// writes.
+fn sync(rig: &mut Rig) {
     let started = Instant::now();
+    tick(rig, vec![Act::Sync(None)]);
     loop {
-        let ready = rig.idle() && !rig.bench.queue.is_empty();
-        tick(rig, ready.then_some(Act::SendAll).into_iter().collect());
+        tick(rig, Vec::new());
         let failures: Vec<String> = rig
             .bench
             .queue
@@ -415,7 +418,7 @@ fn send_queued(rig: &mut Rig) {
             "the send failed\n{}",
             rig.bench.log.tail(30)
         );
-        if rig.idle() && rig.bench.queue.is_empty() {
+        if !rig.syncing && rig.idle() && rig.bench.queue.is_empty() {
             return;
         }
         assert!(
@@ -437,7 +440,7 @@ fn send(rig: &mut Rig, id: u64, to: Location) {
             at: to,
         }],
     );
-    send_queued(rig);
+    sync(rig);
 }
 
 fn entity(rig: &Rig, id: u64) -> &crate::workspace::LocalEntity {
@@ -469,13 +472,10 @@ fn queued(rig: &Rig) -> Vec<(u64, ObjectClass, Location)> {
     entries.map(|held| (held.id, held.class, held.at)).collect()
 }
 
-fn changed(rig: &Rig) -> Vec<u64> {
-    let found = crate::queue::changed(
-        &rig.bench.workspace,
-        &rig.bench.device.state,
-        &rig.bench.queue,
-    );
-    found.into_iter().map(|(id, _, _)| id).collect()
+fn rows(rig: &Rig) -> Vec<(u64, Change)> {
+    let bench = &rig.bench;
+    let rows = crate::bring::rows(&bench.device.state, &bench.workspace, &bench.queue);
+    rows.into_iter().map(|row| (row.id, row.change)).collect()
 }
 
 /// An edit of `id`'s current bytes through the field registry, held unsaved as a typed
@@ -534,7 +534,7 @@ fn l01_a_new_program_is_only_a_hint_at_the_slot_holding_its_bytes_and_saving_que
     let also = also_at(&rig, id);
     act(&mut rig, vec![Act::SaveDoc(id)]);
     assert_eq!(queued(&rig), [], "saving a New program queues nothing");
-    assert_eq!(changed(&rig), Vec::<u64>::new());
+    assert_eq!(rows(&rig), [], "nothing to sync");
     assert_eq!(linked(&rig, id), None, "saving links nothing");
     drop(rig);
 
@@ -627,7 +627,7 @@ fn l03_a_copy_is_linked_to_its_slot_and_a_duplicate_or_second_copy_is_not() {
 
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
-fn l04_saving_an_edited_copy_queues_it_for_its_slot_and_the_send_lands_the_edit() {
+fn l04_an_edited_copy_saved_is_newer_here_and_sync_lands_the_edit() {
     if !attached() {
         return;
     }
@@ -643,8 +643,9 @@ fn l04_saving_an_edited_copy_queues_it_for_its_slot_and_the_send_lands_the_edit(
 
     act(&mut rig, vec![Act::SaveDoc(id)]);
     assert_eq!(standing(&rig, id), Some((from, Standing::Ahead)));
-    assert_eq!(queued(&rig), [(id, PROGRAM, from)], "the save queues it");
-    send_queued(&mut rig);
+    assert_eq!(queued(&rig), [], "the save queues nothing");
+    assert_eq!(rows(&rig), [(id, Change::Ahead)]);
+    sync(&mut rig);
     assert_eq!(standing(&rig, id), Some((from, Standing::Same)));
     drop(rig);
 
@@ -659,7 +660,7 @@ fn l04_saving_an_edited_copy_queues_it_for_its_slot_and_the_send_lands_the_edit(
 
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
-fn l05_a_slot_overwritten_behind_drawbars_back_is_theirs_and_saving_queues_nothing() {
+fn l05_a_slot_overwritten_behind_drawbars_back_is_newer_there_and_saving_queues_nothing() {
     if !attached() {
         return;
     }
@@ -680,7 +681,7 @@ fn l05_a_slot_overwritten_behind_drawbars_back_is_theirs_and_saving_queues_nothi
     rig.connect();
 
     assert_eq!(standing(&rig, id), Some((from, Standing::Theirs)));
-    assert_eq!(changed(&rig), Vec::<u64>::new(), "nothing to queue");
+    assert_eq!(rows(&rig), [(id, Change::Theirs)], "a ↓ row");
     act(&mut rig, vec![Act::SaveDoc(id)]);
     assert_eq!(queued(&rig), [], "saving an unchanged file queues nothing");
     assert_eq!(standing(&rig, id), Some((from, Standing::Theirs)));
@@ -690,7 +691,7 @@ fn l05_a_slot_overwritten_behind_drawbars_back_is_theirs_and_saving_queues_nothi
 
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
-fn l06_a_slot_emptied_behind_drawbars_back_is_gone_and_an_explicit_send_puts_it_back() {
+fn l06_a_slot_emptied_behind_drawbars_back_is_removed_and_an_explicit_send_puts_it_back() {
     if !attached() {
         return;
     }
@@ -708,9 +709,11 @@ fn l06_a_slot_emptied_behind_drawbars_back_is_gone_and_an_explicit_send_puts_it_
         (linked.at, linked.there, linked.standing),
         (Some(from), There::Vacant, Standing::Gone)
     );
-    assert!(changed(&rig).is_empty(), "not owed a send on its own");
-    act(&mut rig, vec![Act::QueueChanged]);
-    assert!(queued(&rig).is_empty());
+    assert_eq!(
+        rows(&rig),
+        [(id, Change::Removed)],
+        "no way until one is picked"
+    );
     act(
         &mut rig,
         vec![Act::Send {
@@ -720,7 +723,7 @@ fn l06_a_slot_emptied_behind_drawbars_back_is_gone_and_an_explicit_send_puts_it_
         }],
     );
     assert_eq!(queued(&rig), [(id, PROGRAM, from)]);
-    send_queued(&mut rig);
+    sync(&mut rig);
     assert_eq!(standing(&rig, id), Some((from, Standing::Same)));
     drop(rig);
 
@@ -947,10 +950,10 @@ fn l10_queueing_a_program_queues_the_sample_it_plays_and_writes_it_first() {
     let mut order = Vec::new();
     let started = Instant::now();
     while !rig.bench.queue.is_empty() {
-        let ready = rig.idle();
+        let ready = rig.idle() && !rig.syncing;
         tick(
             &mut rig,
-            ready.then_some(Act::SendAll).into_iter().collect(),
+            ready.then_some(Act::Sync(None)).into_iter().collect(),
         );
         for id in [probe, id] {
             if !rig.bench.queue.holds(id) && !order.contains(&id) {

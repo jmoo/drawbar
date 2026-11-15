@@ -13,6 +13,7 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
+use crate::bring::{Change, Row, Sheet, Way, DIFFERS};
 use crate::browser::{bound_for, cell_ink, Act, Bound, Carried, Held, Item, Kind};
 use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Expect, Fit, Purpose};
 use crate::fields::fields_of;
@@ -22,7 +23,7 @@ use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
 use crate::plays;
-use crate::strings::{display_name, label, place};
+use crate::strings::{display_name, label, place, shown};
 use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
 
 /// One asset waiting to be written, and the slot it is waiting for.
@@ -202,23 +203,6 @@ impl Occupancy {
             Occupancy::Unknown | Occupancy::Vacant => None,
         }
     }
-
-    /// What is known about the slot, in the words used by both the question before a
-    /// write and the queue row.
-    ///
-    /// ⚠️ The three variants must read differently: a slot nothing has read is not an
-    /// empty one, and a write is about to happen either way.
-    pub fn said(&self, class: ObjectClass, at: Location) -> String {
-        let where_ = place(class, at);
-        match self {
-            Occupancy::Held(held) => format!(
-                "{where_} holds “{}”, {} bytes, which this replaces",
-                held.name, held.body_len
-            ),
-            Occupancy::Vacant => format!("{where_} is empty"),
-            Occupancy::Unknown => format!("{where_} has not been read yet"),
-        }
-    }
 }
 
 /// What a slot holds, as the read that found it reported.
@@ -244,8 +228,6 @@ impl Occupant {
 #[derive(Default)]
 pub struct Queue {
     list: Vec<Queued>,
-    /// The entry the review shows in detail.
-    pub(crate) picked: Option<u64>,
 }
 
 /// The outcome of queueing an asset, which decides what the log says.
@@ -375,7 +357,7 @@ fn place_in(
 }
 
 /// Why a write of a file over its own linked slot waits for the user.
-const CHOOSE: &str = "The keyboard changed its slot. Choose… which is current first.";
+const CHOOSE: &str = "The keyboard changed its slot. Sync it to choose.";
 
 /// Whether `entity` is linked to the slot `at` of `class` on the attached keyboard and the
 /// user must choose between the two before anything is written there.
@@ -404,7 +386,7 @@ pub fn refresh(workspace: &Workspace, device: &mut Device, queue: &mut Queue, lo
     ask_unread(device, queue, log);
 }
 
-/// Record what a write found in its slot instead of what it expected, so the review shows
+/// Record what a write found in its slot instead of what it expected, so the sheet shows
 /// it and the next send expects it, and say on the entry why it stopped.
 pub fn changed_under(
     workspace: &Workspace,
@@ -524,47 +506,6 @@ fn taken(class: ObjectClass, holder: Location) -> String {
     )
 }
 
-/// The assets not in the queue that are newer than the slot they are linked to on the
-/// attached keyboard, each with that slot.
-///
-/// An edit queues nothing; saving a linked asset does. This finds saved assets that are
-/// not waiting, which a send would skip.
-pub fn changed(
-    workspace: &Workspace,
-    device: &DeviceState,
-    queue: &Queue,
-) -> Vec<(u64, ObjectClass, Location)> {
-    workspace
-        .listed()
-        .filter(|entity| !queue.holds(entity.id))
-        .filter_map(|entity| {
-            let linked = crate::device::standing_of(device, entity)?;
-            let at = linked.at.filter(|_| linked.standing == Standing::Ahead)?;
-            Some((entity.id, linked.class, at))
-        })
-        .collect()
-}
-
-/// The toolbar's offer to queue what [`changed`] finds: the button's label and its
-/// hover text. `None` where nothing has changed.
-pub fn offer(
-    workspace: &Workspace,
-    device: &DeviceState,
-    queue: &Queue,
-) -> Option<(String, String)> {
-    offered(changed(workspace, device, queue).len())
-}
-
-/// [`offer`], for `ready` assets.
-pub fn offered(ready: usize) -> Option<(String, String)> {
-    (ready > 0).then(|| {
-        (
-            format!("Queue {ready}"),
-            format!("queue the {ready} ready to send"),
-        )
-    })
-}
-
 /// Check everything waiting against the attached instrument again, and log what it
 /// refuses.
 ///
@@ -638,13 +579,6 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
         held.shows(entity, Occupancy::of(&device.state, held.class, held.at));
     }
     ask_unread(device, queue, log);
-}
-
-/// Queue every asset [`changed`] finds, each for its own slot.
-pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    for (id, class, at) in changed(workspace, &device.state, queue) {
-        enqueue(workspace, device, queue, log, id, class, at);
-    }
 }
 
 /// The diff before the occupant's bytes have been read. A vacant slot has nothing to
@@ -776,7 +710,6 @@ impl Queue {
             }
             held.failure = None;
             held.keyboard = keyboard;
-            self.picked = Some(entity.id);
             return Put::Standing;
         }
         let moved = self
@@ -804,7 +737,6 @@ impl Queue {
             failure: None,
             keyboard,
         });
-        self.picked = Some(entity.id);
         match (moved, instead_of) {
             (Some((was, before)), _) => Put::Moved(was, before),
             (None, Some(other)) => Put::Instead(other),
@@ -918,16 +850,12 @@ impl Queue {
     /// Take an asset out of the queue.
     pub fn forget(&mut self, id: u64) {
         self.list.retain(|held| held.id != id);
-        if self.picked == Some(id) {
-            self.picked = self.list.first().map(|held| held.id);
-        }
     }
 
     /// Empty the queue. The queue is only a plan, so this deletes no asset and sends
     /// nothing to the instrument.
     pub fn clear(&mut self) {
         self.list.clear();
-        self.picked = None;
     }
 
     /// Record why a write into `class` stopped, on the entry it stopped on.
@@ -1102,22 +1030,49 @@ const HEAD: f32 = 24.0;
 const DIFF_ROW: f32 = 26.0;
 const DIFF_MONO: f32 = 11.5;
 
-/// The review's largest size, and its margin from the window's edge.
+/// The sheet's largest size, and its margin from the window's edge.
 const SHEET: egui::Vec2 = egui::vec2(940.0, 580.0);
 const SHEET_MARGIN: f32 = 24.0;
 
-/// The review of what is waiting: what each write replaces, how it differs, and what to
-/// know before sending. Nothing is written until Send all.
-///
-/// Returns whether it stays open: Escape, a click on the backdrop, Not now, Send all, or
-/// opening an item's document closes it.
-pub fn review(
+/// Everything the sheet draws from.
+struct Drawn<'a> {
+    rows: Vec<Row>,
+    queue: &'a Queue,
+    workspace: &'a Workspace,
+    device: &'a DeviceState,
+}
+
+/// The sheet: one row per sound that differs between this computer and the keyboard, the
+/// way each goes, and how the picked one differs. Nothing is written or brought in until
+/// Sync. It lists nothing until the read it asked for has landed.
+pub fn sheet(
     ctx: &egui::Context,
-    queue: &mut Queue,
+    device: &mut Device,
+    queue: &Queue,
     workspace: &Workspace,
-    device: &DeviceState,
     acts: &mut Vec<Act>,
-) -> bool {
+) {
+    let Device { state, asks, .. } = device;
+    let Some(sheet) = asks.sheet.as_mut() else {
+        return;
+    };
+    let read = sheet.read(state);
+    let rows = match read {
+        true => crate::bring::rows(state, workspace, queue),
+        false => Vec::new(),
+    };
+    if sheet
+        .picked
+        .is_none_or(|id| !rows.iter().any(|row| row.id == id))
+    {
+        sheet.picked = rows.first().map(|row| row.id);
+    }
+    let drawn = Drawn {
+        rows,
+        queue,
+        workspace,
+        device: state,
+    };
     let screen = ctx.screen_rect();
     let size = egui::vec2(
         SHEET.x.min(screen.width() - 2.0 * SHEET_MARGIN),
@@ -1131,32 +1086,26 @@ pub fn review(
         .shadow(visuals.window_shadow);
     let before = acts.len();
     let mut open = true;
-    let shown = egui::Modal::new(egui::Id::new("review"))
+    let shown = egui::Modal::new(egui::Id::new("sync"))
         .frame(frame)
         .backdrop_color(egui::Color32::from_black_alpha(115))
         .show(ctx, |ui| {
             ui.set_min_size(size);
             ui.set_max_size(size);
             ui.spacing_mut().item_spacing.y = 0.0;
-            open &= review_head(ui, queue, workspace, device);
-            let foot = review_foot(ui, queue, workspace, device, acts);
-            open &= foot;
-            review_body(ui, queue, workspace, device, acts);
+            open &= head(ui, state);
+            open &= foot(ui, sheet, &drawn, read, acts);
+            body(ui, sheet, &drawn, read, acts);
         });
-    let opened_one = acts[before..]
-        .iter()
-        .any(|act| matches!(act, Act::Open(_) | Act::SendAll));
-    open && !shown.should_close() && !opened_one
+    let left = acts[before..].iter().any(|act| matches!(act, Act::Open(_)));
+    if !open || shown.should_close() || left {
+        asks.sheet = None;
+    }
 }
 
-/// The review's header: what it is, where the writes go, and how many of each kind.
-/// Returns false when close was clicked.
-fn review_head(
-    ui: &mut egui::Ui,
-    queue: &Queue,
-    workspace: &Workspace,
-    device: &DeviceState,
-) -> bool {
+/// The sheet's header: what it is, and which keyboard. Returns false when close was
+/// clicked.
+fn head(ui: &mut egui::Ui, device: &DeviceState) -> bool {
     let visuals = ui.visuals().clone();
     let quiet = crate::app::caption(&visuals);
     let lit = crate::app::accent(&visuals);
@@ -1172,15 +1121,13 @@ fn review_head(
     let (tile, _) = bar.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
     bar.painter()
         .rect_filled(tile, 9.0, crate::app::tint(lit, 0.16));
-    painted(&bar, Glyph::Upload, tile.shrink(8.0), lit);
-    let to = device.product().unwrap_or("the instrument");
-    let (going, replaces, failed) = counts(queue, workspace, device);
+    painted(&bar, Glyph::RefreshCw, tile.shrink(8.0), lit);
+    let to = device.product().unwrap_or("the keyboard");
     bar.label(
-        egui::RichText::new(format!("Send {going} to {to}"))
+        egui::RichText::new(format!("Sync with {to}"))
             .font(egui::FontId::new(15.0, crate::app::bold())),
     );
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
-        bar.spacing_mut().item_spacing.x = 6.0;
         crate::panel::flat(bar);
         let close = egui::Button::image(sized(Glyph::X, 14.0, quiet))
             .image_tint_follows_text_color(false)
@@ -1189,69 +1136,13 @@ fn review_head(
         if bar.add(close).on_hover_text("close").clicked() {
             open = false;
         }
-        bar.add_space(4.0);
-        if failed > 0 {
-            crate::panel::signal_pill(
-                bar,
-                &plural(failed, "cannot go", "cannot go"),
-                bad(&visuals),
-            );
-        }
-        if replaces > 0 {
-            crate::panel::signal_pill(bar, &format!("{replaces} replace"), warn(&visuals));
-        }
     });
     open
 }
 
-/// How many entries will be written, how many of those replace something else, as their
-/// rows say, and how many the attached instrument has refused.
-fn counts(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> (usize, usize, usize) {
-    let failed = failed(queue);
-    let replaces = queue
-        .entries()
-        .iter()
-        .filter(|held| held.failure.is_none())
-        .filter_map(|held| {
-            Some(writes(
-                held,
-                workspace.get(held.id)?,
-                queue,
-                workspace,
-                device,
-            ))
-        })
-        .filter(|note| matches!(note.what, What::Replaces(_)))
-        .count();
-    (queue.len() - failed, replaces, failed)
-}
-
-/// How many entries the attached instrument has refused.
-fn failed(queue: &Queue) -> usize {
-    queue
-        .entries()
-        .iter()
-        .filter(|held| held.failure.is_some())
-        .count()
-}
-
-/// `n` and the noun for it.
-fn plural(n: usize, one: &str, many: &str) -> String {
-    match n {
-        1 => format!("1 {one}"),
-        n => format!("{n} {many}"),
-    }
-}
-
-/// The review's foot, along the bottom: what to know before sending, then Clear, Not now,
-/// and Send all. Returns false when the review should close.
-fn review_foot(
-    ui: &mut egui::Ui,
-    queue: &Queue,
-    workspace: &Workspace,
-    device: &DeviceState,
-    acts: &mut Vec<Act>,
-) -> bool {
+/// The sheet's foot: what to know before writing, then Not now and Sync. Returns false
+/// when the sheet should close.
+fn foot(ui: &mut egui::Ui, sheet: &Sheet, drawn: &Drawn, read: bool, acts: &mut Vec<Act>) -> bool {
     let visuals = ui.visuals().clone();
     let whole = ui.max_rect();
     let rect = egui::Rect::from_min_max(egui::pos2(whole.left(), whole.bottom() - 58.0), whole.max);
@@ -1267,31 +1158,28 @@ fn review_foot(
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = 8.0;
-    let sending = queue.len() - failed(queue);
-    let send = crate::panel::accent_button(
-        &mut bar,
-        Glyph::Upload,
-        &match sending {
-            0 => "Send all".to_string(),
-            n => format!("Send all {n}"),
-        },
-        sending > 0,
-    )
-    .on_disabled_hover_text("Nothing waiting can go to the instrument attached now.");
-    if send.clicked() {
-        acts.push(Act::SendAll);
+    let refused = |row: &Row| {
+        let entry = drawn
+            .queue
+            .entry(row.id)
+            .filter(|_| row.change == Change::Placed);
+        entry.is_some_and(|held| held.failure.is_some())
+    };
+    let going = drawn.rows.iter();
+    let going = going.filter(|row| !refused(row) && sheet.way(row, drawn.workspace).is_some());
+    let going = going.count();
+    let label = match going {
+        0 => "Sync".to_string(),
+        n => format!("Sync {n}"),
+    };
+    let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, read && going > 0);
+    if sync.clicked() {
+        acts.push(Act::SyncAll);
     }
     if crate::panel::tonal_button(&mut bar, None, "Not now").clicked() {
         open = false;
     }
-    if !queue.is_empty()
-        && crate::panel::tonal_button(&mut bar, None, "Clear")
-            .on_hover_text("stop waiting to send any of it; nothing is deleted")
-            .clicked()
-    {
-        acts.push(Act::ClearQueue);
-    }
-    let warnings = crate::browser::send_warnings(queue, workspace, device);
+    let warnings = crate::browser::send_warnings(drawn.queue, drawn.workspace, drawn.device);
     if let Some(first) = warnings.first() {
         let room = bar.available_width();
         bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
@@ -1308,14 +1196,8 @@ fn review_foot(
     open
 }
 
-/// The waiting items beside the diff of the one picked.
-fn review_body(
-    ui: &mut egui::Ui,
-    queue: &mut Queue,
-    workspace: &Workspace,
-    device: &DeviceState,
-    acts: &mut Vec<Act>,
-) {
+/// The rows beside how the picked one differs.
+fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &mut Vec<Act>) {
     let whole = ui.max_rect();
     let body = egui::Rect::from_min_max(
         egui::pos2(whole.left() + 10.0, ui.cursor().top() + 4.0),
@@ -1323,12 +1205,16 @@ fn review_body(
     );
     let mut inside = ui.new_child(egui::UiBuilder::new().max_rect(body));
     let ui = &mut inside;
-    if queue.is_empty() {
+    if drawn.rows.is_empty() {
         ui.add_space(GAP);
         ui.horizontal(|ui| {
             ui.add_space(PAD);
+            let said = match read {
+                true => "Nothing to sync.",
+                false => "Reading the keyboard…",
+            };
             ui.label(
-                egui::RichText::new("Nothing is waiting to be sent.")
+                egui::RichText::new(said)
                     .text_style(ui_text())
                     .weak()
                     .italics(),
@@ -1336,58 +1222,57 @@ fn review_body(
         });
         return;
     }
-    if queue.picked.is_none_or(|id| queue.entry(id).is_none()) {
-        queue.picked = queue.entries().first().map(|held| held.id);
-    }
     let list = (body.width() * 0.3).clamp(ITEMS_LEAST, ITEMS);
     let items = egui::Rect::from_min_size(body.min, egui::vec2(list, body.height()));
     let pane = egui::Rect::from_min_max(egui::pos2(items.right() + 8.0, body.top()), body.max);
-    let picked = queue.picked;
-    let mut clicked = None;
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(items));
     egui::ScrollArea::vertical()
-        .id_salt("queue_items")
+        .id_salt("sync_rows")
         .auto_shrink([false; 2])
         .show(&mut column, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            for held in queue.entries() {
-                let Some(entity) = workspace.get(held.id) else {
-                    continue;
-                };
-                let note = writes(held, entity, queue, workspace, device);
-                let drawn = item(
-                    ui,
-                    held,
-                    entity,
-                    &note,
-                    picked == Some(held.id),
-                    device,
-                    queue,
-                    acts,
-                );
-                if drawn.clicked() {
-                    clicked = Some(held.id);
+            for row in &drawn.rows {
+                if item(ui, row, sheet, drawn, acts).clicked() {
+                    sheet.picked = Some(row.id);
                 }
             }
         });
     ui.painter()
         .rect_filled(pane, 9.0, ui.visuals().window_fill);
-    if let Some(held) = picked.and_then(|id| queue.entry(id)) {
-        if let Some(entity) = workspace.get(held.id) {
-            let mut diff = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
-            let note = writes(held, entity, queue, workspace, device);
-            diff_title(&mut diff, held, &entity.name, &note.what);
-            table(&mut diff, held, &entity.name, workspace, device);
-        }
-    }
-    if let Some(id) = clicked {
-        queue.picked = Some(id);
-    }
+    let picked = drawn.rows.iter().find(|row| Some(row.id) == sheet.picked);
+    let Some((row, entity)) = picked.and_then(|row| Some((row, drawn.workspace.get(row.id)?)))
+    else {
+        return;
+    };
+    let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
+    let words = said(row, drawn);
+    title(&mut pane, &entity.name, &words);
+    let (Some(at), way) = (row.at, sheet.way(row, drawn.workspace)) else {
+        return;
+    };
+    let entry = drawn
+        .queue
+        .entry(row.id)
+        .filter(|_| row.change == Change::Placed);
+    let shown = sheet.shown.as_ref().filter(|it| it.id == row.id);
+    let (diff, renamed) = match (entry, shown, &row.change) {
+        (Some(held), ..) => (&held.diff, held.renames(&entity.name)),
+        (None, Some(shown), Change::Ahead | Change::Theirs | Change::Both) => (&shown.diff, None),
+        _ => return,
+    };
+    table(
+        &mut pane,
+        diff,
+        renamed,
+        way,
+        (row.class, at),
+        drawn.workspace,
+        drawn.device,
+    );
 }
 
-/// The diff's title: what is going where, and how many fields it changes.
-fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str, what: &What) {
-    let visuals = ui.visuals().clone();
+/// The picked row's name, and what Sync does with it, which is shortened first.
+fn title(ui: &mut egui::Ui, name: &str, words: &str) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
     let mut bar = ui.new_child(
@@ -1396,71 +1281,54 @@ fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str, what: &What) {
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = 8.0;
-    if let Diff::Fields(fields) = &held.diff {
-        bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
-            let differ = plural(fields.len(), "field differs", "fields differ");
-            crate::panel::signal_pill(bar, &differ, warn(&visuals));
-            bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
-                title_words(bar, held, name, what);
-            });
-        });
-    } else {
-        title_words(&mut bar, held, name, what);
-    }
-    ui.add_space(4.0);
-}
-
-/// The picked item's name, and what its write does where, in the row's words, which is
-/// shortened first.
-fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str, what: &What) {
-    ui.label(
+    bar.label(
         egui::RichText::new(crate::strings::display_name(name))
             .font(egui::FontId::new(12.5, crate::app::bold())),
     );
-    ui.add(
+    bar.add(
         egui::Label::new(
-            egui::RichText::new(what.at(held.at))
+            egui::RichText::new(words)
                 .size(12.0)
-                .color(crate::app::caption(ui.visuals())),
+                .color(crate::app::caption(bar.visuals())),
         )
         .truncate(),
     );
+    ui.add_space(4.0);
 }
 
-/// The four column heads, and under them the slot's new name if a send of `name`
-/// renames it, then either the fields that differ or a single line describing any other
-/// kind of difference.
+/// The column heads, and under them the slot's new name where a write renames it, then
+/// either the fields that differ or one line for any other kind of difference.
 pub fn table(
     ui: &mut egui::Ui,
-    held: &Queued,
-    name: &str,
+    diff: &Diff,
+    renamed: Option<(&str, String)>,
+    way: Option<Way>,
+    (class, at): (ObjectClass, Location),
     workspace: &Workspace,
     device: &DeviceState,
 ) {
     let width = ui.available_width();
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
-    diff_head(ui, width, &tracks);
-
-    let renamed = held.renames(name);
-    let Diff::Fields(fields) = &held.diff else {
-        let (glyph, tint, said) = summary(&held.diff, held.class, held.at, ui.visuals());
+    diff_head(ui, width, &tracks, way);
+    let Diff::Fields(fields) = diff else {
+        let (glyph, tint, said) = summary(diff, class, at, ui.visuals());
         one_row(ui, width, &tracks, glyph, tint, &said);
         if let Some((was, given)) = renamed {
-            field_row(ui, width, &tracks, NAME_ROW, was, &given);
+            field_row(ui, width, &tracks, way, [NAME_ROW, &given, was]);
         }
         return;
     };
     egui::ScrollArea::vertical()
-        .id_salt("queue_diff")
+        .id_salt("sync_diff")
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             if let Some((was, given)) = &renamed {
-                field_row(ui, width, &tracks, NAME_ROW, was, given);
+                field_row(ui, width, &tracks, way, [NAME_ROW, given, was]);
             }
             for field in fields {
                 let [label, there, here] = field.said(workspace, device);
-                field_row(ui, width, &tracks, &label, &there, &here);
+                field_row(ui, width, &tracks, way, [&label, &here, &there]);
             }
         });
 }
@@ -1486,95 +1354,114 @@ pub(crate) fn summary(
             format!("reading what is in {}…", place(class, at)),
         ),
         Diff::Empty => (Glyph::CircleCheck, good(visuals), "the slot is free".into()),
-        Diff::Identical => (
-            Glyph::Equal,
-            quiet,
-            "the instrument already holds these bytes".into(),
-        ),
-        Diff::Bytes { first_at } => (
-            Glyph::ArrowRight,
-            warn(visuals),
-            format!("bytes differ from {first_at:#06x}"),
-        ),
-        Diff::Checksum => (
-            Glyph::ArrowRight,
-            warn(visuals),
-            "the body differs from what the slot holds".into(),
-        ),
-        // A field list is drawn as rows, not as this line.
-        Diff::Fields(_) => (Glyph::ArrowRight, warn(visuals), String::new()),
+        Diff::Identical => (Glyph::Equal, quiet, "the keyboard holds the same".into()),
+        Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum => {
+            (Glyph::ArrowRight, warn(visuals), DIFFERS.into())
+        }
     }
 }
 
-/// One waiting item: what it is, where it goes, and what it would replace.
+/// What the sheet says of a row: `new`, `update`, `replaces “Bright Wurly”`, `both
+/// changed`, `moved`, `replaced by “Clav”` or `removed`, or why its write stopped.
+fn said(row: &Row, drawn: &Drawn) -> String {
+    let placed = drawn
+        .queue
+        .entry(row.id)
+        .filter(|_| row.change == Change::Placed);
+    let entity = drawn.workspace.get(row.id);
+    match (&row.change, placed.zip(entity)) {
+        (Change::Placed, Some((held, entity))) => match &held.failure {
+            Some(why) => why.clone(),
+            None => writes(held, entity, drawn.queue, drawn.workspace, drawn.device).said(),
+        },
+        (Change::Ahead | Change::Theirs, _) => "update".into(),
+        (Change::Both, _) => "both changed".into(),
+        (Change::Moved { .. }, _) => "moved".into(),
+        (Change::Replaced { by }, _) => format!("replaced by “{by}”"),
+        (Change::Removed, _) => "removed".into(),
+        (Change::Placed, None) => String::new(),
+    }
+}
+
+/// One row: what it is, where, the way it goes, and what Sync does with it.
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a
 /// label allocates a hover rect that wins the hit test over the row, so a click would
 /// land on whichever word is under the pointer.
-#[allow(clippy::too_many_arguments)]
 fn item(
     ui: &mut egui::Ui,
-    held: &Queued,
-    entity: &LocalEntity,
-    note: &Writes,
-    selected: bool,
-    device: &DeviceState,
-    queue: &Queue,
+    row: &Row,
+    sheet: &mut Sheet,
+    drawn: &Drawn,
     acts: &mut Vec<Act>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW),
         egui::Sense::click_and_drag(),
     );
+    let Some(entity) = drawn.workspace.get(row.id) else {
+        return response;
+    };
+    let selected = sheet.picked == Some(row.id);
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let (ink, quiet) = row_ink(&painter, rect, selected, response.hovered(), &visuals);
     let line = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_LINE));
-
-    // Lay out the right end first, so the name is truncated to the room left.
-    let box_ = |right: f32| {
+    let box_ = |right: f32, width: f32| {
         egui::Rect::from_center_size(
-            egui::pos2(right - SMALL / 2.0, line.center().y),
-            egui::Vec2::splat(SMALL),
+            egui::pos2(right - width / 2.0, line.center().y),
+            egui::vec2(width, SMALL + 4.0),
         )
     };
-    let unqueue = ui.interact(
-        box_(rect.right() - PAD),
-        ui.id().with(("unqueue", held.id)),
+    let leave = ui.interact(
+        box_(rect.right() - PAD, SMALL),
+        ui.id().with(("leave", row.id)),
         egui::Sense::click(),
     );
-    // The × stays weak until the pointer is over it.
-    let leaving = match unqueue.hovered() {
+    let leaving = match leave.hovered() {
         true => visuals.text_color(),
         false => visuals.weak_text_color(),
     };
     painted(
         ui,
         Glyph::X,
-        box_(rect.right() - PAD),
+        box_(rect.right() - PAD, SMALL).shrink(2.0),
         cell_ink(selected, leaving, &visuals),
     );
-    if unqueue.on_hover_text("remove from the queue").clicked() {
-        acts.push(Act::Unqueue(held.id));
+    if leave.on_hover_text("leave out").clicked() {
+        match row.change {
+            Change::Placed => acts.push(Act::Unqueue(row.id)),
+            _ => sheet.skip(row.id),
+        }
     }
-    let (glyph, tint, why) = state(held, &entity.name, &note.what, &visuals);
-    painted(
+    let right = way_control(
         ui,
-        glyph,
-        box_(rect.right() - PAD - SMALL - GAP),
-        cell_ink(selected, tint, &visuals),
+        row,
+        sheet,
+        drawn,
+        box_(rect.right() - PAD - SMALL - GAP, WAY),
     );
-    let right = destination(
-        ui,
-        held,
-        line,
-        rect.right() - PAD - 2.0 * (SMALL + GAP),
-        quiet,
-        device,
-        queue,
-        acts,
-    );
-
+    let right = match (&row.change, drawn.queue.entry(row.id), row.at) {
+        (Change::Placed, Some(held), _) => destination(
+            ui,
+            held,
+            line,
+            right,
+            quiet,
+            drawn.device,
+            drawn.queue,
+            acts,
+        ),
+        (Change::Moved { to, .. }, _, Some(at)) => address(
+            &painter,
+            line,
+            right,
+            &format!("{} → {}", shown(at), shown(*to)),
+            quiet,
+        ),
+        (_, _, Some(at)) => address(&painter, line, right, &shown(at), quiet),
+        (_, _, None) => right,
+    };
     let left = rect.left() + PAD;
     painted(
         ui,
@@ -1594,9 +1481,13 @@ fn item(
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
-    let said = note.said();
-    let note_ink = match (&note.what, selected) {
-        (What::Replaces(_), false) => bad(&visuals),
+    let words = said(row, drawn);
+    let failed = drawn
+        .queue
+        .entry(row.id)
+        .is_some_and(|held| held.failure.is_some());
+    let note_ink = match (failed, selected) {
+        (true, false) => bad(&visuals),
         _ => quiet,
     };
     cut(
@@ -1604,21 +1495,85 @@ fn item(
         name_at,
         (line.bottom() + rect.bottom()) / 2.0 - 2.0,
         rect.right() - PAD - name_at,
-        &said,
+        &words,
         egui::TextFormat::simple(egui::FontId::proportional(NOTE), note_ink),
     );
-
-    // Double-click opens the asset's document, as it does in the tree.
     if response.double_clicked() {
         acts.push(Act::Open(Item::Local(entity.id)));
     }
-    // A drag carries the same payload as the asset's library row, so dropping it on a
-    // slot sends it there.
-    if response.dragged() {
-        egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, device));
+    if response.dragged() && row.change == Change::Placed {
+        egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, drawn.device));
     }
-    // The row truncates the name, so the hover text shows it in full.
-    response.on_hover_text(format!("{}\n{said}\n{why}", entity.name))
+    response.on_hover_text(format!("{}\n{words}", entity.name))
+}
+
+/// The way control's width.
+const WAY: f32 = 44.0;
+
+/// A row's way, at the right of its first line: `↑`, `↓` or `Unlink`, a click turning it
+/// where it can go more than one way, and nothing where it goes none yet. Returns the left
+/// edge of the space it took.
+fn way_control(
+    ui: &mut egui::Ui,
+    row: &Row,
+    sheet: &mut Sheet,
+    drawn: &Drawn,
+    box_: egui::Rect,
+) -> f32 {
+    let way = sheet.way(row, drawn.workspace);
+    let ways = row.ways(drawn.workspace);
+    let text = match (way, &row.change) {
+        (None, _) => "—",
+        (Some(Way::Up), _) => "↑",
+        (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink",
+        (Some(Way::Down), Change::Moved { .. }) => "",
+        (Some(Way::Down), _) => "↓",
+    };
+    let turns = ways.len() > 1 || (way.is_none() && !ways.is_empty());
+    let id = ui.id().with(("way", row.id));
+    let response = ui.interact(box_, id, egui::Sense::click());
+    let visuals = ui.visuals();
+    if turns && response.hovered() {
+        ui.painter()
+            .rect_filled(box_, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    let ink = match way {
+        Some(_) => warn(visuals),
+        None => visuals.weak_text_color(),
+    };
+    ui.painter().text(
+        box_.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(NAME),
+        ink,
+    );
+    let hover = match row.down(drawn.workspace) {
+        Some(why) if matches!(row.change, Change::Ahead | Change::Theirs | Change::Both) => why,
+        _ => "change the way",
+    };
+    if turns && response.on_hover_text(hover).clicked() {
+        sheet.flip(row, drawn.workspace);
+    }
+    box_.left() - GAP
+}
+
+/// A row's address, painted right-aligned to `right`. Returns its left edge.
+fn address(
+    painter: &egui::Painter,
+    line: egui::Rect,
+    right: f32,
+    text: &str,
+    ink: egui::Color32,
+) -> f32 {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::monospace(MONO), ink);
+    let width = galley.size().x;
+    painter.galley(
+        egui::pos2(right - width, line.center().y - galley.size().y / 2.0),
+        galley,
+        ink,
+    );
+    right - width - GAP
 }
 
 /// What one write does to its slot, and the program a piano or sample goes for.
@@ -1638,20 +1593,6 @@ enum What {
     Replaces(String),
     /// The slot has not been read yet.
     Checking,
-}
-
-impl What {
-    /// What the write does at `at`, after the name in the review's title: `new at 8:20`,
-    /// `updates 1:7` or `replaces “Bright Wurly” at 8:5`.
-    fn at(&self, at: Location) -> String {
-        let at = crate::strings::shown(at);
-        match self {
-            What::New => format!("new at {at}"),
-            What::Update => format!("updates {at}"),
-            What::Replaces(name) => format!("replaces “{name}” at {at}"),
-            What::Checking => format!("checking {at}"),
-        }
-    }
 }
 
 impl Writes {
@@ -1908,8 +1849,8 @@ fn flat_chip(
     response
 }
 
-/// The diff's four columns: the field, what the instrument holds, the sign between them,
-/// and what it holds after the send. Any of them may shrink to nothing.
+/// The diff's four columns: the field, what this computer holds, the way between them,
+/// and what the keyboard holds. Any of them may shrink to nothing.
 const DIFF_TRACKS: [Track; 4] = [
     Track::Share(1.4),
     Track::Share(1.0),
@@ -1917,11 +1858,11 @@ const DIFF_TRACKS: [Track; 4] = [
     Track::Share(1.0),
 ];
 
-/// The row of column heads over the diff.
-fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
+/// The row of column heads over the diff, with the way between the two sides.
+fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], way: Option<Way>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let ink = crate::app::caption(ui.visuals());
-    for (head, track) in ["Field", "On the keyboard", "", "After sending"]
+    for (head, track) in ["Field", "This computer", "", "Keyboard"]
         .iter()
         .zip(tracks)
     {
@@ -1934,22 +1875,34 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
             egui::TextFormat::simple(egui::FontId::proportional(11.5), ink),
         );
     }
+    sign(ui, cell(rect, &tracks[2]), way, ink);
 }
 
-/// One value a send changes: `name` is what the instrument holds as `there`, and holds
-/// as `here` after the send.
+/// One value the two sides disagree on: the field's name, what this computer holds, and
+/// what the keyboard holds.
 fn field_row(
     ui: &mut egui::Ui,
     width: f32,
     tracks: &[Range<f32>],
-    name: &str,
-    there: &str,
-    here: &str,
+    way: Option<Way>,
+    said: [&str; 3],
 ) {
+    let [name, here, there] = said;
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     let mono = egui::FontId::monospace(DIFF_MONO);
+    let (mine, theirs) = match way {
+        Some(Way::Up) => (
+            visuals.widgets.active.fg_stroke.color,
+            visuals.weak_text_color(),
+        ),
+        Some(Way::Down) => (
+            visuals.weak_text_color(),
+            visuals.widgets.active.fg_stroke.color,
+        ),
+        None => (visuals.text_color(), visuals.text_color()),
+    };
     let cells = [
         (
             name,
@@ -1957,13 +1910,8 @@ fn field_row(
             visuals.text_color(),
             &tracks[0],
         ),
-        (there, mono.clone(), visuals.weak_text_color(), &tracks[1]),
-        (
-            here,
-            mono,
-            visuals.widgets.active.fg_stroke.color,
-            &tracks[3],
-        ),
+        (here, mono.clone(), mine, &tracks[1]),
+        (there, mono, theirs, &tracks[3]),
     ];
     for (text, font, ink, track) in cells {
         cut(
@@ -1975,13 +1923,8 @@ fn field_row(
             egui::TextFormat::simple(font, ink),
         );
     }
-    sign(
-        ui,
-        cell(rect, &tracks[2]),
-        Glyph::ArrowRight,
-        warn(&visuals),
-    );
-    let _ = response.on_hover_text(format!("{name}: {there} → {here}"));
+    sign(ui, cell(rect, &tracks[2]), way, warn(&visuals));
+    let _ = response.on_hover_text(format!("{name}: {here} · {there}"));
 }
 
 /// The single row for a diff that is not a field list.
@@ -1994,7 +1937,14 @@ fn one_row(
     said: &str,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
-    sign(ui, cell(rect, &tracks[2]), glyph, tint);
+    let mark = egui::Rect::from_center_size(cell(rect, &tracks[2]).left_center(), egui::Vec2::ZERO);
+    painted(
+        ui,
+        glyph,
+        mark.expand(SMALL / 2.0)
+            .translate(egui::vec2(SMALL / 2.0, 0.0)),
+        tint,
+    );
     cut(
         ui.painter(),
         rect.left() + tracks[0].start,
@@ -2005,65 +1955,25 @@ fn one_row(
     );
 }
 
-/// The mark between the two values.
-fn sign(ui: &egui::Ui, box_: egui::Rect, glyph: Glyph, tint: egui::Color32) {
-    painted(
-        ui,
-        glyph,
-        egui::Rect::from_center_size(
-            egui::pos2(box_.left() + SMALL / 2.0, box_.center().y),
-            egui::Vec2::splat(SMALL),
-        ),
-        tint,
-    );
-}
-
-/// The state glyph of an item named `name` whose write does `what`, its tint, and the
-/// sentence explaining it.
-fn state(
-    held: &Queued,
-    name: &str,
-    what: &What,
-    visuals: &egui::Visuals,
-) -> (Glyph, egui::Color32, String) {
-    if let Some(why) = &held.failure {
-        return (Glyph::CircleAlert, bad(visuals), why.clone());
-    }
-    let where_ = place(held.class, held.at);
-    if let (Diff::Identical, Some((was, given))) = (&held.diff, held.renames(name)) {
-        return (
-            Glyph::Replace,
-            warn(visuals),
-            format!(
-                "{where_} already holds these bytes, under the name “{was}”, which this \
-                 renames “{given}”"
+/// The arrow between the two sides, pointing the way Sync takes the row, where it takes
+/// one.
+fn sign(ui: &egui::Ui, box_: egui::Rect, way: Option<Way>, tint: egui::Color32) {
+    let turn = match way {
+        Some(Way::Up) => 0.0,
+        Some(Way::Down) => std::f32::consts::PI,
+        None => return,
+    };
+    Glyph::ArrowRight
+        .image()
+        .rotate(turn, egui::Vec2::splat(0.5))
+        .tint(tint)
+        .paint_at(
+            ui,
+            egui::Rect::from_center_size(
+                egui::pos2(box_.left() + SMALL / 2.0, box_.center().y),
+                egui::Vec2::splat(SMALL),
             ),
         );
-    }
-    let said = || held.replaces.said(held.class, held.at);
-    match (&held.diff, &held.replaces) {
-        (Diff::Pending, _) => (
-            Glyph::Gauge,
-            visuals.weak_text_color(),
-            format!("reading what is in {where_}"),
-        ),
-        (Diff::Identical, Occupancy::Held(occupant)) => (
-            Glyph::CircleCheck,
-            good(visuals),
-            format!(
-                "{where_} already holds these bytes, under the name “{}”",
-                occupant.name
-            ),
-        ),
-        (_, Occupancy::Held(_)) if matches!(what, What::Update) => {
-            (Glyph::Replace, warn(visuals), format!("updates {where_}"))
-        }
-        (_, Occupancy::Held(_)) => (Glyph::Replace, warn(visuals), said()),
-        (_, Occupancy::Vacant) => (Glyph::CircleCheck, good(visuals), said()),
-        // Unread, and no read is out: the write goes ahead without knowing what it
-        // replaces.
-        (_, Occupancy::Unknown) => (Glyph::CircleDot, visuals.weak_text_color(), said()),
-    }
 }
 
 #[cfg(test)]
@@ -2188,10 +2098,10 @@ mod tests {
             .expect("every CBIN container has one")
     }
 
-    /// A linked asset has changed once it is saved over what its slot holds, and stops
-    /// counting once it is queued. An edit nothing has saved has not changed.
+    /// A linked asset is a Sync row once it is saved over what its slot holds, and stays
+    /// one row once queued for that slot. An edit nothing has saved is not a row.
     #[test]
-    fn an_asset_has_changed_once_saved_over_its_slot_and_until_queued() {
+    fn an_asset_is_a_sync_row_once_saved_over_its_slot_and_one_row_while_queued() {
         let (mut workspace, mut log, bytes) = bench();
         let class = ObjectClass::Program;
         let (mut device, _) = attached(&workspace);
@@ -2226,9 +2136,9 @@ mod tests {
         }
 
         let ids = |workspace: &Workspace, device: &Device, queue: &Queue| {
-            changed(workspace, &device.state, queue)
+            crate::bring::rows(&device.state, workspace, queue)
                 .iter()
-                .map(|(id, ..)| *id)
+                .map(|row| row.id)
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(&workspace, &device, &queue), Vec::<u64>::new());
@@ -2252,49 +2162,7 @@ mod tests {
             class,
             at(1),
         );
-        assert_eq!(ids(&workspace, &device, &queue), vec![saved]);
-    }
-
-    /// Each changed asset is queued for the slot it is linked to, and one with no link is
-    /// not, whatever slot holds its bytes.
-    #[test]
-    fn queueing_what_changed_makes_one_entry_each() {
-        let (mut workspace, mut log, bytes) = bench();
-        let class = ObjectClass::Program;
-        let (mut device, _) = attached(&workspace);
-        let mut queue = Queue::default();
-
-        let ids: Vec<u64> = (0..2)
-            .map(|slot| {
-                workspace.ingest(
-                    format!("off-{slot}.ne5p"),
-                    Origin::Device {
-                        class,
-                        at: at(slot),
-                    },
-                    bytes.clone(),
-                    &mut log,
-                )
-            })
-            .collect();
-        let homeless = workspace.ingest("typed-here.ne5p".into(), Origin::Fresh, bytes, &mut log);
-        let held = crc(&workspace, ids[0]);
-        device.pretend_bodies(class, 7, &[Some(("off-0", held)), Some(("off-1", held))]);
-        for (slot, id) in ids.iter().enumerate() {
-            link_to(&mut workspace, &device, *id, at(slot as u32));
-        }
-        for id in ids.iter().copied().chain([homeless]) {
-            edit(&mut workspace, id, &mut log);
-            workspace.mark_saved(id);
-        }
-
-        queue_changed(&workspace, &mut device, &mut queue, &mut log);
-
-        assert_eq!(queue.ids(), ids);
-        assert_eq!(queue.entry(ids[0]).map(|held| held.at), Some(at(0)));
-        assert_eq!(queue.entry(ids[1]).map(|held| held.at), Some(at(1)));
-        assert!(!queue.holds(homeless), "it is linked to no slot");
-        assert!(changed(&workspace, &device.state, &queue).is_empty());
+        assert_eq!(ids(&workspace, &device, &queue), vec![saved, queued]);
     }
 
     /// Two assets cannot wait for one slot, and one asset cannot wait for two: the queue
@@ -2869,7 +2737,7 @@ mod tests {
     }
 
     #[test]
-    fn the_review_says_each_write_is_new_an_update_or_replaces_what_the_slot_holds() {
+    fn the_sheet_says_each_write_is_new_an_update_or_replaces_what_the_slot_holds() {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         let make = |bench: &mut crate::testing::Bench, name: &str| {
@@ -2913,13 +2781,15 @@ mod tests {
         assert_eq!(said(jazzy), "update");
         assert_eq!(said(tine), "replaces “Bright Wurly”");
 
+        bench.act(vec![Act::Sync(None)]);
+        bench.land();
         let mut painted = |picked: u64| {
-            bench.queue.picked = Some(picked);
+            bench.device.asks.sheet.as_mut().expect("open").picked = Some(picked);
             let mut frame = || {
                 let input = testing::screen(egui::vec2(940.0, 600.0), Vec::new());
                 testing::run(&bench.ctx, input, |ctx| {
-                    let (queue, workspace) = (&mut bench.queue, &bench.workspace);
-                    review(ctx, queue, workspace, &bench.device.state, &mut Vec::new());
+                    let (device, workspace) = (&mut bench.device, &bench.workspace);
+                    sheet(ctx, device, &bench.queue, workspace, &mut Vec::new());
                 })
             };
             frame();
@@ -2932,21 +2802,7 @@ mod tests {
             "the word sits under the name: {row:?}"
         );
         assert!(shown.iter().any(|word| word.text == "update"));
-        assert!(shown
-            .iter()
-            .any(|word| word.text == "replaces “Bright Wurly” at 1:3"));
-        assert!(
-            shown.iter().any(|word| word.text == "1 replace"),
-            "an update to a linked slot is no replace"
-        );
-        let mut titled = |id| {
-            painted(id)
-                .into_iter()
-                .map(|word| word.text)
-                .collect::<Vec<_>>()
-        };
-        assert!(titled(jazzy).contains(&"updates 1:2".to_string()));
-        assert!(titled(soul).contains(&"new at 1:1".to_string()));
+        assert!(shown.iter().any(|word| word.text == "new"));
         bench.device.pretend_bodies(
             class,
             1,
@@ -3678,7 +3534,7 @@ mod tests {
         }
     }
 
-    /// The review's diff table for `held`, sent under `name`, as painted.
+    /// The sheet's diff table for `held`, sent under `name`, as painted.
     fn table_words(held: &Queued, name: &str) -> Vec<testing::Word> {
         let ctx = testing::context();
         let input = testing::screen(egui::vec2(620.0, 300.0), Vec::new());
@@ -3686,8 +3542,10 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 table(
                     ui,
-                    held,
-                    name,
+                    &held.diff,
+                    held.renames(name),
+                    Some(Way::Up),
+                    (held.class, held.at),
                     &Workspace::new(ctx.clone()),
                     &DeviceState::default(),
                 )
@@ -3697,15 +3555,14 @@ mod tests {
     }
 
     /// The name goes with the sound, so a send of the same bytes under another name
-    /// renames the slot. The review says so, from the name the keyboard holds to the one
-    /// it will hold, and says nothing of a name that stays.
+    /// renames the slot. The sheet shows the name it gives beside the one the keyboard
+    /// holds, and says nothing of a name that stays.
     #[test]
     fn a_send_that_renames_its_slot_shows_the_name_it_gives() {
         let (mut workspace, mut log, bytes) = bench();
         let mut device = Device::new(workspace.ctx().clone());
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 7, &["Incense"]);
-        let visuals = egui::Visuals::dark();
 
         for (name, renamed) in [("qa-c.ne5p", true), ("Incense.ne5p", false)] {
             let mut queue = Queue::default();
@@ -3735,26 +3592,24 @@ mod tests {
             assert!(matches!(held.diff, Diff::Identical), "{name}");
 
             let said = table_words(held, name);
-            let (_, _, why) = state(held, name, &What::Update, &visuals);
             assert_eq!(
                 said.iter().any(|word| word.text == NAME_ROW),
                 renamed,
                 "{name}"
             );
-            assert_eq!(why.contains("renames"), renamed, "{name}: {why}");
             if renamed {
                 let was = testing::where_(&said, "Incense");
                 let given = testing::where_(&said, "qa-c");
-                assert_eq!(was.left(), testing::where_(&said, "On the keyboard").left());
-                assert_eq!(given.left(), testing::where_(&said, "After sending").left());
+                assert_eq!(was.left(), testing::where_(&said, "Keyboard").left());
+                assert_eq!(given.left(), testing::where_(&said, "This computer").left());
             }
         }
     }
 
-    /// Each row of the diff reads from what the keyboard holds now to what it will hold
-    /// after the send, in the columns as in the hover text.
+    /// Each row of the diff shows what this computer holds beside what the keyboard holds,
+    /// under fixed headings.
     #[test]
-    fn the_diff_reads_from_what_the_keyboard_holds_to_what_it_will_hold() {
+    fn the_diff_shows_this_computer_beside_the_keyboard() {
         let (mut workspace, mut log, bytes) = bench();
         let mut device = Device::new(workspace.ctx().clone());
         let class = ObjectClass::Program;
@@ -3791,11 +3646,11 @@ mod tests {
         assert_ne!(field.there, field.here);
 
         let said = table_words(held, "Africa Split.ne5p");
-        let keyboard = testing::where_(&said, "On the keyboard");
-        let after = testing::where_(&said, "After sending");
-        assert!(keyboard.left() < after.left(), "{keyboard:?} {after:?}");
+        let here = testing::where_(&said, "This computer");
+        let keyboard = testing::where_(&said, "Keyboard");
+        assert!(here.left() < keyboard.left(), "{here:?} {keyboard:?}");
+        assert_eq!(testing::where_(&said, &field.here).left(), here.left());
         assert_eq!(testing::where_(&said, &field.there).left(), keyboard.left());
-        assert_eq!(testing::where_(&said, &field.here).left(), after.left());
         assert!(
             !said.iter().any(|word| word.text == NAME_ROW),
             "the name stays"
@@ -3847,10 +3702,10 @@ mod tests {
         );
     }
 
-    /// Paints the review headlessly with each kind of diff, to catch a layout that panics
+    /// Paints the sheet headlessly with each kind of diff, to catch a layout that panics
     /// or an id that collides.
     #[test]
-    fn the_review_paints_every_kind_of_diff_at_any_window_width() {
+    fn the_sheet_paints_every_kind_of_diff_at_any_window_width() {
         let Bench {
             ctx,
             mut workspace,
@@ -3895,12 +3750,16 @@ mod tests {
             &workspace,
         );
 
+        crate::bring::open(&mut device, None);
+        while let Some(class) = device.state.scan.take() {
+            device.state.scan.finished(class);
+        }
         for width in [700.0_f32, 1280.0] {
             for picked in queue.ids() {
-                queue.picked = Some(picked);
+                device.asks.sheet.as_mut().expect("open").picked = Some(picked);
                 let input = testing::screen(egui::vec2(width, 600.0), Vec::new());
                 testing::run(&ctx, input, |ctx| {
-                    review(ctx, &mut queue, &workspace, &device.state, &mut Vec::new());
+                    sheet(ctx, &mut device, &queue, &workspace, &mut Vec::new());
                 });
             }
         }
