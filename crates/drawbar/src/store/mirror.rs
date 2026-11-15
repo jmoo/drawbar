@@ -2317,10 +2317,8 @@ impl Store {
             const SHOWN: usize = 3;
             let mut unread: Vec<&LibPath> = Vec::new();
             for path in unlisted.difference(&browser.folders.unwalked) {
-                match names::refused_here(path.as_str()) {
-                    Some(refused) => {
-                        log.trouble(format!("drawbar could not read “{path}”: {refused}."))
-                    }
+                match names::refused_here(path.leaf()) {
+                    Some(why) => log.trouble(format!("drawbar could not read “{path}”: {why}.")),
                     None => unread.push(path),
                 }
             }

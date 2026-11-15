@@ -1069,8 +1069,8 @@ impl Browser {
                 ..Cells::default()
             },
         );
-        let why = crate::store::names::refused_here(path.as_str())
-            .unwrap_or_else(|| "drawbar does not open this kind of file".into());
+        let why = crate::store::names::refused_here(path.leaf())
+            .unwrap_or("drawbar does not open this kind of file");
         drawn
             .response
             .on_hover_text(format!("Hidden: {why}."))
@@ -2095,7 +2095,7 @@ mod tests {
             .into_iter()
             .map(|word| word.text)
             .collect();
-        let why = r#"Hidden: "tdot.ne5p." is not a name Windows holds, since it ends with a dot, which Windows drops."#;
+        let why = "Hidden: it ends with a dot, which Windows drops.";
         assert!(said.iter().any(|word| word == why), "{said:?}");
     }
 

@@ -4976,12 +4976,11 @@ fn a_name_windows_drops_the_end_of_is_refused_by_name() {
     let folders = &session.bench.browser.folders;
     let unwalked: Vec<&str> = folders.unwalked.iter().map(LibPath::as_str).collect();
     assert_eq!(unwalked, ["dotdir.", "spacedir "]);
-    for (dir, why) in [("dotdir.", "a dot"), ("spacedir ", "a space")] {
-        let said = format!(
-            "drawbar could not read “{dir}”: {dir:?} is not a name Windows holds, since it ends \
-             with {why}, which Windows drops."
-        );
-        assert_eq!(session.said(&said), 1, "{said}");
+    for said in [
+        "drawbar could not read “dotdir.”: it ends with a dot, which Windows drops.",
+        "drawbar could not read “spacedir ”: it ends with a space, which Windows drops.",
+    ] {
+        assert_eq!(session.said(said), 1, "{said}");
     }
     let hidden: Vec<&str> = folders.others.iter().map(LibPath::as_str).collect();
     assert_eq!(hidden, ["tdot.ne5p.", "tspace.ne5p "]);
