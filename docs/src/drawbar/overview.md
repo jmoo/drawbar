@@ -42,24 +42,20 @@ shows how many files it has.
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
 or both. A file is on both when it is linked to a slot of the attached keyboard,
-and **At** gives that slot. drawbar links a file to a slot when you copy the slot
-to this computer, when a send to it lands, and when the file names the slot that
-holds exactly its sound. Copies, new files and imports start with no link. Equal
-sounds alone link nothing; the inspector shows them as **Also at**, and **Link**
-there, or **Link to** in a row's menu, links them. **Unlink** in the menu undoes a
-link and keeps drawbar from linking the file there again.
+and **At** gives that slot. Copying a slot to this computer or sending a file to a
+slot links the two; **Link to** and **Unlink** in a row's menu change a link.
 
 The mark before a name says how a file stands with its slot: `↑` (Ready to send)
-when the file is newer and a send would settle it, and `!` (Needs attention) when
-the keyboard changed the slot, which only you can settle. An address in gray
+when the file is newer, and `!` (Needs attention) when the keyboard changed the
+slot. An address in gray
 is a slot not read yet, or the slot on a keyboard that is not attached. The
 **Needs** column names the piano or sample a program plays, once it is on this
 computer or on the keyboard. A name in italics with a `*` has unsaved edits.
 Hover anything for an explanation.
 
-Select one program and the inspector's **Plays** card lists what it plays, with
-`!` beside one that is in neither place. A piano's or sample's **Played by** card
-lists the programs on this computer that play it.
+Select one program and the inspector's **Plays** card lists the piano and sample it
+plays. A piano's or sample's **Played by** card lists the programs on this
+computer that play it.
 
 ## Folders and tags
 

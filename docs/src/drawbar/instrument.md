@@ -45,24 +45,21 @@ Drag to move things:
 ## Sending
 
 Nothing is written until you send. Dropping a sound on a slot, **Send to…**,
-**Queue for sending**, and saving a sound newer than the slot it is linked to all
-add to the queue; **Send to…** then opens the review to pick the slot. **Send** in
-the top bar counts what is waiting.
+**Queue for sending**, and saving a sound linked to a slot all add to the queue.
+**Send** in the top bar counts what is waiting.
 
 Click **Send**, or press ⇧⌘S, to review the queue. Each row says whether the write
-is `new`, an `update` of the file's own slot, or `replaces` another sound. Click a
-destination to change it, click × to remove a row, and select a row to see what
-the slot holds now and what it will hold after sending.
+is `new`, an `update`, or `replaces` another sound. Click a destination to change
+it, click × to remove a row, and select a row to see what the slot holds now and
+what it will hold after sending.
 **Send all** writes everything. If the instrument refuses something, the rest
 stays queued.
 
-Queueing a program also queues the piano or sample it plays when that is on this
-computer and not on the instrument, and sends it first.
+A queued program takes along the piano or sample it plays when only this computer
+has it.
 
 When sounds on this computer are newer than the slots they are linked to, a
-**Queue** button appears beside **Send**. Click it to queue them all. A slot the
-keyboard changed is never queued over; the sound is listed under **Needs
-attention**.
+**Queue** button appears beside **Send**. Click it to queue them all.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel. Sending a sound renamed on this computer renames its
@@ -71,13 +68,9 @@ slot, even when the slot already holds the same sound.
 ## Changes made on the keyboard
 
 Once a newly attached keyboard has been read, drawbar lists the linked sounds that
-changed there since: changed slots, sounds moved to another slot, and sounds
-removed. **Bring them in** saves each changed slot into its file, moves each
-moved sound's link, and unlinks each removed sound's file, which stays on this
-computer. Slots changed later while the keyboard stays attached are brought in
-without asking. **Not now** leaves them marked. Pianos and samples are not brought
-in; copy them to this computer instead. Library undo, or **Undo** in the activity
-log, puts a file back.
+changed there since. **Bring them in** updates their files to match; **Not now**
+leaves them marked. Library undo, or **Undo** in the activity log, puts a file
+back.
 
 ## Safety
 
@@ -96,5 +89,4 @@ log, puts a file back.
 ## Disconnecting
 
 Unplug, and the instrument's slots disappear. The send queue is kept, so plug
-back in and send. A sound queued for one keyboard is not sent to another: it keeps
-its place and says why.
+back in and send.

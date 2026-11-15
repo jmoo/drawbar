@@ -13,19 +13,11 @@ size, and `edited` or `waiting to send`. The place carries the library's mark:
 any of them for the detail.
 
 To the right are the two faces, **Revert**, **Export…**, and the document's
-main action. It is **Save** while the document is edited; **Send to…** for a
-document linked to no slot, which queues it and opens the review to pick its
-slot; **Load on instrument** when its slot holds it, which makes the panel play
-that slot; and **Send to 1:7** when the slot holds an earlier version. A document
-whose slot the keyboard changed has **Choose…**, which shows the fields that
-differ: **Use the keyboard’s** saves the slot's version into the document, and
-**Use mine** queues the document's to the slot. The action is grayed out when
-there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
-over` when the send cannot happen yet. The panel plays what the instrument holds,
-so edits you have not sent are not heard.
-
-Saving a linked document that is then newer than its slot queues the send to that
-slot.
+main action: **Save**, **Send to…**, **Load on instrument**, or **Choose…** when
+the keyboard changed the document's slot and you pick which version to keep. It
+becomes a warning such as `Won't fit · 70 MB over` when the send cannot happen
+yet. The panel plays what the instrument holds, so edits you have not sent are
+not heard.
 
 ## The faces
 
@@ -65,10 +57,9 @@ a lamp. Double-click a knob to type a value.
 
 Where a program refers to a piano or sample, drawbar shows its name when that
 piano or sample is on this computer or on the instrument. With an instrument
-connected, the piano
-**Model** lists its pianos of the chosen **Type**. Changing either one points the
-program at the piano now chosen, which is what the instrument plays. Sections the
-program stores but is not using are folded away.
+connected, the piano **Model** lists its pianos of the chosen **Type**. Changing
+either one points the program at the piano now chosen, which is what the
+instrument plays. Sections the program stores but is not using are folded away.
 
 A control with a morph shows three dots. Pick a morph source in the inspector's
 **Morph** card and every morphed control shows that source's target instead.
