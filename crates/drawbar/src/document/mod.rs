@@ -30,7 +30,7 @@ mod panel;
 pub(crate) mod piano;
 mod project;
 pub(crate) mod sample;
-mod setlist;
+pub(crate) mod setlist;
 mod table;
 pub(crate) mod text;
 mod verbatim;

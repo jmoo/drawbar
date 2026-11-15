@@ -279,7 +279,7 @@ fn member(
 ///
 /// ⚠️ The Electro 5 plays the piano the id names, and the piano at the dials' position
 /// only where the id is 0. Confirmed on hardware.
-fn dialed(decoded: Option<&Entity>) -> Option<(u8, usize)> {
+pub(crate) fn dialed(decoded: Option<&Entity>) -> Option<(u8, usize)> {
     let Some(Entity::Program(Program::Electro5(program))) = decoded else {
         return None;
     };

@@ -16,7 +16,8 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
-use crate::device::{fit, occupancy, Device, Fit};
+use crate::device::{fit, occupancy, Device, DeviceState, Fit};
+use crate::plays::Catalog;
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
@@ -252,6 +253,8 @@ struct Shown {
     offers: Vec<(Bulk, Offer)>,
     /// Each tag on any of the selection, and whether it is on all of it.
     wearing: Vec<(u64, String, bool)>,
+    /// What one picked row plays, or what plays it.
+    sounds: Option<Sounds>,
 }
 
 /// What the selection card says about what is picked.
@@ -337,6 +340,10 @@ impl Shown {
             })
             .collect();
         let wearing = wearing(&locals, browser.tags());
+        let sounds = match checked.as_slice() {
+            [item] => sounds(*item, workspace, &device.state),
+            _ => None,
+        };
         Shown {
             sources,
             checked,
@@ -345,6 +352,7 @@ impl Shown {
             going,
             offers,
             wearing,
+            sounds,
         }
     }
 }
@@ -384,6 +392,9 @@ fn selection(
         acts,
     );
     kept_apart(ui, &shown.locals, browser, acts);
+    if let Some(sounds) = &shown.sounds {
+        sounds_card(ui, sounds, acts);
+    }
     let answer = answered(browser, device).filter(|_| shown.sources.front.is_none());
     if let Some((slot, deps)) = answer {
         dependencies(ui, slot, deps);
@@ -733,6 +744,153 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     });
 }
 
+/// What the Plays or Played by card lists for the one picked row.
+#[derive(Debug, PartialEq, Eq)]
+enum Sounds {
+    /// The pianos and samples a program plays, piano first.
+    Plays(Vec<Sound>),
+    /// The programs a set list plays, by address, each with its name where it resolves.
+    Programs(Vec<(Location, Option<String>)>),
+    /// The programs on this computer that play a piano or sample.
+    PlayedBy(Vec<(u64, String)>),
+}
+
+/// A piano or sample a program plays.
+#[derive(Debug, PartialEq, Eq)]
+struct Sound {
+    class: ObjectClass,
+    /// Its name, or its id where nothing here or on the instrument goes by it.
+    name: String,
+    lies: Lies,
+}
+
+/// Where a piano or sample a program plays is.
+#[derive(Debug, PartialEq, Eq)]
+enum Lies {
+    Here,
+    /// Only in this slot of the attached instrument.
+    KeyboardOnly(Location),
+    Nowhere,
+}
+
+/// What the one picked row plays, or what plays it: `None` for a row that neither plays
+/// nor is played.
+fn sounds(item: Item, workspace: &Workspace, device: &DeviceState) -> Option<Sounds> {
+    let entity = match item {
+        Item::Local(id) => workspace.get(id)?,
+        Item::Slot { class, at } if class.is_library() => {
+            let name = device.slot(class, at).flatten()?.name.trim();
+            return Some(played_by(workspace, crate::plays::slot_key(class, name)));
+        }
+        Item::Slot { .. } | Item::Folder(_) | Item::Tag(_) => return None,
+    };
+    if let Some(key) = crate::plays::key_of(entity) {
+        return Some(played_by(workspace, key));
+    }
+    let decoded = entity.entity.as_deref();
+    let seen = crate::document::setlist::Catalog { device, workspace };
+    if let Some(programs) = decoded.and_then(|song| crate::document::setlist::programs(song, &seen)) {
+        return Some(Sounds::Programs(programs));
+    }
+    let catalog = Catalog::of(workspace, device);
+    let mut plays: Vec<Sound> = crate::plays::named(entity)
+        .iter()
+        .map(|plays| sound(plays.key(), &catalog))
+        .collect();
+    let dialed = crate::bundle::dialed(decoded)
+        .and_then(|(category, model)| device.piano_at(category, model));
+    if let Some(piano) = dialed {
+        plays.insert(0, sound(crate::plays::slot_key(ObjectClass::Piano, piano), &catalog));
+    }
+    (!plays.is_empty()).then_some(Sounds::Plays(plays))
+}
+
+fn sound((class, id): crate::plays::Key, catalog: &Catalog) -> Sound {
+    let Some(found) = catalog.get((class, id)) else {
+        return Sound {
+            class,
+            name: format!("{} {id:#010x}", Kind::from_class(class).chip()),
+            lies: Lies::Nowhere,
+        };
+    };
+    let lies = match (found.here.is_empty(), found.there) {
+        (true, Some(at)) => Lies::KeyboardOnly(at),
+        _ => Lies::Here,
+    };
+    Sound {
+        class,
+        name: found.name.clone(),
+        lies,
+    }
+}
+
+fn played_by(workspace: &Workspace, key: crate::plays::Key) -> Sounds {
+    let programs = crate::plays::played_by(workspace, key)
+        .map(|entity| (entity.id, crate::strings::display_name(&entity.name).to_string()))
+        .collect();
+    Sounds::PlayedBy(programs)
+}
+
+/// The Plays card of a program or set list, or the Played by card of a piano or sample.
+fn sounds_card(ui: &mut egui::Ui, sounds: &Sounds, acts: &mut Vec<Act>) {
+    match sounds {
+        Sounds::Plays(plays) => card(ui, Head::fixed(Glyph::ListMusic, "Plays"), |ui| {
+            plays.iter().for_each(|sound| sound_line(ui, sound, acts));
+        }),
+        Sounds::Programs(programs) => card(ui, Head::fixed(Glyph::ListMusic, "Plays"), |ui| {
+            for (n, (at, name)) in (1..).zip(programs) {
+                let name = name.as_deref().unwrap_or("—");
+                void(ui, &format!("{n}  {}  {name}", crate::strings::shown(*at)));
+            }
+        }),
+        Sounds::PlayedBy(programs) => {
+            let head = Head {
+                badge: Some((programs.len().to_string(), caption(ui.visuals()))),
+                ..Head::fixed(Glyph::ListMusic, "Played by")
+            };
+            card(ui, head, |ui| {
+                if programs.is_empty() {
+                    return faint(ui, "No program here plays it.");
+                }
+                for (id, name) in programs {
+                    if ui.link(egui::RichText::new(name).text_style(ui_text())).clicked() {
+                        acts.push(Act::Open(Item::Local(*id)));
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// One piano or sample a program plays: its name, and where it is when that is not here.
+fn sound_line(ui: &mut egui::Ui, sound: &Sound, acts: &mut Vec<Act>) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(LINE);
+        let quiet = ui.visuals().weak_text_color();
+        icon(ui, Kind::from_class(sound.class).glyph(), GLYPH, quiet);
+        if sound.lies == Lies::Nowhere {
+            ui.label(egui::RichText::new("!").text_style(ui_text()).color(warn(ui.visuals())));
+        }
+        ui.label(egui::RichText::new(&sound.name).text_style(ui_text()));
+        let note = match sound.lies {
+            Lies::Here => return,
+            Lies::KeyboardOnly(_) => "on the keyboard only",
+            Lies::Nowhere => "not here",
+        };
+        ui.label(egui::RichText::new(note).text_style(ui_text()).weak());
+        if let Lies::KeyboardOnly(at) = sound.lies {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Copy").clicked() {
+                    acts.push(Act::Copy {
+                        class: sound.class,
+                        at,
+                    });
+                }
+            });
+        }
+    });
+}
+
 /// A note that a change to something picked is kept apart, opening Kept apart.
 fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut Vec<Act>) {
     if !picked.iter().any(|&id| browser.folders.keeps_apart(id)) {
@@ -887,7 +1045,7 @@ mod tests {
     use super::*;
     use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
-    use crate::workspace::Fresh;
+    use crate::workspace::{Fresh, Origin};
     use nord_usb::wire::{Dependency, Status};
 
     /// An instrument that has counted a library, holds a program, and has answered which
@@ -1106,6 +1264,167 @@ mod tests {
                 .any(|word| word.text == place(ObjectClass::Program, at)),
             "the badge names the slot that was asked about: {said:?}"
         );
+    }
+
+    fn program_playing(piano: &str, sample: u32) -> Vec<u8> {
+        let sets = [
+            (
+                "piano_panel.id".into(),
+                crate::plays::slot_key(ObjectClass::Piano, piano).1.to_string(),
+            ),
+            ("sample_panel.id".into(), sample.to_string()),
+        ];
+        crate::fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn a_program_plays_what_is_here_on_the_keyboard_only_or_nowhere() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let marimba = crate::plays::slot_key(ObjectClass::Sample, "Marimba").1;
+        let program = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", marimba),
+            &mut log,
+        );
+        let gone = workspace.ingest(
+            "Pad.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", 0x0999_0999),
+            &mut log,
+        );
+        workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        device.pretend_lengths(ObjectClass::Sample, 1, &[None, Some(("Marimba", 1000))]);
+        let marimba_at = Location::from_user(1, 2);
+
+        let plays = |id| sounds(Item::Local(id), &workspace, &device.state);
+        let tine = Sound {
+            class: ObjectClass::Piano,
+            name: "Tine".into(),
+            lies: Lies::Here,
+        };
+        assert_eq!(
+            plays(program),
+            Some(Sounds::Plays(vec![
+                tine,
+                Sound {
+                    class: ObjectClass::Sample,
+                    name: "Marimba".into(),
+                    lies: Lies::KeyboardOnly(marimba_at),
+                },
+            ]))
+        );
+        let Some(Sounds::Plays(of_gone)) = plays(gone) else {
+            panic!("a program plays");
+        };
+        assert_eq!(
+            of_gone[1],
+            Sound {
+                class: ObjectClass::Sample,
+                name: "sample 0x09990999".into(),
+                lies: Lies::Nowhere,
+            }
+        );
+    }
+
+    #[test]
+    fn a_piano_is_played_by_the_programs_here_that_name_it() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let keys = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", 0),
+            &mut log,
+        );
+        workspace.ingest(
+            "Other.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Wurli", 0),
+            &mut log,
+        );
+        let tine = workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        device.pretend_lengths(ObjectClass::Piano, 3, &[Some(("Tine", 1000))]);
+        let by_keys = Some(Sounds::PlayedBy(vec![(keys, "Keys".into())]));
+
+        assert_eq!(sounds(Item::Local(tine), &workspace, &device.state), by_keys);
+        let slot = Item::Slot {
+            class: ObjectClass::Piano,
+            at: Location::from_user(3, 1),
+        };
+        assert_eq!(sounds(slot, &workspace, &device.state), by_keys);
+    }
+
+    #[test]
+    fn a_set_list_plays_its_programs_by_address_named_where_they_resolve() {
+        use nord_format::formats::ne5;
+        use nord_format::{Entity, Song};
+
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let (one, two) = ((0, 0).try_into().unwrap(), (1, 3).try_into().unwrap());
+        let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one, two, one, one]).unwrap();
+        let bytes = nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap();
+        let id = workspace.ingest("Gig.ne5t".into(), Origin::Fresh, bytes, &mut log);
+        device.pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+
+        let Some(Sounds::Programs(programs)) = sounds(Item::Local(id), &workspace, &device.state)
+        else {
+            panic!("a set list plays programs");
+        };
+        assert_eq!(
+            programs[..2],
+            [
+                (Location::from_user(1, 1), Some("Africa Split".to_string())),
+                (Location::from_user(2, 4), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_plays_card_says_where_a_sound_is_missing_and_offers_a_copy() {
+        let ctx = context();
+        let plays = Sounds::Plays(vec![
+            Sound {
+                class: ObjectClass::Piano,
+                name: "Tine".into(),
+                lies: Lies::Here,
+            },
+            Sound {
+                class: ObjectClass::Sample,
+                name: "Marimba".into(),
+                lies: Lies::KeyboardOnly(Location::from_user(1, 2)),
+            },
+            Sound {
+                class: ObjectClass::Sample,
+                name: "sample 0x09990999".into(),
+                lies: Lies::Nowhere,
+            },
+        ]);
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                sounds_card(ui, &plays, &mut Vec::new());
+            });
+        });
+        let said = testing::words(&output);
+        for word in ["Plays", "Tine", "on the keyboard only", "Copy", "!", "not here"] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
     }
 
     #[test]

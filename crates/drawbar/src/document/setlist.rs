@@ -219,6 +219,16 @@ impl Row {
     }
 }
 
+/// The programs a set list plays, in order, each with its name where one resolves.
+pub(crate) fn programs(entity: &Entity, seen: &Catalog<'_>) -> Option<Vec<(Location, Option<String>)>> {
+    let file = song(entity)?;
+    let resolved = file.body.programs().map(|at| {
+        let at = panel(at);
+        (at, resolve(at, seen).0)
+    });
+    Some(resolved.to_vec())
+}
+
 /// The address one-indexed, as the instrument shows it, in the [`Location`] the rest of
 /// the app addresses a slot with.
 fn panel(at: program::Location) -> Location {
