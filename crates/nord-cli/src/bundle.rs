@@ -514,6 +514,37 @@ mod tests {
     }
 
     #[test]
+    fn inspect_and_unpack_both_read_a_drum_bank_without_a_manifest() {
+        let dir = crate::edit::tests::scratch("unpack-drum-bank");
+        let program = |slot: u16| {
+            let file = nord_format::cbin::Cbin {
+                header: Header::new("nd2p", (0, slot), 1),
+                body: nord_format::cbin::RawBody(vec![0x5a; 16]),
+            };
+            let mut out = std::io::Cursor::new(Vec::new());
+            file.write_to(&mut out).unwrap();
+            out.into_inner()
+        };
+        let (one, two) = (program(0), program(1));
+        let members = [("One.nd2p", &one[..]), ("Two.nd2p", &two[..])];
+        let path = dir.join("kits.nd2_bank");
+        std::fs::write(&path, stored(&members)).unwrap();
+        let inspected = nord_format::from_path(&path).expect("inspect a drum bank");
+        assert!(
+            matches!(
+                inspected,
+                nord_format::Entity::Bundle(nord_format::Bundle::Drum2Bank(_))
+            ),
+            "inspect read {inspected:?}"
+        );
+        let out = dir.join("kits");
+        unpack(&Ui::piped(), &path, Some(out.clone())).expect("unpack a drum bank");
+        for (name, bytes) in members {
+            assert_eq!(std::fs::read(out.join(name)).unwrap(), bytes, "{name}");
+        }
+    }
+
+    #[test]
     fn an_archive_path_that_could_leave_the_folder_is_refused() {
         assert_eq!(
             relative("Program/Bank 7/foo.ne5p").unwrap(),

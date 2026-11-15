@@ -108,17 +108,34 @@ impl Manifest {
     }
 }
 
-/// Refuses an archive that is not a whole bundle or backup: one with no member but its
-/// manifest, or whose manifest is missing, or is neither one [`Manifest::parse`] reads
-/// nor a [backup's](is_backup). A member the manifest does not name is let be: a bundle's
+/// Whether an archive holding members named `names` must carry a manifest: it holds an
+/// Electro 5 file, by its `.ne5*` extension. A drum bank, or another model's bundle or
+/// backup, is read without one.
+///
+/// ⚠️ `meta.xml` is shared across product families; only `.ne5*` members identify an
+/// Electro 5 archive.
+pub fn required<'a>(mut names: impl Iterator<Item = &'a str>) -> bool {
+    names.any(|name| {
+        std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
+    })
+}
+
+/// Refuses an archive with no member but its manifest, and an archive whose manifest is
+/// [`required`] and missing, or is neither one [`Manifest::parse`] reads nor a
+/// [backup's](is_backup). A member the manifest does not name is let be: a bundle's
 /// names only the members with dependencies, and what they depend on.
 pub fn check(r: &mut (impl Read + Seek), directory: &Directory) -> Result<(), Error> {
-    if directory
+    let names = directory
         .members
         .iter()
-        .all(|member| member.entry.name == PATH)
-    {
+        .map(|member| member.entry.name.as_str());
+    if names.clone().all(|name| name == PATH) {
         return Err(ArchiveError::Empty.into());
+    }
+    if !required(names) {
+        return Ok(());
     }
     let member = directory
         .get(PATH)

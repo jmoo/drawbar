@@ -107,6 +107,26 @@ fn an_archive_with_no_members_or_no_readable_manifest_is_refused() {
     }
 }
 
+#[test]
+fn only_an_archive_holding_an_electro_5_file_needs_a_manifest() {
+    let check = |members: &[(&str, &[u8])]| {
+        let mut reader = std::io::Cursor::new(archive(members));
+        let directory = nord_format::bundle::archive::Directory::read_from(&mut reader).unwrap();
+        manifest::check(&mut reader, &directory).map_err(|e| e.to_string())
+    };
+    let (electro, drum) = (program(0), drum_program());
+    assert_eq!(
+        check(&[("Bank 1/One.ne5p", &electro), ("One.nd2p", &drum)]),
+        Err("the archive has no meta.xml".into())
+    );
+    assert_eq!(check(&[("One.nd2p", &drum), ("Two.nd2p", &drum)]), Ok(()));
+    assert_eq!(check(&[("One.nd2p", &drum), ("One.nd3k", &drum)]), Ok(()));
+    assert_eq!(
+        check(&[("meta.xml", b"garbage")]),
+        Err("the archive holds no members".into())
+    );
+}
+
 /// A backup carries its own manifest in place of a bundle's, and reads as a bundle does.
 #[test]
 fn a_backup_manifest_stands_in_for_a_bundles() {

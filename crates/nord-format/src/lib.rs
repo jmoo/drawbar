@@ -684,13 +684,7 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         if names.is_empty() {
             return Err(bundle::archive::ArchiveError::Empty.into());
         }
-        // ⚠️ `meta.xml` is shared across product families; only `.ne5*` members identify
-        // an Electro 5 bundle.
-        if names.iter().any(|n| {
-            std::path::Path::new(n.as_ref())
-                .extension()
-                .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
-        }) {
+        if bundle::manifest::required(names.iter().map(|n| n.as_ref())) {
             ZipKind::Electro5
         } else if names.iter().all(|n| n.ends_with(".nd2p")) {
             ZipKind::Drum2
