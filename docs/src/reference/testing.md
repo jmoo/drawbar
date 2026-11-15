@@ -84,6 +84,21 @@ Each test writes only to the last vacant slots of bank 1 and deletes only names
 it gave, and the last test checks that every class holds what it held when the
 run started.
 
+A second suite, `crates/drawbar/src/device/links_on_hardware.rs`, checks links
+between library files and program slots on an Electro 5: copies, sends, saves,
+moves, slots changed or emptied behind drawbar's back, files whose header names
+their slot, and the piano and sample a program plays. Run it the same way:
+
+```sh
+DRAWBAR_HARDWARE=1 cargo test -p drawbar --lib device::links_on_hardware -- --ignored --test-threads=1 --nocapture
+```
+
+It writes to programs 7:6 and 7:44, which must be empty when it starts, to
+programs 8:1 to 8:12, which it reads first with nord-cli and puts back, and to
+one empty sample slot under a name starting `drawbar-hw-`. Every test restores
+them when it ends. `DRAWBAR_HARDWARE_SMALL_SAMPLE` names the sample file it
+sends; it defaults to the demo `drawbar-pad.nsmp` fixture.
+
 ## In the browser
 
 `crates/drawbar/tests/web.rs` runs the browser's library through its worker: in
