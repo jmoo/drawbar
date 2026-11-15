@@ -51,7 +51,7 @@ link and keeps drawbar from linking the file there again.
 
 The mark before a name says how a file stands with its slot: `↑` (Ready to send)
 when the file is newer and a send would settle it, and `!` (Needs attention) when
-the keyboard changed the slot, which only you can settle. An address in gray
+the keyboard changed or emptied the slot, which only you can settle. An address in gray
 is a slot not read yet, or the slot on a keyboard that is not attached. The
 **Needs** column names the piano or sample a program plays, once it is on this
 computer or on the keyboard. A name in italics with a `*` has unsaved edits.

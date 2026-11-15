@@ -1367,27 +1367,34 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
             "{} has not been found on the instrument yet",
             folder(class)
         ))),
-        (Standing::Ahead, None) => Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick)),
-        (Standing::Ahead, Some(at)) => Some(match over(entity, class, at, device) {
-            Some((over, free)) => Loud {
-                label: format!("Won't fit · {} over", room::measure(over)),
-                short: format!("{} over", room::measure(over)),
-                glyph: Glyph::CircleAlert,
-                tone: Tone::Blocked,
-                hint: format!(
-                    "{} is free for {}, and this is {}",
-                    room::measure(free),
-                    place(class, at),
-                    room::measure(entity.size())
+        (Standing::Ahead | Standing::Gone, None) => {
+            Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick))
+        }
+        (Standing::Ahead | Standing::Gone, Some(at)) => {
+            Some(match over(entity, class, at, device) {
+                Some((over, free)) => Loud {
+                    label: format!("Won't fit · {} over", room::measure(over)),
+                    short: format!("{} over", room::measure(over)),
+                    glyph: Glyph::CircleAlert,
+                    tone: Tone::Blocked,
+                    hint: format!(
+                        "{} is free for {}, and this is {}",
+                        room::measure(free),
+                        place(class, at),
+                        room::measure(entity.size())
+                    ),
+                    click: Click::Nothing,
+                },
+                None => send(
+                    format!("Send to {}", shown(at)),
+                    match linked.standing {
+                        Standing::Gone => format!("puts it back in {}", place(class, at)),
+                        _ => format!("replaces {}", place(class, at)),
+                    },
+                    Click::Send(class, at),
                 ),
-                click: Click::Nothing,
-            },
-            None => send(
-                format!("Send to {}", shown(at)),
-                format!("replaces {}", place(class, at)),
-                Click::Send(class, at),
-            ),
-        }),
+            })
+        }
     }
 }
 

@@ -4108,10 +4108,7 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &[None, None, None]);
         assert_eq!(
             bound(&mut bench),
-            (
-                Some((Some(at(2)), Standing::Ahead)),
-                Bound::At(class, at(2))
-            )
+            (Some((Some(at(2)), Standing::Gone)), Bound::At(class, at(2)))
         );
 
         bench
@@ -4148,7 +4145,7 @@ mod tests {
         let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
         assert_eq!(
             (linked.at, linked.standing),
-            (None, Standing::Ahead),
+            (None, Standing::Gone),
             "gone from the keyboard"
         );
         assert_eq!(

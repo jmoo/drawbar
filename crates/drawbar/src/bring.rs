@@ -777,8 +777,34 @@ mod tests {
         walked(&mut bench, &[None, Some(crc(&body()))]);
         let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
         linked(&mut bench, "B.ne5p", body(), 2, &body());
-        assert_eq!(standing(&bench, id), Some(Standing::Ahead));
+        assert_eq!(standing(&bench, id), Some(Standing::Gone));
         assert_eq!(since(&bench.device.state, &bench.workspace), []);
+    }
+
+    #[test]
+    fn an_emptied_slot_is_put_back_only_by_its_explicit_send() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[None]);
+        let id = linked(&mut bench, "A.ne5p", gained("40"), 1, &body());
+        assert_eq!(standing(&bench, id), Some(Standing::Gone));
+        let state = &bench.device.state;
+        assert_eq!(
+            crate::queue::offer(&bench.workspace, state, &bench.queue),
+            None
+        );
+        let entity = bench.workspace.get(id).unwrap();
+        let loud = crate::document::action(entity, state).unwrap();
+        assert_eq!(loud.label, "Send to 1:1");
+        assert_eq!(loud.click, crate::document::Click::Send(PROGRAM, at(1)));
+
+        bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+        assert!(!bench.queue.holds(id), "Save queues nothing");
+        bench.act(vec![crate::browser::Act::Send {
+            id,
+            class: PROGRAM,
+            at: at(1),
+        }]);
+        assert!(bench.queue.holds(id));
     }
 
     #[test]

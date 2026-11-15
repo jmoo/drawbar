@@ -1992,7 +1992,7 @@ pub(crate) fn slot_items(
             Act::LoadOnInstrument { class, at },
         ));
     }
-    if let (Standing::Ahead, Some(at)) = (linked.standing, linked.at) {
+    if let (Standing::Ahead | Standing::Gone, Some(at)) = (linked.standing, linked.at) {
         sends.push((
             format!("Send to {}", shown(at)),
             Act::Send { id, class, at },

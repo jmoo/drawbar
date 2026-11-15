@@ -683,7 +683,7 @@ fn l05_a_slot_overwritten_behind_drawbars_back_is_theirs_and_saving_queues_nothi
 
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
-fn l06_a_slot_emptied_behind_drawbars_back_is_ahead_and_a_send_puts_it_back() {
+fn l06_a_slot_emptied_behind_drawbars_back_is_gone_and_an_explicit_send_puts_it_back() {
     if !attached() {
         return;
     }
@@ -699,10 +699,19 @@ fn l06_a_slot_emptied_behind_drawbars_back_is_ahead_and_a_send_puts_it_back() {
     let linked = linked(&rig, id).expect("still linked");
     assert_eq!(
         (linked.at, linked.there, linked.standing),
-        (Some(from), There::Vacant, Standing::Ahead)
+        (Some(from), There::Vacant, Standing::Gone)
     );
-    assert_eq!(changed(&rig), [id]);
+    assert!(changed(&rig).is_empty(), "not owed a send on its own");
     act(&mut rig, vec![Act::QueueChanged]);
+    assert!(queued(&rig).is_empty());
+    act(
+        &mut rig,
+        vec![Act::Send {
+            id,
+            class: PROGRAM,
+            at: from,
+        }],
+    );
     assert_eq!(queued(&rig), [(id, PROGRAM, from)]);
     send_queued(&mut rig);
     assert_eq!(standing(&rig, id), Some((from, Standing::Same)));

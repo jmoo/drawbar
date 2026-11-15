@@ -63,6 +63,7 @@ impl Where {
             Where::Both(Standing::Both) => {
                 "On this computer and in its slot, and both have changed."
             }
+            Where::Both(Standing::Gone) => "On this computer, and its slot is empty.",
             Where::Both(Standing::Unread) => "On this computer and in a slot not read yet.",
             Where::Computer => "On this computer only.",
             Where::Foreign => "On this computer only. Not for this keyboard.",
@@ -83,7 +84,7 @@ impl Where {
     /// computer, and the instrument.
     fn rank(self) -> u8 {
         match self {
-            Where::Both(Standing::Theirs | Standing::Both) => 0,
+            Where::Both(Standing::Theirs | Standing::Both | Standing::Gone) => 0,
             Where::Both(Standing::Ahead) => 1,
             Where::Both(Standing::Unread) => 2,
             Where::Both(Standing::Same) => 3,
@@ -362,9 +363,9 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, linked: Option<&Linke
 /// [`mark_words`] explains each one wherever it is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
-    /// Its slot holds an earlier version, or nothing: a send settles it.
+    /// Its slot holds an earlier version: a send settles it.
     Ahead,
-    /// The keyboard changed its slot, and only the user can settle it.
+    /// The keyboard changed or emptied its slot, and only the user can settle it.
     Attention,
     Unsaved,
 }
@@ -374,7 +375,7 @@ impl Mark {
     pub fn of(standing: Standing) -> Option<Mark> {
         match standing {
             Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs | Standing::Both => Some(Mark::Attention),
+            Standing::Theirs | Standing::Both | Standing::Gone => Some(Mark::Attention),
             Standing::Same | Standing::Unread => None,
         }
     }
@@ -2105,6 +2106,7 @@ mod tests {
         assert_eq!(sign(Standing::Ahead), Some("↑"));
         assert_eq!(sign(Standing::Theirs), Some("!"));
         assert_eq!(sign(Standing::Both), Some("!"));
+        assert_eq!(sign(Standing::Gone), Some("!"));
         assert_eq!(sign(Standing::Same), None);
         assert_eq!(sign(Standing::Unread), None);
     }
@@ -3009,8 +3011,8 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &[None]);
         assert_eq!(
             looks(&bench),
-            (Where::Computer, Some(Mark::Ahead)),
-            "a send puts it back"
+            (Where::Computer, Some(Mark::Attention)),
+            "emptied on the keyboard"
         );
     }
 

@@ -165,9 +165,11 @@ pub enum Standing {
     /// Not known yet: the slot's bank, or the file, has not been read.
     Unread,
     Same,
-    /// The file is newer: the slot holds an earlier version, or nothing. A send settles
-    /// it.
+    /// The file is newer: the slot holds an earlier version. A send settles it.
     Ahead,
+    /// The slot is empty: its sound was deleted on the keyboard or moved off it. Only an
+    /// explicit send puts it back.
+    Gone,
     /// The slot holds a version the file never had, and the file has not changed.
     Theirs,
     /// The slot holds a version the file never had, and the file has changed too.
@@ -175,7 +177,7 @@ pub enum Standing {
 }
 
 impl Standing {
-    /// Whether only the user can settle it.
+    /// Whether the user must choose between the file and what the slot holds.
     pub fn needs_attention(self) -> bool {
         matches!(self, Standing::Theirs | Standing::Both)
     }
@@ -193,7 +195,7 @@ pub fn standing(held: &Held, here: Option<Print>, there: There) -> Standing {
     let unchanged_here = here == held.base;
     match there {
         There::Unread => Standing::Unread,
-        There::Vacant => Standing::Ahead,
+        There::Vacant => Standing::Gone,
         There::Holds { crc: Some(crc), .. } if crc == here.crc => Standing::Same,
         There::Holds { crc: Some(crc), .. } if held.knew(crc) => Standing::Ahead,
         There::Holds { crc: Some(_), .. } => changed_there(unchanged_here),
@@ -249,11 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_slot_is_behind_its_file() {
-        assert_eq!(
-            standing(&program(V1), Some(V1), There::Vacant),
-            Standing::Ahead
-        );
+    fn an_emptied_slot_is_gone_whatever_the_file_holds() {
+        for here in [V1, V2] {
+            let gone = standing(&program(V1), Some(here), There::Vacant);
+            assert_eq!(gone, Standing::Gone);
+            assert!(!gone.needs_attention(), "nothing to choose between");
+        }
     }
 
     #[test]

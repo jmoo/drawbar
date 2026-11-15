@@ -366,8 +366,7 @@ fn taken(class: ObjectClass, holder: Location) -> String {
 }
 
 /// The assets not in the queue that are newer than the slot they are linked to on the
-/// attached keyboard, each with that slot's class and its address, where a walk has found
-/// one.
+/// attached keyboard, each with that slot.
 ///
 /// An edit queues nothing; saving a linked asset does. This finds saved assets that are
 /// not waiting, which a send would skip.
@@ -375,13 +374,14 @@ pub fn changed(
     workspace: &Workspace,
     device: &DeviceState,
     queue: &Queue,
-) -> Vec<(u64, ObjectClass, Option<Location>)> {
+) -> Vec<(u64, ObjectClass, Location)> {
     workspace
         .listed()
         .filter(|entity| !queue.holds(entity.id))
         .filter_map(|entity| {
             let linked = crate::device::standing_of(device, entity)?;
-            (linked.standing == Standing::Ahead).then_some((entity.id, linked.class, linked.at))
+            let at = linked.at.filter(|_| linked.standing == Standing::Ahead)?;
+            Some((entity.id, linked.class, at))
         })
         .collect()
 }
@@ -480,14 +480,10 @@ pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, l
     }
 }
 
-/// Queue every asset [`changed`] finds, each for its own slot, or a free one where a
-/// piano or sample is gone from the keyboard.
+/// Queue every asset [`changed`] finds, each for its own slot.
 pub fn queue_changed(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
     for (id, class, at) in changed(workspace, &device.state, queue) {
-        let free = || device.state.first_free(class, &queue.waiting_in(class));
-        if let Some(at) = at.or_else(free) {
-            enqueue(workspace, device, queue, log, id, class, at);
-        }
+        enqueue(workspace, device, queue, log, id, class, at);
     }
 }
 
