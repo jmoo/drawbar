@@ -39,6 +39,13 @@ GLYPHS = {
             ("line", [(500, AXIS + 200), (700, AXIS), (500, AXIS - 200)]),
         ],
     ),
+    "↑": (  # UPWARDS ARROW
+        600,
+        [
+            ("line", [(300, 10), (300, 630)]),
+            ("line", [(100, 440), (300, 640), (500, 440)]),
+        ],
+    ),
     "⇧": (  # UPWARDS WHITE ARROW, the Shift key
         760,
         [
