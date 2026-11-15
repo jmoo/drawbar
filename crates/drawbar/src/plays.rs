@@ -132,7 +132,7 @@ mod tests {
             .1
     }
 
-    /// 0x92e0cba2 is the id an Electro 5 gave a piano written as `drawbar-tine`, and
+    /// 0x92e0cba2 is the id an Electro 5 gave a sample written as `drawbar-tine`, and
     /// 0xaeb35621 one written as `tine-other`.
     #[test]
     fn a_piano_is_found_by_the_name_it_is_written_under() {
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn a_piano_is_played_by_the_programs_naming_its_id_as_piano_or_sample() {
+    fn a_piano_is_played_only_by_the_programs_naming_its_id_as_their_piano() {
         let Bench { mut workspace, .. } = Bench::new();
         let mut log = Log::default();
         let (tine, other) = (0x92e0_cba2, 0xaeb3_5621);
