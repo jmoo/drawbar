@@ -109,6 +109,36 @@ pub struct FieldDiff {
     pub path: String,
     pub here: String,
     pub there: String,
+    /// The class of piano or sample the field names by id, for a library reference.
+    pub refers: Option<ObjectClass>,
+}
+
+impl FieldDiff {
+    /// The field's label, then what the keyboard holds and what it holds after, in words:
+    /// a piano or sample by the name it goes by here or on the keyboard, and an id of 0 as
+    /// the dials.
+    pub fn said(&self, workspace: &Workspace, device: &DeviceState) -> [String; 3] {
+        let Some(class) = self.refers else {
+            return [label(&self.path), self.there.clone(), self.here.clone()];
+        };
+        let named = |value: &String| match crate::document::library_id(value) {
+            Some(0) => "by the dials".to_string(),
+            Some(id) => plays::name_of((class, id), workspace, device).unwrap_or(value.clone()),
+            None => value.clone(),
+        };
+        let what = crate::strings::title(Kind::from_class(class).chip());
+        [what, named(&self.there), named(&self.here)]
+    }
+}
+
+/// The class of piano or sample a field names by id, if it is such a reference.
+fn refers(field: &nord_format::fields::Field) -> Option<ObjectClass> {
+    use nord_format::fields::{ControlKind, Library};
+    match field.spec.control {
+        ControlKind::Reference(Library::Piano) => Some(ObjectClass::Piano),
+        ControlKind::Reference(Library::Sample) => Some(ObjectClass::Sample),
+        _ => None,
+    }
 }
 
 /// What is in the slot an entry is waiting for.
@@ -877,6 +907,7 @@ fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
         .filter_map(|field| {
             let there = held.iter().find(|other| other.path == field.path)?;
             (there.display != field.display).then(|| FieldDiff {
+                refers: refers(&field),
                 path: field.path,
                 here: field.display,
                 there: there.display.clone(),
@@ -886,8 +917,10 @@ fn apart(here: &[u8], there: &[u8]) -> Option<Vec<FieldDiff>> {
     (!differing.is_empty()).then_some(differing)
 }
 
-/// The height of one waiting item.
-const ROW: f32 = 32.0;
+/// The height of one waiting item, and of its first line, which its name and destination
+/// share; what the write does goes on the second.
+const ROW: f32 = 44.0;
+const ROW_LINE: f32 = 26.0;
 
 /// The state glyph at the end of a row.
 const SMALL: f32 = 13.0;
@@ -898,6 +931,7 @@ const CHIP_PAD: f32 = 6.0;
 
 /// The font sizes a row uses.
 const NAME: f32 = 12.5;
+const NOTE: f32 = 11.0;
 const MONO: f32 = 10.5;
 
 /// The item list's preferred and least widths, and the geometry of the diff beside it.
@@ -943,7 +977,7 @@ pub fn review(
             ui.set_min_size(size);
             ui.set_max_size(size);
             ui.spacing_mut().item_spacing.y = 0.0;
-            open &= review_head(ui, queue, device);
+            open &= review_head(ui, queue, workspace, device);
             let foot = review_foot(ui, queue, workspace, device, acts);
             open &= foot;
             review_body(ui, queue, workspace, device, acts);
@@ -956,7 +990,12 @@ pub fn review(
 
 /// The review's header: what it is, where the writes go, and how many of each kind.
 /// Returns false when close was clicked.
-fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
+fn review_head(
+    ui: &mut egui::Ui,
+    queue: &Queue,
+    workspace: &Workspace,
+    device: &DeviceState,
+) -> bool {
     let visuals = ui.visuals().clone();
     let quiet = crate::app::caption(&visuals);
     let lit = crate::app::accent(&visuals);
@@ -974,9 +1013,9 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
         .rect_filled(tile, 9.0, crate::app::tint(lit, 0.16));
     painted(&bar, Glyph::Upload, tile.shrink(8.0), lit);
     let to = device.product().unwrap_or("the instrument");
-    let (writes, replaces, failed) = counts(queue);
+    let (going, replaces, failed) = counts(queue, workspace, device);
     bar.label(
-        egui::RichText::new(format!("Send {writes} to {to}"))
+        egui::RichText::new(format!("Send {going} to {to}"))
             .font(egui::FontId::new(15.0, crate::app::bold())),
     );
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
@@ -1004,20 +1043,35 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
     open
 }
 
-/// How many entries will be written, how many of those replace something, and how many
-/// the attached instrument has refused.
-fn counts(queue: &Queue) -> (usize, usize, usize) {
-    let failed = queue
-        .entries()
-        .iter()
-        .filter(|held| held.failure.is_some())
-        .count();
+/// How many entries will be written, how many of those replace something else, as their
+/// rows say, and how many the attached instrument has refused.
+fn counts(queue: &Queue, workspace: &Workspace, device: &DeviceState) -> (usize, usize, usize) {
+    let failed = failed(queue);
     let replaces = queue
         .entries()
         .iter()
-        .filter(|held| held.failure.is_none() && matches!(held.replaces, Occupancy::Held(_)))
+        .filter(|held| held.failure.is_none())
+        .filter_map(|held| {
+            Some(writes(
+                held,
+                workspace.get(held.id)?,
+                queue,
+                workspace,
+                device,
+            ))
+        })
+        .filter(|note| matches!(note.what, What::Replaces(_)))
         .count();
     (queue.len() - failed, replaces, failed)
+}
+
+/// How many entries the attached instrument has refused.
+fn failed(queue: &Queue) -> usize {
+    queue
+        .entries()
+        .iter()
+        .filter(|held| held.failure.is_some())
+        .count()
 }
 
 /// `n` and the noun for it.
@@ -1052,7 +1106,7 @@ fn review_foot(
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = 8.0;
-    let sending = queue.len() - counts(queue).2;
+    let sending = queue.len() - failed(queue);
     let send = crate::panel::accent_button(
         &mut bar,
         Glyph::Upload,
@@ -1158,12 +1212,12 @@ fn review_body(
     ui.painter()
         .rect_filled(pane, 9.0, ui.visuals().window_fill);
     if let Some(held) = picked.and_then(|id| queue.entry(id)) {
-        let mut diff = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
-        let name = workspace
-            .get(held.id)
-            .map_or("", |entity| entity.name.as_str());
-        diff_title(&mut diff, held, name);
-        table(&mut diff, held, name);
+        if let Some(entity) = workspace.get(held.id) {
+            let mut diff = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
+            let note = writes(held, entity, queue, workspace, device);
+            diff_title(&mut diff, held, &entity.name, &note.what);
+            table(&mut diff, held, &entity.name, workspace, device);
+        }
     }
     if let Some(id) = clicked {
         queue.picked = Some(id);
@@ -1171,7 +1225,7 @@ fn review_body(
 }
 
 /// The diff's title: what is going where, and how many fields it changes.
-fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str) {
+fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str, what: &What) {
     let visuals = ui.visuals().clone();
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
@@ -1186,25 +1240,25 @@ fn diff_title(ui: &mut egui::Ui, held: &Queued, name: &str) {
             let differ = plural(fields.len(), "field differs", "fields differ");
             crate::panel::signal_pill(bar, &differ, warn(&visuals));
             bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
-                title_words(bar, held, name);
+                title_words(bar, held, name, what);
             });
         });
     } else {
-        title_words(&mut bar, held, name);
+        title_words(&mut bar, held, name, what);
     }
     ui.add_space(4.0);
 }
 
-/// The picked item's name, and what is known of the slot it goes to, which is shortened
-/// first.
-fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str) {
+/// The picked item's name, and what its write does where, in the row's words, which is
+/// shortened first.
+fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str, what: &What) {
     ui.label(
         egui::RichText::new(crate::strings::display_name(name))
             .font(egui::FontId::new(12.5, crate::app::bold())),
     );
     ui.add(
         egui::Label::new(
-            egui::RichText::new(format!("→ {}", held.replaces.said(held.class, held.at)))
+            egui::RichText::new(what.at(held.at))
                 .size(12.0)
                 .color(crate::app::caption(ui.visuals())),
         )
@@ -1215,7 +1269,13 @@ fn title_words(ui: &mut egui::Ui, held: &Queued, name: &str) {
 /// The four column heads, and under them the slot's new name if a send of `name`
 /// renames it, then either the fields that differ or a single line describing any other
 /// kind of difference.
-pub fn table(ui: &mut egui::Ui, held: &Queued, name: &str) {
+pub fn table(
+    ui: &mut egui::Ui,
+    held: &Queued,
+    name: &str,
+    workspace: &Workspace,
+    device: &DeviceState,
+) {
     let width = ui.available_width();
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
     diff_head(ui, width, &tracks);
@@ -1238,8 +1298,8 @@ pub fn table(ui: &mut egui::Ui, held: &Queued, name: &str) {
                 field_row(ui, width, &tracks, NAME_ROW, was, given);
             }
             for field in fields {
-                let label = label(&field.path);
-                field_row(ui, width, &tracks, &label, &field.there, &field.here);
+                let [label, there, here] = field.said(workspace, device);
+                field_row(ui, width, &tracks, &label, &there, &here);
             }
         });
 }
@@ -1308,11 +1368,12 @@ fn item(
     let visuals = ui.visuals().clone();
     let painter = ui.painter().clone();
     let (ink, quiet) = row_ink(&painter, rect, selected, response.hovered(), &visuals);
+    let line = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_LINE));
 
     // Lay out the right end first, so the name is truncated to the room left.
     let box_ = |right: f32| {
         egui::Rect::from_center_size(
-            egui::pos2(right - SMALL / 2.0, rect.center().y),
+            egui::pos2(right - SMALL / 2.0, line.center().y),
             egui::Vec2::splat(SMALL),
         )
     };
@@ -1335,7 +1396,7 @@ fn item(
     if unqueue.on_hover_text("remove from the queue").clicked() {
         acts.push(Act::Unqueue(held.id));
     }
-    let (glyph, tint, why) = state(held, &entity.name, &visuals);
+    let (glyph, tint, why) = state(held, &entity.name, &note.what, &visuals);
     painted(
         ui,
         glyph,
@@ -1345,7 +1406,7 @@ fn item(
     let right = destination(
         ui,
         held,
-        rect,
+        line,
         rect.right() - PAD - 2.0 * (SMALL + GAP),
         quiet,
         device,
@@ -1358,16 +1419,16 @@ fn item(
         ui,
         Kind::of(entity).glyph(),
         egui::Rect::from_center_size(
-            egui::pos2(left + GLYPH / 2.0, rect.center().y),
+            egui::pos2(left + GLYPH / 2.0, line.center().y),
             egui::Vec2::splat(GLYPH),
         ),
         ink,
     );
     let name_at = left + GLYPH + GAP;
-    let name = cut(
+    cut(
         &painter,
         name_at,
-        rect.center().y,
+        line.center().y,
         right - name_at,
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
@@ -1377,14 +1438,13 @@ fn item(
         (What::Replaces(_), false) => bad(&visuals),
         _ => quiet,
     };
-    let note_at = name_at + name.x + GAP;
     cut(
         &painter,
-        note_at,
-        rect.center().y,
-        right - note_at,
+        name_at,
+        (line.bottom() + rect.bottom()) / 2.0 - 2.0,
+        rect.right() - PAD - name_at,
         &said,
-        egui::TextFormat::simple(egui::FontId::proportional(NAME), note_ink),
+        egui::TextFormat::simple(egui::FontId::proportional(NOTE), note_ink),
     );
 
     // Double-click opens the asset's document, as it does in the tree.
@@ -1417,6 +1477,20 @@ enum What {
     Replaces(String),
     /// The slot has not been read yet.
     Checking,
+}
+
+impl What {
+    /// What the write does at `at`, after the name in the review's title: `new at 8:20`,
+    /// `updates 1:7` or `replaces “Bright Wurly” at 8:5`.
+    fn at(&self, at: Location) -> String {
+        let at = crate::strings::shown(at);
+        match self {
+            What::New => format!("new at {at}"),
+            What::Update => format!("updates {at}"),
+            What::Replaces(name) => format!("replaces “{name}” at {at}"),
+            What::Checking => format!("checking {at}"),
+        }
+    }
 }
 
 impl Writes {
@@ -1780,8 +1854,14 @@ fn sign(ui: &egui::Ui, box_: egui::Rect, glyph: Glyph, tint: egui::Color32) {
     );
 }
 
-/// The state glyph of an item named `name`, its tint, and the sentence explaining it.
-fn state(held: &Queued, name: &str, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
+/// The state glyph of an item named `name` whose write does `what`, its tint, and the
+/// sentence explaining it.
+fn state(
+    held: &Queued,
+    name: &str,
+    what: &What,
+    visuals: &egui::Visuals,
+) -> (Glyph, egui::Color32, String) {
     if let Some(why) = &held.failure {
         return (Glyph::CircleAlert, bad(visuals), why.clone());
     }
@@ -1811,6 +1891,9 @@ fn state(held: &Queued, name: &str, visuals: &egui::Visuals) -> (Glyph, egui::Co
                 occupant.name
             ),
         ),
+        (_, Occupancy::Held(_)) if matches!(what, What::Update) => {
+            (Glyph::Replace, warn(visuals), format!("updates {where_}"))
+        }
         (_, Occupancy::Held(_)) => (Glyph::Replace, warn(visuals), said()),
         (_, Occupancy::Vacant) => (Glyph::CircleCheck, good(visuals), said()),
         // Unread, and no read is out: the write goes ahead without knowing what it
@@ -2642,6 +2725,41 @@ mod tests {
         assert_eq!(said(soul), "new");
         assert_eq!(said(jazzy), "update");
         assert_eq!(said(tine), "replaces “Bright Wurly”");
+
+        let mut painted = |picked: u64| {
+            bench.queue.picked = Some(picked);
+            let mut frame = || {
+                let input = testing::screen(egui::vec2(940.0, 600.0), Vec::new());
+                testing::run(&bench.ctx, input, |ctx| {
+                    let (queue, workspace) = (&mut bench.queue, &bench.workspace);
+                    review(ctx, queue, workspace, &bench.device.state, &mut Vec::new());
+                })
+            };
+            frame();
+            testing::painted(&frame())
+        };
+        let shown = painted(tine);
+        let row = testing::where_(&shown, "replaces “Bright Wurly”");
+        assert!(
+            row.top() > testing::where_(&shown, "Tine").bottom() - 1.0,
+            "the word sits under the name: {row:?}"
+        );
+        assert!(shown.iter().any(|word| word.text == "update"));
+        assert!(shown
+            .iter()
+            .any(|word| word.text == "replaces “Bright Wurly” at 1:3"));
+        assert!(
+            shown.iter().any(|word| word.text == "1 replace"),
+            "an update to a linked slot is no replace"
+        );
+        let mut titled = |id| {
+            painted(id)
+                .into_iter()
+                .map(|word| word.text)
+                .collect::<Vec<_>>()
+        };
+        assert!(titled(jazzy).contains(&"updates 1:2".to_string()));
+        assert!(titled(soul).contains(&"new at 1:1".to_string()));
     }
 
     #[test]
@@ -3356,7 +3474,15 @@ mod tests {
         let ctx = testing::context();
         let input = testing::screen(egui::vec2(620.0, 300.0), Vec::new());
         let output = testing::run(&ctx, input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| table(ui, held, name));
+            egui::CentralPanel::default().show(ctx, |ui| {
+                table(
+                    ui,
+                    held,
+                    name,
+                    &Workspace::new(ctx.clone()),
+                    &DeviceState::default(),
+                )
+            });
         });
         testing::painted(&output)
     }
@@ -3394,7 +3520,7 @@ mod tests {
             assert!(matches!(held.diff, Diff::Identical), "{name}");
 
             let said = table_words(held, name);
-            let (_, _, why) = state(held, name, &visuals);
+            let (_, _, why) = state(held, name, &What::Update, &visuals);
             assert_eq!(
                 said.iter().any(|word| word.text == NAME_ROW),
                 renamed,
@@ -3452,6 +3578,51 @@ mod tests {
         assert!(
             !said.iter().any(|word| word.text == NAME_ROW),
             "the name stays"
+        );
+    }
+
+    #[test]
+    fn a_piano_or_sample_id_in_a_diff_reads_as_the_name_it_goes_by() {
+        let Bench {
+            mut workspace,
+            device,
+            mut log,
+            ..
+        } = Bench::new();
+        workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        let id = |class, name| plays::slot_key(class, name).1.to_string();
+        let sets = [
+            ("piano_panel.id".into(), id(ObjectClass::Piano, "Tine")),
+            ("sample_panel.id".into(), id(ObjectClass::Sample, "Marimba")),
+        ];
+        let bytes = Fresh::Program.bytes().unwrap();
+        let (_, tine) = crate::fields::apply(&bytes, &sets).unwrap();
+        let Diff::Fields(fields) = compare(&tine, &bytes) else {
+            panic!("two programs differ by field");
+        };
+        let said: Vec<[String; 3]> = fields
+            .iter()
+            .map(|field| field.said(&workspace, &device.state))
+            .collect();
+
+        assert!(
+            said.contains(&["Piano".into(), "by the dials".into(), "Tine".into()]),
+            "{said:?}"
+        );
+        let sample = said.iter().find(|[what, ..]| what == "Sample");
+        let unnamed = format!(
+            "{:#010x}",
+            plays::slot_key(ObjectClass::Sample, "Marimba").1
+        );
+        assert_eq!(
+            sample.map(|[_, _, here]| here.as_str()),
+            Some(unnamed.as_str()),
+            "an id nothing names stays as it is"
         );
     }
 

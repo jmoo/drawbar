@@ -709,7 +709,11 @@ fn list(
             egui::TopBottomPanel::bottom("keyboard_settings")
                 .resizable(false)
                 .frame(egui::Frame::new())
-                .show_inside(ui, |ui| boxed(ui, |ui| crate::queue::table(ui, held, name)));
+                .show_inside(ui, |ui| {
+                    boxed(ui, |ui| {
+                        crate::queue::table(ui, held, name, workspace, &device.state)
+                    })
+                });
         }
     }
 

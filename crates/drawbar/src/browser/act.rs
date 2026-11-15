@@ -3008,14 +3008,11 @@ mod tests {
             said.extend(reviewed(&mut bench));
         }
         for slot in [
-            "→ Programs 7:1 holds “Africa Split”",
-            "→ Programs 7:2 is empty",
-            "→ Programs 8:1 has not been read yet",
+            "replaces “Africa Split” at 7:1",
+            "new at 7:2",
+            "checking 8:1",
         ] {
-            assert!(
-                said.iter().any(|word| word.starts_with(slot)),
-                "{slot}: {said:?}"
-            );
+            assert!(said.iter().any(|word| word == slot), "{slot}: {said:?}");
         }
     }
 
