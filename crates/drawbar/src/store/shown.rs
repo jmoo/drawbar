@@ -330,18 +330,21 @@ mod tests {
     /// base is the later, whichever orders first, and any link is later than a keep-off.
     #[test]
     fn of_two_links_on_one_keyboard_the_later_shows() {
-        use crate::link::{Held, Print, Spot};
+        use crate::link::{Held, Print};
         use nord_usb::ObjectClass;
 
         let keyboard = Keyboard {
             model: "Nord Electro 5".into(),
             serial: None,
         };
-        let at = |slot, base| Held::new(ObjectClass::Program, Spot::At { bank: 0, slot }, base);
+        let at = |slot, base| {
+            let at = nord_usb::Location { bank: 0, slot };
+            Held::new(ObjectClass::Program, at, "", base)
+        };
         let older = at(6, Print { crc: 9, len: 121 }).unwrap();
         let newer = at(1, older.base)
             .unwrap()
-            .agreed(Print { crc: 2, len: 121 });
+            .agreed(Print { crc: 2, len: 121 }, "");
         let link = |held: Option<&Held>| Link {
             keyboard: keyboard.clone(),
             held: held.cloned(),

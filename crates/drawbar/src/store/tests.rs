@@ -9126,7 +9126,7 @@ fn electro(serial: &str) -> Keyboard {
 
 fn program_at(slot: u32) -> Held {
     let base = Print { crc: 7, len: 121 };
-    Held::new(ObjectClass::Program, Spot::At { bank: 0, slot }, base).unwrap()
+    Held::new(ObjectClass::Program, Location { bank: 0, slot }, "", base).unwrap()
 }
 
 impl Session {
@@ -9445,7 +9445,7 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     device.pretend_geometry(class, &[("A", 1)]);
     device.pretend_bodies(class, 1, &[Some(("untitled", print(&new).crc))]);
     let keyboard = device.state.keyboard().unwrap();
-    let held = Held::new(class, Spot::at(at), print(&old)).unwrap();
+    let held = Held::new(class, at, "", print(&old)).unwrap();
     session.link(id, &keyboard, held);
     session.heard();
     let Bench {

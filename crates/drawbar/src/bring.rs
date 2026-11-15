@@ -20,8 +20,8 @@ use crate::workspace::{print_of, LocalEntity, Workspace};
 /// What happened on the keyboard to one linked file's sound while drawbar was away.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
-    /// The slot holds a version the file never had, under the file's name, and the file
-    /// has not changed.
+    /// The slot holds a version the file never had, under the name it had when the two
+    /// last agreed, and the file has not changed.
     Changed(Location),
     /// The sound is in another slot of its class, which no file is linked to, or which
     /// holds the sound of the file linked there while this slot holds that one's.
@@ -88,8 +88,9 @@ pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Found> {
         .collect()
 }
 
-/// What changed to one file's sound, judged by what its slot holds now and the name it
-/// holds it under.
+/// What changed to one file's sound, judged by what its slot holds now and whether it
+/// holds it under the name it had when the two last agreed. A link that kept no name
+/// goes by the file's.
 pub fn change(
     state: &DeviceState,
     workspace: &Workspace,
@@ -108,7 +109,8 @@ pub fn change(
         There::Vacant => None,
         There::Holds { .. } => Some(name_at(state, held.class(), from)),
     };
-    if by.is_some() && by == slot_label(&entity.name) {
+    let agreed = held.name().map(str::to_string);
+    if by.is_some() && by == agreed.or_else(|| slot_label(&entity.name)) {
         let theirs = link::standing(held, Some(here), there) == Standing::Theirs;
         return theirs.then_some(Change::Changed(from));
     }
@@ -438,10 +440,10 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
         }
     }
     for class in classes {
-        let moves: Vec<(Spot, Option<Spot>)> = moved
+        let moves: Vec<crate::workspace::Moved> = moved
             .iter()
             .filter(|(found, ..)| found.class == class)
-            .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to))))
+            .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to)), None))
             .collect();
         workspace.respot(&keyboard, class, &moves);
     }
@@ -450,7 +452,8 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
         let saved = entity.and_then(LocalEntity::saved_print);
         let now = entity.and_then(|it| it.held_on(&keyboard)).cloned();
         if let (true, Some(print), Some(now)) = (agrees, saved, now) {
-            workspace.link(found.id, &keyboard, now.agreed(print));
+            let name = name_at(&device.state, found.class, to);
+            workspace.link(found.id, &keyboard, now.agreed(print, &name));
         }
         let name = workspace.get(found.id).map_or("", |it| it.name.as_str());
         log.say(format!("“{}” is now at {}.", display_name(name), shown(to)));
@@ -491,7 +494,7 @@ fn bring(
     if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
-    let held = before.agreed(print_of(&bytes)?);
+    let held = before.agreed(print_of(&bytes)?, &name_at(&device.state, class, at));
     let restored = Restored {
         id,
         bytes: entity.bytes.to_vec(),
@@ -905,7 +908,7 @@ mod tests {
         let id = bench.workspace.ingest(name.into(), origin, bytes, log);
         bench.workspace.settle_files(log);
         let keyboard = bench.device.state.keyboard().expect("attached");
-        let held = Held::new(PROGRAM, Spot::at(at(slot)), print(base)).unwrap();
+        let held = Held::new(PROGRAM, at(slot), "", print(base)).unwrap();
         bench.workspace.link(id, &keyboard, held);
         id
     }
@@ -1030,6 +1033,54 @@ mod tests {
         assert_eq!(
             since(&bench.device.state, &bench.workspace),
             [found(id, Change::Changed(at(1)))]
+        );
+    }
+
+    /// A file named `file`, linked to slot 1 while the slot was called `slot` or, for
+    /// `None`, by a link that kept no name, whose slot was then edited under `now`.
+    fn edited_under(file: &str, slot: Option<&str>, now: &str) -> Option<Change> {
+        let mut bench = Bench::new();
+        walked_named(&mut bench, &[Some((now, crc(&gained("40"))))]);
+        let id = linked(&mut bench, file, body(), 1, &body());
+        let keyboard = bench.device.state.keyboard().unwrap();
+        if let Some(slot) = slot {
+            let held = Held::new(PROGRAM, at(1), slot, print(&body())).unwrap();
+            bench.workspace.link(id, &keyboard, held);
+        }
+        let entity = bench.workspace.get(id).unwrap();
+        let held = entity.held_on(&keyboard).unwrap();
+        change(
+            &bench.device.state,
+            &bench.workspace,
+            &keyboard,
+            entity,
+            held,
+        )
+    }
+
+    #[test]
+    fn a_slot_edited_under_the_name_it_had_when_last_agreed_has_changed() {
+        let changed = Some(Change::Changed(at(1)));
+        assert_eq!(edited_under("Renamed.ne5p", Some("Tine"), "Tine"), changed);
+        assert_eq!(edited_under("Tine.ne5p", None, "Tine"), changed);
+    }
+
+    #[test]
+    fn a_slot_now_under_another_name_was_replaced() {
+        let replaced = |by: &str| {
+            Some(Change::Replaced {
+                at: at(1),
+                by: by.into(),
+            })
+        };
+        assert_eq!(
+            edited_under("Tine.ne5p", Some("Tine"), "Clav"),
+            replaced("Clav")
+        );
+        assert_eq!(
+            edited_under("Renamed.ne5p", None, "Tine"),
+            replaced("Tine"),
+            "a link that kept no name goes by the file's"
         );
     }
 
@@ -1452,7 +1503,7 @@ mod tests {
                     let entity = bench.workspace.get(id).unwrap();
                     let held = entity.held_on(&keyboard).unwrap();
                     assert!(held.knew(crc(&theirs)), "the keyboard's counts as earlier");
-                    let unchosen = Held::new(PROGRAM, Spot::at(at(1)), print(&body())).unwrap();
+                    let unchosen = Held::new(PROGRAM, at(1), "", print(&body())).unwrap();
                     bench.workspace.link(id, &keyboard, unchosen);
                     bench.queue.forget(id);
                 }

@@ -241,6 +241,11 @@ impl Container {
     }
 }
 
+/// A slot drawbar moved or renamed: the link at the first spot goes to the second, or off
+/// the keyboard where there is none, under the name drawbar gave the slot where it renamed
+/// it.
+pub type Moved = (link::Spot, Option<link::Spot>, Option<String>);
+
 /// What a slot holding the body of the container `bytes` reports. `None` for bytes that
 /// are not one.
 pub fn print_of(bytes: &[u8]) -> Option<Print> {
@@ -2153,15 +2158,9 @@ impl Workspace {
             .map(|entity| entity.id)
     }
 
-    /// Follow slots of `class` that drawbar moved on `keyboard`: a link at the first spot
-    /// of a pair goes to the second, or is removed where there is none. Every pair moves
-    /// at once, so a swap moves both links.
-    pub fn respot(
-        &mut self,
-        keyboard: &Keyboard,
-        class: ObjectClass,
-        moves: &[(link::Spot, Option<link::Spot>)],
-    ) {
+    /// Follow slots of `class` that drawbar moved or renamed on `keyboard`. Every move
+    /// happens at once, so a swap moves both links.
+    pub fn respot(&mut self, keyboard: &Keyboard, class: ObjectClass, moves: &[Moved]) {
         let moved: Vec<(u64, Option<link::Held>)> = self
             .entities
             .iter()
@@ -2169,8 +2168,9 @@ impl Workspace {
                 let held = entity
                     .held_on(keyboard)
                     .filter(|held| held.class() == class)?;
-                let (_, to) = moves.iter().find(|(from, _)| *from == held.spot)?;
-                Some((entity.id, to.clone().map(|to| held.moved(to))))
+                let (_, to, name) = moves.iter().find(|(from, ..)| *from == held.spot)?;
+                let held = to.clone().map(|to| held.moved(to, name.as_deref()));
+                Some((entity.id, held))
             })
             .collect();
         for (id, held) in moved {
@@ -5891,7 +5891,7 @@ mod tests {
 
     fn program_at(slot: u32) -> link::Held {
         let base = Print { crc: 7, len: 121 };
-        link::Held::new(ObjectClass::Program, link::Spot::At { bank: 0, slot }, base).unwrap()
+        link::Held::new(ObjectClass::Program, Location { bank: 0, slot }, "", base).unwrap()
     }
 
     fn two_programs() -> (Workspace, Log, [u64; 2]) {

@@ -20,7 +20,7 @@ use crate::ondisk::OnDisk;
 use crate::queue::Queue;
 use crate::strings::{counted, folder, place, shown};
 use crate::tabs::Tabs;
-use crate::workspace::{LocalEntity, Origin, Workspace};
+use crate::workspace::{LocalEntity, Moved, Origin, Workspace};
 
 #[cfg(all(test, unix))]
 mod hardware;
@@ -1039,8 +1039,8 @@ pub(crate) fn spot_at(state: &DeviceState, class: ObjectClass, at: Location) -> 
 }
 
 /// Link the copy `id` of the slot `at` of `class`, read as `print`, to that slot on the
-/// attached keyboard, unless another asset is linked there already. A piano or sample slot
-/// no walk has named goes by the name a write of the copy gives it.
+/// attached keyboard, unless another asset is linked there already. A slot no walk has
+/// named goes by the name a write of the copy gives it.
 pub fn link_copy(
     state: &DeviceState,
     workspace: &mut Workspace,
@@ -1052,9 +1052,14 @@ pub fn link_copy(
     let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
         return;
     };
-    let spot = spot_at(state, class, at)
-        .or_else(|| slot_label(&entity.name).map(|name| Spot::of(class, at, &name)));
-    let Some(held) = spot.and_then(|spot| Held::new(class, spot, print)) else {
+    let scanned = state
+        .slot(class, at)
+        .flatten()
+        .map(|info| info.name.clone());
+    let name = scanned
+        .or_else(|| slot_label(&entity.name))
+        .unwrap_or_default();
+    let Some(held) = Held::new(class, at, &name, print) else {
         return;
     };
     if workspace.linked_at(&keyboard, class, &held.spot).is_none() {
@@ -1142,18 +1147,18 @@ fn found(
     if entity.kept_off(keyboard) || held_here(state, entity).is_some() {
         return None;
     }
-    let spot = match class.is_library() {
+    let (at, info) = match class.is_library() {
         true => {
             let name = slot_label(&entity.name)?;
-            let (at, info) = by_name.get(&(class, name.as_str()))?;
-            (info.body_len == print.len).then(|| Spot::of(class, *at, &name))?
+            let &(at, info) = by_name.get(&(class, name.as_str()))?;
+            (info.body_len == print.len).then_some((at, info))?
         }
-        false => Spot::at(named_slots(entity, class).find(|at| {
-            let info = state.slot(class, *at).flatten();
-            info.is_some_and(|info| info.crc32 == Some(print.crc))
-        })?),
+        false => named_slots(entity, class).find_map(|at| {
+            let info = state.slot(class, at).flatten()?;
+            (info.crc32 == Some(print.crc)).then_some((at, info))
+        })?,
     };
-    let held = Held::new(class, spot, print)?;
+    let held = Held::new(class, at, &info.name, print)?;
     fit(state, entity).allowed().then_some(held)
 }
 
@@ -1248,20 +1253,15 @@ fn link_sent(
     let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
         return;
     };
-    let spot = match class.is_library() {
-        true => slot_label(name).map(|name| Spot::of(class, at, &name)),
-        false => Some(Spot::at(at)),
-    };
-    let Some(spot) = spot else {
+    let name = slot_label(name).unwrap_or_default();
+    let Some(fresh) = Held::new(class, at, &name, print) else {
         return;
     };
     let held = match entity.held_on(&keyboard) {
-        Some(held) if held.class() == class && held.spot == spot => Some(held.agreed(print)),
-        _ => Held::new(class, spot, print),
+        Some(held) if held.class() == class && held.spot == fresh.spot => held.agreed(print, &name),
+        _ => fresh,
     };
-    if let Some(held) = held {
-        workspace.link(id, &keyboard, held);
-    }
+    workspace.link(id, &keyboard, held);
 }
 
 /// Where the slot `held` names is, and what a walk says it holds there. A slot kept by
@@ -1629,27 +1629,29 @@ struct Running {
     respot: Option<Respot>,
 }
 
-/// Slots of one class whose links move: from the first spot of each pair to the second,
-/// or off the keyboard where there is none.
-type Respot = (ObjectClass, Vec<(Spot, Option<Spot>)>);
+/// Slots of one class whose links move. See [`Workspace::respot`].
+type Respot = (ObjectClass, Vec<Moved>);
 
 /// The links a slot operation moves once it succeeds: a move swaps two addresses, a
-/// delete unlinks, and a rename moves a piano or sample to its new name.
+/// delete unlinks, and a rename gives the slot its new name, which keys a piano or sample.
 fn respot(state: &DeviceState, cmd: &DeviceCmd) -> Option<Respot> {
     match cmd {
         DeviceCmd::Move { class, from, to } if !class.is_library() => {
             let (from, to) = (Spot::at(*from), Spot::at(*to));
             Some((
                 *class,
-                vec![(from.clone(), Some(to.clone())), (to, Some(from))],
+                vec![
+                    (from.clone(), Some(to.clone()), None),
+                    (to, Some(from), None),
+                ],
             ))
         }
         DeviceCmd::Delete { class, at } => {
-            Some((*class, vec![(spot_at(state, *class, *at)?, None)]))
+            Some((*class, vec![(spot_at(state, *class, *at)?, None, None)]))
         }
-        DeviceCmd::Rename { class, at, name } if class.is_library() => {
-            let from = spot_at(state, *class, *at)?;
-            Some((*class, vec![(from, Some(Spot::of(*class, *at, name)))]))
+        DeviceCmd::Rename { class, at, name } => {
+            let (from, to) = (spot_at(state, *class, *at)?, Spot::of(*class, *at, name));
+            Some((*class, vec![(from, Some(to), Some(name.clone()))]))
         }
         _ => None,
     }
@@ -3234,14 +3236,14 @@ mod tests {
         assert_eq!(folder(ObjectClass::Unknown(9)), "Other");
     }
 
-    fn linked_at(class: ObjectClass, spot: Spot, len: u32) -> Held {
-        Held::new(class, spot, crate::link::Print { crc: 7, len }).unwrap()
+    fn linked_at(class: ObjectClass, at: Location, name: &str, len: u32) -> Held {
+        Held::new(class, at, name, crate::link::Print { crc: 7, len }).unwrap()
     }
 
     #[test]
     fn a_slot_kept_by_its_address_is_unread_vacant_or_what_a_walk_reported() {
         let mut device = Device::new(egui::Context::default());
-        let program = |slot| linked_at(ObjectClass::Program, Spot::At { bank: 0, slot }, 121);
+        let program = |slot| linked_at(ObjectClass::Program, Location { bank: 0, slot }, "", 121);
         let at = |slot| Some(Location { bank: 0, slot });
         assert_eq!(there(&device.state, &program(0)), (at(0), There::Unread));
         device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Tine", 9)), None]);
@@ -3256,7 +3258,8 @@ mod tests {
     #[test]
     fn a_slot_kept_by_its_name_is_found_anywhere_and_vacant_once_every_bank_is_read() {
         let mut device = Device::new(egui::Context::default());
-        let piano = |name: &str| linked_at(ObjectClass::Piano, Spot::Named(name.into()), 900);
+        let piano =
+            |name: &str| linked_at(ObjectClass::Piano, Location { bank: 0, slot: 0 }, name, 900);
         device.pretend_geometry(ObjectClass::Piano, &[("Grand", 4), ("Upright", 4)]);
         device.pretend_lengths(ObjectClass::Piano, 2, &[None, Some((" Yamaha ", 900))]);
         let found = (
@@ -3286,7 +3289,13 @@ mod tests {
         let id = workspace.ingest("A.ne5p".into(), Origin::Fresh, program, &mut log);
         workspace.settle_files(&mut log);
         let print = workspace.get(id).unwrap().saved_print().expect("read");
-        let held = Held::new(ObjectClass::Program, Spot::At { bank: 0, slot: 0 }, print).unwrap();
+        let held = Held::new(
+            ObjectClass::Program,
+            Location { bank: 0, slot: 0 },
+            "",
+            print,
+        )
+        .unwrap();
         let elsewhere = Keyboard {
             model: "Nord Electro 5".into(),
             serial: Some("B2".into()),
@@ -3434,8 +3443,43 @@ mod tests {
         );
     }
 
+    fn name_held(bench: &crate::testing::Bench, id: u64) -> Option<String> {
+        let keyboard = bench.device.state.keyboard().expect("attached");
+        let held = bench.workspace.get(id)?.held_on(&keyboard)?;
+        held.name().map(str::to_string)
+    }
+
     #[test]
-    fn a_move_drawbar_makes_swaps_the_links_and_a_delete_unlinks() {
+    fn a_send_records_the_name_its_write_gave_the_slot() {
+        let mut bench = crate::testing::Bench::new();
+        bench.device.pretend_attached();
+        let id = file(&mut bench, "Clav.ne5p", body());
+        let sent = |bench: &mut crate::testing::Bench, name: &str, bytes| {
+            bench.device.pretend(DeviceEvent::Sent {
+                id,
+                class: ObjectClass::Program,
+                at: at(1),
+                name: name.into(),
+                sent: Payload::Bytes(bytes),
+            });
+            heard(bench);
+        };
+        sent(&mut bench, "Tine.ne5p", body());
+        assert_eq!(name_held(&bench, id).as_deref(), Some("Tine"));
+        bench
+            .workspace
+            .replace_bytes(id, gained("41"), &mut bench.log);
+        bench.workspace.mark_saved(id);
+        sent(&mut bench, "Wurl.ne5p", gained("41"));
+        assert_eq!(
+            name_held(&bench, id).as_deref(),
+            Some("Wurl"),
+            "agreed again"
+        );
+    }
+
+    #[test]
+    fn a_move_drawbar_makes_swaps_the_links_a_rename_renames_and_a_delete_unlinks() {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         bench
@@ -3443,8 +3487,8 @@ mod tests {
             .pretend_bodies(class, 1, &[Some(("A", 1)), Some(("B", 2))]);
         let keyboard = bench.device.state.keyboard().unwrap();
         let [first, second] = ["A.ne5p", "B.ne5p"].map(|name| file(&mut bench, name, body()));
-        for (id, slot) in [(first, 1), (second, 2)] {
-            let held = Held::new(class, Spot::at(at(slot)), print(&body())).unwrap();
+        for (id, slot, name) in [(first, 1, "A"), (second, 2, "B")] {
+            let held = Held::new(class, at(slot), name, print(&body())).unwrap();
             bench.workspace.link(id, &keyboard, held);
         }
         let done = |bench: &mut crate::testing::Bench, act| {
@@ -3476,6 +3520,20 @@ mod tests {
         assert_eq!(entry.at, at(2), "the write follows the sound it replaces");
         assert!(matches!(entry.replaces, crate::queue::Occupancy::Unknown));
         bench.queue.forget(waiting);
+        assert_eq!(name_held(&bench, first).as_deref(), Some("A"), "it travels");
+
+        bench.device.state.in_flight = None;
+        let name = "Bright".to_string();
+        done(
+            &mut bench,
+            crate::browser::Act::RenameSlot {
+                class,
+                at: at(1),
+                name,
+            },
+        );
+        assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
+        assert_eq!(name_held(&bench, second).as_deref(), Some("Bright"));
 
         bench.device.state.in_flight = None;
         done(
@@ -3497,8 +3555,13 @@ mod tests {
         let keyboard = bench.device.state.keyboard().unwrap();
         let ids = names.map(|name| {
             let id = file(&mut bench, &format!("{name}.npno"), body());
-            let spot = Spot::Named(name.into());
-            let held = Held::new(class, spot, Print { crc: 1, len: 10 }).unwrap();
+            let held = Held::new(
+                class,
+                Location { bank: 0, slot: 0 },
+                name,
+                Print { crc: 1, len: 10 },
+            );
+            let held = held.unwrap();
             bench.workspace.link(id, &keyboard, held);
             id
         });
@@ -3606,7 +3669,7 @@ mod tests {
         bench.device.pretend_bodies(class, 1, &slots);
         let keyboard = bench.device.state.keyboard().unwrap();
         let taken = file(&mut bench, "X.ne5p", mine.clone());
-        let held = Held::new(class, Spot::at(at(4)), print(&mine)).unwrap();
+        let held = Held::new(class, at(4), "", print(&mine)).unwrap();
         bench.workspace.link(taken, &keyboard, held);
         let origin = Origin::Device { class, at: at(2) };
         let id = bench
@@ -3709,7 +3772,7 @@ mod tests {
             .device
             .pretend_bodies(class, 1, &[slot.map(|crc| ("A", crc))]);
         let keyboard = bench.device.state.keyboard().unwrap();
-        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        let held = Held::new(class, at(1), "", print(&body())).unwrap();
         let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
             .map(|(name, bytes)| file(bench, name, bytes));
         for id in [first, second] {
@@ -3774,7 +3837,7 @@ mod tests {
         bench.device.pretend_attached();
         let keyboard = bench.device.state.keyboard().unwrap();
         let original = file(&mut bench, "A.ne5p", body());
-        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(original, &keyboard, held);
         let copy = bench.workspace.duplicate(original, &mut bench.log).unwrap();
         assert_eq!(held_at(&bench, copy), None);
@@ -3798,7 +3861,7 @@ mod tests {
         bench.device.pretend_scanned(class, 1, &["", ""]);
         let id = file(&mut bench, "A.ne5p", body());
         let keyboard = bench.device.state.keyboard().unwrap();
-        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(id, &keyboard, held);
         crate::queue::enqueue(
             &bench.workspace,
@@ -3842,7 +3905,7 @@ mod tests {
         if let Connection::Connected(card) = &mut bench.device.state.connection {
             card.serial = Some("B2".into());
         }
-        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        let held = Held::new(class, at(1), "", print(&body())).unwrap();
         bench.workspace.link(id, &other, held);
         let gain = [("center_panel.gain".into(), "40".into())];
         let edited = crate::fields::apply(&body(), &gain).unwrap().1;

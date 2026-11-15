@@ -1748,9 +1748,11 @@ fn link_to(
     let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
         return;
     };
-    let Some(held) = crate::device::spot_at(state, class, at)
+    let Some(held) = state
+        .slot(class, at)
+        .flatten()
         .zip(entity.saved_print())
-        .and_then(|(spot, print)| crate::link::Held::new(class, spot, print))
+        .and_then(|(info, print)| crate::link::Held::new(class, at, &info.name, print))
     else {
         return;
     };
@@ -4063,7 +4065,7 @@ mod tests {
             .device
             .pretend_bodies(class, 7, &[Some(("New program", print.crc))]);
         let keyboard = bench.device.state.keyboard().unwrap();
-        let held = crate::link::Held::new(class, crate::link::Spot::at(at(0)), print).unwrap();
+        let held = crate::link::Held::new(class, at(0), "", print).unwrap();
         bench.workspace.link(id, &keyboard, held);
         let linked = |bench: &Bench| {
             let entity = bench.workspace.get(id).unwrap();

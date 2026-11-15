@@ -853,13 +853,15 @@ impl Queue {
     /// Follow slots of `class` that drawbar moved: an entry waiting for the first address
     /// of a pair waits for the second, and asks again what it replaces there. Every pair
     /// moves at once, so a swap moves both.
-    pub fn respot(&mut self, class: ObjectClass, moves: &[(Spot, Option<Spot>)]) {
+    pub fn respot(&mut self, class: ObjectClass, moves: &[crate::workspace::Moved]) {
         let to = |at: Location| {
-            moves.iter().find_map(|(from, to)| match (from, to) {
-                (from, Some(Spot::At { bank, slot })) if *from == Spot::at(at) => Some(Location {
-                    bank: *bank,
-                    slot: *slot,
-                }),
+            moves.iter().find_map(|(from, to, _)| match to {
+                Some(to @ Spot::At { bank, slot }) if *from == Spot::at(at) && to != from => {
+                    Some(Location {
+                        bank: *bank,
+                        slot: *slot,
+                    })
+                }
                 _ => None,
             })
         };
@@ -2132,8 +2134,7 @@ mod tests {
     fn link_to(workspace: &mut Workspace, device: &Device, id: u64, at: Location) {
         let keyboard = device.state.keyboard().expect("attached");
         let print = workspace.get(id).unwrap().saved_print().unwrap();
-        let spot = crate::link::Spot::at(at);
-        let held = crate::link::Held::new(ObjectClass::Program, spot, print).unwrap();
+        let held = crate::link::Held::new(ObjectClass::Program, at, "", print).unwrap();
         workspace.link(id, &keyboard, held);
     }
 
@@ -2823,9 +2824,9 @@ mod tests {
             &[None, Some(("Jazzy", 1)), Some(("Bright Wurly", 2))],
         );
         let base = crate::link::Print { crc: 1, len: 121 };
-        let spot = crate::link::Spot::at(Location::from_user(1, 2));
+        let at = Location::from_user(1, 2);
         let keyboard = bench.device.state.keyboard().unwrap();
-        let held = crate::link::Held::new(class, spot, base).unwrap();
+        let held = crate::link::Held::new(class, at, "", base).unwrap();
         bench.workspace.link(jazzy, &keyboard, held);
         for (id, slot) in [(soul, 1), (jazzy, 2), (tine, 3)] {
             let at = Location::from_user(1, slot);

@@ -1914,11 +1914,7 @@ mod tests {
             crc: !crc,
             len: 121,
         };
-        let held = crate::link::Held::new(
-            class,
-            crate::link::Spot::at(Location { bank: 4, slot: 0 }),
-            base,
-        );
+        let held = crate::link::Held::new(class, Location { bank: 4, slot: 0 }, "", base);
         let keyboard = bench.device.state.keyboard().unwrap();
         bench.workspace.link(id, &keyboard, held.unwrap());
         bench

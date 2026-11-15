@@ -1566,11 +1566,11 @@ mod tests {
         device: &DeviceState,
         id: u64,
         class: ObjectClass,
-        spot: crate::link::Spot,
+        (at, name): (Location, &str),
         base: crate::link::Print,
     ) {
         let keyboard = device.keyboard().expect("attached");
-        let held = crate::link::Held::new(class, spot, base).unwrap();
+        let held = crate::link::Held::new(class, at, name, base).unwrap();
         workspace.link(id, &keyboard, held);
     }
 
@@ -1609,7 +1609,7 @@ mod tests {
         );
 
         let print = copy.saved_print().unwrap();
-        let spot = crate::link::Spot::at(at);
+        let spot = (at, "");
         link_at(
             &mut workspace,
             &device.state,
@@ -1795,14 +1795,7 @@ mod tests {
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!((held.label.as_str(), held.click), ("Send to…", Click::Pick));
 
-        link_at(
-            &mut workspace,
-            &device.state,
-            id,
-            class,
-            crate::link::Spot::at(at),
-            earlier,
-        );
+        link_at(&mut workspace, &device.state, id, class, (at, ""), earlier);
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(held.label, LOAD_ON_INSTRUMENT, "the slot holds it");
         assert_eq!(held.click, Click::Load(class, at));
@@ -1853,7 +1846,7 @@ mod tests {
         let mut device = crate::device::Device::new(egui::Context::default());
         device.pretend_bodies(class, 7, &[Some(("Blue Room", 7))]);
         let earlier = older(&workspace, id);
-        let spot = crate::link::Spot::at(Location { bank: 6, slot: 0 });
+        let spot = (Location { bank: 6, slot: 0 }, "");
         link_at(&mut workspace, &device.state, id, class, spot, earlier);
         let entity = workspace.get(id).unwrap();
         assert_eq!(lives(entity, &device.state).mark, Some(Mark::Attention));
@@ -1875,7 +1868,7 @@ mod tests {
         let id = workspace.ingest("Grand.npno".into(), Origin::Fresh, bytes, &mut log);
         let mut device = Device::new(egui::Context::default());
         device.pretend_scanned(class, 1, &["", "", "", "Grand"]);
-        let spot = crate::link::Spot::Named("Grand".into());
+        let spot = (Location { bank: 0, slot: 3 }, "Grand");
         let earlier = older(&workspace, id);
         link_at(&mut workspace, &device.state, id, class, spot, earlier);
         let in_pianos = Location { bank: 0, slot: 3 };
@@ -1935,14 +1928,7 @@ mod tests {
             &mut log,
         );
         let earlier = older(&workspace, id);
-        link_at(
-            &mut workspace,
-            &device.state,
-            id,
-            class,
-            crate::link::Spot::at(at),
-            earlier,
-        );
+        link_at(&mut workspace, &device.state, id, class, (at, ""), earlier);
         let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
         assert_eq!(held.click, Click::Send(class, at));
@@ -1988,7 +1974,7 @@ mod tests {
             "a copy with no link"
         );
         let print = workspace.get(copied).unwrap().saved_print().unwrap();
-        let spot = crate::link::Spot::at(at);
+        let spot = (at, "");
         link_at(
             &mut workspace,
             &attached.state,

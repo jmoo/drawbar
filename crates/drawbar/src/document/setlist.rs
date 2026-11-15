@@ -905,7 +905,7 @@ mod tests {
                 model: "Nord Electro 5".into(),
                 serial: None,
             };
-            let held = crate::link::Held::new(class, crate::link::Spot::at(at), print).unwrap();
+            let held = crate::link::Held::new(class, at, "", print).unwrap();
             self.workspace.link(id, &keyboard, held);
         }
 

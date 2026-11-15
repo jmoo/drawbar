@@ -2547,7 +2547,7 @@ mod tests {
     /// replaces both as they are stored, and leaves another keyboard's alone.
     #[test]
     fn a_link_write_replaces_every_member_stored_for_its_keyboard_and_no_other() {
-        use crate::link::{Held, Keyboard, Print, Spot};
+        use crate::link::{Held, Keyboard, Print};
         use nord_usb::ObjectClass;
 
         let root = Temp::new();
@@ -2561,7 +2561,8 @@ mod tests {
             keyboard: keyboard(serial),
             held: Held::new(
                 ObjectClass::Program,
-                Spot::At { bank: 0, slot },
+                nord_usb::Location { bank: 0, slot },
+                "",
                 Print {
                     crc: slot,
                     len: 121,
