@@ -68,12 +68,12 @@ slot, even when the slot already holds the same sound.
 
 ## Changes made on the keyboard
 
-Once a newly attached keyboard has been read, drawbar lists the linked sounds that
-changed there since. **Bring them in** copies each changed slot into its file, moves
-the link of a moved sound, and unlinks a file whose sound was removed or replaced; with
-no slot changed, the button reads **Update links**. **Not now** leaves them marked, and
-**Keyboard changes…** in the Instrument menu asks again.
-Library undo, or **Undo** in the activity log, puts a file back.
+Once a newly attached keyboard has been read, drawbar lists the linked sounds
+that changed there since. **Bring them in** copies each changed slot into its
+file, moves the link of a moved sound, and unlinks a file whose sound was removed
+or replaced. **Not now** leaves them marked, and **Keyboard changes…** in the
+Instrument menu asks again. Library undo, or **Undo** in the activity log, puts a
+file back.
 
 ## Safety
 

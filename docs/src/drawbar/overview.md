@@ -48,11 +48,10 @@ change a link.
 
 The mark before a name says how a file stands with its slot: `↑` (Ready to send)
 when the file is newer, and `!` (Needs attention) when the keyboard changed or
-emptied the slot. An address in gray
-is a slot not read yet, or the slot on a keyboard that is not attached. The
-**Needs** column names the piano or sample a program plays, once it is on this
-computer or on the keyboard. A name in italics with a `*` has unsaved edits.
-Hover anything for an explanation.
+emptied the slot. An address in gray is a slot not read yet, or the slot on a
+keyboard that is not attached. The **Needs** column names the piano or sample a
+program plays, once it is on this computer or on the keyboard. A name in italics
+with a `*` has unsaved edits. Hover anything for an explanation.
 
 Select one program and the inspector's **Plays** card lists the piano and sample it
 plays. A piano's or sample's **Played by** card lists the programs on this
