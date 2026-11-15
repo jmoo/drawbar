@@ -2,21 +2,20 @@
 
 There is no Apply button. A control you move is set on the document at once,
 and the name shows a `*` until you save. Nothing on the instrument changes until
-you queue the document and send it.
+you save the document and sync.
 
 ## The document header
 
 Every document has the same strip across the top: its kind and name, a format
 badge, where it lives (the slot it is linked to, a folder, or this computer), its
 size, and `edited` or `waiting to send`. The place carries the library's mark:
-`↑ Programs 1:7` is ready to send, and `! Programs 7:14` needs attention. Hover
-any of them for the detail.
+`↑ Programs 1:7` is newer here, `↓ Programs 1:7` is newer on the keyboard, and
+`! Programs 7:14` needs attention. Hover any of them for the detail.
 
 To the right are the two faces, **Revert**, **Export…**, and the document's
-main action: **Save**, **Send to…**, **Load on instrument**, or **Choose…** when
-the keyboard changed the document's slot and you pick which version to keep. It
-becomes a warning such as `Won't fit · 70 MB over` when the send cannot happen
-yet. The panel plays what the instrument holds, so edits you have not sent are
+main action: **Save**, **Send to…**, **Load on instrument**, or **Sync…** when
+the document and its slot differ, which opens the Sync sheet on it. It becomes a
+warning such as `Won't fit · 70 MB over` when the write cannot happen yet. The panel plays what the instrument holds, so edits you have not sent are
 not heard.
 
 ## The faces

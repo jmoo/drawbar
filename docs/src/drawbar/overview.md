@@ -6,7 +6,7 @@ desktop app.
 
 | Part | What it is for |
 |---|---|
-| **Top bar** | Import, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
+| **Top bar** | Import, New and Save, the search box, **Sync**, and **Connect instrument…** or your instrument's name. |
 | **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
 | **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
@@ -27,8 +27,8 @@ browser, a few keys use ⌥ (⌃ on a Mac) in place of ⌘.
 
 Click the status line, or press ⌥⌘L, for the log. **Problems** shows only what
 went wrong. The copy button puts the whole log on the clipboard for a bug report.
-When drawbar links files, brings in changed slots, or queues sends on its own, the
-line that says so has an **Undo** beside it.
+When drawbar links files on its own, or Sync brings in a slot or moves or removes
+a link, the line that says so has an **Undo** beside it.
 
 ## Selecting
 
@@ -46,9 +46,9 @@ holds something, and **At** gives that slot. Copying a slot to this computer or
 sending a file to a slot links the two; **Link to** and **Unlink** in a row's menu
 change a link.
 
-The mark before a name says how a file stands with its slot: `↑` (Ready to send)
-when the file is newer, and `!` (Needs attention) when the keyboard changed or
-emptied the slot. An address in gray is a slot not read yet, or the slot on a
+The mark before a name says how a file stands with its slot: `↑` when the file is
+newer, `↓` when the slot is, and `!` (Needs attention) when both changed or the
+keyboard emptied the slot. An address in gray is a slot not read yet, or the slot on a
 keyboard that is not attached. The **Needs** column names the piano or sample a
 program plays, once it is on this computer or on the keyboard. A name in italics
 with a `*` has unsaved edits. Hover anything for an explanation.

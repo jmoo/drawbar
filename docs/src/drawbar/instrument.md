@@ -42,38 +42,32 @@ Drag to move things:
 - a sound onto a slot queues it for sending;
 - a slot onto another slot in the same folder swaps the two.
 
-## Sending
+## Sync
 
-Nothing is written until you send. Dropping a sound on a slot, **Send to…**,
-**Queue for sending**, and saving a sound linked to a slot all add to the queue.
-**Send** in the top bar counts what is waiting.
+Nothing is written until you sync. **Sync** in the top bar, or ⇧⌘S, reads the
+keyboard and lists every sound that differs between it and this computer: files
+newer here, slots changed on the keyboard, sounds moved, replaced or removed
+there, and sounds you dropped on a slot or sent with **Send to…** or **Queue for
+sending**. Its count is the number of rows.
 
-Click **Send**, or press ⇧⌘S, to review the queue. Each row says whether the write
-is `new`, an `update`, or `replaces` another sound. Click a destination to change
-it, click × to remove a row, and select a row to see what the slot holds now and
-what it will hold after sending.
-**Send all** writes everything. If the instrument refuses something, the rest
-stays queued.
+Each row has a way: `↑` writes the file to its slot, `↓` brings the slot into the
+file. Click the arrow to turn it. A sound changed on both sides, or removed on the
+keyboard, has no way until you pick one. Click × to leave a row out, and select a
+row to see the two versions side by side. **Sync** in the sheet does every row
+that has a way. If the instrument refuses a write, that sound stays listed.
 
-A queued program takes along the piano or sample it plays when only this computer
-has it.
+A program sent to the keyboard takes along the piano or sample it plays when only
+this computer has it. A piano or sample is never brought in; copy it to this
+computer instead.
 
-When sounds on this computer are newer than the slots they are linked to, a
-**Queue** button appears beside **Send**. Click it to queue them all. Sounds saved
-while the keyboard was away are queued when it attaches.
+When a keyboard attaches and something changed on it, the sheet opens by itself.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
-`Africa-Split` on the panel. Sending a sound renamed on this computer renames its
+`Africa-Split` on the panel. Writing a sound renamed on this computer renames its
 slot, even when the slot already holds the same sound.
 
-## Changes made on the keyboard
-
-Once a newly attached keyboard has been read, drawbar lists the linked sounds
-that changed there since. **Bring them in** copies each changed slot into its
-file, moves the link of a moved sound, and unlinks a file whose sound was removed
-or replaced. **Not now** leaves them marked, and **Keyboard changes…** in the
-Instrument menu asks again. Library undo, or **Undo** in the activity log, puts a
-file back.
+Library undo, or **Undo** in the activity log, puts back a file Sync brought in, or
+a link it moved or removed.
 
 ## Safety
 
@@ -91,5 +85,5 @@ file back.
 
 ## Disconnecting
 
-Unplug, and the instrument's slots disappear. The send queue is kept, so plug
-back in and send.
+Unplug, and the instrument's slots disappear. Sounds you sent to a slot stay
+listed, so plug back in and sync.

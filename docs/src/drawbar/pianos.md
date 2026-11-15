@@ -85,5 +85,5 @@ have been played on an instrument.
 
 ## Sending
 
-Queue a library from its header. It is checked against the instrument and its
+Send a library from its header. It is checked against the instrument and its
 free space first.

@@ -19,8 +19,8 @@ cargo install drawbar
 - Trim a piano library until it fits, build a sample instrument from WAVs or a
   Sample Editor project, and listen to either from the screen or a MIDI
   controller before you send it.
-- Queue your changes and send them in one go, with a review of what each one
-  replaces.
+- Sync with the keyboard in one go: one sheet shows what changed on each side,
+  and which way each sound goes.
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
   side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.

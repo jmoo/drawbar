@@ -73,4 +73,4 @@ Instruments drawbar makes from WAVs are v2.
 
 ## Sending
 
-Queue an instrument from its header like anything else.
+Send an instrument from its header like anything else.
