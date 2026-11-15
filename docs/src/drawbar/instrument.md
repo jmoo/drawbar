@@ -28,7 +28,7 @@ opens at the slot when you rename from the Keyboard tab or the Library.
 
 Samples and pianos keep the name they were sent with, so they cannot be renamed
 or duplicated on the instrument. The instrument also keeps one of each name: a
-sample or piano named like one already there is queued to replace it, and
+sample or piano named like one already there goes on Sync to replace it, and
 cannot go to any other slot until you rename it.
 
 With several slots checked, **Copy to this computer** reads each folder's slots
@@ -39,28 +39,15 @@ writes them, with what they play, as one bundle; see
 Drag to move things:
 
 - a slot onto **This computer** copies it;
-- a sound onto a slot queues it for sending;
+- a sound onto a slot places it there for Sync;
 - a slot onto another slot in the same folder swaps the two.
 
 ## Sync
 
 Nothing is written until you sync. **Sync** in the top bar, or ⇧⌘S, reads the
-keyboard and lists every sound that differs between it and this computer: files
-newer here, slots changed on the keyboard, sounds moved, replaced or removed
-there, and sounds you dropped on a slot or sent with **Send to…** or **Queue for
-sending**. Its count is the number of rows.
-
-Each row has a way: `↑` writes the file to its slot, `↓` brings the slot into the
-file. Click the arrow to turn it. A sound changed on both sides, or removed on the
-keyboard, has no way until you pick one. Click × to leave a row out, and select a
-row to see the two versions side by side. **Sync** in the sheet does every row
-that has a way. If the instrument refuses a write, that sound stays listed.
-
-A program sent to the keyboard takes along the piano or sample it plays when only
-this computer has it. A piano or sample is never brought in; copy it to this
-computer instead.
-
-When a keyboard attaches and something changed on it, the sheet opens by itself.
+instrument and lists what differs. `↑` writes a sound to the instrument, `↓`
+brings one here; click the arrow to turn it. A `!` row waits for your pick. When
+an instrument attaches with changes of its own, the list opens by itself.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel. Writing a sound renamed on this computer renames its
@@ -85,5 +72,5 @@ a link it moved or removed.
 
 ## Disconnecting
 
-Unplug, and the instrument's slots disappear. Sounds you sent to a slot stay
+Unplug, and the instrument's slots disappear. Sounds you placed on a slot stay
 listed, so plug back in and sync.

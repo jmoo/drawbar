@@ -8,7 +8,7 @@ plays.
 ## Edits are a plan
 
 An edit is a plan over the saved library, shown at once, and every switch can
-be turned back on. The library is rewritten only when you save, export or queue
+be turned back on. The library is rewritten only when you save, export or sync
 it, and that can take a moment for a large one. Until then the plan is an
 unsaved edit like any other: the name is starred, and **Revert** drops it.
 
@@ -25,7 +25,7 @@ A list of switches, each with the size it keeps: one per velocity layer, **Pedal
 resonance**, **Release samples**, and **Keys**, which narrows the range. A meter
 compares the library with the instrument's free piano memory and names the
 cheapest cut that would make it fit. A library that does not fit cannot be
-queued.
+sent.
 
 **Velocity layers** goes finer: one lane per layer, one segment per root. Click a
 segment to drop that layer for that root only. Each segment gives the velocities
