@@ -65,6 +65,11 @@ pub enum Undo {
         keyboard: Keyboard,
         held: Held,
     },
+    /// Files unlinked from a slot another file kept: link each back, in place of that one.
+    Reclaim {
+        keyboard: Keyboard,
+        links: Vec<(u64, Held)>,
+    },
 }
 
 /// A file as it was before it was brought in: the bytes it was saved as, and its link.
@@ -103,6 +108,11 @@ impl Undo {
                     workspace.link(id, &keyboard, held);
                 }
             }
+            Undo::Reclaim { keyboard, links } => {
+                for (id, held) in links {
+                    workspace.link(id, &keyboard, held);
+                }
+            }
         }
     }
 
@@ -110,7 +120,9 @@ impl Undo {
     pub fn weight(&self) -> usize {
         match self {
             Undo::Restore(kept) => kept.iter().map(|kept| kept.bytes.len()).sum(),
-            Undo::Unlink { .. } | Undo::Unqueue(_) | Undo::Relink { .. } => 0,
+            Undo::Unlink { .. } | Undo::Unqueue(_) | Undo::Relink { .. } | Undo::Reclaim { .. } => {
+                0
+            }
         }
     }
 }

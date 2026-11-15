@@ -2,8 +2,6 @@
 //! it was last attached, and which of a file and its slot is current. Bringing a slot in
 //! reads it and saves what it holds as the file linked to it.
 
-use std::collections::HashMap;
-
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
@@ -53,15 +51,11 @@ pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Noticed> {
     let Some(keyboard) = state.keyboard() else {
         return Vec::new();
     };
-    let claims = claims(workspace, keyboard);
     let judged: Vec<(Noticed, &Held)> = workspace
         .listed()
         .filter(|entity| !entity.is_unsaved())
         .filter_map(|entity| {
             let held = entity.held_on(keyboard)?;
-            if claims[&(held.class(), &held.spot)] > 1 {
-                return None;
-            }
             let change = change(state, workspace, keyboard, entity, held)?;
             let (id, class) = (entity.id, held.class());
             Some((Noticed { id, class, change }, held))
@@ -196,22 +190,6 @@ fn unmoved(state: &DeviceState, held: &Held) -> Option<Change> {
         at,
         by: name_at(state, held.class(), at),
     })
-}
-
-/// How many files are linked to each slot on `keyboard`. Two libraries that linked one
-/// slot each before they synced both keep their link.
-fn claims<'w>(
-    workspace: &'w Workspace,
-    keyboard: &Keyboard,
-) -> HashMap<(ObjectClass, &'w Spot), usize> {
-    let mut claims = HashMap::new();
-    for held in workspace
-        .listed()
-        .filter_map(|entity| entity.held_on(keyboard))
-    {
-        *claims.entry((held.class(), &held.spot)).or_default() += 1;
-    }
-    claims
 }
 
 /// Whether the walk of every class holding a file linked on the attached keyboard has
@@ -514,7 +492,6 @@ fn bring(
     workspace.replace_bytes(id, bytes, log);
     workspace.mark_saved(id);
     workspace.link(id, keyboard, held);
-    device.state.uncontest(id);
     Some(restored)
 }
 
@@ -536,10 +513,7 @@ pub fn landed(
     let agreed = device.state.keyboard().is_some_and(|keyboard| {
         workspace.get(id).is_some_and(|entity| {
             let held = entity.held_on(keyboard);
-            held.is_some_and(|held| {
-                entity.saved_print() == Some(held.base)
-                    && claims(workspace, keyboard)[&(held.class(), &held.spot)] == 1
-            })
+            held.is_some_and(|held| entity.saved_print() == Some(held.base))
         })
     });
     if !agreed {
@@ -657,7 +631,6 @@ pub fn use_mine(device: &mut Device, workspace: &mut Workspace, queue: &mut Queu
     };
     let (_, there) = there(&device.state, held);
     workspace.link(id, keyboard, held.superseding(there));
-    device.state.uncontest(id);
     crate::queue::enqueue(workspace, device, queue, log, id, class, at);
 }
 

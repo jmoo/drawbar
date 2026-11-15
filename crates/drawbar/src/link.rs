@@ -206,18 +206,12 @@ pub enum Standing {
     Theirs,
     /// The slot holds a version the file never had, and the file has changed too.
     Both,
-    /// Another file is linked to the slot as well, and neither is known to be what it
-    /// holds. [`standing`] never says it: it is a fact about two links.
-    Contested,
 }
 
 impl Standing {
     /// Whether the user must choose between the file and what the slot holds.
     pub fn needs_attention(self) -> bool {
-        matches!(
-            self,
-            Standing::Theirs | Standing::Both | Standing::Contested
-        )
+        matches!(self, Standing::Theirs | Standing::Both)
     }
 }
 

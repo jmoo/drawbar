@@ -63,9 +63,6 @@ impl Where {
             Where::Both(Standing::Both) => {
                 "On this computer and in its slot, and both have changed."
             }
-            Where::Both(Standing::Contested) => {
-                "On this computer and in its slot, which another file is linked to too."
-            }
             Where::Both(Standing::Gone) => "On this computer, and its slot is empty.",
             Where::Both(Standing::Unread) => "On this computer and in a slot not read yet.",
             Where::Computer => "On this computer only.",
@@ -87,9 +84,7 @@ impl Where {
     /// computer, and the instrument.
     fn rank(self) -> u8 {
         match self {
-            Where::Both(
-                Standing::Theirs | Standing::Both | Standing::Gone | Standing::Contested,
-            ) => 0,
+            Where::Both(Standing::Theirs | Standing::Both | Standing::Gone) => 0,
             Where::Both(Standing::Ahead) => 1,
             Where::Both(Standing::Unread) => 2,
             Where::Both(Standing::Same) => 3,
@@ -365,9 +360,7 @@ impl Mark {
     pub fn of(standing: Standing) -> Option<Mark> {
         match standing {
             Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs | Standing::Both | Standing::Gone | Standing::Contested => {
-                Some(Mark::Attention)
-            }
+            Standing::Theirs | Standing::Both | Standing::Gone => Some(Mark::Attention),
             Standing::Same | Standing::Unread => None,
         }
     }
