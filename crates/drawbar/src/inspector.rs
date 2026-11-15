@@ -423,7 +423,7 @@ struct Single {
     id: Option<u64>,
     /// The header's action for an asset: its label, its hover, and what a click asks for.
     action: Option<(String, String, Click)>,
-    /// The slots [`crate::device::link_offers`] finds for an asset with no slot.
+    /// The slots [`crate::device::also_at`] finds for an asset with no slot.
     also: Vec<(ObjectClass, Location)>,
     facts: Vec<Fact>,
 }
@@ -508,7 +508,7 @@ fn about(
         .map(|loud| (loud.label, loud.hint, loud.click));
     let also = entity
         .filter(|_| row.at.is_none())
-        .map_or_else(Vec::new, |entity| crate::device::link_offers(&device.state, workspace, entity));
+        .map_or_else(Vec::new, |entity| crate::device::also_at(&device.state, workspace, entity));
     About::Row(Single {
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),

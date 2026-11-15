@@ -1391,15 +1391,21 @@ pub fn standing_on<'w>(
     }
 }
 
+/// A slot of the attached keyboard an asset with no link there may be linked to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Offer {
+    class: ObjectClass,
+    at: Location,
+    /// Whether the slot holds exactly what the asset was saved as.
+    holds: bool,
+}
+
 /// The slots of the attached keyboard an asset with no link there may be linked to: the
-/// ones holding exactly what it was saved as, and the slot its header or origin names
-/// where that slot keeps a sound under its name, first. Only those no other asset is
-/// linked to. Only a hint: nothing is linked, merged or sent by it.
-pub fn link_offers(
-    state: &DeviceState,
-    workspace: &Workspace,
-    entity: &LocalEntity,
-) -> Vec<(ObjectClass, Location)> {
+/// ones holding exactly what it was saved as, and first the slot its header or origin
+/// names where that slot holds it or, for an asset that is not new, a sound under its
+/// name. Only those no other asset is linked to. Only a hint: nothing is linked, merged or
+/// sent by it.
+fn offers(state: &DeviceState, workspace: &Workspace, entity: &LocalEntity) -> Vec<Offer> {
     let (Some(keyboard), Some(class), Some(print)) =
         (state.keyboard(), home(entity), entity.saved_print())
     else {
@@ -1408,26 +1414,49 @@ pub fn link_offers(
     if held_here(state, entity).is_some() {
         return Vec::new();
     }
-    let label = slot_label(&entity.name);
+    let label = slot_label(&entity.name).filter(|_| !matches!(entity.origin, Origin::Fresh));
     let free = |at: &Location| {
         let spot = spot_at(state, class, *at);
         spot.is_none_or(|spot| workspace.linked_at(&keyboard, class, &spot).is_none())
     };
-    let named = named_slots(entity, class).filter(free).find(|at| {
-        let info = state.slot(class, *at).flatten();
-        info.is_some_and(|info| {
-            info.crc32 == Some(print.crc) || Some(info.name.trim()) == label.as_deref()
-        })
-    });
+    let offer = |at: Location| {
+        let info = state.slot(class, at).flatten()?;
+        let holds = info.crc32 == Some(print.crc);
+        let named = label.as_deref() == Some(info.name.trim());
+        (holds || named).then_some(Offer { class, at, holds })
+    };
+    let named = named_slots(entity, class).filter(free).find_map(offer);
     let holding = occupied(state, class)
-        .filter(|(at, info)| info.crc32 == Some(print.crc) && Some(*at) != named)
+        .filter(|(at, info)| info.crc32 == Some(print.crc) && named.is_none_or(|it| it.at != *at))
         .map(|(at, _)| at)
-        .filter(free);
-    named
-        .into_iter()
-        .chain(holding)
-        .map(|at| (class, at))
-        .collect()
+        .filter(free)
+        .map(|at| Offer {
+            class,
+            at,
+            holds: true,
+        });
+    named.into_iter().chain(holding).collect()
+}
+
+/// The slots Link to offers an asset: every one of [`offers`].
+pub fn link_offers(
+    state: &DeviceState,
+    workspace: &Workspace,
+    entity: &LocalEntity,
+) -> Vec<(ObjectClass, Location)> {
+    let offers = offers(state, workspace, entity).into_iter();
+    offers.map(|offer| (offer.class, offer.at)).collect()
+}
+
+/// The slots of [`offers`] holding exactly what an asset was saved as.
+pub fn also_at(
+    state: &DeviceState,
+    workspace: &Workspace,
+    entity: &LocalEntity,
+) -> Vec<(ObjectClass, Location)> {
+    let offers = offers(state, workspace, entity).into_iter();
+    let holding = offers.filter(|offer| offer.holds);
+    holding.map(|offer| (offer.class, offer.at)).collect()
 }
 
 /// The folder an asset belongs in.
@@ -3593,6 +3622,53 @@ mod tests {
         let entity = bench.workspace.get(id).unwrap();
         let linked = standing_of(&bench.device.state, entity).unwrap();
         assert!(linked.standing.needs_attention(), "{:?}", linked.standing);
+    }
+
+    #[test]
+    fn a_new_file_is_offered_only_the_slots_holding_its_bytes_whatever_its_header_names() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        let fresh = crate::workspace::Fresh::Program.bytes().unwrap();
+        let slots = [
+            Some(("untitled", print(&gained("40")).crc)),
+            Some(("B", print(&fresh).crc)),
+        ];
+        bench.device.pretend_bodies(class, 1, &slots);
+        let id = bench
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut bench.log)
+            .unwrap();
+        let entity = bench.workspace.get(id).unwrap();
+        assert_eq!(
+            named_slots(entity, class).next(),
+            Some(at(1)),
+            "a New program's header names 1:1"
+        );
+
+        let state = &bench.device.state;
+        let offers = link_offers(state, &bench.workspace, entity);
+        assert_eq!(offers, [(class, at(2))]);
+        assert_eq!(also_at(state, &bench.workspace, entity), [(class, at(2))]);
+    }
+
+    #[test]
+    fn also_at_names_only_the_slots_holding_the_files_bytes_and_link_to_its_named_slot_too() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        let (mine, other) = (gained("40"), body());
+        let slots = [Some(("A", print(&other).crc)), Some(("Z", print(&mine).crc))];
+        bench.device.pretend_bodies(class, 1, &slots);
+        let origin = Origin::Device { class, at: at(1) };
+        let id = bench
+            .workspace
+            .ingest("A.ne5p".into(), origin, mine, &mut bench.log);
+        bench.workspace.settle_files(&mut bench.log);
+        let entity = bench.workspace.get(id).unwrap();
+
+        let state = &bench.device.state;
+        let offers = link_offers(state, &bench.workspace, entity);
+        assert_eq!(offers, [(class, at(1)), (class, at(2))]);
+        assert_eq!(also_at(state, &bench.workspace, entity), [(class, at(2))]);
     }
 
     #[test]

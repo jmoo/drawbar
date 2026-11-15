@@ -1590,11 +1590,11 @@ fn tooltip(
     }
 }
 
-/// The addresses of the slots an unlinked row may be linked to. See
-/// [`crate::device::link_offers`].
+/// The addresses of the slots holding what an unlinked row holds. See
+/// [`crate::device::also_at`].
 fn also_at(row: &Row, workspace: &Workspace, device: &Device) -> Vec<String> {
     let entity = row.item.local().and_then(|id| workspace.get(id));
-    let also = entity.map(|entity| crate::device::link_offers(&device.state, workspace, entity));
+    let also = entity.map(|entity| crate::device::also_at(&device.state, workspace, entity));
     let also = also.unwrap_or_default().into_iter();
     also.map(|(_, at)| shown(at)).collect()
 }
