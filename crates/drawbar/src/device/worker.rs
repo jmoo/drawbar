@@ -331,6 +331,7 @@ async fn execute<T: Transport>(
                 id,
                 class,
                 at,
+                name,
                 sent: payload,
             });
             Ok(Some(note))
@@ -790,6 +791,7 @@ async fn batch<T: Transport>(
                             id: item.id,
                             class,
                             at: item.at,
+                            name: item.name.clone(),
                             sent: item.payload.clone(),
                         });
                     }

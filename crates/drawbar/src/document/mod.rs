@@ -1950,7 +1950,7 @@ mod tests {
         open.twice();
         open.act(vec![Act::SendAll]);
         let sent = |open: &Open| {
-            let batch = open.device.queued().iter().find_map(|cmd| match cmd {
+            let batch = open.device.queued().into_iter().find_map(|cmd| match cmd {
                 DeviceCmd::SendAll { items, .. } => Some(items),
                 _ => None,
             });
@@ -2798,7 +2798,7 @@ mod tests {
         let asked = open
             .device
             .queued()
-            .iter()
+            .into_iter()
             .filter(|cmd| matches!(cmd, crate::device::DeviceCmd::Deps { .. }))
             .count();
         assert_eq!(asked, 0);

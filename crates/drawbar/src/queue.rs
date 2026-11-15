@@ -17,7 +17,7 @@ use crate::browser::{bound_for, cell_ink, Act, Bound, Carried, Held, Item, Kind}
 use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Fit, Purpose};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
-use crate::link::{Keyboard, Standing};
+use crate::link::{Keyboard, Spot, Standing};
 use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
@@ -43,6 +43,8 @@ pub struct Queued {
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
     /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
+    /// Why [`recheck`] held it back, until it is queued again.
+    held_back: Option<String>,
     /// The keyboard it was queued for, where one was attached. It is written to no other.
     pub keyboard: Option<Keyboard>,
 }
@@ -249,6 +251,9 @@ pub fn enqueue(
     if let Some(why) = name_clash(workspace, &device.state, queue, entity, class, at) {
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
+    if unsettled(&device.state, entity, class, at) {
+        return log.trouble(format!("“{name}” was not queued. {CHOOSE}"));
+    }
     for id in missing_plays(entity, workspace, &device.state, queue) {
         if let Some(Bound::At(class, at)) = workspace
             .get(id)
@@ -259,7 +264,11 @@ pub fn enqueue(
     }
     let holds = Occupancy::of(&device.state, class, at);
     let keyboard = device.state.keyboard();
-    let displaced = match queue.put(entity, class, at, holds, keyboard) {
+    let put = queue.put(entity, class, at, holds, keyboard);
+    if let Some((class, at)) = queue.unread(id) {
+        read_occupant(device, log, class, at);
+    }
+    let displaced = match put {
         Put::Standing => return,
         Put::Made => None,
         Put::Moved(was, before) => Some(format!(
@@ -273,10 +282,87 @@ pub fn enqueue(
             )
         }),
     };
-    if let Some((class, at)) = queue.unread(id) {
-        read_occupant(device, log, class, at);
-    }
     log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
+}
+
+/// Why a write of a file over its own linked slot waits for the user.
+const CHOOSE: &str = "The keyboard changed its slot. Choose… which is current first.";
+
+/// Whether `entity` is linked to the slot `at` of `class` on the attached keyboard and the
+/// user must choose between the two before anything is written there.
+fn unsettled(state: &DeviceState, entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
+    crate::device::standing_of(state, entity).is_some_and(|linked| {
+        (linked.class, linked.at) == (class, Some(at)) && linked.standing.needs_attention()
+    })
+}
+
+/// Whether a slot holds something other than what an entry was made against. A slot no
+/// walk has read changes nothing.
+fn differs(was: &Occupancy, now: &Occupancy) -> bool {
+    match (was, now) {
+        (Occupancy::Unknown, _) | (_, Occupancy::Unknown) => false,
+        (Occupancy::Vacant, Occupancy::Vacant) => false,
+        (Occupancy::Vacant, Occupancy::Held(_)) | (Occupancy::Held(_), Occupancy::Vacant) => true,
+        (Occupancy::Held(was), Occupancy::Held(now)) => {
+            let sums = match (was.crc, now.crc) {
+                (Some(was), Some(now)) => was != now,
+                (None, None) => was.body_len != now.body_len,
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            was.name != now.name || sums
+        }
+    }
+}
+
+/// Check every waiting entry against what the attached keyboard holds now. An entry whose
+/// slot changed since it was queued, or whose file's slot now waits for the user, is held
+/// back: it stays queued, says why, and shows what the slot holds now. Call before a send
+/// and whenever a bank is read again.
+pub fn recheck(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+    for held in &mut queue.list {
+        let Some(entity) = workspace.get(held.id) else {
+            continue;
+        };
+        let now = Occupancy::of(&device.state, held.class, held.at);
+        let changed = differs(&held.replaces, &now);
+        match (changed, &held.replaces) {
+            (true, _) => {
+                held.diff = verdict(held.class, entity, &now);
+                held.replaces = now;
+                held.read = Read::Unasked;
+                held.stamp = entity.stamp;
+            }
+            (false, Occupancy::Unknown) => {
+                if matches!(held.read, Read::Unasked) {
+                    held.diff = verdict(held.class, entity, &now);
+                }
+                held.replaces = now;
+            }
+            (false, Occupancy::Vacant | Occupancy::Held(_)) => {}
+        }
+        let why = match (
+            unsettled(&device.state, entity, held.class, held.at),
+            changed,
+        ) {
+            (true, _) => CHOOSE,
+            (false, true) => "Its slot changed on the keyboard since it was queued.",
+            (false, false) => continue,
+        };
+        if held.failure.as_deref() != Some(why) {
+            log.say(format!(
+                "“{}” was held back from {}. {why}",
+                entity.name,
+                place(held.class, held.at)
+            ));
+            held.failure = Some(why.to_string());
+        }
+        held.held_back = changed.then(|| why.to_string()).or(held.held_back.take());
+    }
+    for id in queue.ids() {
+        if let Some((class, at)) = queue.unread(id) {
+            read_occupant(device, log, class, at);
+        }
+    }
 }
 
 /// The piano and sample files on this computer a program plays that the attached
@@ -454,7 +540,7 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
                 ));
             }
         }
-        held.failure = refusal;
+        held.failure = refusal.or_else(|| held.held_back.clone());
     }
 }
 
@@ -565,8 +651,9 @@ impl Queue {
     /// Callers use [`enqueue`], which wraps this.
     ///
     /// ⚠️ An asset already waiting for this slot keeps its entry and the read that entry
-    /// is waiting on. Rebuilding the entry would discard an occupant already read and ask
-    /// the instrument for it again.
+    /// is waiting on, unless the slot holds something else now or the entry was made for
+    /// another keyboard. Rebuilding the entry would discard an occupant already read and
+    /// ask the instrument for it again.
     fn put(
         &mut self,
         entity: &LocalEntity,
@@ -580,7 +667,14 @@ impl Queue {
             .iter_mut()
             .find(|held| (held.id, held.class, held.at) == (entity.id, class, at))
         {
+            if held.keyboard != keyboard || differs(&held.replaces, &replaces) {
+                held.diff = verdict(class, entity, &replaces);
+                held.replaces = replaces;
+                held.read = Read::Unasked;
+                held.stamp = entity.stamp;
+            }
             held.failure = None;
+            held.held_back = None;
             held.keyboard = keyboard;
             self.picked = Some(entity.id);
             return Put::Standing;
@@ -608,6 +702,7 @@ impl Queue {
             read: Read::Unasked,
             stamp: entity.stamp,
             failure: None,
+            held_back: None,
             keyboard,
         });
         self.picked = Some(entity.id);
@@ -719,6 +814,29 @@ impl Queue {
         self.list
             .iter()
             .find(|held| (held.class, held.at) == (class, at))
+    }
+
+    /// Follow slots of `class` that drawbar moved: an entry waiting for the first address
+    /// of a pair waits for the second, and asks again what it replaces there. Every pair
+    /// moves at once, so a swap moves both.
+    pub fn respot(&mut self, class: ObjectClass, moves: &[(Spot, Option<Spot>)]) {
+        let to = |at: Location| {
+            moves.iter().find_map(|(from, to)| match (from, to) {
+                (from, Some(Spot::At { bank, slot })) if *from == Spot::at(at) => Some(Location {
+                    bank: *bank,
+                    slot: *slot,
+                }),
+                _ => None,
+            })
+        };
+        for held in self.list.iter_mut().filter(|held| held.class == class) {
+            if let Some(at) = to(held.at) {
+                held.at = at;
+                held.replaces = Occupancy::Unknown;
+                held.read = Read::Unasked;
+                held.diff = Diff::Pending;
+            }
+        }
     }
 
     /// Take an asset out of the queue.
@@ -1438,8 +1556,11 @@ fn writes(
     workspace: &Workspace,
     device: &DeviceState,
 ) -> Writes {
-    let linked_there = crate::device::slot_of(device, entity) == Some((held.class, held.at));
-    let what = match (&held.replaces, linked_there) {
+    let update = crate::device::standing_of(device, entity).is_some_and(|linked| {
+        (linked.class, linked.at) == (held.class, Some(held.at))
+            && matches!(linked.standing, Standing::Ahead | Standing::Same)
+    });
+    let what = match (&held.replaces, update) {
         (Occupancy::Vacant, _) => What::New,
         (Occupancy::Held(_) | Occupancy::Unknown, true) => What::Update,
         (Occupancy::Held(occupant), false) => What::Replaces(occupant.name.clone()),
@@ -1864,7 +1985,7 @@ mod tests {
 
     /// The first command queued for the instrument, which must be a read.
     fn asked(device: &Device) -> (ObjectClass, Location, Purpose) {
-        match device.queued().front().expect("a read was queued") {
+        match device.queued().front().copied().expect("a read was queued") {
             DeviceCmd::Get { class, at, why, .. } => (*class, *at, *why),
             other => panic!("{}", other.label()),
         }
@@ -2638,6 +2759,28 @@ mod tests {
         assert_eq!(said(soul), "new");
         assert_eq!(said(jazzy), "update");
         assert_eq!(said(tine), "replaces “Bright Wurly”");
+
+        bench.device.pretend_bodies(
+            class,
+            1,
+            &[None, Some(("Jazzy", 9)), Some(("Bright Wurly", 2))],
+        );
+        let entity = bench.workspace.get(jazzy).unwrap();
+        let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
+        assert!(linked.standing.needs_attention());
+        let held = bench.queue.entry(jazzy).unwrap();
+        let said = writes(
+            held,
+            entity,
+            &bench.queue,
+            &bench.workspace,
+            &bench.device.state,
+        );
+        assert_eq!(
+            said.said(),
+            "replaces “Jazzy”",
+            "not an update of what it holds now"
+        );
     }
 
     #[test]

@@ -3001,6 +3001,7 @@ mod tests {
             id,
             class,
             at: at(6, 0),
+            name: "Sent.ne5p".into(),
             sent: crate::device::Payload::Bytes(sent),
         });
         poll(&mut bench);

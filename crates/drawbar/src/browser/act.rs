@@ -1494,6 +1494,7 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    crate::queue::recheck(workspace, device, queue, log);
     let mut checking = None;
     for held in will_write(queue) {
         let entity = workspace
@@ -1866,7 +1867,11 @@ fn save_doc(
         let linked = crate::device::standing_of(&device.state, entity);
         let ahead = linked.is_some_and(|linked| linked.standing == Standing::Ahead);
         let bound = ahead.then(|| bound_for(entity, &device.state, queue));
-        let waiting = queue.entry(id).map(|held| (held.class, held.at));
+        let keyboard = device.state.keyboard();
+        let waiting = queue
+            .entry(id)
+            .filter(|held| held.keyboard == keyboard)
+            .map(|held| (held.class, held.at));
         match bound {
             // Already waiting for that slot, so the save only moved the baseline.
             Some(Bound::At(class, at)) if waiting != Some((class, at)) => {
@@ -2111,7 +2116,12 @@ mod tests {
             bench.queue.is_empty(),
             "a write back does not join the queue"
         );
-        let put = bench.device.queued().front().expect("a put was asked for");
+        let put = bench
+            .device
+            .queued()
+            .front()
+            .copied()
+            .expect("a put was asked for");
         assert!(
             matches!(put, DeviceCmd::Put { id: sent, class, at: to, .. }
                 if *sent == id && *class == ObjectClass::Program && *to == at(3)),
@@ -2124,6 +2134,7 @@ mod tests {
             id,
             class: ObjectClass::Program,
             at: at(3),
+            name: "Sent.ne5p".into(),
             sent: crate::device::Payload::Bytes(bench.workspace.get(id).unwrap().bytes.to_vec()),
         });
         bench.device.poll(
@@ -2159,7 +2170,7 @@ mod tests {
             bench
                 .device
                 .queued()
-                .iter()
+                .into_iter()
                 .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
         };
         assert!(
@@ -2200,7 +2211,7 @@ mod tests {
         bench.device.pretend_scanned(class, 1, &[""]);
         bench.act(vec![Act::Send { id, class, at }, Act::SendAll]);
 
-        let Some(DeviceCmd::SendAll { items, .. }) = bench.device.queued().back() else {
+        let Some(DeviceCmd::SendAll { items, .. }) = bench.device.queued().back().copied() else {
             panic!("a batch was asked for")
         };
         let [item] = items.as_slice() else {
@@ -2216,7 +2227,7 @@ mod tests {
         assert!(Arc::ptr_eq(sent, &file), "the file it rests in");
         assert_eq!(Some(said.crc), crc32);
         assert_eq!(file.take_reads(), [], "nothing read it");
-        let sent = item.payload.clone();
+        let (sent, name) = (item.payload.clone(), item.name.clone());
 
         // Dispatching the write drops what the walk said of the bank it changes.
         bench.device.pump();
@@ -2224,6 +2235,7 @@ mod tests {
             id,
             class,
             at,
+            name,
             sent,
         });
         bench.device.poll(
@@ -2952,7 +2964,13 @@ mod tests {
         );
 
         bench.act(vec![Act::SendAll]);
-        match bench.device.queued().front().expect("a batch was queued") {
+        match bench
+            .device
+            .queued()
+            .front()
+            .copied()
+            .expect("a batch was queued")
+        {
             DeviceCmd::SendAll { class, items } => {
                 assert_eq!(*class, ObjectClass::Program);
                 assert_eq!(
@@ -3200,7 +3218,7 @@ mod tests {
         let batch = bench
             .device
             .queued()
-            .iter()
+            .into_iter()
             .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
             .expect("the rest of the batch still goes");
         let DeviceCmd::SendAll { items, .. } = batch else {
@@ -3275,7 +3293,7 @@ mod tests {
         let batch = bench
             .device
             .queued()
-            .iter()
+            .into_iter()
             .find(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
             .expect("one command for the folder");
         let DeviceCmd::SendAll { items, .. } = batch else {
@@ -3290,7 +3308,7 @@ mod tests {
             bench
                 .device
                 .queued()
-                .iter()
+                .into_iter()
                 .filter(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
                 .count(),
             1,
@@ -3301,7 +3319,7 @@ mod tests {
         let waiting = |device: &Device| {
             device
                 .queued()
-                .iter()
+                .into_iter()
                 .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
         };
         while waiting(&bench.device) {
@@ -3322,6 +3340,7 @@ mod tests {
             id: ids[0],
             class,
             at: at(0),
+            name: "Sent.ne5p".into(),
             sent: crate::device::Payload::Bytes(
                 bench.workspace.get(ids[0]).unwrap().bytes.to_vec(),
             ),
@@ -4173,6 +4192,7 @@ mod tests {
             id,
             class,
             at: at(1),
+            name: "Sent.ne5p".into(),
             sent: Payload::Bytes(bytes),
         });
         poll(&mut bench);

@@ -673,7 +673,7 @@ mod tests {
     }
 
     fn pulls(bench: &Bench) -> Vec<Location> {
-        let queued = bench.device.queued().iter();
+        let queued = bench.device.queued().into_iter();
         queued
             .filter_map(|cmd| match cmd {
                 DeviceCmd::Get {
@@ -699,6 +699,18 @@ mod tests {
             why,
         });
         heard(bench);
+    }
+
+    fn program_info(slot: u32, name: &str, crc: u32) -> nord_usb::wire::ProgramInfo {
+        nord_usb::wire::ProgramInfo {
+            location: at(slot),
+            body_len: 121,
+            format: "ne5p".into(),
+            version: 4,
+            crc32: Some(crc),
+            modified: None,
+            name: name.into(),
+        }
     }
 
     fn found(id: u64, change: Change) -> Found {
@@ -805,6 +817,103 @@ mod tests {
             at: at(1),
         }]);
         assert!(bench.queue.holds(id));
+    }
+
+    #[test]
+    fn nothing_but_choose_queues_a_file_over_its_own_changed_slot() {
+        use crate::browser::Act;
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40"))), None]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+        let own = Act::Send {
+            id,
+            class: PROGRAM,
+            at: at(1),
+        };
+        for act in [
+            Act::SendChecked(vec![id]),
+            own,
+            Act::SaveDoc(id),
+            Act::QueueChanged,
+        ] {
+            let said = format!("{act:?}");
+            bench.act(vec![act]);
+            assert!(!bench.queue.holds(id), "{said} queued it");
+        }
+        let pointed = bench.log.transcript().matches("Choose…").count();
+        assert_eq!(pointed, 2, "a bulk queue and a drag say why");
+
+        bench.act(vec![Act::Send {
+            id,
+            class: PROGRAM,
+            at: at(2),
+        }]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(2)));
+    }
+
+    #[test]
+    fn a_queued_write_whose_slot_changed_is_held_back_and_the_rest_go() {
+        use crate::browser::Act;
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body())), Some(crc(&body())), None]);
+        let theirs = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let log = &mut bench.log;
+        let other = bench
+            .workspace
+            .ingest("B.ne5p".into(), Origin::Fresh, gained("41"), log);
+        let free = bench
+            .workspace
+            .ingest("C.ne5p".into(), Origin::Fresh, gained("42"), log);
+        bench.workspace.settle_files(log);
+        bench.workspace.replace_bytes(theirs, gained("50"), log);
+        bench.act(vec![Act::SaveDoc(theirs)]);
+        for (id, slot) in [(other, 2), (free, 3)] {
+            bench.act(vec![Act::Send {
+                id,
+                class: PROGRAM,
+                at: at(slot),
+            }]);
+        }
+        assert_eq!(bench.queue.len(), 3);
+
+        let slots = vec![
+            Some(program_info(1, "A", crc(&gained("43")))),
+            Some(program_info(2, "Someone", crc(&gained("44")))),
+            None,
+        ];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class: PROGRAM,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        let failure = |bench: &Bench, id| bench.queue.entry(id).unwrap().failure.clone();
+        assert!(failure(&bench, theirs).unwrap().contains("Choose…"));
+        assert!(
+            failure(&bench, other).is_some(),
+            "it replaces another sound now"
+        );
+        let Some(crate::queue::Occupancy::Held(now)) =
+            bench.queue.entry(other).map(|held| &held.replaces)
+        else {
+            panic!("the review shows what the slot holds");
+        };
+        assert_eq!(now.name, "Someone");
+        assert_eq!(failure(&bench, free), None);
+
+        bench.act(vec![Act::SendAll]);
+        let ids: Vec<u64> = bench
+            .device
+            .queued()
+            .into_iter()
+            .flat_map(|cmd| match cmd {
+                DeviceCmd::SendAll { items, .. } => items.iter().map(|item| item.id).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(ids, [free]);
+        assert!(bench.queue.holds(theirs) && bench.queue.holds(other));
     }
 
     #[test]

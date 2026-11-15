@@ -9283,6 +9283,7 @@ fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
             id,
             class,
             at,
+            name: "Sent.ne5p".into(),
             sent: crate::device::Payload::Bytes(sent),
         });
     let Bench {
@@ -9368,7 +9369,7 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     assert_eq!(session.bytes(id), old);
     assert_eq!(standing(&session), Some(crate::link::Standing::Ahead));
     session.heard();
-    let pulls = session.bench.device.queued().iter().filter(|cmd| {
+    let pulls = session.bench.device.queued().into_iter().filter(|cmd| {
         matches!(
             cmd,
             crate::device::DeviceCmd::Get {

@@ -513,6 +513,8 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
+        /// The name the write was given. The slot takes its [`slot_label`].
+        name: String,
         /// What the write carried: what the slot now holds and what the asset is saved as
         /// from here on (see [`Workspace::landed`] and [`Workspace::landed_file`]). The
         /// asset may hold something else by now, since a write takes as long as the
@@ -1157,20 +1159,20 @@ pub fn link_kept(state: &DeviceState, workspace: &mut Workspace, id: u64) {
     }
 }
 
-/// Link `id` to the slot a send of it reached as `print`, in place of any other asset.
+/// Link `id` to the slot a send of it reached under `name` as `print`, in place of any
+/// other asset.
 fn link_sent(
     state: &DeviceState,
     workspace: &mut Workspace,
     id: u64,
-    class: ObjectClass,
-    at: Location,
+    (class, at, name): (ObjectClass, Location, &str),
     print: Print,
 ) {
     let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
         return;
     };
     let spot = match class.is_library() {
-        true => slot_label(&entity.name).map(|name| Spot::of(class, at, &name)),
+        true => slot_label(name).map(|name| Spot::of(class, at, &name)),
         false => Some(Spot::at(at)),
     };
     let Some(spot) = spot else {
@@ -1432,8 +1434,10 @@ pub struct Device {
     #[cfg(test)]
     from_worker: std::sync::mpsc::Sender<DeviceEvent>,
     link: Link,
-    /// What the user asked for. Always dispatched ahead of the background scan.
-    pending: VecDeque<DeviceCmd>,
+    /// What the user asked for, each with the links it moves once it succeeds, taken
+    /// when it was asked for: an earlier command in the queue may drop the names a later
+    /// one's are keyed by. Always dispatched ahead of the background scan.
+    pending: VecDeque<(DeviceCmd, Option<Respot>)>,
     /// What the command in flight leaves to do when it finishes or fails.
     running: Option<Running>,
     /// The list revision [`link_found`] last looked at. It looks again when the list or
@@ -1594,7 +1598,8 @@ impl Device {
             log.trouble("No instrument is attached.");
             return;
         }
-        self.pending.push_back(cmd);
+        let respot = respot(&self.state, &cmd);
+        self.pending.push_back((cmd, respot));
     }
 
     /// Whether anything failed since the last call, once.
@@ -1639,17 +1644,16 @@ impl Device {
         if !self.state.connected() || self.state.in_flight.is_some() {
             return;
         }
-        if let Some(cmd) = self.pending.pop_front() {
-            return self.dispatch(cmd);
+        if let Some((cmd, respot)) = self.pending.pop_front() {
+            return self.dispatch(cmd, respot);
         }
         let Some(class) = self.state.scan.take() else {
             return;
         };
-        self.dispatch(DeviceCmd::ScanClass { class });
+        self.dispatch(DeviceCmd::ScanClass { class }, None);
     }
 
-    fn dispatch(&mut self, cmd: DeviceCmd) {
-        let respot = respot(&self.state, &cmd);
+    fn dispatch(&mut self, cmd: DeviceCmd, respot: Option<Respot>) {
         // Drop affected banks before a mutation so confirmations never quote stale names.
         let touched = match &cmd {
             DeviceCmd::Delete { class, at }
@@ -1729,8 +1733,8 @@ impl Device {
 
     /// What the user has asked the instrument for and it has not started yet.
     #[cfg(test)]
-    pub fn queued(&self) -> &VecDeque<DeviceCmd> {
-        &self.pending
+    pub fn queued(&self) -> VecDeque<&DeviceCmd> {
+        self.pending.iter().map(|(cmd, _)| cmd).collect()
     }
 
     /// Attach an instrument, as its descriptors would have. The product string matches
@@ -1893,7 +1897,8 @@ impl Device {
         let writes =
             |cmd: &DeviceCmd| matches!(cmd, DeviceCmd::Put { .. } | DeviceCmd::SendAll { .. });
         let running = self.running.as_ref();
-        running.is_some_and(|running| running.writing.is_some()) || self.pending.iter().any(writes)
+        running.is_some_and(|running| running.writing.is_some())
+            || self.pending.iter().any(|(cmd, _)| writes(cmd))
     }
 
     /// Log each slot just read whose body differs from what the asset linked to it was
@@ -1986,12 +1991,12 @@ impl Device {
                             self.state.scan.heard(class, now);
                         }
                         // The panel is still playing what it read before the write.
-                        self.pending.extend(running.reload);
+                        self.pending.extend(running.reload.map(|cmd| (cmd, None)));
                         self.pending.extend(
                             running
                                 .rescan
                                 .into_iter()
-                                .map(|(class, bank)| DeviceCmd::ScanBank { class, bank }),
+                                .map(|(class, bank)| (DeviceCmd::ScanBank { class, bank }, None)),
                         );
                     }
                     self.state.in_flight = None;
@@ -2030,6 +2035,7 @@ impl Device {
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
+                    crate::queue::recheck(workspace, self, queue, log);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
@@ -2117,6 +2123,7 @@ impl Device {
                     id,
                     class,
                     at,
+                    name,
                     sent,
                 } => {
                     queue.forget(id);
@@ -2126,7 +2133,7 @@ impl Device {
                         Payload::File { file, print } => workspace.landed_file(id, file, print.crc),
                     }
                     if let Some(print) = print {
-                        link_sent(&self.state, workspace, id, class, at, print);
+                        link_sent(&self.state, workspace, id, (class, at, &name), print);
                     }
                 }
                 DeviceEvent::Note(text) => log.info(text),
@@ -2136,6 +2143,7 @@ impl Device {
                     if let (Some((class, moves)), Some(keyboard)) = (respot, self.state.keyboard())
                     {
                         workspace.respot(&keyboard, class, &moves);
+                        queue.respot(class, &moves);
                     }
                     let follow_up = self.running.as_ref().is_some_and(|run| run.follow_up);
                     if let Some(words) = self.state.in_flight.as_ref().filter(|_| !follow_up) {
@@ -2587,6 +2595,7 @@ mod tests {
             id: landed,
             class: ObjectClass::Program,
             at: at(3),
+            name: "Sent.ne5p".into(),
             sent: Payload::Bytes(workspace.get(landed).unwrap().bytes.to_vec()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
@@ -2632,6 +2641,7 @@ mod tests {
             id,
             class: ObjectClass::Piano,
             at,
+            name: "Upright.npno".into(),
             sent,
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
@@ -2768,6 +2778,7 @@ mod tests {
                 id,
                 class,
                 at,
+                name: "Sent.ne5p".into(),
                 sent: Payload::Bytes(sent),
             });
             device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
@@ -2869,6 +2880,7 @@ mod tests {
             id,
             class,
             at,
+            name: "Sent.ne5p".into(),
             sent: Payload::Bytes(sent.clone()),
         });
         device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
@@ -2921,7 +2933,7 @@ mod tests {
                 &mut Tabs::default(),
                 &mut Queue::default(),
             );
-            device.queued().iter().find_map(|cmd| match cmd {
+            device.queued().into_iter().find_map(|cmd| match cmd {
                 DeviceCmd::Reload { class, written } => Some((*class, written.clone())),
                 _ => None,
             })
@@ -3000,7 +3012,7 @@ mod tests {
         );
         let rescans: Vec<(ObjectClass, u32)> = device
             .queued()
-            .iter()
+            .into_iter()
             .filter_map(|cmd| match cmd {
                 DeviceCmd::ScanBank { class, bank } => Some((*class, *bank)),
                 _ => None,
@@ -3229,6 +3241,7 @@ mod tests {
                 id,
                 class,
                 at: at(slot),
+                name: "Sent.ne5p".into(),
                 sent: Payload::Bytes(bytes),
             });
             heard(bench);
@@ -3287,6 +3300,17 @@ mod tests {
             bench.device.pretend(DeviceEvent::OpOk("done".into()));
             heard(bench);
         };
+        let waiting = file(&mut bench, "C.ne5p", gained("40"));
+        crate::queue::enqueue(
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
+            waiting,
+            class,
+            at(1),
+        );
+        bench.device.pending.clear();
         let swap = crate::browser::Act::Rearrange {
             class,
             from: at(1),
@@ -3295,6 +3319,10 @@ mod tests {
         done(&mut bench, swap);
         assert_eq!(held_at(&bench, first), Some(Spot::at(at(2))));
         assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
+        let entry = bench.queue.entry(waiting).unwrap();
+        assert_eq!(entry.at, at(2), "the write follows the sound it replaces");
+        assert!(matches!(entry.replaces, crate::queue::Occupancy::Unknown));
+        bench.queue.forget(waiting);
 
         bench.device.state.in_flight = None;
         done(
@@ -3303,6 +3331,54 @@ mod tests {
         );
         assert_eq!(held_at(&bench, first), None);
         assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
+    }
+
+    #[test]
+    fn deleting_several_pianos_at_once_unlinks_each_file() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Piano;
+        let names = ["Tine", "Clav"];
+        bench
+            .device
+            .pretend_lengths(class, 1, &[Some((names[0], 10)), Some((names[1], 10))]);
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let ids = names.map(|name| {
+            let id = file(&mut bench, &format!("{name}.npno"), body());
+            let spot = Spot::Named(name.into());
+            let held = Held::new(class, spot, Print { crc: 1, len: 10 }).unwrap();
+            bench.workspace.link(id, &keyboard, held);
+            id
+        });
+        bench.act(vec![
+            crate::browser::Act::DeleteSlot { class, at: at(1) },
+            crate::browser::Act::DeleteSlot { class, at: at(2) },
+        ]);
+        for _ in names {
+            bench.device.pump();
+            bench.device.pretend(DeviceEvent::OpOk("deleted".into()));
+            bench.device.pretend(DeviceEvent::Finished);
+            heard(&mut bench);
+        }
+        for id in ids {
+            assert_eq!(held_at(&bench, id), None, "file {id}");
+        }
+    }
+
+    #[test]
+    fn a_sent_piano_is_linked_by_the_name_its_write_gave_the_slot() {
+        let mut bench = crate::testing::Bench::new();
+        bench.device.pretend_attached();
+        let id = file(&mut bench, "Tine.npno", body());
+        bench.workspace.rename(id, "Clav.npno".into());
+        bench.device.pretend(DeviceEvent::Sent {
+            id,
+            class: ObjectClass::Piano,
+            at: at(1),
+            name: "Tine.npno".into(),
+            sent: Payload::Bytes(body()),
+        });
+        heard(&mut bench);
+        assert_eq!(held_at(&bench, id), Some(Spot::Named("Tine".into())));
     }
 
     #[test]
@@ -3362,6 +3438,7 @@ mod tests {
             id: copy,
             class,
             at: at(2),
+            name: "Sent.ne5p".into(),
             sent: Payload::Bytes(body()),
         });
         heard(&mut bench);
@@ -3407,10 +3484,36 @@ mod tests {
             !bench
                 .device
                 .queued()
-                .iter()
+                .into_iter()
                 .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. })),
             "nothing is written"
         );
         assert!(bench.queue.holds(id), "it keeps its place");
+
+        let other = bench.device.state.keyboard().unwrap();
+        bench
+            .device
+            .pretend_bodies(class, 1, &[Some(("A", print(&body()).crc)), None]);
+        if let Connection::Connected(card) = &mut bench.device.state.connection {
+            card.serial = Some("B2".into());
+        }
+        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        bench.workspace.link(id, &other, held);
+        let gain = [("center_panel.gain".into(), "40".into())];
+        let edited = crate::fields::apply(&body(), &gain).unwrap().1;
+        bench.workspace.replace_bytes(id, edited, &mut bench.log);
+        bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let entry = bench.queue.entry(id).unwrap();
+        assert_eq!(
+            (entry.keyboard.as_ref(), entry.failure.as_deref()),
+            (Some(&other), None),
+            "saving queues it for the keyboard attached now"
+        );
     }
 }
