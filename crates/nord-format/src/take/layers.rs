@@ -102,7 +102,8 @@ fn named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool, octaves: bool) -> Vec<Opt
             .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs().min(24.0))
             .sum()
     };
-    while octaves {
+    let mut moving = octaves;
+    while moving {
         let now = bend(&line);
         let mut best: Option<(f64, usize, f64)> = None;
         for i in 0..line.len() {
@@ -120,7 +121,7 @@ fn named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool, octaves: bool) -> Vec<Opt
         }
         match best {
             Some((_, i, moved)) => line[i] = moved,
-            None => break,
+            None => moving = false,
         }
     }
     run_of
@@ -138,13 +139,13 @@ fn off_warning(pitch: f64, note: u8) -> Option<String> {
     })
 }
 
+/// A hit's note and any warning about its pitch, or none for a hit left out.
+pub type Named = Option<(u8, Option<String>)>;
+
 /// The note and any warning of each of `hits` in a take with no note list: the note
 /// [`notes_by_hit`] names, a hit with no pitch taking the note of the named hit before
 /// it, and none for a hit `skipped` leaves out.
-pub fn self_named(
-    hits: &[Hit],
-    skipped: impl Fn(&Hit) -> bool + Copy,
-) -> Vec<Option<(u8, Option<String>)>> {
+pub fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) -> Vec<Named> {
     let mut last: Option<u8> = None;
     hits.iter()
         .zip(notes_by_hit(hits, skipped))

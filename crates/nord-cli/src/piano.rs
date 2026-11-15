@@ -1944,7 +1944,10 @@ mod tests {
             ladder.iter().all(|&entry| entry == ladder[0])
         };
         let held = ladders(&["--no-decay"]);
-        assert!(held.len() >= 2, "an attack and its key-off, pitched out too");
+        assert!(
+            held.len() >= 2,
+            "an attack and its key-off, pitched out too"
+        );
         assert!(held.iter().all(flat), "{held:x?}");
         assert!(!ladders(&[]).iter().all(flat), "a grand's attack fades");
         std::fs::remove_dir_all(&dir).unwrap();

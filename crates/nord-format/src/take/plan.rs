@@ -162,20 +162,19 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     let skipped = |hit: &Hit| {
         options.skip.contains(&hit.number) || (options.one_note && Some(hit.number) != loudest)
     };
-    let (notes, assigned): (Vec<u8>, Vec<Option<(u8, Option<String>)>>) =
-        match options.notes.is_empty() {
-            true => (
-                layers::notes_of(&hits, skipped),
-                layers::self_named(&hits, skipped),
-            ),
-            false => (
-                options.notes.clone(),
-                layers::assign(&hits, &options.notes, skipped)
-                    .into_iter()
-                    .map(|a| a.map(|(j, warning)| (options.notes[j], warning)))
-                    .collect(),
-            ),
-        };
+    let (notes, assigned): (Vec<u8>, Vec<layers::Named>) = match options.notes.is_empty() {
+        true => (
+            layers::notes_of(&hits, skipped),
+            layers::self_named(&hits, skipped),
+        ),
+        false => (
+            options.notes.clone(),
+            layers::assign(&hits, &options.notes, skipped)
+                .into_iter()
+                .map(|a| a.map(|(j, warning)| (options.notes[j], warning)))
+                .collect(),
+        ),
+    };
     let mut planned: Vec<Planned> = hits
         .iter()
         .zip(assigned)
