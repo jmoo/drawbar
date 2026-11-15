@@ -15,7 +15,7 @@ mod drafts;
 mod exec;
 mod ids;
 mod keeper;
-mod keys;
+pub(crate) mod keys;
 mod mirror;
 pub mod names;
 pub mod older;

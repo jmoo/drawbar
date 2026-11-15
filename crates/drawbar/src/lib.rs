@@ -30,6 +30,7 @@ pub mod knob;
 pub mod led;
 pub mod libraries;
 pub mod library;
+pub mod link;
 pub mod log;
 pub mod menu;
 #[cfg(target_os = "macos")]
