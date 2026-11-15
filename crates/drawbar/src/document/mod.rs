@@ -1534,7 +1534,6 @@ fn piano_lookup(
         .and_then(current_model)
         .and_then(|n| models.iter().find(|(i, _)| *i == n))
         .map(|(_, piano)| piano.trim().to_string());
-    // The instrument plays the piano the id names, wherever the dials point.
     let scan_disagrees = match (&name, registry) {
         (Some(named), Some(fields)) => current_model(fields)
             .and_then(|n| models.iter().find(|(i, _)| *i == n))
@@ -1543,12 +1542,21 @@ fn piano_lookup(
             .cloned(),
         _ => None,
     };
+    let sample = registry
+        .and_then(|fields| fields.iter().find(|field| field.path == panel::SAMPLE_ID))
+        .and_then(|field| library_id(&field.value))
+        .filter(|id| *id != 0)
+        .and_then(|id| {
+            let name = crate::plays::name_of((ObjectClass::Sample, id), workspace, &device.state);
+            Some((id, name?))
+        });
     panel::PianoLookup {
         id,
         name,
         dialed,
         models,
         scan_disagrees,
+        sample,
     }
 }
 
@@ -2843,7 +2851,6 @@ mod tests {
         );
     }
 
-    /// The instrument plays the piano the id names, whatever the dials say.
     #[test]
     fn dials_pointing_away_from_the_piano_the_id_names_are_called_out() {
         let Bench {
@@ -2864,6 +2871,33 @@ mod tests {
         let lookup = piano_lookup(Some(&fields), &workspace, &device);
         assert_eq!(lookup.name.as_deref(), Some("White Grand"));
         assert_eq!(lookup.scan_disagrees.as_deref(), Some("Royal Grand"));
+    }
+
+    #[test]
+    fn a_sample_id_shows_the_name_of_the_sample_it_names() {
+        let Bench {
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
+        let marimba = crate::plays::slot_key(ObjectClass::Sample, "Marimba").1;
+        let sets = [(panel::SAMPLE_ID.into(), marimba.to_string())];
+        let fields = fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .0;
+        let stored = fields
+            .iter()
+            .find(|field| field.path == panel::SAMPLE_ID)
+            .unwrap();
+        assert_eq!(
+            piano_lookup(Some(&fields), &workspace, &device).names(stored),
+            None,
+            "nothing goes by it yet"
+        );
+
+        device.pretend_lengths(ObjectClass::Sample, 1, &[Some(("Marimba", 1000))]);
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
+        assert_eq!(lookup.names(stored), Some("Marimba"));
     }
 
     /// The instrument plays the piano at the dials where the id is 0.

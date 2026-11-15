@@ -1355,7 +1355,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         (Standing::Same | Standing::Unread, Some(at)) => Some(Loud {
             short: "Load".to_string(),
             glyph: Glyph::Keyboard,
-            hint: format!("plays {} on the instrument", place(class, at)),
+            hint: format!("plays {} on the keyboard", place(class, at)),
             click: Click::Load(class, at),
             ..send(
                 LOAD_ON_INSTRUMENT.to_string(),
@@ -1364,7 +1364,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
             )
         }),
         (Standing::Same | Standing::Unread, None) => Some(idle(format!(
-            "{} has not been found on the instrument yet",
+            "{} has not been found on the keyboard yet",
             folder(class)
         ))),
         (Standing::Ahead, None) => Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick)),
@@ -1384,7 +1384,10 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
             },
             None => send(
                 format!("Send to {}", shown(at)),
-                format!("replaces {}", place(class, at)),
+                match device.slot(class, at) {
+                    Some(None) => format!("new at {}", place(class, at)),
+                    _ => format!("updates {}", place(class, at)),
+                },
                 Click::Send(class, at),
             ),
         }),
@@ -1818,7 +1821,7 @@ mod tests {
             (Tone::Ready, Click::Send(class, at))
         );
         assert_eq!(held.label, "Send to 7:4");
-        assert_eq!(held.hint, "replaces Set lists 7:4");
+        assert_eq!(held.hint, "updates Set lists 7:4");
         assert_eq!(badge(&workspace, &device), "↑ Set lists 7:4");
 
         device.pretend_bodies(class, 7, &[None, None, None, Some(("Blue Room", 7))]);
@@ -1879,7 +1882,7 @@ mod tests {
         assert_eq!(held.tone, Tone::Ready, "{}", held.hint);
         assert_eq!(held.click, Click::Send(class, in_pianos));
         assert_eq!(
-            held.hint, "replaces Pianos 1:4",
+            held.hint, "updates Pianos 1:4",
             "no free space reported is no refusal"
         );
 
