@@ -12,16 +12,27 @@ use crate::strings;
 /// The field the piano lookup decorates, and so the section it belongs in.
 pub const PIANO_MODEL: &str = "piano_panel.piano_model";
 
+/// The panel's Type dial, which picks the Pianos bank the Model dial counts in.
+pub const PIANO_CATEGORY: &str = "piano_panel.category";
+
+/// The id of the piano the program plays.
+pub const PIANO_ID: &str = "piano_panel.id";
+
 /// What is known about the piano a program plays, and what it would take to know more.
 ///
 /// ⚠️ The file stores the piano's id and, separately, the panel's category and Model dial
 /// position, which mean something only in the instrument's own library. Only the
 /// instrument resolves the id to a name, so a name shown here never comes from the file.
 pub struct PianoLookup {
-    /// The id the file names, or `None` where it references no piano at all.
+    /// The id the file names, or `None` where it stores 0 and the dials pick the piano.
     pub id: Option<u32>,
     /// What the instrument called that id, where it has named it.
     pub name: Option<String>,
+    /// Where the file stores 0, the scan's name for the piano the dials pick.
+    pub dialed: Option<String>,
+    /// Whether the instrument has yet to give the dialed piano an id, which a bundle
+    /// names it by.
+    pub dialed_unnamed: bool,
     /// Whether asking is possible: an attached instrument, and a slot to ask about.
     pub can_ask: bool,
     /// Whether the instrument refused the last read of the slot's dependencies.
@@ -37,24 +48,25 @@ pub struct PianoLookup {
 }
 
 impl PianoLookup {
-    /// Whether the instrument could put a name to the piano this program references and
-    /// has not done so yet.
+    /// Whether the instrument could put a name to the piano this program plays, or an id
+    /// to the piano its dials pick, and has not done so yet.
     pub(super) fn wants_a_name(&self) -> bool {
-        self.can_ask && self.id.is_some() && self.name.is_none()
+        self.can_ask && (self.id.is_some() && self.name.is_none() || self.dialed_unnamed)
     }
 
     /// The catalog's name for a library reference, where this lookup resolves it.
     ///
-    /// Only the piano library has a catalog here, and only for the id the instrument has
-    /// named. Every other reference shows the id the file stores.
+    /// Only the piano library has a catalog here: the id the instrument has named, and 0
+    /// for the piano the dials pick. Every other reference shows the id the file stores.
     pub(super) fn names(&self, field: &Field) -> Option<&str> {
         if field.spec.control != ControlKind::Reference(Library::Piano) {
             return None;
         }
-        if super::library_id(&field.value) != self.id {
-            return None;
+        match super::library_id(&field.value) {
+            Some(0) => self.dialed.as_deref(),
+            id if id == self.id => self.name.as_deref(),
+            _ => None,
         }
-        self.name.as_deref()
     }
 
     /// The Model dial as a list of the instrument's own pianos, where the Pianos folder
