@@ -3088,7 +3088,7 @@ mod tests {
         bench.act(vec![Act::AskSendAll]);
 
         let said = reviewed(&mut bench);
-        for word in ["1 write", "1 cannot go", "Send all 1"] {
+        for word in ["Send 1 to Nord Stage 4", "1 cannot go", "Send all 1"] {
             assert!(said.iter().any(|it| it == word), "{word}: {said:?}");
         }
     }

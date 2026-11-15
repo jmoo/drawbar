@@ -397,7 +397,7 @@ pub fn offer(
     (changed > 0).then(|| {
         (
             format!("Queue {changed}"),
-            format!("queue {changed} changed to send to the keyboard"),
+            format!("queue the {changed} ready to send"),
         )
     })
 }
@@ -974,29 +974,11 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
         .rect_filled(tile, 9.0, crate::app::tint(lit, 0.16));
     painted(&bar, Glyph::Upload, tile.shrink(8.0), lit);
     let to = device.product().unwrap_or("the instrument");
-    let [title, line] = [
-        egui::RichText::new("Review send queue").font(egui::FontId::new(15.0, crate::app::bold())),
-        egui::RichText::new(format!("To {to} · nothing is written until you send"))
-            .size(12.0)
-            .color(quiet),
-    ]
-    .map(|text| {
-        egui::WidgetText::from(text).into_galley(
-            &bar,
-            Some(egui::TextWrapMode::Extend),
-            f32::INFINITY,
-            egui::FontSelection::Default,
-        )
-    });
-    let block = egui::vec2(
-        title.size().x.max(line.size().x),
-        title.size().y + 2.0 + line.size().y,
+    let (writes, replaces, failed) = counts(queue);
+    bar.label(
+        egui::RichText::new(format!("Send {writes} to {to}"))
+            .font(egui::FontId::new(15.0, crate::app::bold())),
     );
-    bar.allocate_ui_with_layout(block, egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(title);
-        ui.label(line);
-    });
     bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |bar| {
         bar.spacing_mut().item_spacing.x = 6.0;
         crate::panel::flat(bar);
@@ -1008,7 +990,6 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
             open = false;
         }
         bar.add_space(4.0);
-        let (writes, replaces, failed) = counts(queue);
         if failed > 0 {
             crate::panel::signal_pill(
                 bar,
@@ -1019,7 +1000,6 @@ fn review_head(ui: &mut egui::Ui, queue: &Queue, device: &DeviceState) -> bool {
         if replaces > 0 {
             crate::panel::signal_pill(bar, &format!("{replaces} replace"), warn(&visuals));
         }
-        crate::panel::quiet_pill(bar, &plural(writes, "write", "writes"));
     });
     open
 }
@@ -1159,12 +1139,12 @@ fn review_body(
                 let Some(entity) = workspace.get(held.id) else {
                     continue;
                 };
-                let note = sent_for(held, entity, queue, workspace);
+                let note = writes(held, entity, queue, workspace, device);
                 let drawn = item(
                     ui,
                     held,
                     entity,
-                    note.as_deref(),
+                    &note,
                     picked == Some(held.id),
                     device,
                     queue,
@@ -1310,7 +1290,7 @@ fn item(
     ui: &mut egui::Ui,
     held: &Queued,
     entity: &LocalEntity,
-    note: Option<&str>,
+    note: &Writes,
     selected: bool,
     device: &DeviceState,
     queue: &Queue,
@@ -1387,17 +1367,20 @@ fn item(
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
-    if let Some(note) = note {
-        let note_at = name_at + name.x + GAP;
-        cut(
-            &painter,
-            note_at,
-            rect.center().y,
-            right - note_at,
-            note,
-            egui::TextFormat::simple(egui::FontId::proportional(NAME), quiet),
-        );
-    }
+    let said = note.said();
+    let note_ink = match (&note.what, selected) {
+        (What::Replaces(_), false) => bad(&visuals),
+        _ => quiet,
+    };
+    let note_at = name_at + name.x + GAP;
+    cut(
+        &painter,
+        note_at,
+        rect.center().y,
+        right - note_at,
+        &said,
+        egui::TextFormat::simple(egui::FontId::proportional(NAME), note_ink),
+    );
 
     // Double-click opens the asset's document, as it does in the tree.
     if response.double_clicked() {
@@ -1409,31 +1392,67 @@ fn item(
         egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, device));
     }
     // The row truncates the name, so the hover text shows it in full.
-    let note = note.map(|note| format!("\n{note}")).unwrap_or_default();
-    response.on_hover_text(format!("{}{note}\n{why}", entity.name))
+    response.on_hover_text(format!("{}\n{said}\n{why}", entity.name))
 }
 
-/// Why a waiting piano or sample goes: the first waiting program that plays it.
-fn sent_for(
+/// What one write does to its slot, and the program a piano or sample goes for.
+struct Writes {
+    what: What,
+    /// The first waiting program that plays the piano or sample written.
+    for_: Option<String>,
+}
+
+/// What a write does to its slot.
+enum What {
+    /// The slot is empty.
+    New,
+    /// The slot holds an earlier version: the file is linked there.
+    Update,
+    /// The slot holds something else, by the name the keyboard gives it.
+    Replaces(String),
+    /// The slot has not been read yet.
+    Checking,
+}
+
+impl Writes {
+    /// `new`, `update`, `replaces “Bright Wurly”` or `checking`, then `“Keys” plays it`.
+    fn said(&self) -> String {
+        let what = match &self.what {
+            What::New => "new".to_string(),
+            What::Update => "update".to_string(),
+            What::Replaces(name) => format!("replaces “{name}”"),
+            What::Checking => "checking".to_string(),
+        };
+        match &self.for_ {
+            Some(program) => format!("{what} · “{program}” plays it"),
+            None => what,
+        }
+    }
+}
+
+fn writes(
     held: &Queued,
     entity: &LocalEntity,
     queue: &Queue,
     workspace: &Workspace,
-) -> Option<String> {
-    let key = plays::key_of(entity)?;
-    let program = queue
-        .list
-        .iter()
-        .filter_map(|other| workspace.get(other.id))
-        .find(|program| plays::named(program).iter().any(|plays| plays.key() == key))?;
-    let new = match held.replaces {
-        Occupancy::Vacant => "new · ",
-        Occupancy::Held(_) | Occupancy::Unknown => "",
+    device: &DeviceState,
+) -> Writes {
+    let linked_there = crate::device::slot_of(device, entity) == Some((held.class, held.at));
+    let what = match (&held.replaces, linked_there) {
+        (Occupancy::Vacant, _) => What::New,
+        (Occupancy::Held(_) | Occupancy::Unknown, true) => What::Update,
+        (Occupancy::Held(occupant), false) => What::Replaces(occupant.name.clone()),
+        (Occupancy::Unknown, false) => What::Checking,
     };
-    Some(format!(
-        "{new}“{}” plays it",
-        crate::strings::display_name(&program.name)
-    ))
+    let for_ = plays::key_of(entity).and_then(|key| {
+        let program = queue
+            .list
+            .iter()
+            .filter_map(|other| workspace.get(other.id))
+            .find(|program| plays::named(program).iter().any(|plays| plays.key() == key))?;
+        Some(crate::strings::display_name(&program.name).to_string())
+    });
+    Writes { what, for_ }
 }
 
 /// What dragging a waiting entry carries.
@@ -2575,6 +2594,52 @@ mod tests {
     }
 
     #[test]
+    fn the_review_says_each_write_is_new_an_update_or_replaces_what_the_slot_holds() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        let make = |bench: &mut crate::testing::Bench, name: &str| {
+            let bytes = Fresh::Program.bytes().unwrap();
+            bench
+                .workspace
+                .ingest(name.into(), Origin::Fresh, bytes, &mut bench.log)
+        };
+        let (soul, jazzy, tine) = (
+            make(&mut bench, "Soul Keys.ne5p"),
+            make(&mut bench, "Jazzy.ne5p"),
+            make(&mut bench, "Tine.ne5p"),
+        );
+        bench.device.pretend_bodies(
+            class,
+            1,
+            &[None, Some(("Jazzy", 1)), Some(("Bright Wurly", 2))],
+        );
+        let base = crate::link::Print { crc: 1, len: 121 };
+        let spot = crate::link::Spot::at(Location::from_user(1, 2));
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let held = crate::link::Held::new(class, spot, base).unwrap();
+        bench.workspace.link(jazzy, &keyboard, held);
+        for (id, slot) in [(soul, 1), (jazzy, 2), (tine, 3)] {
+            let at = Location::from_user(1, slot);
+            bench.act(vec![Act::Replace { id, class, at }]);
+        }
+        let said = |id: u64| {
+            let held = bench.queue.entry(id).unwrap();
+            let entity = bench.workspace.get(id).unwrap();
+            writes(
+                held,
+                entity,
+                &bench.queue,
+                &bench.workspace,
+                &bench.device.state,
+            )
+            .said()
+        };
+        assert_eq!(said(soul), "new");
+        assert_eq!(said(jazzy), "update");
+        assert_eq!(said(tine), "replaces “Bright Wurly”");
+    }
+
+    #[test]
     fn a_queued_program_takes_the_piano_it_plays_that_the_instrument_lacks_ahead_of_it() {
         let (mut workspace, mut log, fresh) = bench();
         let piano = workspace.ingest(
@@ -2606,8 +2671,15 @@ mod tests {
         );
         let entity = workspace.get(piano).unwrap();
         assert_eq!(
-            sent_for(&queue.entries()[0], entity, &queue, &workspace).as_deref(),
-            Some("new · “Keys” plays it")
+            writes(
+                &queue.entries()[0],
+                entity,
+                &queue,
+                &workspace,
+                &device.state
+            )
+            .said(),
+            "new · “Keys” plays it"
         );
 
         let mut partly = pianos_read(&workspace, 1, "Grand");
