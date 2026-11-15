@@ -44,14 +44,15 @@ Drag to move things:
 
 ## Sending
 
-Nothing is written until you send. Dropping a sound on a slot, **Queue for
-sending**, and saving a sound newer than the slot it is linked to all add to the
-queue. A sound with no link goes to the first free slot. **Send** in the top bar
-counts what is waiting.
+Nothing is written until you send. Dropping a sound on a slot, **Send to…**,
+**Queue for sending**, and saving a sound newer than the slot it is linked to all
+add to the queue; **Send to…** then opens the review to pick the slot. **Send** in
+the top bar counts what is waiting.
 
-Click **Send**, or press ⇧⌘S, to review the queue. Click a destination to change
-it, click × to remove a row, and select a row to see what the slot holds now and
-what it will hold after sending.
+Click **Send**, or press ⇧⌘S, to review the queue. Each row says whether the write
+is `new`, an `update` of the file's own slot, or `replaces` another sound. Click a
+destination to change it, click × to remove a row, and select a row to see what
+the slot holds now and what it will hold after sending.
 **Send all** writes everything. If the instrument refuses something, the rest
 stays queued.
 

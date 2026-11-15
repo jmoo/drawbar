@@ -8,14 +8,16 @@ you queue the document and send it.
 
 Every document has the same strip across the top: its kind and name, a format
 badge, where it lives (the slot it is linked to, a folder, or this computer), its
-size, and its state: `edited`, `ready to send`, `waiting to send` or `changed on
-the keyboard`. Hover any of them for the detail.
+size, and `edited` or `waiting to send`. The place carries the library's mark:
+`↑ Programs 1:7` is ready to send, and `! Programs 7:14` needs attention. Hover
+any of them for the detail.
 
 To the right are the two faces, **Revert**, **Export…**, and the document's
-main action. It is **Send to…** for a document linked to no slot, which queues it
-for a free slot; **Load on instrument** when its slot holds it, which makes the
-panel play that slot; and **Send to 1:7** when the slot holds an earlier version.
-A document whose slot the keyboard changed has none. The action is grayed out when
+main action. It is **Save** while the document is edited; **Send to…** for a
+document linked to no slot, which queues it and opens the review to pick its
+slot; **Load on instrument** when its slot holds it, which makes the panel play
+that slot; and **Send to 1:7** when the slot holds an earlier version. A document
+whose slot the keyboard changed has none. The action is grayed out when
 there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
 over` when the send cannot happen yet. The panel plays what the instrument holds,
 so edits you have not sent are not heard.

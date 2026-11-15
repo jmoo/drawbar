@@ -43,11 +43,13 @@ or both. A file is on both when it is linked to a slot of the attached keyboard,
 and **At** gives that slot. drawbar links a file to a slot when you copy the slot
 to this computer, when a send to it lands, and when the file names the slot that
 holds exactly its sound. Copies, new files and imports start with no link. Equal
-sounds alone link nothing; the inspector shows them as **also at**.
+sounds alone link nothing; the inspector shows them as **Also at**, and **Link**
+there, or **Link to** in a row's menu, links them. **Unlink** in the menu undoes a
+link and keeps drawbar from linking the file there again.
 
-A file's mark says how it stands with its slot: none when the two are the same,
-yellow when the file is newer and a send would settle it, and red when the
-keyboard changed the slot, which only you can settle. An address in gray
+The mark before a name says how a file stands with its slot: `↑` (Ready to send)
+when the file is newer and a send would settle it, and `!` (Needs attention) when
+the keyboard changed the slot, which only you can settle. An address in gray
 is a slot not read yet, or the slot on a keyboard that is not attached. The
 **Needs** column names the piano or sample a program plays, once it is on this
 computer or on the keyboard. A name in italics with a `*` has unsaved edits.
