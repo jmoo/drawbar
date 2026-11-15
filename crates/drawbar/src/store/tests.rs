@@ -329,6 +329,7 @@ impl Session {
             builds,
             ..
         } = &mut self.bench;
+        let sync = crate::bring::Rows::of(&device.state, workspace, queue);
         let input = crate::testing::screen(eframe::egui::vec2(1280.0, 720.0), Vec::new());
         let output = crate::testing::run(&ctx.clone(), input, |ctx| {
             eframe::egui::CentralPanel::default().show(ctx, |ui| {
@@ -340,6 +341,7 @@ impl Session {
                     log,
                     &crate::document::Around {
                         queue,
+                        sync: &sync,
                         tags: &browser.tags,
                         played: &crate::midi::Played::default(),
                         builds,
@@ -1859,7 +1861,8 @@ fn search_kinds_and_counts_work_on_files_not_read_yet() {
             kind,
             ..Default::default()
         };
-        crate::library::rows(workspace, &device.state, queue, &browser.tags, &filter)
+        let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+        crate::library::rows(workspace, &device.state, &browser.tags, &filter, &sync)
     };
     let names = |rows: &[crate::library::Row]| -> Vec<(String, u64)> {
         let mut named: Vec<(String, u64)> = rows

@@ -187,8 +187,6 @@ pub enum Act {
     Unqueue(u64),
     /// Read the attached keyboard and show the Sync sheet, with this file's row picked.
     Sync(Option<u64>),
-    /// Empty the queue. Nothing is deleted, so it asks nothing.
-    ClearQueue,
     /// The sheet's Sync, pressed: each row goes the way the sheet shows.
     SyncAll,
     /// A Send already confirmed, so it does not ask again.
@@ -297,8 +295,8 @@ pub enum Rescuing {
 
 impl Act {
     /// The assets whose bytes the act carries out of the app: saved into their files,
-    /// exported, queued, or written to the instrument.
-    pub fn carries(&self, queue: &Queue) -> Vec<u64> {
+    /// exported, queued, or written to the instrument. Sync may write any file with a row.
+    pub fn carries(&self, sync: &crate::bring::Rows) -> Vec<u64> {
         match self {
             Act::SaveDoc(id)
             | Act::WriteBack(id)
@@ -309,7 +307,7 @@ impl Act {
             | Act::Replace { id, .. } => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
             Act::ExportBundle { ids, .. } => ids.clone(),
-            Act::SyncAll => will_write(queue).map(|held| held.id).collect(),
+            Act::SyncAll => sync.list.iter().map(|row| row.id).collect(),
             _ => Vec::new(),
         }
     }
@@ -370,7 +368,6 @@ impl Act {
             | Act::Link { .. }
             | Act::Unlink(_)
             | Act::Unqueue(_)
-            | Act::ClearQueue
             | Act::SyncAll
             | Act::Sync(_)
             | Act::Rearrange { .. }
@@ -427,7 +424,7 @@ impl Bulk {
 
     pub fn label(self) -> &'static str {
         match self {
-            Bulk::Queue => "Queue for sending",
+            Bulk::Queue => "Add to Sync",
             Bulk::Copy => "Copy to this computer",
             Bulk::Export => "Export…",
             Bulk::Bundle => "Export as bundle…",
@@ -790,19 +787,13 @@ pub fn apply(
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
-                    log.say(format!(
-                        "“{}” is no longer waiting to be sent.",
-                        entity.name
-                    ));
+                    log.say(format!("“{}” left out of Sync.", entity.name));
                 }
-            }
-            Act::ClearQueue => {
-                queue.clear();
-                log.say("The send queue is empty.");
             }
             Act::SyncAll => {
                 if crate::bring::apply(device, workspace, queue, log) {
-                    send_batch(queue, workspace, device, log);
+                    let sent = send_batch(queue, workspace, device, log);
+                    queue.forget_unsent(&sent);
                 }
             }
             Act::Rearrange { class, from, to } => {
@@ -1483,12 +1474,17 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
 /// flow. An entry leaves the queue when its [`crate::device::DeviceEvent::Sent`] arrives,
 /// so a batch that stops halfway leaves the rest of the queue in place. Each write
 /// expects its slot to hold what the sheet shows; one whose slot has not been read waits
-/// for the read.
-fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log: &mut Log) {
+/// for the read. Returns the files it asked to write.
+fn send_batch(
+    queue: &mut Queue,
+    workspace: &Workspace,
+    device: &mut Device,
+    log: &mut Log,
+) -> Vec<u64> {
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
-    crate::queue::refresh(workspace, device, queue, log);
+    crate::queue::refresh(&device.state, queue);
     let unread = will_write(queue).find(|held| held.replaces.expect().is_none());
     if let Some(entity) = unread.and_then(|held| workspace.get(held.id)) {
         log.say(format!("“{}” waits for its slot to be read.", entity.name));
@@ -1504,23 +1500,30 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
         }
     }
     if let Some(name) = checking {
-        return log.trouble(format!(
-            "Nothing was sent: “{name}” is still being checked."
+        log.trouble(format!(
+            "Nothing was synced: “{name}” is still being checked."
         ));
+        return Vec::new();
     }
     // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
         Ok(batch) => batch,
         Err((name, e)) => {
             log.error(format!("{name}: {e}"));
-            return log.trouble(format!(
-                "Nothing was sent: “{name}” cannot be sent. The details are below."
+            log.trouble(format!(
+                "Nothing was synced: “{name}” cannot be sent. The details are below."
             ));
+            return Vec::new();
         }
     };
+    let sent = batch
+        .iter()
+        .flat_map(|(_, items)| items.iter().map(|item| item.id));
+    let sent = sent.collect();
     for (class, items) in batch {
         device.send(DeviceCmd::SendAll { class, items }, log);
     }
+    sent
 }
 
 /// One folder's writes, in queue order.
@@ -1573,14 +1576,14 @@ pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
     queue.entries().iter().filter(|held| held.failure.is_none())
 }
 
-/// What a batch should be warned about, each warning once, in queue order.
-pub fn send_warnings(queue: &Queue, workspace: &Workspace, state: &DeviceState) -> Vec<String> {
+/// What writing `writes` should be warned about, each warning once, in order.
+pub fn send_warnings<'a>(
+    writes: impl Iterator<Item = (ObjectClass, &'a LocalEntity)>,
+    state: &DeviceState,
+) -> Vec<String> {
     let mut warnings: Vec<String> = Vec::new();
-    for held in will_write(queue) {
-        let Some(entity) = workspace.get(held.id) else {
-            continue;
-        };
-        for warning in write_warnings(state, held.class, entity) {
+    for (class, entity) in writes {
+        for warning in write_warnings(state, class, entity) {
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
@@ -1725,21 +1728,21 @@ fn send_to(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &
     log.say(match unqueued(&entity.name, bound, &device.state) {
         Some(said) => said,
         None => format!(
-            "“{}” belongs in no folder the instrument has, so it was not queued.",
+            "“{}” belongs in no folder the instrument has, so it was not added to Sync.",
             entity.name
         ),
     });
 }
 
-/// Why an asset bound nowhere it can go was not queued. `None` for one bound for a slot,
+/// Why an asset bound nowhere it can go was not added to Sync. `None` for one bound for a slot,
 /// or for no folder the instrument has, which [`queue_all`] counts.
 fn unqueued(name: &str, bound: Bound, state: &DeviceState) -> Option<String> {
     match bound {
         Bound::Full(class) => Some(format!(
-            "“{name}” was not queued: no slot of {} is both read and still free.",
+            "“{name}” was not added to Sync: no slot of {} is both read and still free.",
             state.folder_name(class)
         )),
-        Bound::Refused(why) => Some(format!("“{name}” was not queued. {why}")),
+        Bound::Refused(why) => Some(format!("“{name}” was not added to Sync. {why}")),
         Bound::At(..) | Bound::Nowhere => None,
     }
 }
@@ -1832,7 +1835,7 @@ fn queue_all(
     }
     if nowhere > 0 {
         log.say(match nowhere {
-            1 => "1 of them belongs in no folder the instrument has, so it was not queued."
+            1 => "1 of them belongs in no folder the instrument has, so it was not added to Sync."
                 .to_string(),
             n => format!(
                 "{n} of them belong in no folder the instrument has, so they were not queued."
@@ -2202,23 +2205,23 @@ mod tests {
         let held = bench.queue.entry(id).expect("it is still queued");
         assert!(
             matches!(&held.replaces, Occupancy::Held(now) if now.name == "Squabble B"),
-            "the review shows what the slot holds now"
+            "the sheet shows what the slot holds now"
         );
         let why = held.failure.clone().unwrap_or_default();
         assert!(why.contains("changed on the keyboard"), "{why}");
         let (_, said) = bench.log.status();
-        assert!(said.contains("“Mine.ne5p” was not sent"), "{said}");
+        assert!(said.contains("“Mine.ne5p” was not synced"), "{said}");
 
         bench.sync();
         assert_eq!(
             batches(&bench).last(),
             Some(&vec![(id, shown("Squabble B"))]),
-            "the next send expects what the review showed"
+            "the next send expects what the sheet showed"
         );
     }
 
     #[test]
-    fn an_entry_whose_slot_is_unread_is_not_sent_and_its_read_is_asked() {
+    fn an_entry_whose_slot_is_unread_is_not_sent() {
         let mut bench = Bench::new();
         bench.device.pretend_attached();
         let bytes = Fresh::Program.bytes().unwrap();
@@ -2238,10 +2241,6 @@ mod tests {
         bench.sync();
         assert_eq!(batches(&bench), Vec::<Vec<(u64, Expect)>>::new());
         assert!(bench.queue.holds(id));
-        let reads = bench.device.queued().into_iter().any(|cmd| {
-            matches!(cmd, DeviceCmd::Get { at: read, why: Purpose::Compare, .. } if *read == at(0))
-        });
-        assert!(reads, "the slot is read");
         let (_, said) = bench.log.status();
         assert!(said.contains("waits for its slot to be read"), "{said}");
     }
@@ -2326,7 +2325,7 @@ mod tests {
         let (_, said) = bench.log.status();
         assert_eq!(
             said,
-            "“Africa Split.ne5p” was not sent: Programs 7:4 changed on the keyboard."
+            "“Africa Split.ne5p” was not synced: Programs 7:4 changed on the keyboard."
         );
     }
 
@@ -2436,7 +2435,7 @@ mod tests {
         );
         assert_eq!(
             bench.log.status().1,
-            "Nothing was sent: “Upright.npno” is still being checked."
+            "Nothing was synced: “Upright.npno” is still being checked."
         );
 
         bench.workspace.settle_files(&mut bench.log);
@@ -2683,8 +2682,13 @@ mod tests {
             &bench.device.state,
         ));
 
-        assert_eq!(bench.queue.ids(), vec![owed, opened]);
-        assert_eq!(bench.queue.entry(owed).map(|held| held.at), Some(at(0)));
+        assert_eq!(
+            bench.queue.ids(),
+            vec![opened],
+            "its own slot is Sync's row"
+        );
+        let sheet = bench.device.asks.sheet.as_ref().expect("the sheet opens");
+        assert_eq!(sheet.picked, Some(owed));
         assert_eq!(
             bench.queue.entry(opened).map(|held| held.at),
             Some(at(1)),
@@ -2761,7 +2765,7 @@ mod tests {
         );
         let said = bench.log.transcript();
         assert!(
-            said.contains("“sound 4.ne5p” was not queued: no slot of Programs"),
+            said.contains("“sound 4.ne5p” was not added to Sync: no slot of Programs"),
             "{said}"
         );
     }
@@ -2988,9 +2992,12 @@ mod tests {
             bytes,
             &mut bench.log,
         );
-        link(&mut bench, id, at(0));
-        bench.act(vec![Act::SendChecked(vec![id])]);
-        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(0)));
+        bench.act(vec![Act::Send {
+            id,
+            class,
+            at: at(1),
+        }]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(1)));
 
         // What a queue row carries, dropped on a keyboard cell.
         let carried = crate::browser::Held {
@@ -3055,10 +3062,9 @@ mod tests {
         );
     }
 
-    /// Neither removing one entry nor clearing the queue deletes anything from this
-    /// computer, and the status line stops saying that something is waiting.
+    /// Leaving a send placed by hand out of Sync deletes nothing from this computer.
     #[test]
-    fn an_entry_leaves_the_queue_alone_and_the_queue_empties_without_deleting_anything() {
+    fn a_row_left_out_of_sync_leaves_the_queue_alone_and_deletes_nothing() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_partitions(&crate::device::ELECTRO5);
@@ -3085,25 +3091,18 @@ mod tests {
 
         bench.act(vec![Act::Unqueue(ids[1])]);
         assert_eq!(bench.queue.ids(), vec![ids[0], ids[2]]);
-        assert_eq!(
-            bench.log.status().1,
-            "“sound 1.ne5p” is no longer waiting to be sent."
-        );
-
-        bench.act(vec![Act::ClearQueue]);
-        assert!(bench.queue.is_empty());
-        assert_eq!(bench.log.status().1, "The send queue is empty.");
+        assert_eq!(bench.log.status().1, "“sound 1.ne5p” left out of Sync.");
         assert_eq!(
             bench.workspace.listed().count(),
             3,
-            "emptying the queue deletes nothing"
+            "leaving out deletes nothing"
         );
     }
 
     /// Queueing says where the asset is going on the status line and leaves the window as
     /// it was: the sheet opens only when asked for.
     #[test]
-    fn queueing_says_where_it_goes_without_opening_the_review() {
+    fn placing_says_where_it_goes_without_opening_the_sheet() {
         let mut bench = Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_partitions(&crate::device::ELECTRO5);
@@ -3125,7 +3124,7 @@ mod tests {
         assert!(bench.queue.holds(id));
         assert!(bench.device.asks.sheet.is_none());
         let (_, said) = bench.log.status();
-        assert!(said.contains("waiting to be sent to Programs"), "{said}");
+        assert!(said.contains("goes to Programs 7:1 on Sync"), "{said}");
     }
 
     /// A session belongs to a folder, so a batch is one command per folder, in queue
@@ -3273,9 +3272,16 @@ mod tests {
         let mut said = Vec::new();
         for id in bench.queue.ids() {
             bench.device.asks.sheet.as_mut().expect("open").picked = Some(id);
-            said.extend(reviewed(&mut bench));
+            said.extend(painted_sheet(&mut bench));
         }
-        for slot in ["replaces “Africa Split”", "new", "checking"] {
+        for slot in [
+            "replaces “Africa Split”",
+            "new",
+            "checking",
+            "Programs 7:1",
+            "Programs 7:2",
+            "Programs 8:1",
+        ] {
             assert!(said.iter().any(|word| word == slot), "{slot}: {said:?}");
         }
     }
@@ -3356,22 +3362,24 @@ mod tests {
         bench.act(vec![Act::Sync(None)]);
         bench.land();
 
-        let said = reviewed(&mut bench);
+        let said = painted_sheet(&mut bench);
         for word in ["Sync with Nord Stage 4", "Sync 1"] {
             assert!(said.iter().any(|it| it == word), "{word}: {said:?}");
         }
     }
 
     /// Every string the sheet paints, after a frame to settle its layout.
-    fn reviewed(bench: &mut Bench) -> Vec<String> {
+    fn painted_sheet(bench: &mut Bench) -> Vec<String> {
         let mut said = Vec::new();
         for _ in 0..2 {
             let input = crate::testing::screen(eframe::egui::vec2(1280.0, 800.0), Vec::new());
             let output = crate::testing::run(&bench.ctx, input, |ctx| {
+                let sync =
+                    crate::bring::Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
                 crate::queue::sheet(
                     ctx,
                     &mut bench.device,
-                    &bench.queue,
+                    (&bench.queue, &sync),
                     &bench.workspace,
                     &mut Vec::new(),
                 );
@@ -4476,7 +4484,12 @@ mod tests {
             class,
             at: holder,
         }]);
-        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(holder));
+        assert!(
+            !bench.queue.holds(id),
+            "the slot it is linked to is Sync's row"
+        );
+        let sheet = bench.device.asks.sheet.as_ref().expect("the sheet opens");
+        assert_eq!(sheet.picked, Some(id));
     }
 
     /// Two sounds of one name cannot both wait for a library, and a name the instrument

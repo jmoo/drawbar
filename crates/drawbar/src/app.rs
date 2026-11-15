@@ -776,7 +776,7 @@ impl DrawbarApp {
         }
         if unqueued > 0 {
             self.log.say(format!(
-                "{unqueued} waiting to be sent left the queue with the library they are in."
+                "{unqueued} placed on a slot left Sync with the library they are in."
             ));
         }
         self.browser.leave_library();
@@ -1137,14 +1137,6 @@ impl eframe::App for DrawbarApp {
                 }
             }
         }
-        // An edit to an asset with a waiting entry changes what that write would do; the
-        // queue diffs it again against the occupant it already read.
-        crate::queue::follow(
-            &self.workspace,
-            &mut self.device,
-            &mut self.queue,
-            &mut self.log,
-        );
         self.tabs.prune(&self.workspace);
         let kept = self
             .workspace
@@ -1250,9 +1242,12 @@ impl eframe::App for DrawbarApp {
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
         // it is.
+        let sync = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
         let acts = self
             .document
-            .settle(ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            .settle(ctx, acts, &mut self.workspace, &sync, &mut self.log);
         let acts = match released {
             true => acts,
             false => self.hold_sends(acts),
@@ -1295,9 +1290,12 @@ impl eframe::App for DrawbarApp {
 impl DrawbarApp {
     /// The Sync sheet, and an Undo pressed in the activity log.
     fn asks(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+        let sync = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
         let (device, workspace, log) = (&mut self.device, &mut self.workspace, &mut self.log);
-        crate::queue::sheet(ctx, device, &self.queue, workspace, acts);
-        crate::bring::show_picked(device, workspace, &self.queue, log);
+        crate::queue::sheet(ctx, device, (&self.queue, &sync), workspace, acts);
+        crate::bring::show_picked(device, &sync, log);
         log.undo_pressed(workspace);
     }
 
@@ -1398,8 +1396,12 @@ impl DrawbarApp {
         played: &Played,
         acts: &mut Vec<browser::Act>,
     ) {
+        let sync = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
         let around = crate::document::Around {
             queue: &self.queue,
+            sync: &sync,
             tags: self.browser.tags(),
             played,
             builds: &self.builds,

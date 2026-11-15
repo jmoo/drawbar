@@ -21,7 +21,6 @@ use nord_usb::{Location, ObjectClass};
 use super::{Connection, DeviceCmd};
 use crate::browser::{apply, Act};
 use crate::ondisk::OnDisk;
-use crate::queue::Diff;
 use crate::store::Store;
 use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
@@ -412,8 +411,8 @@ pub(super) struct Rig {
     pub(super) library: Temp,
     pub(super) store: Store,
     pub(super) bench: Bench,
-    /// Whether Sync was pressed and its sheet waits to be confirmed once its read lands,
-    /// as the user would.
+    /// Whether Sync was pressed and its sheet is still up: it is confirmed, as the user
+    /// would, every frame from when its read lands until Sync has run and closed it.
     pub(super) syncing: bool,
 }
 
@@ -474,13 +473,14 @@ impl Rig {
         if !device.take_kept().is_empty() {
             self.store.rescue_due();
         }
-        crate::queue::follow(workspace, device, queue, log);
         let mut acts = acts;
         self.syncing &= device.asks.sheet.is_some();
         self.syncing |= acts.iter().any(|act| matches!(act, Act::Sync(_)));
+        // ⚠️ A confirmation the library holds for its check is dropped, and the release
+        // that follows may find the sheet still reading; confirming every frame until the
+        // sheet closes covers both.
         let read = device.asks.sheet.as_ref();
         if released || (self.syncing && read.is_some_and(|sheet| sheet.read(&device.state))) {
-            self.syncing = false;
             acts.push(Act::SyncAll);
         }
         // As the app holds a send until the library's files are checked for outside
@@ -1175,113 +1175,6 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
     );
     assert_streamed(&again, file.len);
 
-    rig.release();
-    assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-sample");
-}
-
-/// The queue compares a resting asset with the slot it would replace by the checksum of
-/// the slot's body, read off the instrument: the same body is Identical, and another of
-/// the same length is Checksum. Neither asset's file is read.
-#[test]
-#[ignore = "writes to an attached instrument; see the module's documentation"]
-fn s6_the_queue_compares_a_slot_by_checksum_without_reading_the_file() {
-    if !attached() {
-        return;
-    }
-    let source = run().source(
-        ObjectClass::Sample,
-        slot_from("DRAWBAR_HARDWARE_SAMPLE", "1:20"),
-    );
-    let edited = run().dir.join("sample-edited");
-    let fields = run()
-        .cli
-        .ok(&["sample", "edit", &source.display().to_string(), "--fields"]);
-    let root = fields
-        .lines()
-        .find_map(|line| line.strip_prefix("zone1.root_key"))
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("a first zone with a root key");
-    let to = if root == "C4" { "D4" } else { "C4" };
-    run().cli.ok(&[
-        "sample",
-        "edit",
-        &source.display().to_string(),
-        "--set",
-        &format!("zone1.root_key={to}"),
-        "-o",
-        &edited.display().to_string(),
-    ]);
-    assert_eq!(
-        fs::metadata(&edited).unwrap().len(),
-        fs::metadata(&source).unwrap().len(),
-        "the edit keeps the length"
-    );
-
-    let mut claims = Claims::default();
-    let mut rig = Rig::open(&[
-        ("drawbar-hw-sample.nsmp", &source),
-        ("drawbar-hw-edited.nsmp", &edited),
-    ]);
-    rig.connect();
-    let class = ObjectClass::Sample;
-    let slot = rig.vacant(class, 0);
-    claims.take(class, slot);
-    let id = rig.asset("drawbar-hw-sample.nsmp");
-    let other = rig.asset("drawbar-hw-edited.nsmp");
-    send_into_vacant(&mut rig, id, class, slot);
-    let (file, other_file) = (rig.file(id), rig.file(other));
-    file.take_reads();
-    other_file.take_reads();
-
-    let diff_of = |rig: &Rig, id: u64| match rig.bench.queue.entry(id).map(|held| &held.diff) {
-        Some(Diff::Pending) | None => None,
-        Some(Diff::Identical) => Some("Identical"),
-        Some(Diff::Checksum) => Some("Checksum"),
-        Some(Diff::Empty) => Some("Empty"),
-        Some(Diff::Fields(_)) => Some("Fields"),
-        Some(Diff::Bytes { .. }) => Some("Bytes"),
-    };
-    let started = Instant::now();
-    rig.frame(vec![Act::Replace {
-        id,
-        class,
-        at: slot,
-    }]);
-    rig.until("the compare read of the same body", SEND_LIMIT, |rig| {
-        diff_of(rig, id).is_some() && rig.idle()
-    });
-    eprintln!(
-        "the same body: {:?} in {:.1?}",
-        diff_of(&rig, id),
-        started.elapsed()
-    );
-    assert_eq!(diff_of(&rig, id), Some("Identical"));
-
-    rig.frame(vec![Act::Replace {
-        id: other,
-        class,
-        at: slot,
-    }]);
-    assert!(!rig.bench.queue.holds(id), "the slot takes one asset");
-    let started = Instant::now();
-    rig.until("the compare read for another body", SEND_LIMIT, |rig| {
-        diff_of(rig, other).is_some() && rig.idle()
-    });
-    eprintln!(
-        "another body: {:?} in {:.1?}",
-        diff_of(&rig, other),
-        started.elapsed()
-    );
-    assert_eq!(diff_of(&rig, other), Some("Checksum"));
-    assert_eq!(
-        file.take_reads(),
-        [],
-        "the compare read nothing of the file"
-    );
-    assert_eq!(other_file.take_reads(), [], "nor of the other");
-
-    rig.frame(vec![Act::ClearQueue]);
     rig.release();
     assert_no_strays(class);
     assert_holds(class, slot, &source, "drawbar-hw-sample");

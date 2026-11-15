@@ -25,7 +25,7 @@ pub(crate) const GAP: f32 = 4.0;
 /// not.
 pub(crate) const PAD: f32 = 20.0;
 
-/// The rounding of a sheet, and of the send queue's review.
+/// The rounding of a sheet, and of the Sync sheet.
 pub(crate) const SHEET_RADIUS: u8 = 14;
 
 /// The minimum space between a sheet and the window's edge.

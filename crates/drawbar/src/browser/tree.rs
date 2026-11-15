@@ -403,7 +403,7 @@ struct Frame {
     naming: Naming,
     /// The slots open as views.
     viewed: Vec<(ObjectClass, Location)>,
-    /// How many are waiting to be sent, are ready to send, and need the user.
+    /// How many files Sync acts on as they stand, and how many need the user.
     counts: [usize; 2],
 }
 
@@ -571,7 +571,7 @@ impl Browser {
     ) {
         self.follow_jump(device);
         let counts = match self.sections.places {
-            true => self.counts.of(workspace, device, queue),
+            true => self.synced.of(workspace, device, queue).counts(),
             false => [0; 2],
         };
         let frame = self.frame(workspace, device, counts);
@@ -1211,6 +1211,7 @@ impl Browser {
         let item = Item::Local(entity.id);
         let kind = Kind::of(entity);
         let selected = self.selection.holds(item);
+        let sync = self.synced.of(workspace, device, queue);
 
         // While a name is being typed, the row senses nothing: a drag sense over the
         // field would take the clicks that place the cursor.
@@ -1241,7 +1242,7 @@ impl Browser {
                 name: &entity.name,
                 note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: mark(entity, &device.state, ui.visuals()),
+                dot: mark(&sync, entity.id, ui.visuals()),
                 tags: wears,
                 child: true,
                 gray: !self.followed,
@@ -1743,7 +1744,7 @@ impl Browser {
         let duplicate = ui
             .add_enabled(edits && free.is_some(), egui::Button::new("Duplicate"))
             .on_disabled_hover_text(match edits {
-                true => "every slot read so far is taken or already queued",
+                true => "every slot read so far is taken or already placed",
                 false => fixed,
             });
         if duplicate.clicked() {
@@ -1995,16 +1996,13 @@ pub(crate) fn slot_items(
 }
 
 /// The status dot on a local row, with its color and hover text.
-fn mark(
-    entity: &LocalEntity,
-    device: &DeviceState,
+fn mark<'a>(
+    sync: &'a crate::bring::Rows,
+    id: u64,
     visuals: &egui::Visuals,
-) -> Option<(egui::Color32, &'static str)> {
-    let mark = crate::library::keyboard_mark(entity, device)?;
-    Some((
-        crate::library::mark_ink(mark, visuals),
-        crate::library::mark_words(mark),
-    ))
+) -> Option<(egui::Color32, &'a str)> {
+    let (mark, said) = crate::library::keyboard_mark(sync, id)?;
+    Some((crate::library::mark_ink(mark, visuals), said))
 }
 
 /// Where a queued asset is going, for the note that says so.

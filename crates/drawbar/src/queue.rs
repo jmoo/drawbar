@@ -8,20 +8,19 @@ use std::io::Cursor;
 use std::ops::Range;
 
 use eframe::egui;
-use nord_usb::op::Received;
 use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{bad, good, ui as ui_text, warn};
-use crate::bring::{Change, Row, Sheet, Way, DIFFERS};
-use crate::browser::{bound_for, cell_ink, Act, Bound, Carried, Held, Item, Kind};
-use crate::device::{fit, occupied, Device, DeviceCmd, DeviceState, Expect, Fit, Purpose};
+use crate::bring::{Change, Row, Rows, Sheet, Way, DIFFERS};
+use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
+use crate::device::{fit, Device, DeviceState, Expect, Fit};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
-use crate::link::{Keyboard, Spot, Standing};
+use crate::link::{Keyboard, Spot};
 use crate::log::Log;
 use crate::menu::MENU_FOOT;
-use crate::panel::{cell, cut, row_ink, Track, GAP, GLYPH, PAD};
+use crate::panel::{cut, row_ink, Track, GAP, GLYPH, PAD};
 use crate::plays;
 use crate::strings::{display_name, label, place, shown};
 use crate::workspace::{first_difference, wire_body, LocalEntity, Workspace};
@@ -32,15 +31,11 @@ pub struct Queued {
     pub id: u64,
     pub class: ObjectClass,
     pub at: Location,
-    /// What the slot held when this was queued.
+    /// What the slot holds, as the last read of its bank found it.
     pub replaces: Occupancy,
-    /// How what is waiting differs from what the slot holds.
-    pub diff: Diff,
-    /// How far the compare read of [`Queued::at`] has progressed.
-    read: Read,
-    /// The stamp of the asset's bytes [`Queued::diff`] was made from, so an edit under a
-    /// waiting entry is noticed without comparing anything.
-    stamp: u64,
+    /// Made by Sync for a row that is not a send placed by hand: it leaves the queue
+    /// once written, refused or failed, and is never a row of its own.
+    pub transient: bool,
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
     /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
@@ -49,15 +44,6 @@ pub struct Queued {
 }
 
 impl Queued {
-    /// Diff again against what the slot is now known to hold, to be read if that does
-    /// not settle it.
-    fn shows(&mut self, entity: &LocalEntity, now: Occupancy) {
-        self.diff = verdict(self.class, entity, &now);
-        self.replaces = now;
-        self.read = Read::Unasked;
-        self.stamp = entity.stamp;
-    }
-
     /// The name the slot holds and the one a send of `name` gives it, where the two
     /// differ. The name goes with the sound, so a send renames the slot even when the
     /// bytes are the same.
@@ -69,27 +55,6 @@ impl Queued {
         let renamed = self.class.names_its_slots() && given != occupant.name;
         renamed.then_some((occupant.name.as_str(), given))
     }
-}
-
-/// How far the compare read of the slot an entry is waiting for has progressed.
-enum Read {
-    /// No read has been asked for, or the read found the slot empty.
-    Unasked,
-    /// Asked for, and not yet answered.
-    Asked,
-    /// The occupant's bytes, kept so that an edit made after this entry was queued is
-    /// diffed against them without reading the slot again.
-    Answered(Vec<u8>),
-    /// The length and CRC-32 of a piano or sample occupant's body, which was read through
-    /// its checksum and not kept.
-    Summed(Sum),
-}
-
-/// A wire body as its length and CRC-32.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Sum {
-    len: usize,
-    crc: u32,
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -124,12 +89,12 @@ pub struct FieldDiff {
 }
 
 impl FieldDiff {
-    /// The field's label, then what the keyboard holds and what it holds after, in words:
+    /// The field's label, then what this computer holds and what the keyboard holds, in words:
     /// a piano or sample by the name it goes by here or on the keyboard, and an id of 0 as
     /// the dials.
     pub fn said(&self, workspace: &Workspace, device: &DeviceState) -> [String; 3] {
         let Some(class) = self.refers else {
-            return [label(&self.path), self.there.clone(), self.here.clone()];
+            return [label(&self.path), self.here.clone(), self.there.clone()];
         };
         let named = |value: &String| match crate::document::library_id(value) {
             Some(0) => "by the dials".to_string(),
@@ -137,7 +102,7 @@ impl FieldDiff {
             None => value.clone(),
         };
         let what = crate::strings::title(Kind::from_class(class).chip());
-        [what, named(&self.there), named(&self.here)]
+        [what, named(&self.here), named(&self.there)]
     }
 }
 
@@ -188,15 +153,6 @@ impl Occupancy {
         }
     }
 
-    /// Whether two reads of the slot found one occupant, by the rule a write checks its
-    /// slot with. A slot nobody has read agrees with anything.
-    fn agrees(&self, now: &Occupancy) -> bool {
-        match (self.expect(), now.expect()) {
-            (Some(was), Some(now)) => was.matches(&now),
-            _ => true,
-        }
-    }
-
     pub fn occupant(&self) -> Option<&Occupant> {
         match self {
             Occupancy::Held(held) => Some(held),
@@ -237,33 +193,16 @@ enum Put {
     /// This asset was already waiting for this same slot. Nothing moved.
     Standing,
     /// It was waiting for another slot, and moved here.
-    Moved(ObjectClass, Location),
+    Moved,
     /// Something else was waiting for this slot, and was dropped.
     Instead(u64),
-}
-
-/// Ask the instrument what is in the slot an entry is waiting for.
-fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Location) {
-    device.send(
-        DeviceCmd::Get {
-            class,
-            at,
-            why: Purpose::Compare,
-        },
-        log,
-    );
 }
 
 /// An asset in the queue, and the slot it waits for.
 pub type Waiting = (u64, ObjectClass, Location);
 
-/// Queue an asset to be written to a slot, and log what that displaced. Returns each entry
-/// it made or moved, the pianos and samples it takes along first.
-///
-/// The slot is read unless the scan cache shows it empty or holding a body with the same
-/// checksum. A slot in a bank the scan never reached is read, not assumed vacant.
-/// Queueing an asset for the slot it is already waiting for logs nothing and asks the
-/// instrument nothing.
+/// Place an asset on a slot by hand, for Sync to write, and log what that displaced. One
+/// placed on the slot it is linked to opens the sheet on its row instead.
 pub fn enqueue(
     workspace: &Workspace,
     device: &mut Device,
@@ -272,186 +211,92 @@ pub fn enqueue(
     id: u64,
     class: ObjectClass,
     at: Location,
-) -> Vec<Waiting> {
-    let placed = place_in(workspace, device, queue, log, (id, class, at));
-    for ((id, class, at), put) in &placed {
-        let name = workspace.get(*id).map_or("", |it| it.name.as_str());
-        let where_ = place(*class, *at);
-        let displaced = match put {
-            Put::Standing | Put::Made => None,
-            Put::Moved(was, before) => Some(format!(
-                "“{name}” is waiting for {where_} rather than {}.",
-                place(*was, *before)
-            )),
-            Put::Instead(other) => workspace.get(*other).map(|other| {
-                format!(
-                    "“{name}” is waiting for {where_}; “{}” is not anymore.",
-                    other.name
-                )
-            }),
-        };
-        log.say(displaced.unwrap_or(format!("“{name}” is waiting to be sent to {where_}.")));
-    }
-    placed.into_iter().map(|(waiting, _)| waiting).collect()
+) {
+    let Some(put) = place_in(workspace, device, queue, log, (id, class, at), false) else {
+        return;
+    };
+    let name = workspace.get(id).map_or("", |it| it.name.as_str());
+    let where_ = place(class, at);
+    let other = |other: u64| workspace.get(other).map_or("", |it| it.name.as_str());
+    log.say(match put {
+        Put::Standing => return,
+        Put::Made | Put::Moved => format!("“{name}” goes to {where_} on Sync."),
+        Put::Instead(was) => format!(
+            "“{name}” goes to {where_} on Sync; “{}” left out of Sync.",
+            other(was)
+        ),
+    });
 }
 
-/// [`enqueue`], saying only what it refused.
-pub fn enqueue_quietly(
+/// Queue a row's write for the batch Sync sends now, saying only what it refused.
+pub fn enqueue_transient(
     workspace: &Workspace,
     device: &mut Device,
     queue: &mut Queue,
     log: &mut Log,
     waiting: Waiting,
-) -> Vec<Waiting> {
-    let placed = place_in(workspace, device, queue, log, waiting);
-    placed.into_iter().map(|(waiting, _)| waiting).collect()
+) {
+    place_in(workspace, device, queue, log, waiting, true);
 }
 
-/// Queue an asset as [`enqueue`] does, saying only what it refused, and return what each
-/// entry made or moved displaced.
+/// Queue an asset as [`enqueue`] does, saying only what it refused.
 fn place_in(
     workspace: &Workspace,
     device: &mut Device,
     queue: &mut Queue,
     log: &mut Log,
     (id, class, at): Waiting,
-) -> Vec<(Waiting, Put)> {
-    let Some(entity) = workspace.get(id) else {
-        return Vec::new();
-    };
-    let name = entity.name.clone();
+    transient: bool,
+) -> Option<Put> {
+    let entity = workspace.get(id)?;
+    let name = &entity.name;
     let where_ = place(class, at);
     // A send writes what the queue holds, so an asset the instrument refuses must never
     // enter it.
     if let Fit::Refuses(why) = fit(&device.state, entity) {
         log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
-        return Vec::new();
+        return None;
     }
     if let Some(why) = name_clash(workspace, &device.state, queue, entity, class, at) {
         log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
-        return Vec::new();
+        return None;
     }
-    if unsettled(&device.state, entity, class, at) {
-        log.trouble(format!("“{name}” was not queued. {CHOOSE}"));
-        return Vec::new();
-    }
-    let mut placed = Vec::new();
-    for id in missing_plays(entity, workspace, &device.state, queue) {
-        if let Some(Bound::At(class, at)) = workspace
-            .get(id)
-            .map(|file| bound_for(file, &device.state, queue))
-        {
-            placed.extend(place_in(workspace, device, queue, log, (id, class, at)));
-        }
+    let linked = crate::device::standing_of(&device.state, entity);
+    if !transient && linked.is_some_and(|it| (it.class, it.at) == (class, Some(at))) {
+        crate::bring::open(device, Some(id));
+        return None;
     }
     let holds = Occupancy::of(&device.state, class, at);
     let keyboard = device.state.keyboard().cloned();
-    let put = queue.put(entity, class, at, holds, keyboard);
-    if let Some((class, at)) = queue.unread(id) {
-        read_occupant(device, log, class, at);
-    }
-    if !matches!(put, Put::Standing) {
-        placed.push(((id, class, at), put));
-    }
-    placed
-}
-
-/// Why a write of a file over its own linked slot waits for the user.
-const CHOOSE: &str = "The keyboard changed its slot. Sync it to choose.";
-
-/// Whether `entity` is linked to the slot `at` of `class` on the attached keyboard and the
-/// user must choose between the two before anything is written there.
-fn unsettled(state: &DeviceState, entity: &LocalEntity, class: ObjectClass, at: Location) -> bool {
-    crate::device::standing_of(state, entity).is_some_and(|linked| {
-        (linked.class, linked.at) == (class, Some(at)) && linked.standing.needs_attention()
-    })
+    Some(queue.put(entity, (class, at), holds, keyboard, transient))
 }
 
 /// Show every waiting entry what the cache of the attached keyboard says its slot holds
-/// now, and ask for the compare read of each slot that leaves unsettled. Call whenever a
-/// bank is read again and before a send.
-pub fn refresh(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+/// now. Call whenever a bank is read again and before a send.
+pub fn refresh(state: &DeviceState, queue: &mut Queue) {
     for held in &mut queue.list {
-        let now = Occupancy::of(&device.state, held.class, held.at);
-        let unread = matches!(held.replaces, Occupancy::Unknown);
-        if matches!(now, Occupancy::Unknown) || (!unread && held.replaces.agrees(&now)) {
-            continue;
-        }
-        match (unread, &held.read, workspace.get(held.id)) {
-            (true, Read::Asked, _) => held.replaces = now,
-            (_, _, Some(entity)) => held.shows(entity, now),
-            (_, _, None) => {}
+        let now = Occupancy::of(state, held.class, held.at);
+        if !matches!(now, Occupancy::Unknown) {
+            held.replaces = now;
         }
     }
-    ask_unread(device, queue, log);
 }
 
-/// Record what a write found in its slot instead of what it expected, so the sheet shows
-/// it and the next send expects it, and say on the entry why it stopped.
-pub fn changed_under(
-    workspace: &Workspace,
-    device: &mut Device,
-    queue: &mut Queue,
-    log: &mut Log,
-    (id, class, at): (u64, ObjectClass, Location),
-    holds: Option<&ProgramInfo>,
-) {
+/// A write found its slot holding `holds` instead of what it expected. A send placed by
+/// hand keeps its place and shows it, saying why it stopped; a row's write leaves.
+pub fn changed_under(queue: &mut Queue, (id, class, at): Waiting, holds: Option<&ProgramInfo>) {
     let waiting = queue.list.iter_mut();
     let mut waiting = waiting.filter(|held| (held.id, held.class, held.at) == (id, class, at));
-    let (Some(held), Some(entity)) = (waiting.next(), workspace.get(id)) else {
+    let Some(held) = waiting.next() else {
         return;
     };
-    held.shows(
-        entity,
-        holds.map_or(Occupancy::Vacant, |info| {
-            Occupancy::Held(Occupant::of(info))
-        }),
-    );
+    held.replaces = holds.map_or(Occupancy::Vacant, |info| {
+        Occupancy::Held(Occupant::of(info))
+    });
     held.failure = Some("Its slot changed on the keyboard.".to_string());
-    ask_unread(device, queue, log);
-}
-
-/// Ask for the compare read of every slot an entry still needs one of.
-fn ask_unread(device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    for id in queue.ids() {
-        if let Some((class, at)) = queue.unread(id) {
-            read_occupant(device, log, class, at);
-        }
+    if held.transient {
+        queue.forget(id);
     }
-}
-
-/// The piano and sample files on this computer a program plays that the attached
-/// instrument does not hold and nothing waiting will write, the first file of each.
-///
-/// ⚠️ Only for a class whose every bank has been read: a slot missing from a partial
-/// read may still be on the instrument.
-fn missing_plays(
-    entity: &LocalEntity,
-    workspace: &Workspace,
-    state: &DeviceState,
-    queue: &Queue,
-) -> Vec<u64> {
-    let waiting = |key| {
-        queue
-            .list
-            .iter()
-            .any(|held| workspace.get(held.id).and_then(plays::key_of) == Some(key))
-    };
-    plays::named(entity)
-        .iter()
-        .map(|plays| plays.key())
-        .filter(|&(class, id)| {
-            let held = |info: &ProgramInfo| plays::slot_key(class, &info.name) == (class, id);
-            state.read_whole(class) && !occupied(state, class).any(|(_, info)| held(info))
-        })
-        .filter(|key| !waiting(*key))
-        .filter_map(|key| {
-            workspace
-                .listed()
-                .find(|file| plays::key_of(file) == Some(key))
-                .map(|file| file.id)
-        })
-        .collect()
 }
 
 /// Why a write of `entity` into `at` would be refused for its name: a slot of the
@@ -541,14 +386,11 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
             .is_some_and(|keyboard| attached.is_some_and(|attached| attached != keyboard));
         let refusal = match (fit(state, entity), elsewhere) {
             (Fit::Refuses(why), _) => Some(why),
-            (_, true) => Some("It was queued for another keyboard.".to_string()),
+            (_, true) => Some("It was placed for another keyboard.".to_string()),
             (Fit::Unattached | Fit::Takes | Fit::Warn(_), false) => {
                 crate::device::name_taken(state, held.class, held.at, entity)
                     .map(|holder| taken(held.class, holder))
                     .or_else(earlier)
-                    .or_else(|| {
-                        unsettled(state, entity, held.class, held.at).then(|| CHOOSE.to_string())
-                    })
             }
         };
         // Logged only when the reason changes, so repeated refits stay quiet.
@@ -563,74 +405,18 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
         }
         held.failure = refusal;
     }
+    queue
+        .list
+        .retain(|held| !(held.transient && held.failure.is_some()));
 }
 
-/// Discard what the previous instrument reported about the slots being waited for, and
-/// ask the attached one.
+/// Discard what the previous instrument reported about the slots being waited for.
 ///
-/// ⚠️ The queue outlives a disconnection, but reads in flight do not. An entry left
-/// waiting for an answer that will never come would wait for the rest of the session,
-/// and what the last instrument held in a slot says nothing about this one.
-pub fn reattach(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
+/// ⚠️ The queue outlives a disconnection, and what the last instrument held in a slot
+/// says nothing about this one.
+pub fn reattach(state: &DeviceState, queue: &mut Queue) {
     for held in &mut queue.list {
-        let Some(entity) = workspace.get(held.id) else {
-            continue;
-        };
-        held.shows(entity, Occupancy::of(&device.state, held.class, held.at));
-    }
-    ask_unread(device, queue, log);
-}
-
-/// The diff before the occupant's bytes have been read. A vacant slot has nothing to
-/// replace, and two bodies whose checksums match are identical, because the instrument
-/// reports the body's CRC-32 for a slot. A piano or sample slot reports none, but one
-/// whose body is another length than this asset's holds something else.
-///
-/// ⚠️ The checksum is of the current bytes, which a send writes, and not of the saved
-/// baseline a link compares.
-fn verdict(class: ObjectClass, entity: &LocalEntity, replaces: &Occupancy) -> Diff {
-    let here = entity.container.as_ref();
-    let crc = here.map(|here| here.body_crc32);
-    let len = here.map(|here| here.body.len());
-    match replaces {
-        Occupancy::Vacant => Diff::Empty,
-        Occupancy::Held(held) if held.crc.is_some() && held.crc == crc => Diff::Identical,
-        Occupancy::Held(held)
-            if class.is_library() && len.is_some_and(|len| len != held.body_len as usize) =>
-        {
-            Diff::Checksum
-        }
-        Occupancy::Held(_) | Occupancy::Unknown => Diff::Pending,
-    }
-}
-
-/// Diff again every waiting entry whose asset was edited since its last diff.
-///
-/// An entry with an answered compare read is diffed against the occupant's bytes it kept,
-/// without asking the instrument again. An entry whose read is still out keeps waiting
-/// for it. An entry the checksums settled without a read is checked against the
-/// checksums again, and asks for the read only when they no longer match.
-pub fn follow(workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log) {
-    let mut moved = Vec::new();
-    for held in &mut queue.list {
-        let Some(entity) = workspace.get(held.id) else {
-            continue;
-        };
-        if entity.stamp == held.stamp {
-            continue;
-        }
-        held.stamp = entity.stamp;
-        held.diff = match &held.read {
-            Read::Answered(there) => compare_with(entity, there),
-            Read::Summed(there) => compare_sum(entity, *there),
-            Read::Unasked | Read::Asked => verdict(held.class, entity, &held.replaces),
-        };
-        moved.push(held.id);
-    }
-    for id in moved {
-        if let Some((class, at)) = queue.unread(id) {
-            read_occupant(device, log, class, at);
-        }
+        held.replaces = Occupancy::of(state, held.class, held.at);
     }
 }
 
@@ -677,47 +463,28 @@ pub fn unqueue_moved(
     let name = |id: u64| display_name(workspace.get(id).map_or("", |it| it.name.as_str()));
     log.say(match gone.as_slice() {
         [] => return,
-        [id] => format!("“{}” is no longer waiting to send.", name(*id)),
-        many => format!("{} sounds are no longer waiting to send.", many.len()),
+        [id] => format!("“{}” left out of Sync.", name(*id)),
+        many => format!("{} sounds left out of Sync.", many.len()),
     });
 }
 
 impl Queue {
     /// Queue one asset for one slot, and report what that displaced: where this asset was
-    /// waiting before, or what was waiting for this slot.
-    ///
-    /// Callers use [`enqueue`], which wraps this.
-    ///
-    /// ⚠️ An asset already waiting for this slot keeps its entry and the read that entry
-    /// is waiting on, unless the slot holds something else now or the entry was made for
-    /// another keyboard. Rebuilding the entry would discard an occupant already read and
-    /// ask the instrument for it again.
+    /// waiting before, or what was waiting for this slot. Callers use [`enqueue`].
     fn put(
         &mut self,
         entity: &LocalEntity,
-        class: ObjectClass,
-        at: Location,
+        (class, at): (ObjectClass, Location),
         replaces: Occupancy,
         keyboard: Option<Keyboard>,
+        transient: bool,
     ) -> Put {
-        if let Some(held) = self
-            .list
-            .iter_mut()
-            .find(|held| (held.id, held.class, held.at) == (entity.id, class, at))
-        {
-            if held.keyboard != keyboard || !held.replaces.agrees(&replaces) {
-                held.shows(entity, replaces);
-            }
-            held.failure = None;
-            held.keyboard = keyboard;
+        let same = |held: &&mut Queued| (held.id, held.class, held.at) == (entity.id, class, at);
+        if let Some(held) = self.list.iter_mut().find(same) {
+            (held.replaces, held.keyboard, held.failure) = (replaces, keyboard, None);
             return Put::Standing;
         }
-        let moved = self
-            .list
-            .iter()
-            .find(|held| held.id == entity.id)
-            .map(|held| (held.class, held.at))
-            .filter(|held| *held != (class, at));
+        let moved = self.list.iter().any(|held| held.id == entity.id);
         let instead_of = self
             .list
             .iter()
@@ -725,110 +492,20 @@ impl Queue {
             .map(|held| held.id);
         self.list
             .retain(|held| held.id != entity.id && (held.class, held.at) != (class, at));
-
         self.list.push(Queued {
             id: entity.id,
             class,
             at,
-            diff: verdict(class, entity, &replaces),
             replaces,
-            read: Read::Unasked,
-            stamp: entity.stamp,
+            transient,
             failure: None,
             keyboard,
         });
         match (moved, instead_of) {
-            (Some((was, before)), _) => Put::Moved(was, before),
-            (None, Some(other)) => Put::Instead(other),
-            (None, None) => Put::Made,
+            (true, _) => Put::Moved,
+            (false, Some(other)) => Put::Instead(other),
+            (false, None) => Put::Made,
         }
-    }
-
-    /// The slot an entry still needs a compare read of, now marked as asked for.
-    ///
-    /// Queueing, re-queueing, and editing while the read is out all ask here, so the
-    /// instrument is asked about a destination only once.
-    fn unread(&mut self, id: u64) -> Option<(ObjectClass, Location)> {
-        let held = self.list.iter_mut().find(|held| held.id == id)?;
-        if !matches!(held.diff, Diff::Pending) {
-            return None;
-        }
-        match held.read {
-            Read::Unasked => {
-                held.read = Read::Asked;
-                Some((held.class, held.at))
-            }
-            Read::Asked | Read::Answered(_) | Read::Summed(_) => None,
-        }
-    }
-
-    /// Record the occupant a compare read returned for a slot something is waiting for.
-    ///
-    /// For a slot no walk had reached, this is also how the entry learns that the slot is
-    /// occupied.
-    pub fn arrived(
-        &mut self,
-        class: ObjectClass,
-        at: Location,
-        info: &ProgramInfo,
-        there: &[u8],
-        workspace: &Workspace,
-    ) {
-        let Some(held) = self.waiting_for(class, at) else {
-            return;
-        };
-        if let Occupancy::Unknown = held.replaces {
-            held.replaces = Occupancy::Held(Occupant::of(info));
-        }
-        let Some(entity) = workspace.get(held.id) else {
-            return;
-        };
-        held.read = Read::Answered(there.to_vec());
-        held.stamp = entity.stamp;
-        held.diff = compare_with(entity, there);
-    }
-
-    /// Record the occupant a compare read took only the checksum of, for a piano or sample
-    /// slot something is waiting for.
-    pub fn summed(
-        &mut self,
-        class: ObjectClass,
-        at: Location,
-        received: &Received,
-        workspace: &Workspace,
-    ) {
-        let Some(held) = self.waiting_for(class, at) else {
-            return;
-        };
-        if let Occupancy::Unknown = held.replaces {
-            held.replaces = Occupancy::Held(Occupant::of(&received.info));
-        }
-        let Some(entity) = workspace.get(held.id) else {
-            return;
-        };
-        let there = Sum {
-            len: received.info.body_len as usize,
-            crc: received.body_crc32,
-        };
-        held.read = Read::Summed(there);
-        held.stamp = entity.stamp;
-        held.diff = compare_sum(entity, there);
-    }
-
-    /// Record that the compare read of a slot something is waiting for found it empty.
-    pub fn vacant(&mut self, class: ObjectClass, at: Location) {
-        let Some(held) = self.waiting_for(class, at) else {
-            return;
-        };
-        held.replaces = Occupancy::Vacant;
-        held.read = Read::Unasked;
-        held.diff = Diff::Empty;
-    }
-
-    fn waiting_for(&mut self, class: ObjectClass, at: Location) -> Option<&mut Queued> {
-        self.list
-            .iter_mut()
-            .find(|held| (held.class, held.at) == (class, at))
     }
 
     /// The slots of one class something is already waiting for.
@@ -872,6 +549,19 @@ impl Queue {
         {
             held.failure = Some(why.to_string());
         }
+        self.list
+            .retain(|held| !(held.transient && held.failure.is_some()));
+    }
+
+    /// Take out every entry Sync made for a row, written or not: the rows stand for them.
+    pub fn forget_transient(&mut self) {
+        self.list.retain(|held| !held.transient);
+    }
+
+    /// Take out each entry Sync made for a row that is not among `sent`.
+    pub fn forget_unsent(&mut self, sent: &[u64]) {
+        self.list
+            .retain(|held| !held.transient || sent.contains(&held.id));
     }
 
     pub fn holds(&self, id: u64) -> bool {
@@ -899,66 +589,13 @@ impl Queue {
         self.list.is_empty()
     }
 
-    /// Which assets wait, in order, and the kind of difference each one's compare found:
-    /// everything the library's rows read of the queue, to tell when they are stale.
-    pub fn shape(&self) -> Vec<(u64, std::mem::Discriminant<Diff>)> {
+    /// Which assets wait where, in order, and which of them stopped: everything the
+    /// library's rows read of the queue, to tell when they are stale.
+    pub fn shape(&self) -> Vec<(Waiting, bool)> {
         let held = self.list.iter();
-        held.map(|held| (held.id, std::mem::discriminant(&held.diff)))
+        held.map(|held| ((held.id, held.class, held.at), held.failure.is_some()))
             .collect()
     }
-}
-
-/// [`compare`] against what an asset holds. One resting in its file is compared by the
-/// checksum a slot holding it reports, and is never read. One not read yet, or whose
-/// check has not answered, has no diff yet.
-fn compare_with(entity: &LocalEntity, there: &[u8]) -> Diff {
-    if entity.unread() {
-        return Diff::Pending;
-    }
-    if entity.rests().is_none() {
-        return compare(&entity.bytes, there);
-    }
-    let Some(here) = &entity.container else {
-        return Diff::Pending;
-    };
-    match wire_sum(there) {
-        Some((body, crc)) if crc == here.body_crc32 && body.len() == here.body.len() => {
-            Diff::Identical
-        }
-        _ => Diff::Checksum,
-    }
-}
-
-/// [`compare_with`] against an occupant known only by its body's length and checksum.
-fn compare_sum(entity: &LocalEntity, there: Sum) -> Diff {
-    if entity.unread() {
-        return Diff::Pending;
-    }
-    let here = match entity.rests() {
-        Some(_) => entity.container.as_ref().map(|here| Sum {
-            len: here.body.len(),
-            crc: here.body_crc32,
-        }),
-        None => wire_sum(&entity.bytes).map(|(body, crc)| Sum {
-            len: body.len(),
-            crc,
-        }),
-    };
-    match here {
-        None => Diff::Pending,
-        Some(here) if here == there => Diff::Identical,
-        Some(_) => Diff::Checksum,
-    }
-}
-
-/// Where a file's wire body lies, and its CRC-32: the checksum a slot holding it
-/// reports. `None` for bytes that are not a CBIN container.
-fn wire_sum(bytes: &[u8]) -> Option<(Range<usize>, u32)> {
-    let info = nord_format::cbin::inspect(&mut Cursor::new(bytes)).ok()?;
-    let start = usize::try_from(info.header.generation.body_start()).ok()?;
-    let end = start.checked_add(usize::try_from(info.body_len).ok()?)?;
-    let body = bytes.get(start..end)?;
-    Some((start..end, nord_format::crc::crc32(body)))
 }
 
 /// How what is waiting differs from what the slot holds.
@@ -1048,7 +685,7 @@ struct Drawn<'a> {
 pub fn sheet(
     ctx: &egui::Context,
     device: &mut Device,
-    queue: &Queue,
+    (queue, sync): (&Queue, &Rows),
     workspace: &Workspace,
     acts: &mut Vec<Act>,
 ) {
@@ -1058,7 +695,7 @@ pub fn sheet(
     };
     let read = sheet.read(state);
     let rows = match read {
-        true => crate::bring::rows(state, workspace, queue),
+        true => sync.list.clone(),
         false => Vec::new(),
     };
     if sheet
@@ -1159,27 +796,34 @@ fn foot(ui: &mut egui::Ui, sheet: &Sheet, drawn: &Drawn, read: bool, acts: &mut 
     );
     bar.spacing_mut().item_spacing.x = 8.0;
     let refused = |row: &Row| {
-        let entry = drawn
-            .queue
-            .entry(row.id)
-            .filter(|_| row.change == Change::Placed);
+        let entry = drawn.queue.entry(row.id).filter(|held| !held.transient);
         entry.is_some_and(|held| held.failure.is_some())
     };
-    let going = drawn.rows.iter();
-    let going = going.filter(|row| !refused(row) && sheet.way(row, drawn.workspace).is_some());
-    let going = going.count();
-    let label = match going {
+    let going: Vec<(&Row, Way)> = drawn
+        .rows
+        .iter()
+        .filter(|row| !refused(row))
+        .filter_map(|row| Some((row, sheet.way(row, drawn.workspace)?)))
+        .collect();
+    let label = match going.len() {
         0 => "Sync".to_string(),
         n => format!("Sync {n}"),
     };
-    let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, read && going > 0);
+    let live = read && !going.is_empty();
+    let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live)
+        .on_disabled_hover_text(match read {
+            true => "Pick a direction for a row first.",
+            false => "Reading the keyboard…",
+        });
     if sync.clicked() {
         acts.push(Act::SyncAll);
     }
     if crate::panel::tonal_button(&mut bar, None, "Not now").clicked() {
         open = false;
     }
-    let warnings = crate::browser::send_warnings(drawn.queue, drawn.workspace, drawn.device);
+    let up = going.iter().filter(|(_, way)| *way == Way::Up);
+    let up = up.filter_map(|(row, _)| Some((row.class, drawn.workspace.get(row.id)?)));
+    let warnings = crate::browser::send_warnings(up, drawn.device);
     if let Some(first) = warnings.first() {
         let room = bar.available_width();
         bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
@@ -1245,26 +889,30 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &
         return;
     };
     let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
-    let words = said(row, drawn);
+    let words = row.said(drawn.workspace, drawn.queue);
     title(&mut pane, &entity.name, &words);
-    let (Some(at), way) = (row.at, sheet.way(row, drawn.workspace)) else {
+    let way = sheet.way(row, drawn.workspace);
+    let (sign, toward) = match way {
+        Some(Way::Up) => ("↑", "to the keyboard"),
+        Some(Way::Down) => ("↓", "to this computer"),
+        None => ("!", "pick a direction"),
+    };
+    let ink = match way {
+        Some(_) => warn(pane.visuals()),
+        None => bad(pane.visuals()),
+    };
+    pane.label(egui::RichText::new(format!("{sign} {toward}")).color(ink));
+    pane.add_space(4.0);
+    let shown = sheet.shown.as_ref().filter(|it| it.id == row.id);
+    let (Some(shown), Some(at)) = (shown, row.at) else {
         return;
     };
-    let entry = drawn
-        .queue
-        .entry(row.id)
-        .filter(|_| row.change == Change::Placed);
-    let shown = sheet.shown.as_ref().filter(|it| it.id == row.id);
-    let (diff, renamed) = match (entry, shown, &row.change) {
-        (Some(held), ..) => (&held.diff, held.renames(&entity.name)),
-        (None, Some(shown), Change::Ahead | Change::Theirs | Change::Both) => (&shown.diff, None),
-        _ => return,
-    };
+    let entry = drawn.queue.entry(row.id).filter(|held| !held.transient);
+    let renamed = entry.and_then(|held| held.renames(&entity.name));
     table(
         &mut pane,
-        diff,
+        &shown.diff,
         renamed,
-        way,
         (row.class, at),
         drawn.workspace,
         drawn.device,
@@ -1302,20 +950,19 @@ pub fn table(
     ui: &mut egui::Ui,
     diff: &Diff,
     renamed: Option<(&str, String)>,
-    way: Option<Way>,
     (class, at): (ObjectClass, Location),
     workspace: &Workspace,
     device: &DeviceState,
 ) {
     let width = ui.available_width();
     let tracks = crate::panel::tracks(width, &DIFF_TRACKS, GAP);
-    diff_head(ui, width, &tracks, way);
+    diff_head(ui, width, &tracks);
+    if let Some((was, given)) = &renamed {
+        field_row(ui, width, &tracks, [NAME_ROW, given, was]);
+    }
     let Diff::Fields(fields) = diff else {
-        let (glyph, tint, said) = summary(diff, class, at, ui.visuals());
-        one_row(ui, width, &tracks, glyph, tint, &said);
-        if let Some((was, given)) = renamed {
-            field_row(ui, width, &tracks, way, [NAME_ROW, &given, was]);
-        }
+        let (tint, said) = summary(diff, class, at, ui.visuals());
+        one_row(ui, width, &tracks, tint, &said);
         return;
     };
     egui::ScrollArea::vertical()
@@ -1323,12 +970,9 @@ pub fn table(
         .auto_shrink([false; 2])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            if let Some((was, given)) = &renamed {
-                field_row(ui, width, &tracks, way, [NAME_ROW, given, was]);
-            }
             for field in fields {
-                let [label, there, here] = field.said(workspace, device);
-                field_row(ui, width, &tracks, way, [&label, &here, &there]);
+                let [label, here, there] = field.said(workspace, device);
+                field_row(ui, width, &tracks, [&label, &here, &there]);
             }
         });
 }
@@ -1340,46 +984,18 @@ const NAME_ROW: &str = "Name";
 ///
 /// ⚠️ Only a slot read and found empty is free. While the read is out, this says only
 /// that it is out.
-pub(crate) fn summary(
+fn summary(
     diff: &Diff,
     class: ObjectClass,
     at: Location,
     visuals: &egui::Visuals,
-) -> (Glyph, egui::Color32, String) {
+) -> (egui::Color32, String) {
     let quiet = visuals.weak_text_color();
     match diff {
-        Diff::Pending => (
-            Glyph::Gauge,
-            quiet,
-            format!("reading what is in {}…", place(class, at)),
-        ),
-        Diff::Empty => (Glyph::CircleCheck, good(visuals), "the slot is free".into()),
-        Diff::Identical => (Glyph::Equal, quiet, "the keyboard holds the same".into()),
-        Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum => {
-            (Glyph::ArrowRight, warn(visuals), DIFFERS.into())
-        }
-    }
-}
-
-/// What the sheet says of a row: `new`, `update`, `replaces “Bright Wurly”`, `both
-/// changed`, `moved`, `replaced by “Clav”` or `removed`, or why its write stopped.
-fn said(row: &Row, drawn: &Drawn) -> String {
-    let placed = drawn
-        .queue
-        .entry(row.id)
-        .filter(|_| row.change == Change::Placed);
-    let entity = drawn.workspace.get(row.id);
-    match (&row.change, placed.zip(entity)) {
-        (Change::Placed, Some((held, entity))) => match &held.failure {
-            Some(why) => why.clone(),
-            None => writes(held, entity, drawn.queue, drawn.workspace, drawn.device).said(),
-        },
-        (Change::Ahead | Change::Theirs, _) => "update".into(),
-        (Change::Both, _) => "both changed".into(),
-        (Change::Moved { .. }, _) => "moved".into(),
-        (Change::Replaced { by }, _) => format!("replaced by “{by}”"),
-        (Change::Removed, _) => "removed".into(),
-        (Change::Placed, None) => String::new(),
+        Diff::Pending => (quiet, format!("reading what is in {}…", place(class, at))),
+        Diff::Empty => (good(visuals), "the slot is free".into()),
+        Diff::Identical => (quiet, "the keyboard holds the same".into()),
+        Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum => (warn(visuals), DIFFERS.into()),
     }
 }
 
@@ -1428,10 +1044,11 @@ fn item(
         box_(rect.right() - PAD, SMALL).shrink(2.0),
         cell_ink(selected, leaving, &visuals),
     );
-    if leave.on_hover_text("leave out").clicked() {
-        match row.change {
-            Change::Placed => acts.push(Act::Unqueue(row.id)),
-            _ => sheet.skip(row.id),
+    let placed = drawn.queue.entry(row.id).filter(|held| !held.transient);
+    if leave.on_hover_text("leave out of Sync").clicked() {
+        match placed {
+            Some(_) => acts.push(Act::Unqueue(row.id)),
+            None => sheet.skip(row.id),
         }
     }
     let right = way_control(
@@ -1441,8 +1058,8 @@ fn item(
         drawn,
         box_(rect.right() - PAD - SMALL - GAP, WAY),
     );
-    let right = match (&row.change, drawn.queue.entry(row.id), row.at) {
-        (Change::Placed, Some(held), _) => destination(
+    let right = match (&row.change, placed, row.at) {
+        (_, Some(held), _) => destination(
             ui,
             held,
             line,
@@ -1452,15 +1069,8 @@ fn item(
             drawn.queue,
             acts,
         ),
-        (Change::Moved { to, .. }, _, Some(at)) => address(
-            &painter,
-            line,
-            right,
-            &format!("{} → {}", shown(at), shown(*to)),
-            quiet,
-        ),
-        (_, _, Some(at)) => address(&painter, line, right, &shown(at), quiet),
-        (_, _, None) => right,
+        (_, None, Some(at)) => address(&painter, line, right, &shown(at), quiet),
+        (_, None, None) => right,
     };
     let left = rect.left() + PAD;
     painted(
@@ -1481,11 +1091,8 @@ fn item(
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
-    let words = said(row, drawn);
-    let failed = drawn
-        .queue
-        .entry(row.id)
-        .is_some_and(|held| held.failure.is_some());
+    let words = row.said(drawn.workspace, drawn.queue);
+    let failed = placed.is_some_and(|held| held.failure.is_some());
     let note_ink = match (failed, selected) {
         (true, false) => bad(&visuals),
         _ => quiet,
@@ -1501,7 +1108,7 @@ fn item(
     if response.double_clicked() {
         acts.push(Act::Open(Item::Local(entity.id)));
     }
-    if response.dragged() && row.change == Change::Placed {
+    if response.dragged() && placed.is_some() {
         egui::DragAndDrop::set_payload(ui.ctx(), carried(entity, drawn.device));
     }
     response.on_hover_text(format!("{}\n{words}", entity.name))
@@ -1510,8 +1117,11 @@ fn item(
 /// The way control's width.
 const WAY: f32 = 44.0;
 
-/// A row's way, at the right of its first line: `↑`, `↓` or `Unlink`, a click turning it
-/// where it can go more than one way, and nothing where it goes none yet. Returns the left
+/// What the arrows mean, wherever one is drawn.
+const ARROWS: &str = "↑ to the keyboard · ↓ to this computer";
+
+/// A row's way, at the right of its first line: `↑`, `↓` or `Unlink`, or `!` where it
+/// has none yet; a click turns it where it can go more than one way. Returns the left
 /// edge of the space it took.
 fn way_control(
     ui: &mut egui::Ui,
@@ -1521,17 +1131,15 @@ fn way_control(
     box_: egui::Rect,
 ) -> f32 {
     let way = sheet.way(row, drawn.workspace);
-    let ways = row.ways(drawn.workspace);
+    let ways = row.ways(drawn.workspace).allowed;
     let text = match (way, &row.change) {
-        (None, _) => "—",
+        (None, _) => "!",
         (Some(Way::Up), _) => "↑",
         (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink",
-        (Some(Way::Down), Change::Moved { .. }) => "",
         (Some(Way::Down), _) => "↓",
     };
     let turns = ways.len() > 1 || (way.is_none() && !ways.is_empty());
-    let id = ui.id().with(("way", row.id));
-    let response = ui.interact(box_, id, egui::Sense::click());
+    let response = ui.interact(box_, ui.id().with(("way", row.id)), egui::Sense::click());
     let visuals = ui.visuals();
     if turns && response.hovered() {
         ui.painter()
@@ -1539,7 +1147,7 @@ fn way_control(
     }
     let ink = match way {
         Some(_) => warn(visuals),
-        None => visuals.weak_text_color(),
+        None => bad(visuals),
     };
     ui.painter().text(
         box_.center(),
@@ -1548,11 +1156,14 @@ fn way_control(
         egui::FontId::proportional(NAME),
         ink,
     );
-    let hover = match row.down(drawn.workspace) {
-        Some(why) if matches!(row.change, Change::Ahead | Change::Theirs | Change::Both) => why,
-        _ => "change the way",
+    let hover = match (way, row.down_blocked(drawn.workspace)) {
+        (None, _) => format!("click to pick a direction\n{ARROWS}"),
+        (_, Some(why)) if !matches!(row.change, Change::Placed | Change::Plays { .. }) => {
+            format!("{ARROWS}\n{why}")
+        }
+        _ => ARROWS.to_string(),
     };
-    if turns && response.on_hover_text(hover).clicked() {
+    if response.on_hover_text(hover).clicked() && turns {
         sheet.flip(row, drawn.workspace);
     }
     box_.left() - GAP
@@ -1576,67 +1187,15 @@ fn address(
     right - width - GAP
 }
 
-/// What one write does to its slot, and the program a piano or sample goes for.
-struct Writes {
-    what: What,
-    /// The first waiting program that plays the piano or sample written.
-    for_: Option<String>,
-}
-
-/// What a write does to its slot.
-enum What {
-    /// The slot is empty.
-    New,
-    /// The slot holds an earlier version: the file is linked there.
-    Update,
-    /// The slot holds something else, by the name the keyboard gives it.
-    Replaces(String),
-    /// The slot has not been read yet.
-    Checking,
-}
-
-impl Writes {
-    /// `new`, `update`, `replaces “Bright Wurly”` or `checking`, then `“Keys” plays it`.
-    fn said(&self) -> String {
-        let what = match &self.what {
-            What::New => "new".to_string(),
-            What::Update => "update".to_string(),
-            What::Replaces(name) => format!("replaces “{name}”"),
-            What::Checking => "checking".to_string(),
-        };
-        match &self.for_ {
-            Some(program) => format!("{what} · “{program}” plays it"),
-            None => what,
-        }
+/// What a send placed by hand does to its slot, or why it stopped: `new`,
+/// `replaces “Bright Wurly”` or `checking`.
+pub fn placed_words(id: u64, queue: &Queue) -> String {
+    match queue.entry(id).map(|held| (&held.failure, &held.replaces)) {
+        Some((Some(why), _)) => why.clone(),
+        Some((None, Occupancy::Vacant)) => "new".into(),
+        Some((None, Occupancy::Held(occupant))) => format!("replaces “{}”", occupant.name),
+        Some((None, Occupancy::Unknown)) | None => "checking".into(),
     }
-}
-
-fn writes(
-    held: &Queued,
-    entity: &LocalEntity,
-    queue: &Queue,
-    workspace: &Workspace,
-    device: &DeviceState,
-) -> Writes {
-    let update = crate::device::standing_of(device, entity).is_some_and(|linked| {
-        (linked.class, linked.at) == (held.class, Some(held.at))
-            && matches!(linked.standing, Standing::Ahead | Standing::Same)
-    });
-    let what = match (&held.replaces, update) {
-        (Occupancy::Vacant, _) => What::New,
-        (Occupancy::Held(_) | Occupancy::Unknown, true) => What::Update,
-        (Occupancy::Held(occupant), false) => What::Replaces(occupant.name.clone()),
-        (Occupancy::Unknown, false) => What::Checking,
-    };
-    let for_ = plays::key_of(entity).and_then(|key| {
-        let program = queue
-            .list
-            .iter()
-            .filter_map(|other| workspace.get(other.id))
-            .find(|program| plays::named(program).iter().any(|plays| plays.key() == key))?;
-        Some(crate::strings::display_name(&program.name).to_string())
-    });
-    Writes { what, for_ }
 }
 
 /// What dragging a waiting entry carries.
@@ -1849,23 +1408,15 @@ fn flat_chip(
     response
 }
 
-/// The diff's four columns: the field, what this computer holds, the way between them,
-/// and what the keyboard holds. Any of them may shrink to nothing.
-const DIFF_TRACKS: [Track; 4] = [
-    Track::Share(1.4),
-    Track::Share(1.0),
-    Track::Px(20.0),
-    Track::Share(1.0),
-];
+/// The diff's three columns: the field, what this computer holds, and what the keyboard
+/// holds. Any of them may shrink to nothing.
+const DIFF_TRACKS: [Track; 3] = [Track::Share(1.4), Track::Share(1.0), Track::Share(1.0)];
 
-/// The row of column heads over the diff, with the way between the two sides.
-fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], way: Option<Way>) {
+/// The row of column heads over the diff.
+fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::hover());
     let ink = crate::app::caption(ui.visuals());
-    for (head, track) in ["Field", "This computer", "", "Keyboard"]
-        .iter()
-        .zip(tracks)
-    {
+    for (head, track) in ["Field", "This computer", "Keyboard"].iter().zip(tracks) {
         cut(
             ui.painter(),
             rect.left() + track.start,
@@ -1875,111 +1426,46 @@ fn diff_head(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], way: Option<W
             egui::TextFormat::simple(egui::FontId::proportional(11.5), ink),
         );
     }
-    sign(ui, cell(rect, &tracks[2]), way, ink);
 }
 
 /// One value the two sides disagree on: the field's name, what this computer holds, and
 /// what the keyboard holds.
-fn field_row(
-    ui: &mut egui::Ui,
-    width: f32,
-    tracks: &[Range<f32>],
-    way: Option<Way>,
-    said: [&str; 3],
-) {
-    let [name, here, there] = said;
+fn field_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], said: [&str; 3]) {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
     let visuals = ui.visuals().clone();
     let mono = egui::FontId::monospace(DIFF_MONO);
-    let (mine, theirs) = match way {
-        Some(Way::Up) => (
-            visuals.widgets.active.fg_stroke.color,
-            visuals.weak_text_color(),
-        ),
-        Some(Way::Down) => (
-            visuals.weak_text_color(),
-            visuals.widgets.active.fg_stroke.color,
-        ),
-        None => (visuals.text_color(), visuals.text_color()),
-    };
-    let cells = [
-        (
-            name,
-            egui::FontId::proportional(DIFF_MONO),
-            visuals.text_color(),
-            &tracks[0],
-        ),
-        (here, mono.clone(), mine, &tracks[1]),
-        (there, mono, theirs, &tracks[3]),
-    ];
-    for (text, font, ink, track) in cells {
+    let fonts = [egui::FontId::proportional(DIFF_MONO), mono.clone(), mono];
+    for ((text, font), track) in said.iter().zip(fonts).zip(tracks) {
         cut(
             ui.painter(),
             rect.left() + track.start,
             rect.center().y,
             track.end - track.start,
             text,
-            egui::TextFormat::simple(font, ink),
+            egui::TextFormat::simple(font, visuals.text_color()),
         );
     }
-    sign(ui, cell(rect, &tracks[2]), way, warn(&visuals));
-    let _ = response.on_hover_text(format!("{name}: {here} · {there}"));
+    let [name, here, there] = said;
+    let _ = response.on_hover_text(format!("{name}: {here} here, {there} on the keyboard"));
 }
 
 /// The single row for a diff that is not a field list.
-fn one_row(
-    ui: &mut egui::Ui,
-    width: f32,
-    tracks: &[Range<f32>],
-    glyph: Glyph,
-    tint: egui::Color32,
-    said: &str,
-) {
+fn one_row(ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>], tint: egui::Color32, said: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, DIFF_ROW), egui::Sense::hover());
-    let mark = egui::Rect::from_center_size(cell(rect, &tracks[2]).left_center(), egui::Vec2::ZERO);
-    painted(
-        ui,
-        glyph,
-        mark.expand(SMALL / 2.0)
-            .translate(egui::vec2(SMALL / 2.0, 0.0)),
-        tint,
-    );
     cut(
         ui.painter(),
         rect.left() + tracks[0].start,
         rect.center().y,
-        tracks[0].end - tracks[0].start,
+        rect.width(),
         said,
         egui::TextFormat::simple(egui::FontId::proportional(DIFF_MONO), tint),
     );
 }
 
-/// The arrow between the two sides, pointing the way Sync takes the row, where it takes
-/// one.
-fn sign(ui: &egui::Ui, box_: egui::Rect, way: Option<Way>, tint: egui::Color32) {
-    let turn = match way {
-        Some(Way::Up) => 0.0,
-        Some(Way::Down) => std::f32::consts::PI,
-        None => return,
-    };
-    Glyph::ArrowRight
-        .image()
-        .rotate(turn, egui::Vec2::splat(0.5))
-        .tint(tint)
-        .paint_at(
-            ui,
-            egui::Rect::from_center_size(
-                egui::pos2(box_.left() + SMALL / 2.0, box_.center().y),
-                egui::Vec2::splat(SMALL),
-            ),
-        );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::DeviceEvent;
     use crate::log::Log;
     use crate::tabs::Tabs;
     use crate::testing::{self, Bench};
@@ -1996,39 +1482,11 @@ mod tests {
     }
 
     /// How many of the entries would write over something already in their slot.
-    fn replacing(queue: &Queue) -> usize {
-        queue
-            .entries()
-            .iter()
-            .filter(|held| held.replaces.occupant().is_some())
-            .count()
-    }
-
-    fn occupant(name: &str, crc: Option<u32>) -> ProgramInfo {
-        ProgramInfo {
-            location: at(0),
-            body_len: 121,
-            format: "ne5p".into(),
-            version: 4,
-            crc32: crc,
-            modified: None,
-            name: name.to_string(),
-        }
-    }
-
     /// An attached instrument nothing has read yet, and the tabs `poll` wants.
     fn attached(workspace: &Workspace) -> (Device, Tabs) {
         let mut device = Device::new(workspace.ctx().clone());
         device.pretend_attached();
         (device, Tabs::default())
-    }
-
-    /// The first command queued for the instrument, which must be a read.
-    fn asked(device: &Device) -> (ObjectClass, Location, Purpose) {
-        match device.queued().front().copied().expect("a read was queued") {
-            DeviceCmd::Get { class, at, why, .. } => (*class, *at, *why),
-            other => panic!("{}", other.label()),
-        }
     }
 
     /// Change a document's bytes the way an edit does.
@@ -2179,19 +1637,19 @@ mod tests {
 
         let landed = queue.put(
             workspace.get(first).unwrap(),
-            class,
-            at(0),
+            (class, at(0)),
             Occupancy::Vacant,
             None,
+            false,
         );
         assert!(matches!(landed, Put::Made));
 
         let landed = queue.put(
             workspace.get(second).unwrap(),
-            class,
-            at(0),
+            (class, at(0)),
             Occupancy::Vacant,
             None,
+            false,
         );
         assert!(
             matches!(landed, Put::Instead(displaced) if displaced == first),
@@ -2201,31 +1659,28 @@ mod tests {
 
         queue.put(
             workspace.get(first).unwrap(),
-            class,
-            at(1),
+            (class, at(1)),
             Occupancy::Vacant,
             None,
+            false,
         );
         let landed = queue.put(
             workspace.get(first).unwrap(),
-            class,
-            at(2),
+            (class, at(2)),
             Occupancy::Vacant,
             None,
+            false,
         );
-        assert!(
-            matches!(landed, Put::Moved(was, before) if (was, before) == (class, at(1))),
-            "one slot per asset"
-        );
+        assert!(matches!(landed, Put::Moved), "one slot per asset");
         assert_eq!(queue.ids(), vec![second, first]);
 
         // Queueing it for the slot it already waits for leaves its entry alone.
         let landed = queue.put(
             workspace.get(first).unwrap(),
-            class,
-            at(2),
+            (class, at(2)),
             Occupancy::Vacant,
             None,
+            false,
         );
         assert!(matches!(landed, Put::Standing));
         assert_eq!(queue.ids(), vec![second, first]);
@@ -2284,10 +1739,10 @@ mod tests {
         for (slot, id) in ids.iter().enumerate() {
             queue.put(
                 workspace.get(*id).unwrap(),
-                class,
-                at(slot as u32),
+                (class, at(slot as u32)),
                 Occupancy::Vacant,
                 None,
+                false,
             );
         }
 
@@ -2344,369 +1799,6 @@ mod tests {
         assert_eq!(first_at, 4);
     }
 
-    /// Four entries, two for occupied slots. A slot whose occupant turns out to be the
-    /// same bytes still counts as a replacement.
-    #[test]
-    fn what_is_waiting_counts_its_replacements_whatever_the_bytes_turn_out_to_be() {
-        let (mut workspace, mut log, bytes) = bench();
-        let mut device = Device::new(workspace.ctx().clone());
-        let class = ObjectClass::Program;
-        // Two slots hold something, two are vacant.
-        device.pretend_scanned(class, 7, &["Africa Split", "Squabble B", "", ""]);
-        let (_, edited) =
-            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
-                .expect("the registry takes the set");
-
-        let mut queue = Queue::default();
-        let mut ids = Vec::new();
-        for slot in 0..4 {
-            let held = match slot {
-                // Slot 1 turns out to hold the same bytes as its entry.
-                1 => bytes.clone(),
-                _ => edited.clone(),
-            };
-            let id = workspace.ingest(
-                format!("sound {slot}"),
-                Origin::Device {
-                    class,
-                    at: at(slot),
-                },
-                held,
-                &mut log,
-            );
-            enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
-                id,
-                class,
-                at(slot),
-            );
-            ids.push(id);
-        }
-
-        assert_eq!((queue.len(), replacing(&queue)), (4, 2));
-        // A vacant slot needs no read; an occupied one is waiting on the bytes it holds.
-        assert!(matches!(queue.entry(ids[0]).unwrap().diff, Diff::Pending));
-        assert!(matches!(queue.entry(ids[1]).unwrap().diff, Diff::Pending));
-        assert!(matches!(queue.entry(ids[2]).unwrap().diff, Diff::Empty));
-        assert_eq!(device.queued().len(), 2, "one read per occupied slot");
-
-        queue.arrived(
-            class,
-            at(0),
-            &crate::device::reported(at(0), "Africa Split"),
-            &bytes,
-            &workspace,
-        );
-        queue.arrived(
-            class,
-            at(1),
-            &crate::device::reported(at(1), "Squabble B"),
-            &bytes,
-            &workspace,
-        );
-        let Diff::Fields(fields) = &queue.entry(ids[0]).unwrap().diff else {
-            panic!("a program against a program is a field list");
-        };
-        assert_eq!(
-            fields.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-            vec!["center_panel.gain"]
-        );
-        assert!(matches!(queue.entry(ids[1]).unwrap().diff, Diff::Identical));
-        // Still counted as a replacement: the write goes ahead over identical bytes.
-        assert_eq!((queue.len(), replacing(&queue)), (4, 2));
-    }
-
-    /// An edit made while an entry waits is diffed against the occupant already read,
-    /// without asking the instrument about that slot again.
-    #[test]
-    fn an_edit_under_a_waiting_entry_is_diffed_again_without_a_second_read() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let mut queue = Queue::default();
-        let class = ObjectClass::Program;
-        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
-
-        let id = workspace.ingest(
-            "Africa Split".into(),
-            Origin::Device { class, at: at(0) },
-            bytes.clone(),
-            &mut log,
-        );
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(0),
-        );
-        queue.arrived(
-            class,
-            at(0),
-            &crate::device::reported(at(0), "Africa Split"),
-            &bytes,
-            &workspace,
-        );
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
-        let reads = device.queued().len();
-
-        edit(&mut workspace, id, &mut log);
-        follow(&workspace, &mut device, &mut queue, &mut log);
-
-        let Diff::Fields(fields) = &queue.entry(id).unwrap().diff else {
-            panic!("a program against a program is a field list");
-        };
-        assert_eq!(
-            fields.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-            vec!["center_panel.gain"]
-        );
-        assert_eq!(device.queued().len(), reads, "the slot was not read again");
-
-        // With no further edit, a second pass changes nothing and asks nothing.
-        follow(&workspace, &mut device, &mut queue, &mut log);
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Fields(_)));
-        assert_eq!(device.queued().len(), reads);
-    }
-
-    /// An entry the checksums settled without a read has no occupant bytes to diff a
-    /// later edit against, so that edit asks for the read, once.
-    #[test]
-    fn an_edit_under_an_entry_settled_by_checksum_asks_for_the_read_once() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let mut queue = Queue::default();
-        let class = ObjectClass::Program;
-
-        let id = workspace.ingest(
-            "Africa Split".into(),
-            Origin::Device { class, at: at(0) },
-            bytes,
-            &mut log,
-        );
-        let held = workspace.get(id).unwrap().saved.crc32().unwrap();
-        device.pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(0),
-        );
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
-        assert!(device.queued().is_empty(), "the checksums settled it");
-
-        edit(&mut workspace, id, &mut log);
-        follow(&workspace, &mut device, &mut queue, &mut log);
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
-        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
-
-        follow(&workspace, &mut device, &mut queue, &mut log);
-        assert_eq!(device.queued().len(), 1, "asked for once, not once a frame");
-    }
-
-    /// ⚠️ A type-0 file stores no body checksum. Every Electro 5 factory program is one,
-    /// as is everything Nord Sound Manager exports from one, inferred from specimens. An
-    /// entry for such a file settles against a slot it matches only because the checksum
-    /// is computed from the body, not read from the header.
-    #[test]
-    fn a_type_0_entry_settles_against_the_slot_reporting_its_checksum_without_a_read() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let mut queue = Queue::default();
-        let class = ObjectClass::Program;
-
-        let id = workspace.ingest(
-            "Circling Bells.ne5p".into(),
-            Origin::File("Circling Bells.ne5p".into()),
-            crate::workspace::as_type_0(&bytes),
-            &mut log,
-        );
-        let held = crc(&workspace, id);
-        device.pretend_bodies(class, 7, &[Some(("Circling Bells", held))]);
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(0),
-        );
-
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Identical));
-        assert!(device.queued().is_empty(), "the checksums settled it");
-    }
-
-    /// Queueing an asset for the slot it is already waiting for changes nothing, so the
-    /// instrument is not asked about the slot again and the log does not repeat itself.
-    /// Sending a checked set that includes an asset already waiting does this.
-    #[test]
-    fn queueing_an_asset_where_it_is_already_going_asks_and_says_nothing_further() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-
-        for _ in 0..3 {
-            enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
-                id,
-                class,
-                at(0),
-            );
-        }
-
-        assert_eq!(queue.len(), 1);
-        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
-        assert_eq!(device.queued().len(), 1, "one read for one destination");
-        assert_eq!(
-            log.transcript()
-                .matches("is waiting to be sent to Programs 7:1")
-                .count(),
-            1,
-            "{}",
-            log.transcript()
-        );
-    }
-
-    /// Edits made while a compare read is out all need the same answer, so none of them
-    /// asks for the read again.
-    #[test]
-    fn edits_made_while_a_compare_read_is_out_do_not_ask_for_it_again() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(0),
-        );
-        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
-
-        for gain in ["96", "97", "98"] {
-            let held = workspace.get(id).unwrap().bytes.to_vec();
-            let (_, edited) =
-                crate::fields::apply(&held, &[("center_panel.gain".into(), gain.into())]).unwrap();
-            workspace.replace_bytes(id, edited, &mut log);
-            follow(&workspace, &mut device, &mut queue, &mut log);
-        }
-
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
-        assert_eq!(device.queued().len(), 1, "the answer was already coming");
-    }
-
-    /// ⚠️ The queue outlives a connection, but reads in flight do not. An entry still
-    /// marked as waiting would wait for the rest of the session, and one keeping the last
-    /// instrument's occupant would claim this instrument holds it.
-    #[test]
-    fn an_entry_waiting_on_a_read_when_the_instrument_went_away_is_asked_again() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, mut tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        device.pretend_bodies(class, 7, &[Some(("Africa Split", 7))]);
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(0),
-        );
-        assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
-
-        device.pretend(DeviceEvent::Disconnected { lost: true });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-        assert!(
-            device.queued().is_empty(),
-            "the read went with the connection"
-        );
-
-        device.pretend_attached();
-        device.pretend(DeviceEvent::Partitions(Vec::new()));
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-
-        let held = queue.entry(id).expect("it is still waiting");
-        assert!(matches!(held.diff, Diff::Pending));
-        assert!(
-            held.replaces.occupant().is_none(),
-            "the last instrument's occupant says nothing about this one"
-        );
-        assert_eq!(
-            asked(&device),
-            (class, at(0), Purpose::Compare),
-            "the answer that never came is asked for again"
-        );
-    }
-
-    /// A piano resting in its file is compared with the slot's occupant by checksum, as
-    /// [`crate::library::agrees`] compares it: the same body is identical, another body
-    /// differs, and neither answer reads the file.
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_resting_piano_is_compared_with_the_occupant_without_reading_its_file() {
-        let (mut workspace, mut log, _) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let dir = testing::Temp::new();
-        let bytes = testing::piano(40);
-        let file = testing::on_disk(&dir, "Upright.npno", &bytes);
-        let id = testing::rest(&mut workspace, "Upright.npno", file.clone());
-        workspace.settle_files(&mut log);
-        file.take_reads();
-        let mut other = bytes.clone();
-        let last = other.len() - 1;
-        other[last] ^= 1;
-
-        let class = ObjectClass::Piano;
-        for (there, identical) in [(&bytes, true), (&other, false)] {
-            let mut queue = Queue::default();
-            enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
-                id,
-                class,
-                at(0),
-            );
-            assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
-            queue.arrived(
-                class,
-                at(0),
-                &crate::device::reported(at(0), "Grand"),
-                there,
-                &workspace,
-            );
-
-            let diff = &queue.entry(id).unwrap().diff;
-            match identical {
-                true => assert!(matches!(diff, Diff::Identical), "the same body"),
-                false => assert!(matches!(diff, Diff::Checksum), "another body"),
-            }
-        }
-        assert_eq!(file.take_reads(), [], "nothing read the file");
-    }
-
     /// An instrument whose piano library has been read up to `banks` of its two banks,
     /// holding a piano called `held` at 1:1.
     fn pianos_read(workspace: &Workspace, banks: u32, held: &str) -> Device {
@@ -2736,8 +1828,59 @@ mod tests {
         queue
     }
 
+    /// A program placed by hand lists the piano it plays that only this computer has as a
+    /// row of its own, going to a free slot, until the keyboard is seen to hold it or a
+    /// bank is unread. Nothing is queued for it before Sync.
     #[test]
-    fn the_sheet_says_each_write_is_new_an_update_or_replaces_what_the_slot_holds() {
+    fn a_program_placed_by_hand_lists_the_piano_it_plays_as_its_own_row() {
+        use crate::bring::{Change, Row, Rows};
+        let (mut workspace, mut log, fresh) = bench();
+        let piano = workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
+        let (_, bytes) =
+            crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let rows = |device: &mut Device| {
+            let queue = after_queueing(&workspace, device, program);
+            assert_eq!(queue.ids(), [program], "only what was placed is queued");
+            Rows::of(&device.state, &workspace, &queue).list
+        };
+        let placed = Row {
+            id: program,
+            class: ObjectClass::Program,
+            at: Some(at(0)),
+            change: Change::Placed,
+        };
+        let played = Row {
+            id: piano,
+            class: ObjectClass::Piano,
+            at: Some(Location::from_user(1, 2)),
+            change: Change::Plays { by: program },
+        };
+        let mut device = pianos_read(&workspace, 2, "Grand");
+        assert_eq!(rows(&mut device), [placed.clone(), played.clone()]);
+        let said = played.said(&workspace, &Queue::default());
+        assert_eq!(said, "new · “Keys” plays it");
+        assert_eq!(
+            rows(&mut pianos_read(&workspace, 1, "Grand")),
+            std::slice::from_ref(&placed),
+            "a bank unread"
+        );
+        assert_eq!(
+            rows(&mut pianos_read(&workspace, 2, "Tine")),
+            [placed],
+            "already there"
+        );
+    }
+
+    #[test]
+    fn the_sheet_says_each_placed_write_is_new_or_replaces_and_a_file_placed_on_its_own_slot_is_its_row(
+    ) {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         let make = |bench: &mut crate::testing::Bench, name: &str| {
@@ -2765,31 +1908,27 @@ mod tests {
             let at = Location::from_user(1, slot);
             bench.act(vec![Act::Replace { id, class, at }]);
         }
-        let said = |id: u64| {
-            let held = bench.queue.entry(id).unwrap();
-            let entity = bench.workspace.get(id).unwrap();
-            writes(
-                held,
-                entity,
-                &bench.queue,
-                &bench.workspace,
-                &bench.device.state,
-            )
-            .said()
-        };
-        assert_eq!(said(soul), "new");
-        assert_eq!(said(jazzy), "update");
-        assert_eq!(said(tine), "replaces “Bright Wurly”");
+        assert_eq!(placed_words(soul, &bench.queue), "new");
+        assert_eq!(placed_words(tine, &bench.queue), "replaces “Bright Wurly”");
+        assert!(!bench.queue.holds(jazzy), "its own slot is not queued");
+        let opened = bench.device.asks.sheet.as_ref().expect("the sheet opens");
+        assert_eq!(opened.picked, Some(jazzy));
 
-        bench.act(vec![Act::Sync(None)]);
         bench.land();
+        let sync = crate::bring::Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
         let mut painted = |picked: u64| {
             bench.device.asks.sheet.as_mut().expect("open").picked = Some(picked);
             let mut frame = || {
                 let input = testing::screen(egui::vec2(940.0, 600.0), Vec::new());
                 testing::run(&bench.ctx, input, |ctx| {
                     let (device, workspace) = (&mut bench.device, &bench.workspace);
-                    sheet(ctx, device, &bench.queue, workspace, &mut Vec::new());
+                    sheet(
+                        ctx,
+                        device,
+                        (&bench.queue, &sync),
+                        workspace,
+                        &mut Vec::new(),
+                    );
                 })
             };
             frame();
@@ -2801,314 +1940,8 @@ mod tests {
             row.top() > testing::where_(&shown, "Tine").bottom() - 1.0,
             "the word sits under the name: {row:?}"
         );
-        assert!(shown.iter().any(|word| word.text == "update"));
+        assert!(shown.iter().any(|word| word.text == "Newer here"));
         assert!(shown.iter().any(|word| word.text == "new"));
-        bench.device.pretend_bodies(
-            class,
-            1,
-            &[None, Some(("Jazzy", 9)), Some(("Bright Wurly", 2))],
-        );
-        let entity = bench.workspace.get(jazzy).unwrap();
-        let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
-        assert!(linked.standing.needs_attention());
-        let held = bench.queue.entry(jazzy).unwrap();
-        let said = writes(
-            held,
-            entity,
-            &bench.queue,
-            &bench.workspace,
-            &bench.device.state,
-        );
-        assert_eq!(
-            said.said(),
-            "replaces “Jazzy”",
-            "not an update of what it holds now"
-        );
-    }
-
-    #[test]
-    fn a_queued_program_takes_the_piano_it_plays_that_the_instrument_lacks_ahead_of_it() {
-        let (mut workspace, mut log, fresh) = bench();
-        let piano = workspace.ingest(
-            "Tine.npno".into(),
-            Origin::Fresh,
-            testing::piano(1),
-            &mut log,
-        );
-        let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
-        let (_, bytes) =
-            crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
-        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
-        let order = |queue: &Queue| -> Vec<(u64, ObjectClass, Location)> {
-            queue
-                .entries()
-                .iter()
-                .map(|held| (held.id, held.class, held.at))
-                .collect()
-        };
-
-        let mut device = pianos_read(&workspace, 2, "Grand");
-        let queue = after_queueing(&workspace, &mut device, program);
-        assert_eq!(
-            order(&queue),
-            [
-                (piano, ObjectClass::Piano, Location::from_user(1, 2)),
-                (program, ObjectClass::Program, at(0)),
-            ]
-        );
-        let entity = workspace.get(piano).unwrap();
-        assert_eq!(
-            writes(
-                &queue.entries()[0],
-                entity,
-                &queue,
-                &workspace,
-                &device.state
-            )
-            .said(),
-            "new · “Keys” plays it"
-        );
-
-        let mut partly = pianos_read(&workspace, 1, "Grand");
-        let queue = after_queueing(&workspace, &mut partly, program);
-        assert_eq!(
-            order(&queue),
-            [(program, ObjectClass::Program, at(0))],
-            "a bank unread"
-        );
-
-        let mut holding = pianos_read(&workspace, 2, "Tine");
-        let queue = after_queueing(&workspace, &mut holding, program);
-        assert_eq!(
-            order(&queue),
-            [(program, ObjectClass::Program, at(0))],
-            "already there"
-        );
-    }
-
-    /// A piano slot reports no checksum. One whose body is another length than the
-    /// asset's differs, and no read is asked for. One of the same length is read through
-    /// its checksum, and that read decides. Neither reads the asset's file.
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_piano_slot_differs_by_length_or_else_by_a_read_through_its_checksum() {
-        let (mut workspace, mut log, _) = bench();
-        let dir = testing::Temp::new();
-        let bytes = testing::piano(40);
-        let file = testing::on_disk(&dir, "Upright.npno", &bytes);
-        let id = testing::rest(&mut workspace, "Upright.npno", file.clone());
-        workspace.settle_files(&mut log);
-        file.take_reads();
-        let (body, crc) = wire_sum(&bytes).expect("a piano library");
-        let len = body.len() as u32;
-        let class = ObjectClass::Piano;
-        let queued =
-            |workspace: &Workspace, device: &mut Device, queue: &mut Queue, log: &mut Log| {
-                enqueue(workspace, device, queue, log, id, class, at(0));
-            };
-
-        let (mut device, _tabs) = attached(&workspace);
-        device.pretend_lengths(class, 7, &[Some(("Grand", len + 1))]);
-        let mut queue = Queue::default();
-        queued(&workspace, &mut device, &mut queue, &mut log);
-        assert!(matches!(queue.entry(id).unwrap().diff, Diff::Checksum));
-        assert!(device.queued().is_empty(), "the length settled it");
-
-        for (there, identical) in [(crc, true), (crc ^ 1, false)] {
-            let (mut device, mut tabs) = attached(&workspace);
-            device.pretend_lengths(class, 7, &[Some(("Grand", len))]);
-            let mut queue = Queue::default();
-            queued(&workspace, &mut device, &mut queue, &mut log);
-            assert!(matches!(queue.entry(id).unwrap().diff, Diff::Pending));
-            assert_eq!(asked(&device), (class, at(0), Purpose::Compare));
-
-            device.pretend(DeviceEvent::Summed {
-                class,
-                at: at(0),
-                received: Received {
-                    info: ProgramInfo {
-                        location: at(0),
-                        body_len: len,
-                        format: "npno".into(),
-                        version: 540,
-                        crc32: None,
-                        modified: None,
-                        name: "Grand".into(),
-                    },
-                    body_crc32: there,
-                },
-            });
-            device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-            let diff = &queue.entry(id).unwrap().diff;
-            match identical {
-                true => assert!(matches!(diff, Diff::Identical), "the same body"),
-                false => assert!(matches!(diff, Diff::Checksum), "another body"),
-            }
-        }
-        assert_eq!(file.take_reads(), [], "nothing read the file");
-    }
-
-    /// A bank no walk has reached says nothing about its slots, so an entry for one waits
-    /// on a read and does not call the slot free.
-    #[test]
-    fn a_slot_in_an_unscanned_bank_is_read_before_it_is_called_free() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, _tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(6),
-        );
-
-        let held = queue.entry(id).unwrap();
-        assert!(matches!(held.diff, Diff::Pending));
-        assert!(held.replaces.occupant().is_none());
-        assert_eq!(asked(&device), (class, at(6), Purpose::Compare));
-    }
-
-    /// For a slot no walk had reached, the read settles it: an empty read makes the slot
-    /// free, and bytes make the entry a replacement of what the read's `INFO` reported.
-    #[test]
-    fn the_read_of_an_unscanned_slot_settles_what_the_entry_replaces() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, mut tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let (_, edited) =
-            crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
-                .expect("the registry takes the set");
-        let mut queue = Queue::default();
-        let mut ids = Vec::new();
-        for slot in [3, 4] {
-            let id = workspace.ingest(
-                format!("sound {slot}"),
-                Origin::Fresh,
-                edited.clone(),
-                &mut log,
-            );
-            enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
-                id,
-                class,
-                at(slot),
-            );
-            ids.push(id);
-        }
-
-        device.pretend(DeviceEvent::Vacant {
-            class,
-            at: at(3),
-            why: Purpose::Compare,
-        });
-        let info = crate::device::reported(at(4), "");
-        device.pretend(DeviceEvent::Got {
-            info: info.clone(),
-            origin: Origin::Device { class, at: at(4) },
-            bytes,
-            why: Purpose::Compare,
-        });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-
-        let empty = queue.entry(ids[0]).unwrap();
-        assert!(matches!(empty.diff, Diff::Empty));
-        assert!(empty.replaces.occupant().is_none());
-
-        let taken = queue.entry(ids[1]).unwrap();
-        let Diff::Fields(fields) = &taken.diff else {
-            panic!("a program against a program is a field list");
-        };
-        assert_eq!(
-            fields.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-            vec!["center_panel.gain"]
-        );
-        assert_eq!(
-            taken.replaces.expect(),
-            Some(Expect::of(Some(&info))),
-            "what the read's INFO reported, though it sums nothing and has no name"
-        );
-        assert_eq!((queue.len(), replacing(&queue)), (2, 1));
-    }
-
-    /// The scan cache is keyed by the panel's bank number, which is one more than the
-    /// wire's and is the number [`DeviceEvent::BankScanned`] carries. An entry for a slot a
-    /// walk has read carries the name the walk found.
-    #[test]
-    fn a_slot_a_walk_has_read_carries_the_name_it_found() {
-        let (mut workspace, mut log, bytes) = bench();
-        let (mut device, mut tabs) = attached(&workspace);
-        let class = ObjectClass::Program;
-        let mut queue = Queue::default();
-        // Programs 1:7 on the panel is bank 0, slot 6 on the wire.
-        let occupied = Location { bank: 0, slot: 6 };
-        device.pretend(DeviceEvent::BankScanned {
-            class,
-            bank: 1,
-            slots: (0..7)
-                .map(|slot| {
-                    (slot == occupied.slot).then(|| ProgramInfo {
-                        location: Location { bank: 0, slot },
-                        name: "Jazzy Click B".into(),
-                        ..occupant("", None)
-                    })
-                })
-                .collect(),
-        });
-        device.poll(&mut log, &mut workspace, &mut tabs, &mut queue);
-
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            occupied,
-        );
-
-        let held = queue.entry(id).unwrap();
-        assert_eq!(
-            held.replaces.occupant().map(|held| held.name.as_str()),
-            Some("Jazzy Click B"),
-        );
-        assert!(matches!(held.diff, Diff::Pending));
-        assert_eq!(asked(&device), (class, occupied, Purpose::Compare));
-    }
-
-    /// A slot a walk found empty is free and needs no compare read.
-    #[test]
-    fn a_scanned_empty_slot_is_free_and_asks_the_instrument_nothing() {
-        let (mut workspace, mut log, bytes) = bench();
-        let mut device = Device::new(workspace.ctx().clone());
-        let class = ObjectClass::Program;
-        device.pretend_scanned(class, 7, &["Africa Split", ""]);
-        let mut queue = Queue::default();
-        let id = workspace.ingest("Jazzy Click B".into(), Origin::Fresh, bytes, &mut log);
-
-        enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            class,
-            at(1),
-        );
-
-        let held = queue.entry(id).unwrap();
-        assert!(matches!(held.diff, Diff::Empty));
-        assert!(held.replaces.occupant().is_none());
-        assert!(device.queued().is_empty(), "nothing to ask about");
     }
 
     /// Retargeting a waiting asset moves its entry without adding a second. The entry
@@ -3136,7 +1969,10 @@ mod tests {
                 at(slot),
             );
         }
-        assert!(matches!(queue.entry(first).unwrap().diff, Diff::Empty));
+        assert!(matches!(
+            queue.entry(first).unwrap().replaces,
+            Occupancy::Vacant
+        ));
 
         retarget(
             &workspace,
@@ -3535,16 +2371,15 @@ mod tests {
     }
 
     /// The sheet's diff table for `held`, sent under `name`, as painted.
-    fn table_words(held: &Queued, name: &str) -> Vec<testing::Word> {
+    fn table_words(held: &Queued, name: &str, diff: &Diff) -> Vec<testing::Word> {
         let ctx = testing::context();
         let input = testing::screen(egui::vec2(620.0, 300.0), Vec::new());
         let output = testing::run(&ctx, input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 table(
                     ui,
-                    &held.diff,
+                    diff,
                     held.renames(name),
-                    Some(Way::Up),
                     (held.class, held.at),
                     &Workspace::new(ctx.clone()),
                     &DeviceState::default(),
@@ -3581,17 +2416,8 @@ mod tests {
                 class,
                 at(0),
             );
-            queue.arrived(
-                class,
-                at(0),
-                &crate::device::reported(at(0), "Incense"),
-                &bytes,
-                &workspace,
-            );
             let held = queue.entry(id).unwrap();
-            assert!(matches!(held.diff, Diff::Identical), "{name}");
-
-            let said = table_words(held, name);
+            let said = table_words(held, name, &compare(&bytes, &bytes));
             assert_eq!(
                 said.iter().any(|word| word.text == NAME_ROW),
                 renamed,
@@ -3631,21 +2457,15 @@ mod tests {
             class,
             at(0),
         );
-        queue.arrived(
-            class,
-            at(0),
-            &crate::device::reported(at(0), "Africa Split"),
-            &bytes,
-            &workspace,
-        );
         let held = queue.entry(id).unwrap();
-        let Diff::Fields(fields) = &held.diff else {
+        let diff = compare(&workspace.get(id).unwrap().bytes, &bytes);
+        let Diff::Fields(fields) = &diff else {
             panic!("a program against a program is a field list");
         };
         let field = &fields[0];
         assert_ne!(field.there, field.here);
 
-        let said = table_words(held, "Africa Split.ne5p");
+        let said = table_words(held, "Africa Split.ne5p", &diff);
         let here = testing::where_(&said, "This computer");
         let keyboard = testing::where_(&said, "Keyboard");
         assert!(here.left() < keyboard.left(), "{here:?} {keyboard:?}");
@@ -3687,7 +2507,7 @@ mod tests {
             .collect();
 
         assert!(
-            said.contains(&["Piano".into(), "by the dials".into(), "Tine".into()]),
+            said.contains(&["Piano".into(), "Tine".into(), "by the dials".into()]),
             "{said:?}"
         );
         let sample = said.iter().find(|[what, ..]| what == "Sample");
@@ -3696,7 +2516,7 @@ mod tests {
             plays::slot_key(ObjectClass::Sample, "Marimba").1
         );
         assert_eq!(
-            sample.map(|[_, _, here]| here.as_str()),
+            sample.map(|[_, here, _]| here.as_str()),
             Some(unnamed.as_str()),
             "an id nothing names stays as it is"
         );
@@ -3741,25 +2561,38 @@ mod tests {
                 at(slot),
             );
         }
-        // One waiting on its read, one with a field list, one for a free slot.
-        queue.arrived(
-            class,
-            at(1),
-            &crate::device::reported(at(1), "Squabble B"),
-            &bytes,
-            &workspace,
-        );
-
         crate::bring::open(&mut device, None);
         while let Some(class) = device.state.scan.take() {
             device.state.scan.finished(class);
         }
+        let sync = crate::bring::Rows::of(&device.state, &workspace, &queue);
+        // One waiting on its read, one with a field list, one for a free slot.
         for width in [700.0_f32, 1280.0] {
-            for picked in queue.ids() {
-                device.asks.sheet.as_mut().expect("open").picked = Some(picked);
+            for (slot, id) in queue.ids().into_iter().enumerate() {
+                let sheet_ = device.asks.sheet.as_mut().expect("open");
+                sheet_.picked = Some(id);
+                let diff = compare(&edited, &bytes);
+                let diff = match slot {
+                    0 => Diff::Pending,
+                    1 => diff,
+                    _ => Diff::Empty,
+                };
+                let at = at(slot as u32);
+                sheet_.shown = Some(crate::bring::Shown {
+                    id,
+                    class,
+                    at,
+                    diff,
+                });
                 let input = testing::screen(egui::vec2(width, 600.0), Vec::new());
                 testing::run(&ctx, input, |ctx| {
-                    sheet(ctx, &mut device, &queue, &workspace, &mut Vec::new());
+                    sheet(
+                        ctx,
+                        &mut device,
+                        (&queue, &sync),
+                        &workspace,
+                        &mut Vec::new(),
+                    );
                 });
             }
         }

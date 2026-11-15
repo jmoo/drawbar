@@ -10,10 +10,11 @@ use nord_usb::{Location, ObjectClass};
 use super::controls::{self, Sets};
 use super::{piano, project, sample, setlist, text, wav, Shape};
 use crate::app::{accent, caption, good, tint, warn};
+use crate::bring::Rows;
 use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT, SYNC};
 use crate::device::{loadable, place_of, read_only, standing_of, DeviceState};
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{mark_ink, mark_sign, mark_words, Mark};
+use crate::library::{keyboard_mark, mark_ink, mark_sign, Mark, UNSAVED};
 use crate::link::Standing;
 use crate::panel::caps;
 use crate::queue::Queue;
@@ -286,6 +287,7 @@ pub(super) struct Facts<'a> {
     pub showing: Face,
     pub device: &'a DeviceState,
     pub queue: &'a Queue,
+    pub sync: &'a Rows,
     pub tags: &'a Tags,
     /// Whether this is a view of the instrument's own copy, not an asset held here.
     pub view: bool,
@@ -451,7 +453,7 @@ fn left(
         drawn.on_hover_text(hint);
     }
 
-    let place = lives(entity, facts.device);
+    let place = lives(entity, facts.device, facts.sync);
     let shown = place.shown();
     shown.hash(&mut shows);
     let (ink, stroke) = match place.mark {
@@ -488,7 +490,7 @@ fn left(
         },
     );
     match place.mark {
-        Some(mark) => drawn.on_hover_text(mark_words(mark)),
+        Some(_) => drawn.on_hover_text(&place.said),
         None => drawn.on_hover_text(entity.origin.label()),
     };
 
@@ -1139,6 +1141,8 @@ fn stream_version(entity: &LocalEntity) -> Option<u16> {
 pub(super) struct Lives {
     pub text: String,
     pub mark: Option<Mark>,
+    /// The words of the mark, from the file's Sync row.
+    pub said: String,
     /// Whether the address says nothing yet of what the slot holds.
     pub faint: bool,
 }
@@ -1155,20 +1159,23 @@ impl Lives {
 
 /// Where the document lives: the slot it is linked to on the attached keyboard, its one
 /// link while nothing is attached, or else where it is [`stored`].
-pub(super) fn lives(entity: &LocalEntity, device: &DeviceState) -> Lives {
+pub(super) fn lives(entity: &LocalEntity, device: &DeviceState, sync: &Rows) -> Lives {
     let Some(placed) = place_of(device, entity) else {
         return Lives {
             text: stored(entity),
             mark: None,
+            said: String::new(),
             faint: false,
         };
     };
+    let marked = keyboard_mark(sync, entity.id);
     Lives {
         text: match placed.at {
             Some(at) => place(placed.class, at),
             None => folder(placed.class).to_string(),
         },
-        mark: Mark::of(placed.standing),
+        mark: marked.map(|(mark, _)| mark),
+        said: marked.map_or_else(String::new, |(_, said)| said.to_string()),
         faint: placed.faint(),
     }
 }
@@ -1253,17 +1260,21 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
             None => StateLine {
                 words: "edited".to_string(),
                 ink: Ink::Warn,
-                hint: mark_words(Mark::Unsaved).to_string(),
+                hint: UNSAVED.to_string(),
             },
         });
     }
     if let Some(claim) = &facts.extras.state {
         return Some(claim.clone());
     }
-    facts.queue.holds(entity.id).then(|| StateLine {
-        words: "waiting to send".to_string(),
+    let held = facts
+        .queue
+        .entry(entity.id)
+        .filter(|held| !held.transient)?;
+    Some(StateLine {
+        words: "to sync".to_string(),
         ink: Ink::Warn,
-        hint: "Sync writes it".to_string(),
+        hint: format!("Goes to {} on Sync.", place(held.class, held.at)),
     })
 }
 
@@ -1286,9 +1297,9 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         hint,
         click,
     };
-    let sync = |glyph| Loud {
+    let sync = || Loud {
         short: "Sync".to_string(),
-        glyph,
+        glyph: Glyph::RefreshCw,
         ..send(SYNC.to_string(), String::new(), Click::Sync)
     };
     let idle = |hint: String| Loud {
@@ -1326,7 +1337,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         return Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick));
     };
     match (linked.standing, linked.at) {
-        (Standing::Theirs | Standing::Both, _) => Some(sync(Glyph::RefreshCw)),
+        (Standing::Theirs | Standing::Both, _) => Some(sync()),
         (Standing::Same | Standing::Unread, Some(at)) if loadable(device, class, at) => {
             Some(Loud {
                 short: "Load".to_string(),
@@ -1362,7 +1373,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
                     ),
                     click: Click::Nothing,
                 },
-                None => sync(Glyph::RefreshCw),
+                None => sync(),
             })
         }
     }
@@ -1425,7 +1436,9 @@ fn identity(entity: &LocalEntity, tags: &Tags) -> Vec<Cell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bring::Rows;
     use crate::log::Log;
+    use crate::queue::Queue;
     use crate::testing::{self, sample_bytes, wav_bytes, Bench};
     use crate::workspace::{Fresh, Workspace};
 
@@ -1563,7 +1576,12 @@ mod tests {
         device.pretend_attached();
         let fresh = workspace.create(Fresh::Program, &mut log).unwrap();
         assert_eq!(
-            lives(workspace.get(fresh).unwrap(), &device.state).shown(),
+            lives(
+                workspace.get(fresh).unwrap(),
+                &device.state,
+                &Rows::of(&device.state, &workspace, &Queue::default())
+            )
+            .shown(),
             "This computer"
         );
 
@@ -1576,7 +1594,12 @@ mod tests {
         let copied = workspace.ingest("Africa.ne5p".to_string(), origin, bytes, &mut log);
         let copy = workspace.get(copied).unwrap();
         assert_eq!(
-            lives(copy, &device.state).shown(),
+            lives(
+                copy,
+                &device.state,
+                &Rows::of(&device.state, &workspace, &Queue::default())
+            )
+            .shown(),
             "This computer",
             "a copy with no link"
         );
@@ -1591,12 +1614,20 @@ mod tests {
             spot,
             print,
         );
-        let linked = lives(workspace.get(copied).unwrap(), &device.state);
+        let linked = lives(
+            workspace.get(copied).unwrap(),
+            &device.state,
+            &Rows::of(&device.state, &workspace, &Queue::default()),
+        );
         assert_eq!(linked.shown(), "Programs 7:4");
         assert!(linked.faint, "its bank is not read yet");
 
         let unattached = crate::device::Device::new(egui::Context::default());
-        let away = lives(workspace.get(copied).unwrap(), &unattached.state);
+        let away = lives(
+            workspace.get(copied).unwrap(),
+            &unattached.state,
+            &Rows::of(&unattached.state, &workspace, &Queue::default()),
+        );
         assert_eq!((away.shown().as_str(), away.faint), ("Programs 7:4", true));
     }
 
@@ -1696,6 +1727,7 @@ mod tests {
             showing: Face::Basic,
             device,
             queue,
+            sync: Box::leak(Box::default()),
             tags,
             view: false,
             renaming: (None, None),
@@ -1769,7 +1801,12 @@ mod tests {
         assert_eq!(held.label, LOAD_ON_INSTRUMENT, "the slot holds it");
         assert_eq!(held.click, Click::Load(class, at));
         let badge = |workspace: &Workspace, device: &Device| {
-            lives(workspace.get(id).unwrap(), &device.state).shown()
+            lives(
+                workspace.get(id).unwrap(),
+                &device.state,
+                &Rows::of(&device.state, workspace, &Queue::default()),
+            )
+            .shown()
         };
         assert_eq!(badge(&workspace, &device), "Set lists 7:4");
 
@@ -1813,7 +1850,15 @@ mod tests {
         let spot = (Location { bank: 6, slot: 0 }, "");
         link_at(&mut workspace, &device.state, id, class, spot, earlier);
         let entity = workspace.get(id).unwrap();
-        assert_eq!(lives(entity, &device.state).mark, Some(Mark::Attention));
+        assert_eq!(
+            lives(
+                entity,
+                &device.state,
+                &Rows::of(&device.state, &workspace, &Queue::default())
+            )
+            .mark,
+            Some(Mark::Attention)
+        );
         assert!(state(entity, &facts(&device.state, &queue, &tags)).is_none());
     }
 

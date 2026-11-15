@@ -134,21 +134,6 @@ impl Held {
         }
     }
 
-    /// This link once the user chose the file over what the slot holds: the slot's
-    /// version counts as an earlier one, so the file is [`Standing::Ahead`] of it.
-    pub fn superseding(&self, there: There) -> Held {
-        let mut held = self.clone();
-        match there {
-            There::Holds { crc: Some(crc), .. } if !held.knew(crc) => {
-                held.past.insert(0, crc);
-                held.past.truncate(PAST);
-            }
-            There::Holds { crc: None, len } => held.base.len = len,
-            There::Holds { .. } | There::Unread | There::Vacant => {}
-        }
-        held
-    }
-
     /// This link at another slot of its class, under `name` where drawbar renamed the
     /// slot. Otherwise the name it had travels with it.
     pub fn moved(&self, spot: Spot, name: Option<&str>) -> Held {
@@ -206,13 +191,6 @@ pub enum Standing {
     Theirs,
     /// The slot holds a version the file never had, and the file has changed too.
     Both,
-}
-
-impl Standing {
-    /// Whether the user must choose between the file and what the slot holds.
-    pub fn needs_attention(self) -> bool {
-        matches!(self, Standing::Theirs | Standing::Both)
-    }
 }
 
 /// How the file saved as `here` compares with what its linked slot holds. `here` is
@@ -292,7 +270,6 @@ mod tests {
         for here in [V1, V2] {
             let gone = standing(&program(V1), Some(here), There::Vacant);
             assert_eq!(gone, Standing::Gone);
-            assert!(!gone.needs_attention(), "nothing to choose between");
         }
     }
 
@@ -308,7 +285,6 @@ mod tests {
     fn a_slot_and_a_file_that_both_changed_need_the_user() {
         let both = standing(&program(V1), Some(V2), holds(V3));
         assert_eq!(both, Standing::Both);
-        assert!(both.needs_attention());
     }
 
     #[test]
@@ -331,25 +307,6 @@ mod tests {
         );
         assert_eq!(standing(&piano(V1), Some(V1), there(200)), Standing::Theirs);
         assert_eq!(standing(&piano(V1), Some(V2), there(200)), Standing::Both);
-    }
-
-    #[test]
-    fn choosing_the_file_over_a_changed_slot_leaves_the_file_ahead() {
-        for here in [V1, V2] {
-            let held = program(V1);
-            assert!(standing(&held, Some(here), holds(V3)).needs_attention());
-            let mine = held.superseding(holds(V3));
-            assert_eq!(standing(&mine, Some(here), holds(V3)), Standing::Ahead);
-        }
-        let piano = piano(V1);
-        let replaced = There::Holds {
-            crc: None,
-            len: 200,
-        };
-        for here in [V1, V2] {
-            let mine = piano.superseding(replaced);
-            assert_eq!(standing(&mine, Some(here), replaced), Standing::Ahead);
-        }
     }
 
     #[test]

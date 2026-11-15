@@ -148,6 +148,7 @@ fn shape(entity: &LocalEntity) -> Shape {
 /// MIDI controller played since the last frame.
 pub struct Around<'a> {
     pub queue: &'a Queue,
+    pub sync: &'a crate::bring::Rows,
     pub tags: &'a Tags,
     /// Keys played here strike the key map when the current face shows one.
     pub played: &'a Played,
@@ -428,6 +429,7 @@ impl Document {
                 showing: face,
                 device: &device.state,
                 queue: around.queue,
+                sync: around.sync,
                 tags: around.tags,
                 view: viewing,
                 renaming,
@@ -671,7 +673,7 @@ impl Document {
         ctx: &egui::Context,
         acts: Vec<crate::browser::Act>,
         workspace: &mut Workspace,
-        queue: &Queue,
+        sync: &crate::bring::Rows,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
         let mut ids = self.samples.ids();
@@ -689,7 +691,7 @@ impl Document {
                 self.piano.forget(*id);
                 self.samples.forget(*id);
             }
-            let carried = act.carries(queue);
+            let carried = act.carries(sync);
             if let Some(act) = self.save_first(act, &carried, workspace, log) {
                 out.extend(self.piano.hold(ctx, act, workspace));
             }
@@ -1640,6 +1642,7 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bring::Rows;
     use crate::testing::{self, nameless_sample_bytes, sample_bytes, wav_bytes, Bench, Word};
     use crate::workspace::{Fresh, Origin};
 
@@ -1711,9 +1714,10 @@ mod tests {
         #[cfg(not(target_arch = "wasm32"))]
         fn act(&mut self, acts: Vec<crate::browser::Act>) {
             let ctx = self.ctx.clone();
-            let acts =
-                self.document
-                    .settle(&ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            let sync = Rows::of(&self.device.state, &self.workspace, &self.queue);
+            let acts = self
+                .document
+                .settle(&ctx, acts, &mut self.workspace, &sync, &mut self.log);
             crate::browser::apply(
                 &mut crate::browser::Browser::default(),
                 &mut crate::shell::Shell::default(),
@@ -1786,6 +1790,7 @@ mod tests {
                         &mut self.device,
                         &mut self.log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &self.queue,
                             tags: &self.tags,
                             played: &Played::default(),
@@ -1888,11 +1893,16 @@ mod tests {
         let Open {
             document,
             workspace,
-            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        let ran = document.settle(
+            &ctx,
+            vec![Act::SaveDoc(id)],
+            workspace,
+            &Rows::default(),
+            log,
+        );
         assert_eq!(ran, [], "the save waits for the file");
         assert!(workspace.saving_edit(id));
 
@@ -1903,7 +1913,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &Rows::default(), log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let whole = sample::apply(&bytes, &sets).unwrap();
@@ -2712,6 +2722,7 @@ mod tests {
                         &mut device,
                         &mut log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
@@ -3004,6 +3015,7 @@ mod tests {
                         &mut device,
                         &mut log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
@@ -3737,7 +3749,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
-            &open.queue,
+            &Rows::default(),
             &mut open.log,
         );
         assert!(
@@ -3797,11 +3809,16 @@ mod tests {
         let Open {
             document,
             workspace,
-            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        let ran = document.settle(
+            &ctx,
+            vec![Act::SaveDoc(id)],
+            workspace,
+            &Rows::default(),
+            log,
+        );
         assert_eq!(ran, [], "the save waits for the file");
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
@@ -3812,7 +3829,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &Rows::default(), log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let renamed = piano::snapshot(
@@ -3884,7 +3901,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Revert(open.id)],
             &mut open.workspace,
-            &open.queue,
+            &Rows::default(),
             &mut open.log,
         );
         assert!(

@@ -34,7 +34,6 @@ pub use act::{
     apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
     LOAD_ON_INSTRUMENT, SYNC,
 };
-pub(crate) use act::{bound_for, Bound};
 #[cfg(test)]
 pub(crate) use drag::TAGGED;
 pub use drag::{
@@ -247,7 +246,7 @@ pub struct Browser {
     /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
     rows: Rows,
-    counts: crate::library::Counts,
+    synced: crate::bring::Synced,
     /// Acts waiting for the assets they read to be read, in the order they were asked.
     held: Vec<Act>,
     /// Where this computer's folders were drawn as places a drop lands, in drawing order:
@@ -272,7 +271,7 @@ impl Default for Browser {
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
             rows: Rows::default(),
-            counts: crate::library::Counts::default(),
+            synced: crate::bring::Synced::default(),
             held: Vec::new(),
             targets: Vec::new(),
             followed: true,
@@ -1904,7 +1903,9 @@ mod tests {
             ids.push(id);
         }
 
-        let warnings = send_warnings(&queue, &workspace, &device.state);
+        let writes = queue.entries().iter();
+        let writes = writes.filter_map(|held| Some((held.class, workspace.get(held.id)?)));
+        let warnings = send_warnings(writes, &device.state);
         let foreign = warnings
             .iter()
             .filter(|warning| warning.contains("This file is ns4p"))

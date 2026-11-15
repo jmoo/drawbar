@@ -831,7 +831,10 @@ impl DrawbarApp {
         }
         let visuals = ui.visuals().clone();
         let lit = accent(&visuals);
-        let rows = crate::bring::rows(&self.device.state, &self.workspace, &self.queue).len();
+        let synced = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
+        let rows = synced.list.len();
         let label = match rows {
             0 => "Sync".to_string(),
             n => format!("Sync {n}"),
@@ -2606,10 +2609,10 @@ mod tests {
     }
 
     /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
-    /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to review the send queue would then
+    /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to Sync would then
     /// mark the open document saved and lose its revert.
     #[test]
-    fn the_send_queue_shortcut_never_falls_through_to_save() {
+    fn the_sync_shortcut_never_falls_through_to_save() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         let id = app
@@ -2623,18 +2626,18 @@ mod tests {
         app.tabs.open(id);
         assert!(app.workspace.get(id).unwrap().is_unsaved());
 
-        let review = || {
+        let sync = || {
             pressed(
                 egui::Key::S,
                 egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
             )
         };
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![sync()]);
         assert!(!app.attached(), "nothing was attached");
         assert!(
             !app.device.asks.sheet.is_some(),
-            "there is no queue to review"
+            "there is no keyboard to sync with"
         );
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
@@ -2643,15 +2646,15 @@ mod tests {
 
         attach(&mut app);
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![sync()]);
         assert!(app.device.asks.sheet.is_some());
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
-            "reviewing the queue is not saving"
+            "opening the sheet is not saving"
         );
     }
 
-    /// A key acts on nothing a modal covers: ⌘S behind the send queue's review leaves the
+    /// A key acts on nothing a modal covers: ⌘S behind the Sync sheet leaves the
     /// open document's revert point where it was, and saves again once the sheet closes.
     #[test]
     fn a_shortcut_behind_a_modal_does_nothing() {
@@ -2668,6 +2671,18 @@ mod tests {
         app.workspace.replace_bytes(id, edited, &mut app.log);
         app.tabs.open(id);
         let save = || pressed(egui::Key::S, egui::Modifiers::COMMAND);
+        let other = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let (class, at) = (ObjectClass::Program, nord_usb::Location::from_user(1, 1));
+        let waiting = (
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        crate::queue::enqueue(waiting.0, waiting.1, waiting.2, waiting.3, other, class, at);
 
         crate::bring::open(&mut app.device, None);
         let _ = settled(&ctx, &mut app, SCREEN);

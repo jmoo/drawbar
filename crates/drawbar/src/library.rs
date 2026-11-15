@@ -14,18 +14,20 @@ use nord_usb::wire::ProgramInfo;
 use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, tint, ui as ui_text, warn};
+use crate::bring::{Rows, Sign, Synced};
 use crate::browser::{qualifier, Act, Browser, Item, Kept, Kind, Qualifier};
-use crate::device::{fit, place_of, read_only, standing_of, Device, DeviceState, Linked};
+use crate::device::{fit, place_of, read_only, Device, DeviceState, Linked};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
 use crate::link::{Standing, There};
 use crate::panel::{cut, list_width, pill_at, row_ink, view_header, Track, ROW_INSET};
 use crate::plays::Catalog;
-use crate::queue::{Diff, Queue};
+use crate::queue::Queue;
 use crate::shell::Shell;
 use crate::strings::{counted, folder, place, shown};
 use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
+use std::rc::Rc;
 
 /// Which of the two places a row's contents are in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -158,8 +160,9 @@ pub struct Row {
     /// Whether the address says nothing yet of what the slot holds: its bank is unread,
     /// or the keyboard it is on is not attached.
     pub faint: bool,
-    /// What the row's mark says of the asset and its slot.
+    /// What the row's mark says of the asset and its slot, and its words.
     pub mark: Option<Mark>,
+    pub said: String,
     pub size: u64,
     pub needs: Needs,
 }
@@ -182,9 +185,9 @@ impl Row {
 pub fn rows(
     workspace: &Workspace,
     device: &DeviceState,
-    queue: &Queue,
     tags: &Tags,
     filter: &Filter,
+    sync: &Rows,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut claimed = BTreeSet::new();
@@ -193,7 +196,13 @@ pub fn rows(
     let catalog = Catalog::of(workspace, device);
     for entity in workspace.listed() {
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, worn.len(), &kept, instrument, &catalog);
+        let row = local(
+            entity,
+            device,
+            worn.len(),
+            (&kept, instrument, &catalog),
+            sync,
+        );
         // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = row.at.filter(|_| device.connected()) {
             claimed.insert(Item::Slot {
@@ -201,7 +210,7 @@ pub fn rows(
                 at: slot.1,
             });
         }
-        let state = state(row.item, row.mark, queue);
+        let state = state(row.mark);
         if admits(filter, &row, worn, state) {
             rows.push(row);
         }
@@ -241,22 +250,34 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>
 
 /// What a row needs: Sync, or the user. A slot on the instrument needs nothing, since it
 /// is what the instrument holds.
-pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
-    match (item, mark) {
-        (Item::Local(_), Some(Mark::Attention | Mark::Gone)) => Some(State::Attention),
-        (Item::Local(id), _) if queue.holds(id) => Some(State::Sync),
-        (Item::Local(_), Some(Mark::Ahead | Mark::Theirs)) => Some(State::Sync),
-        _ => None,
+pub fn state(mark: Option<Mark>) -> Option<State> {
+    match mark {
+        Some(Mark::Up | Mark::Down) => Some(State::Sync),
+        Some(Mark::Attention) => Some(State::Attention),
+        Some(Mark::Unsaved) | None => None,
     }
 }
 
 /// The row for one item, built as [`rows`] builds it, so the inspector shows what the
 /// table shows. A folder or a tag makes no row.
-pub fn row_of(item: Item, workspace: &Workspace, device: &DeviceState, tags: &Tags) -> Option<Row> {
+pub fn row_of(
+    item: Item,
+    workspace: &Workspace,
+    device: &DeviceState,
+    tags: &Tags,
+    sync: &Rows,
+) -> Option<Row> {
     let instrument = device.product().and_then(Family::from_product);
     let kept = Kept::of(workspace);
     let catalog = Catalog::of(workspace, device);
-    row_with(item, workspace, device, tags, &kept, instrument, &catalog)
+    row_with(
+        item,
+        workspace,
+        device,
+        tags,
+        (&kept, instrument, &catalog),
+        sync,
+    )
 }
 
 /// [`row_of`], with what it reads of the whole list already taken.
@@ -266,15 +287,14 @@ fn row_with(
     workspace: &Workspace,
     device: &DeviceState,
     tags: &Tags,
-    kept: &Kept,
-    instrument: Option<Family>,
-    catalog: &Catalog,
+    list: (&Kept, Option<Family>, &Catalog),
+    sync: &Rows,
 ) -> Option<Row> {
     match item {
         Item::Local(id) => {
             let entity = workspace.get(id)?;
             let worn = tags.worn(id).len();
-            Some(local(entity, device, worn, kept, instrument, catalog))
+            Some(local(entity, device, worn, list, sync))
         }
         Item::Slot { class, at } => {
             Some(slot(class, at, device.slot(class, at).flatten()?, device))
@@ -287,12 +307,12 @@ fn local(
     entity: &LocalEntity,
     device: &DeviceState,
     tags: usize,
-    kept: &Kept,
-    instrument: Option<Family>,
-    catalog: &Catalog,
+    (kept, instrument, catalog): (&Kept, Option<Family>, &Catalog),
+    sync: &Rows,
 ) -> Row {
     let placed = place_of(device, entity);
     let linked = placed.filter(|_| device.connected());
+    let marked = keyboard_mark(sync, entity.id);
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity),
@@ -303,7 +323,8 @@ fn local(
         where_: whereabouts(entity, device, linked.as_ref()),
         at: placed.and_then(|placed| Some((placed.class, placed.at?))),
         faint: placed.is_none_or(|placed| placed.faint()),
-        mark: linked.and_then(|linked| Mark::of(linked.standing)),
+        mark: marked.map(|(mark, _)| mark),
+        said: marked.map_or_else(String::new, |(_, said)| said.to_string()),
         size: entity.size(),
         needs: wanted(entity, catalog),
     }
@@ -322,6 +343,7 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
         at: Some((class, at)),
         faint: false,
         mark: None,
+        said: String::new(),
         size: u64::from(info.body_len),
         needs: played(class, at, device),
     }
@@ -338,31 +360,21 @@ fn whereabouts(entity: &LocalEntity, device: &DeviceState, linked: Option<&Linke
 }
 
 /// What a mark on a row claims: the mark the tree paints at a row's right end, and the
-/// star after a name.
-///
-/// [`mark_words`] explains each one wherever it is drawn.
+/// star after a name. A file's Sync row gives the first three, and its words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
-    /// Its slot holds an earlier version.
-    Ahead,
-    /// Its slot holds a later version, and the file has not changed.
-    Theirs,
-    /// Both it and its slot changed, and only the user can settle it.
+    Up,
+    Down,
     Attention,
-    /// The keyboard emptied its slot, and only the user can settle it.
-    Gone,
     Unsaved,
 }
 
 impl Mark {
-    /// The mark a linked asset's standing calls for.
-    pub fn of(standing: Standing) -> Option<Mark> {
-        match standing {
-            Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs => Some(Mark::Theirs),
-            Standing::Both => Some(Mark::Attention),
-            Standing::Gone => Some(Mark::Gone),
-            Standing::Same | Standing::Unread => None,
+    pub fn of(sign: Sign) -> Mark {
+        match sign {
+            Sign::Up => Mark::Up,
+            Sign::Down => Mark::Down,
+            Sign::Attention => Mark::Attention,
         }
     }
 }
@@ -370,51 +382,29 @@ impl Mark {
 /// The color a mark is painted in, everywhere it is painted.
 pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     match mark {
-        Mark::Ahead | Mark::Theirs => warn(visuals),
-        Mark::Attention | Mark::Gone => crate::app::bad(visuals),
+        Mark::Up | Mark::Down => warn(visuals),
+        Mark::Attention => crate::app::bad(visuals),
         Mark::Unsaved => visuals.text_color(),
     }
 }
 
-/// What a mark means, in words, wherever a hover or hint explains one.
-pub fn mark_words(mark: Mark) -> &'static str {
-    match mark {
-        Mark::Unsaved => "Edited since it was last saved",
-        Mark::Ahead => "Newer here",
-        Mark::Theirs => "Newer on the keyboard",
-        Mark::Attention => State::Attention.title(),
-        Mark::Gone => "Its slot is empty",
-    }
-}
+/// What the unsaved mark means, in words.
+pub const UNSAVED: &str = "Edited since it was last saved";
 
 /// The character a mark is drawn as in front of a name or an address.
 pub fn mark_sign(mark: Mark) -> &'static str {
     match mark {
-        Mark::Ahead => "↑",
-        Mark::Theirs => "↓",
-        Mark::Attention | Mark::Gone => "!",
+        Mark::Up => "↑",
+        Mark::Down => "↓",
+        Mark::Attention => "!",
         Mark::Unsaved => "*",
     }
 }
 
-/// The mark at a local row's right end: how the asset compares with the slot it is
-/// linked to on the attached keyboard. An asset with no link there gets none.
-pub fn keyboard_mark(entity: &LocalEntity, device: &DeviceState) -> Option<Mark> {
-    Mark::of(standing_of(device, entity)?.standing)
-}
-
-/// How many assets Sync acts on, and how many need the user: [`state`] counted over the
-/// whole list.
-pub fn counts(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> [usize; 2] {
-    let mut counts = [0, 0];
-    for entity in workspace.listed() {
-        match state(Item::Local(entity.id), keyboard_mark(entity, device), queue) {
-            Some(State::Sync) => counts[0] += 1,
-            Some(State::Attention) => counts[1] += 1,
-            None => {}
-        }
-    }
-    counts
+/// The mark of the file `id` and its words, from its Sync row.
+pub fn keyboard_mark(rows: &Rows, id: u64) -> Option<(Mark, &str)> {
+    let (sign, said) = rows.mark(id)?;
+    Some((Mark::of(sign), said))
 }
 
 /// The first library a program names, by name where a piano or sample here or on the
@@ -831,7 +821,7 @@ pub struct Library {
     widths: Widths,
     /// The order of the rows as last taken, kept until something it comes from changes.
     table: Option<Table>,
-    counts: Counts,
+    synced: Synced,
     /// What the rows find pianos and samples by, and the list and instrument revisions it
     /// was taken at.
     catalog: Option<((u64, u64), Catalog)>,
@@ -847,7 +837,7 @@ impl Default for Library {
             order: Order::Up,
             widths: [None; COLUMNS],
             table: None,
-            counts: Counts::default(),
+            synced: Synced::default(),
             catalog: None,
             #[cfg(test)]
             built: 0,
@@ -866,7 +856,7 @@ struct Sources {
     revision: Option<u64>,
     layout: u64,
     device: u64,
-    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+    queue: Vec<(crate::queue::Waiting, bool)>,
     tags: u64,
     filter: Filter,
     query: String,
@@ -904,36 +894,6 @@ impl Sources {
 struct Table {
     sources: Sources,
     items: Vec<Item>,
-}
-
-/// What the header's counts read: the list, the instrument and the queue.
-#[derive(PartialEq)]
-struct Counted {
-    revision: u64,
-    device: u64,
-    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
-}
-
-/// [`counts`], and what they were counted from.
-#[derive(Default)]
-pub struct Counts(Option<(Counted, [usize; 2])>);
-
-impl Counts {
-    /// [`counts`], counted again only when the list, the instrument or the queue has
-    /// changed.
-    pub fn of(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 2] {
-        let now = Counted {
-            revision: workspace.revision(),
-            device: device.revision(),
-            queue: queue.shape(),
-        };
-        if let Some((_, counts)) = self.0.as_ref().filter(|(at, _)| *at == now) {
-            return *counts;
-        }
-        let counts = counts(workspace, &device.state, queue);
-        self.0 = Some((now, counts));
-        counts
-    }
 }
 
 impl Library {
@@ -998,7 +958,7 @@ impl Library {
             Some(table) if table.sources == sources => table,
             _ => self.build(sources, workspace, device, queue, browser.tags(), shell),
         };
-        let counts = self.counts(workspace, device, queue);
+        let counts = self.synced(workspace, device, queue).counts();
         header(ui, counts, browser.tags(), &shell.filter, &mut acts);
         self.table(ui, &table, browser, workspace, device, queue, &mut acts);
         self.table = Some(table);
@@ -1019,7 +979,8 @@ impl Library {
         {
             self.built += 1;
         }
-        let held = rows(workspace, &device.state, queue, tags, &shell.filter);
+        let sync = self.synced(workspace, device, queue);
+        let held = rows(workspace, &device.state, tags, &shell.filter, &sync);
         let held = arrange(held, &shell.omnibox, self.by, self.order);
         Table {
             sources,
@@ -1027,14 +988,14 @@ impl Library {
         }
     }
 
-    /// What is waiting, ready to send, and needs the user. See [`Counts::of`].
-    pub(crate) fn counts(
+    /// The Sync rows. See [`Synced::of`].
+    pub(crate) fn synced(
         &mut self,
         workspace: &Workspace,
         device: &Device,
         queue: &Queue,
-    ) -> [usize; 2] {
-        self.counts.of(workspace, device, queue)
+    ) -> Rc<Rows> {
+        self.synced.of(workspace, device, queue)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1048,6 +1009,7 @@ impl Library {
         queue: &Queue,
         acts: &mut Vec<Act>,
     ) {
+        let sync = self.synced(workspace, device, queue);
         let room = ui.available_rect_before_wrap();
         let ui = &mut ui.new_child(
             egui::UiBuilder::new()
@@ -1099,9 +1061,8 @@ impl Library {
                             workspace,
                             &device.state,
                             tags,
-                            &kept,
-                            instrument,
-                            catalog,
+                            (&kept, instrument, catalog),
+                            &sync,
                         )
                     })
                     .collect();
@@ -1506,7 +1467,7 @@ fn paint(
         write(count, &row.tags.to_string(), mono(MONO - 0.5));
     }
     let where_ = cell(Column::Where);
-    let (pill_ink, pill_fill) = where_look(state(row.item, row.mark, queue), selected, &visuals);
+    let (pill_ink, pill_fill) = where_look(state(row.mark), selected, &visuals);
     pill_at(
         &painter,
         where_.left(),
@@ -1569,9 +1530,7 @@ fn tooltip(
 ) -> String {
     match column {
         Column::Glyph | Column::Kind => word(row),
-        Column::Mark => row
-            .mark
-            .map_or_else(String::new, |mark| mark_words(mark).to_string()),
+        Column::Mark => row.said.clone(),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -1628,6 +1587,7 @@ fn nothing(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bring::Rows;
     use crate::testing::{self, Bench};
     use crate::workspace::{Fresh, Origin};
 
@@ -1647,6 +1607,7 @@ mod tests {
             at: at.map(|at| (ObjectClass::Program, at)),
             faint: false,
             mark: None,
+            said: String::new(),
             size,
             needs: Needs::Nothing,
         }
@@ -1923,10 +1884,16 @@ mod tests {
         tags.set(both, sunday, true);
 
         let names = |filter: &Filter| -> Vec<String> {
-            rows(&workspace, &device.state, &Queue::default(), &tags, filter)
-                .into_iter()
-                .map(|row| row.name)
-                .collect()
+            rows(
+                &workspace,
+                &device.state,
+                &tags,
+                filter,
+                &Rows::of(&device.state, &workspace, &Queue::default()),
+            )
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
         };
         let mut filter = Filter::default();
         assert_eq!(
@@ -1979,8 +1946,8 @@ mod tests {
         let entity = workspace.get(id).expect("it is on the list");
         assert!(!fit(&device.state, entity).allowed(), "a Stage 4 program");
         assert_eq!(whereabouts(entity, &device.state, None), Where::Foreign);
-        assert_eq!(keyboard_mark(entity, &device.state), None);
-        assert!(crate::bring::rows(&device.state, &workspace, &queue).is_empty());
+        let sync = Rows::of(&device.state, &workspace, &queue);
+        assert!(sync.list.is_empty() && keyboard_mark(&sync, id).is_none());
     }
 
     /// An edit an editor has not yet applied to the bytes gets the same star as any other.
@@ -2006,18 +1973,25 @@ mod tests {
         link(&mut workspace, &device, id, at(6, 0));
 
         let starred = |workspace: &Workspace| {
-            rows(workspace, &device.state, &queue, &tags, &Filter::default())
-                .into_iter()
-                .find(|row| matches!(row.item, Item::Local(_)))
-                .expect("the asset is listed")
-                .unsaved
+            rows(
+                workspace,
+                &device.state,
+                &tags,
+                &Filter::default(),
+                &Rows::of(&device.state, workspace, &queue),
+            )
+            .into_iter()
+            .find(|row| matches!(row.item, Item::Local(_)))
+            .expect("the asset is listed")
+            .unsaved
         };
         assert!(!starred(&workspace));
 
         workspace.mark_pending(id, true);
         assert!(starred(&workspace), "the plan is an edit the row shows");
+        let sync = Rows::of(&device.state, &workspace, &queue);
         assert_eq!(
-            keyboard_mark(workspace.get(id).unwrap(), &device.state),
+            keyboard_mark(&sync, id),
             None,
             "and the slot still holds what this was saved as",
         );
@@ -2035,7 +2009,7 @@ mod tests {
             mut log,
             ..
         } = Bench::new();
-        let (tags, mut queue) = (Tags::default(), Queue::default());
+        let (tags, queue) = (Tags::default(), Queue::default());
 
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
@@ -2061,82 +2035,86 @@ mod tests {
         ) -> usize {
             let mut filter = Filter::default();
             filter.narrow(Narrow::State(state));
-            rows(workspace, &device.state, queue, tags, &filter)
-                .into_iter()
-                .filter(|row| matches!(row.item, Item::Local(_)))
-                .count()
+            rows(
+                workspace,
+                &device.state,
+                tags,
+                &filter,
+                &Rows::of(&device.state, workspace, queue),
+            )
+            .into_iter()
+            .filter(|row| matches!(row.item, Item::Local(_)))
+            .count()
         }
         assert_eq!(narrowed(&workspace, &device, &queue, &tags, State::Sync), 1);
 
-        crate::queue::enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
-            id,
-            ObjectClass::Program,
-            at(6, 0),
-        );
-        assert!(queue.holds(id), "it is owed to the slot it is linked to");
-        let said = |mark| state(Item::Local(id), Some(mark), &queue);
-        assert_eq!(said(Mark::Ahead), Some(State::Sync));
-        assert_eq!(
-            said(Mark::Attention),
-            Some(State::Attention),
-            "a write held for the user's choice is not Sync's to make"
-        );
-        assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Sync),
-            1,
-            "counted once"
-        );
+        assert_eq!(state(Some(Mark::Up)), Some(State::Sync));
+        assert_eq!(state(Some(Mark::Down)), Some(State::Sync));
+        assert_eq!(state(Some(Mark::Attention)), Some(State::Attention));
         assert_eq!(
             narrowed(&workspace, &device, &queue, &tags, State::Attention),
             0
         );
     }
 
-    /// Every mark says what it means apart from the others, and each of the three kinds of
-    /// mark has its own color: an emptied slot needs the user as a changed one does.
+    /// Each of the three kinds of mark has its own color, and the two ways share one.
     #[test]
-    fn every_mark_is_painted_and_said_apart_from_the_others() {
-        let all = [
-            Mark::Ahead,
-            Mark::Theirs,
-            Mark::Attention,
-            Mark::Gone,
-            Mark::Unsaved,
-        ];
-        let said: BTreeSet<&str> = all.iter().map(|mark| mark_words(*mark)).collect();
-        assert_eq!(said.len(), all.len(), "{said:?}");
-
-        let kinds = [Mark::Ahead, Mark::Attention, Mark::Unsaved];
+    fn every_kind_of_mark_is_painted_apart_from_the_others() {
+        let kinds = [Mark::Up, Mark::Attention, Mark::Unsaved];
         for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
             let inks: BTreeSet<[u8; 4]> = kinds
                 .iter()
                 .map(|mark| mark_ink(*mark, &visuals).to_array())
                 .collect();
             assert_eq!(inks.len(), kinds.len(), "{inks:?}");
-            let gone = mark_ink(Mark::Gone, &visuals);
-            assert_eq!(gone, mark_ink(Mark::Attention, &visuals));
-            let theirs = mark_ink(Mark::Theirs, &visuals);
-            assert_eq!(theirs, mark_ink(Mark::Ahead, &visuals));
+            assert_eq!(mark_ink(Mark::Down, &visuals), mark_ink(Mark::Up, &visuals));
         }
     }
 
+    /// What the library marks a file with, and says of it on hover, is what its Sync row
+    /// says: ↑ for its own way up, ↓ for its own way down, and `!` for every row that waits
+    /// for the player or changes a link.
     #[test]
-    fn a_row_is_marked_by_the_side_that_is_newer_and_bang_when_it_needs_attention() {
-        let sign = |standing| Mark::of(standing).map(mark_sign);
-        assert_eq!(sign(Standing::Ahead), Some("↑"));
-        assert_eq!(sign(Standing::Theirs), Some("↓"));
-        assert_eq!(sign(Standing::Both), Some("!"));
-        assert_eq!(sign(Standing::Gone), Some("!"));
-        assert_eq!(sign(Standing::Same), None);
-        assert_eq!(sign(Standing::Unread), None);
+    fn a_files_mark_and_its_words_come_from_its_sync_row() {
+        use crate::bring::{Change, Row as Synced};
+        let Bench { workspace, .. } = Bench::new();
+        let row = |change| Synced {
+            id: 1,
+            class: ObjectClass::Program,
+            at: Some(at(6, 0)),
+            change,
+        };
+        let marked = |change| {
+            let row = row(change);
+            (
+                mark_sign(Mark::of(row.sign(&workspace))),
+                row.said(&workspace, &Queue::default()),
+            )
+        };
+        assert_eq!(marked(Change::Ahead), ("↑", "Newer here".into()));
+        assert_eq!(
+            marked(Change::Theirs),
+            ("↓", "Newer on the keyboard".into())
+        );
+        assert_eq!(marked(Change::Both), ("!", "Both changed".into()));
+        assert_eq!(
+            marked(Change::Removed),
+            ("!", "Removed on the keyboard".into())
+        );
+        let by = "Clav".to_string();
+        assert_eq!(
+            marked(Change::Replaced { by }),
+            ("!", "Replaced by “Clav”".into())
+        );
+        let moved = Change::Moved {
+            to: at(6, 3),
+            agrees: true,
+        };
+        assert_eq!(marked(moved), ("!", "Moved to 7:4".into()));
     }
 
     #[test]
-    fn the_mark_cell_names_its_mark_on_hover_and_an_unmarked_row_has_none() {
+    fn the_mark_cell_says_its_rows_words_on_hover_and_an_unmarked_row_none() {
         let Bench {
             workspace, device, ..
         } = Bench::new();
@@ -2150,14 +2128,9 @@ mod tests {
         );
         let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device);
         assert_eq!(hover(&held), "");
-        held.mark = Some(Mark::Ahead);
+        held.mark = Some(Mark::Up);
+        held.said = "Newer here".into();
         assert_eq!(hover(&held), "Newer here");
-        held.mark = Some(Mark::Theirs);
-        assert_eq!(hover(&held), "Newer on the keyboard");
-        held.mark = Some(Mark::Attention);
-        assert_eq!(hover(&held), "Needs attention");
-        held.mark = Some(Mark::Gone);
-        assert_eq!(hover(&held), "Its slot is empty");
     }
 
     /// The sentence about a selection: where the picked rows go, how many of those slots
@@ -2653,9 +2626,9 @@ mod tests {
         let held = rows(
             &workspace,
             &device.state,
-            &queue,
             browser.tags(),
             &Filter::default(),
+            &Rows::of(&device.state, &workspace, &queue),
         );
         let ordered: Vec<String> = arrange(held, "", Column::Kind, Order::Up)
             .iter()
@@ -2919,6 +2892,7 @@ mod tests {
             &bench.workspace,
             state,
             bench.browser.tags(),
+            &Rows::of(state, &bench.workspace, &bench.queue),
         )
         .unwrap()
     }
@@ -2929,9 +2903,9 @@ mod tests {
         rows(
             &bench.workspace,
             state,
-            &bench.queue,
             bench.browser.tags(),
             &filter,
+            &Rows::of(state, &bench.workspace, &bench.queue),
         )
         .into_iter()
         .filter_map(|row| match row.item {
@@ -3002,7 +2976,7 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &held(crc ^ 1));
         assert_eq!(
             looks(&bench),
-            (Where::Both(Standing::Theirs), Some(Mark::Theirs))
+            (Where::Both(Standing::Theirs), Some(Mark::Down))
         );
         bench.act(vec![Act::SaveDoc(id)]);
         assert!(
@@ -3014,7 +2988,7 @@ mod tests {
         save_edited(&mut bench, id, "40");
         assert_eq!(
             looks(&bench),
-            (Where::Both(Standing::Ahead), Some(Mark::Ahead))
+            (Where::Both(Standing::Ahead), Some(Mark::Up))
         );
         assert!(bench.queue.is_empty(), "Save only saves");
 
@@ -3034,7 +3008,7 @@ mod tests {
         bench.device.pretend_bodies(class, 7, &[None]);
         assert_eq!(
             looks(&bench),
-            (Where::Computer, Some(Mark::Gone)),
+            (Where::Computer, Some(Mark::Attention)),
             "emptied on the keyboard"
         );
     }

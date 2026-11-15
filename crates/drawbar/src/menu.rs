@@ -62,7 +62,6 @@ pub enum Command {
     ReadEverything,
     ReadAgain,
     Sync,
-    ClearQueue,
     Unqueue,
     Listen,
     Guide,
@@ -155,8 +154,7 @@ pub fn label(command: Command) -> String {
         Command::ReadEverything => "Read everything",
         Command::ReadAgain => "Read again",
         Command::Sync => "Sync…",
-        Command::ClearQueue => "Clear send queue",
-        Command::Unqueue => "Remove from queue",
+        Command::Unqueue => "Leave out of Sync",
         Command::Listen => "Listen to MIDI controllers",
         Command::Guide => "User guide",
         Command::WhatsNew => "What's new",
@@ -322,7 +320,6 @@ fn instrument_entries() -> Vec<Entry> {
         Do(C::ReadAgain),
         Rule,
         Do(C::Sync),
-        Do(C::ClearQueue),
         Do(C::Unqueue),
         Rule,
         Do(C::Listen),
@@ -427,7 +424,7 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// The commands with keys, in the order a key press is matched against them.
 ///
 /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored: ⇧⌘S
-/// must be taken before ⌘S, or asking to review the send queue would save the open
+/// must be taken before ⌘S, or asking to Sync would save the open
 /// document and lose its revert. A bound key is consumed whether or not its command is
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
@@ -505,7 +502,6 @@ impl DrawbarApp {
     pub(crate) fn offer(&self, command: Command) -> Option<Offer> {
         let attached = self.attached();
         let active = self.tabs.active();
-        let waiting = self.queue.len();
         let plain = Offer::of(command);
         let check = |on| Offer {
             checked: Some(on),
@@ -638,7 +634,6 @@ impl DrawbarApp {
                 let class = self.open_class().filter(|_| attached)?;
                 relabeled(format!("Read {} again", folder(class)))
             }
-            Command::ClearQueue => (attached && waiting > 0).then_some(plain)?,
             Command::Unqueue => (attached && !self.queued_picks().is_empty()).then_some(plain)?,
             Command::Listen => {
                 let supported = crate::midi::supported();
@@ -720,7 +715,6 @@ impl DrawbarApp {
             Command::ReadEverything => acts.push(Act::Resync),
             Command::ReadAgain => acts.extend(self.open_class().map(Act::ReadAgain)),
             Command::Sync => acts.push(Act::Sync(None)),
-            Command::ClearQueue => acts.push(Act::ClearQueue),
             Command::Unqueue => acts.extend(self.queued_picks().into_iter().map(Act::Unqueue)),
             Command::Listen => match self.midi.on() {
                 true => self.midi.stop(),

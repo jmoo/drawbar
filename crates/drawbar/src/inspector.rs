@@ -19,10 +19,10 @@ use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, DeviceState, Fit};
 use crate::document::Click;
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{mark_ink, mark_words, row_of, Mark, Row, Where};
+use crate::library::{mark_ink, row_of, Mark, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
 use crate::plays::Catalog;
-use crate::queue::{Diff, Queue};
+use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
 use crate::strings::{kind_word, place, shown};
@@ -240,7 +240,7 @@ struct Sources {
     picked: u64,
     revision: u64,
     device: u64,
-    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+    queue: Vec<(crate::queue::Waiting, bool)>,
     tags: u64,
 }
 
@@ -320,9 +320,11 @@ impl Shown {
             0 => (About::Nothing, None),
             many if many > MANY => (About::Several(summed(&checked, workspace, device)), None),
             _ => {
+                let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+                let tags = browser.tags();
                 let rows: Vec<Row> = checked
                     .iter()
-                    .filter_map(|item| row_of(*item, workspace, &device.state, browser.tags()))
+                    .filter_map(|item| row_of(*item, workspace, &device.state, tags, &sync))
                     .collect();
                 let going = (checked.len() > 1)
                     .then(|| {
@@ -418,6 +420,8 @@ struct Single {
     /// The slot's place, or `None` for an asset with no slot.
     at: Option<String>,
     mark: Option<Mark>,
+    /// The words of the mark, from the asset's Sync row.
+    said: String,
     faint: bool,
     /// The asset's id; a slot has none.
     id: Option<u64>,
@@ -515,6 +519,7 @@ fn about(
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),
         mark: row.mark,
+        said: row.said.clone(),
         faint: row.faint,
         id: entity.map(|entity| entity.id),
         action,
@@ -551,7 +556,7 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
         };
         ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
         if let Some(mark) = picked.mark {
-            let said = format!(" · {}", mark_words(mark).to_lowercase());
+            let said = format!(" · {}", picked.said.to_lowercase());
             let ink = mark_ink(mark, ui.visuals());
             ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
         }
@@ -1698,6 +1703,7 @@ mod tests {
             at: None,
             faint: false,
             mark: None,
+            said: String::new(),
             size: 2_048,
             needs: crate::library::Needs::Nothing,
         };
@@ -1768,6 +1774,7 @@ mod tests {
             at: None,
             faint: false,
             mark: None,
+            said: String::new(),
             size: 0,
             needs: crate::library::Needs::Nothing,
         };
@@ -2073,7 +2080,7 @@ mod tests {
             assert!(
                 acts.iter()
                     .any(|act| matches!(act, Act::SendChecked(sent) if sent == &ids)),
-                "{width}: Queue for sending queues the selection; got {} acts",
+                "{width}: Add to Sync places the selection; got {} acts",
                 acts.len()
             );
         }

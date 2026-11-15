@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use eframe::egui;
 use nord_format::accept::{Acceptance, Family};
-use nord_usb::op::Received;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
 
@@ -587,13 +586,6 @@ pub enum DeviceEvent {
         at: Location,
         /// Where the file is, in words a person can follow to it.
         place: String,
-    },
-    /// The occupant of a piano or sample slot something is queued for, read through its
-    /// checksum and not kept, since the instrument reports no checksum for those slots.
-    Summed {
-        class: ObjectClass,
-        at: Location,
-        received: Received,
     },
     Note(String),
     OpOk(String),
@@ -1734,6 +1726,8 @@ struct Running {
     follow_up: bool,
     /// The links the command moves once it succeeds. See [`respot`].
     respot: Option<Respot>,
+    /// The slot the command reads to bring in, so a failed read brings nothing in later.
+    pulling: Option<(ObjectClass, Location)>,
 }
 
 /// Slots of one class whose links move. See [`Workspace::respot`].
@@ -1988,6 +1982,14 @@ impl Device {
             },
             follow_up: matches!(cmd, DeviceCmd::ScanBank { .. } | DeviceCmd::Reload { .. }),
             respot,
+            pulling: match &cmd {
+                DeviceCmd::Get {
+                    class,
+                    at,
+                    why: Purpose::Pull,
+                } => Some((*class, *at)),
+                _ => None,
+            },
         });
         self.state.in_flight = Some(cmd.words());
         self.link.send(cmd);
@@ -2301,7 +2303,7 @@ impl Device {
                 DeviceEvent::Partitions(partitions) => {
                     self.state.partitions = partitions;
                     crate::queue::refit(workspace, &self.state, queue, log);
-                    crate::queue::reattach(workspace, self, queue, log);
+                    crate::queue::reattach(&self.state, queue);
                     self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
@@ -2318,7 +2320,7 @@ impl Device {
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
                     follow_names(&self.state, workspace, class, bank);
-                    crate::queue::refresh(workspace, self, queue, log);
+                    crate::queue::refresh(&self.state, queue);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
@@ -2351,13 +2353,13 @@ impl Device {
                     }
                     Purpose::Compare => {
                         if let Some((class, at)) = origin.slot() {
-                            queue.arrived(class, at, &info, &bytes, workspace);
                             self.asks.read(class, at, &bytes, workspace);
                         }
                     }
                     Purpose::Pull => {
                         if let Some((class, at)) = origin.slot() {
-                            crate::bring::landed(self, workspace, queue, log, class, at, bytes);
+                            let name = info.name.trim();
+                            crate::bring::landed(self, workspace, log, class, at, bytes, name);
                         }
                     }
                 },
@@ -2377,11 +2379,8 @@ impl Device {
                 // An empty slot is a failure to a user who asked to copy or open it, and
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {
-                    Purpose::Compare => {
-                        queue.vacant(class, at);
-                        self.asks.vacant(class, at);
-                    }
-                    Purpose::Pull => self.asks.vacant(class, at),
+                    Purpose::Compare => self.asks.vacant(class, at),
+                    Purpose::Pull => self.asks.unpull(class, at),
                     Purpose::Copy | Purpose::View => {
                         self.failed = true;
                         log.error(format!("{} holds nothing to read", shown(at)));
@@ -2395,11 +2394,6 @@ impl Device {
                     ));
                     self.kept.push(at);
                 }
-                DeviceEvent::Summed {
-                    class,
-                    at,
-                    received,
-                } => queue.summed(class, at, &received, workspace),
                 // This covers that object only; the rest of a batch still waits on its
                 // own write.
                 DeviceEvent::Sent {
@@ -2433,13 +2427,16 @@ impl Device {
                     // what it plays.
                     self.pending
                         .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
-                    let slot = (id, class, at);
-                    crate::queue::changed_under(workspace, self, queue, log, slot, holds.as_ref());
+                    let synced = queue.holds(id);
+                    crate::queue::changed_under(queue, (id, class, at), holds.as_ref());
                     let name = workspace.get(id).map_or("", |entity| entity.name.as_str());
                     log.trouble(format!(
-                        "“{name}” was not sent: {} changed on the keyboard.",
+                        "“{name}” was not synced: {} changed on the keyboard.",
                         place(class, at)
                     ));
+                    if synced && self.asks.sheet.is_none() {
+                        crate::bring::open(self, Some(id));
+                    }
                 }
                 DeviceEvent::Note(text) => log.info(text),
                 DeviceEvent::OpOk(text) => {
@@ -2461,6 +2458,9 @@ impl Device {
                     self.failed = true;
                     if let Some(running) = self.running.as_mut() {
                         running.reload = None;
+                        if let Some((class, at)) = running.pulling {
+                            self.asks.unpull(class, at);
+                        }
                         if let Some(class) = running.writing {
                             queue.stumbled(class, &text);
                             self.pending
@@ -3729,7 +3729,7 @@ mod tests {
             !bench.queue.holds(waiting),
             "its slot holds another sound now"
         );
-        let said = "“C” is no longer waiting to send.";
+        let said = "“C” left out of Sync.";
         assert!(bench.log.iter().any(|entry| entry.text == said));
         bench.sync();
         let sends = bench.device.queued().into_iter();
@@ -3902,7 +3902,8 @@ mod tests {
         }]);
         let entity = bench.workspace.get(id).unwrap();
         let linked = standing_of(&bench.device.state, entity).unwrap();
-        assert!(linked.standing.needs_attention(), "{:?}", linked.standing);
+        let attention = matches!(linked.standing, Standing::Theirs | Standing::Both);
+        assert!(attention, "{:?}", linked.standing);
     }
 
     #[test]
@@ -4212,7 +4213,7 @@ mod tests {
             &mut bench.log,
             id,
             class,
-            at(1),
+            at(2),
         );
         bench.device.pending.clear();
 
@@ -4226,7 +4227,7 @@ mod tests {
             &mut bench.log,
         );
         let why = bench.queue.entry(id).and_then(|held| held.failure.clone());
-        assert_eq!(why.as_deref(), Some("It was queued for another keyboard."));
+        assert_eq!(why.as_deref(), Some("It was placed for another keyboard."));
         bench.sync();
         assert!(
             !bench
@@ -4249,12 +4250,13 @@ mod tests {
         let edited = crate::fields::apply(&body(), &gain).unwrap().1;
         bench.workspace.replace_bytes(id, edited, &mut bench.log);
         bench.act(vec![crate::browser::Act::SaveDoc(id)]);
+        bench.act(vec![crate::browser::Act::Unqueue(id)]);
         bench.sync();
         let entry = bench.queue.entry(id).unwrap();
         assert_eq!(
-            (entry.keyboard.as_ref(), entry.failure.as_deref()),
-            (Some(&other), None),
-            "Sync writes it to the keyboard attached now"
+            (entry.keyboard.as_ref(), entry.failure.as_deref(), entry.at),
+            (Some(&other), None, at(1)),
+            "Sync writes it to its slot on the keyboard attached now"
         );
         let written = bench.device.queued().into_iter().any(|cmd| {
             matches!(cmd, DeviceCmd::SendAll { items, .. } if items.iter().any(|it| it.id == id))

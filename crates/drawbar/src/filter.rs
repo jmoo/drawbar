@@ -32,7 +32,7 @@ impl State {
     /// The full description, shown on hover.
     pub fn sentence(self) -> &'static str {
         match self {
-            State::Sync => "newer here or on the keyboard, or sent to a slot by hand",
+            State::Sync => "newer here or on the keyboard, or placed on a slot by hand",
             State::Attention => {
                 "changed on both sides, or emptied on the keyboard, since it was last synced"
             }
