@@ -251,6 +251,8 @@ pub struct Asks {
     /// Each file brought in this session and what its link agreed on then. One whose link
     /// says otherwise now had it undone, and is not brought in again on its own.
     agreed: Vec<(u64, Print)>,
+    /// Whether the files ahead of their slots were queued for this attach.
+    queued: bool,
 }
 
 impl Asks {
@@ -359,6 +361,36 @@ fn pull(device: &mut Device, log: &mut Log, pull: Pull) {
     device.send(DeviceCmd::Get { class, at, why }, log);
 }
 
+/// Once per attach, after the walk of every class holding a linked file and the question
+/// it asks: queue each file ahead of its
+/// slot for that slot, as saving it would have, and say so in one line that Undo takes back.
+pub fn queue_ahead(device: &mut Device, workspace: &Workspace, queue: &mut Queue, log: &mut Log) {
+    let read = walked(&device.state, workspace);
+    if device.asks.queued || !device.asks.answered() || !read || device.sending() {
+        return;
+    }
+    device.asks.queued = true;
+    let mut quiet = Log::default();
+    let mut ids = Vec::new();
+    for (id, class, at) in crate::queue::changed(workspace, &device.state, queue) {
+        crate::queue::enqueue(workspace, device, queue, &mut quiet, id, class, at);
+        if queue.holds(id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return;
+    }
+    log.say(format!(
+        "{} waiting to send.",
+        match ids.len() {
+            1 => "1 sound is".to_string(),
+            n => format!("{n} sounds are"),
+        }
+    ));
+    log.offer(Undo::Unqueue(ids));
+}
+
 /// The command that asks again what changed on the keyboard.
 pub const KEYBOARD_CHANGES: &str = "Keyboard changes…";
 
@@ -450,11 +482,7 @@ fn bring(
     }
     let entity = workspace.get(id)?;
     let before = entity.held_on(&keyboard)?.clone();
-    if entity.is_unsaved()
-        || entity.unread()
-        || entity.rests().is_some()
-        || claimants(workspace, &keyboard, &before) > 1
-    {
+    if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
     let held = before.agreed(print_of(&bytes)?);
@@ -468,6 +496,7 @@ fn bring(
     workspace.replace_bytes(id, bytes, log);
     workspace.mark_saved(id);
     workspace.link(id, &keyboard, held);
+    device.state.uncontest(id);
     Some(restored)
 }
 
@@ -489,7 +518,10 @@ pub fn landed(
     let agreed = device.state.keyboard().is_some_and(|keyboard| {
         workspace.get(id).is_some_and(|entity| {
             let held = entity.held_on(&keyboard);
-            held.is_some_and(|held| entity.saved_print() == Some(held.base))
+            held.is_some_and(|held| {
+                entity.saved_print() == Some(held.base)
+                    && claimants(workspace, &keyboard, held) == 1
+            })
         })
     });
     if !agreed {
@@ -607,6 +639,7 @@ pub fn use_mine(device: &mut Device, workspace: &mut Workspace, queue: &mut Queu
     };
     let (_, there) = there(&device.state, held);
     workspace.link(id, &keyboard, held.superseding(there));
+    device.state.uncontest(id);
     crate::queue::enqueue(workspace, device, queue, log, id, class, at);
 }
 
@@ -1301,6 +1334,24 @@ mod tests {
         let origin = Origin::File("A.ne5p".into());
         let log = &mut bench.log;
         bench.workspace.ingest("A.ne5p".into(), origin, body(), log)
+    }
+
+    #[test]
+    fn once_read_the_files_ahead_of_their_slots_are_queued_in_one_line_undo_takes_back() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body())), Some(crc(&body()))]);
+        let ahead = linked(&mut bench, "A.ne5p", gained("40"), 1, &body());
+        let also = linked(&mut bench, "B.ne5p", gained("41"), 2, &body());
+        heard(&mut bench);
+        assert!(bench.queue.holds(ahead) && bench.queue.holds(also));
+        assert!(bench.log.press("2 sounds are waiting to send."));
+        bench
+            .log
+            .undo_pressed(&mut bench.workspace, &mut bench.queue);
+        assert!(bench.queue.is_empty());
+        bench.device.pretend(DeviceEvent::Finished);
+        heard(&mut bench);
+        assert!(bench.queue.is_empty(), "once per attach");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use nord_format::components::library_id;
 use nord_usb::{Location, ObjectClass};
 
 use super::hardware::{attached, place, Cli, Rig, ATTACH_LIMIT, HEADER, MARK, SEND_LIMIT};
-use super::{also_at, standing_of, Linked};
+use super::{link_offers, standing_of, Linked};
 use crate::browser::Act;
 use crate::link::{Standing, There};
 use crate::store::{Pass, Store};
@@ -457,6 +457,13 @@ fn standing(rig: &Rig, id: u64) -> Option<(Location, Standing)> {
     ))
 }
 
+/// The slots Link to offers a file.
+fn also_at(rig: &Rig, id: u64) -> Vec<Location> {
+    let state = &rig.bench.device.state;
+    let offers = link_offers(state, &rig.bench.workspace, entity(rig, id));
+    offers.into_iter().map(|(_, at)| at).collect()
+}
+
 fn queued(rig: &Rig) -> Vec<(u64, ObjectClass, Location)> {
     let entries = rig.bench.queue.entries().iter();
     entries.map(|held| (held.id, held.class, held.at)).collect()
@@ -524,7 +531,7 @@ fn l01_a_new_program_is_only_a_hint_at_the_slot_holding_its_bytes_and_saving_que
     let id = new_program(&mut rig);
 
     assert_eq!(linked(&rig, id), None, "a New program is linked nowhere");
-    let also = also_at(&rig.bench.device.state, entity(&rig, id));
+    let also = also_at(&rig, id);
     act(&mut rig, vec![Act::SaveDoc(id)]);
     assert_eq!(queued(&rig), [], "saving a New program queues nothing");
     assert_eq!(changed(&rig), Vec::<u64>::new());
@@ -768,10 +775,9 @@ fn l07_a_file_whose_header_names_the_slot_holding_it_links_on_its_own_and_a_copy
     });
     let twin = arrived(&rig, &before).expect("imported");
     assert_eq!(linked(&rig, twin), None, "one file per slot");
-    assert_eq!(
-        also_at(&rig.bench.device.state, entity(&rig, twin)),
-        [slot],
-        "the copy is only a hint"
+    assert!(
+        also_at(&rig, twin).is_empty(),
+        "the slot is the linked file's, so the copy is offered nothing"
     );
     assert_eq!(standing(&rig, id), Some((slot, Standing::Same)));
     assert_eq!(log_lines(&rig, "linked to the slot"), 1);
@@ -795,7 +801,7 @@ fn l07_two_files_naming_one_slot_at_once_link_neither() {
     for name in &names {
         let id = read(&rig, name).expect("read");
         assert_eq!(linked(&rig, id), None, "“{name}” is linked");
-        let also = also_at(&rig.bench.device.state, entity(&rig, id));
+        let also = also_at(&rig, id);
         assert_eq!(also, [slot], "“{name}” is hinted at its slot");
     }
     assert_eq!(log_lines(&rig, "linked to the slot"), 0);

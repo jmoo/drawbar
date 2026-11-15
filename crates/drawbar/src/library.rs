@@ -63,6 +63,9 @@ impl Where {
             Where::Both(Standing::Both) => {
                 "On this computer and in its slot, and both have changed."
             }
+            Where::Both(Standing::Contested) => {
+                "On this computer and in its slot, which another file is linked to too."
+            }
             Where::Both(Standing::Gone) => "On this computer, and its slot is empty.",
             Where::Both(Standing::Unread) => "On this computer and in a slot not read yet.",
             Where::Computer => "On this computer only.",
@@ -84,7 +87,9 @@ impl Where {
     /// computer, and the instrument.
     fn rank(self) -> u8 {
         match self {
-            Where::Both(Standing::Theirs | Standing::Both | Standing::Gone) => 0,
+            Where::Both(
+                Standing::Theirs | Standing::Both | Standing::Gone | Standing::Contested,
+            ) => 0,
             Where::Both(Standing::Ahead) => 1,
             Where::Both(Standing::Unread) => 2,
             Where::Both(Standing::Same) => 3,
@@ -375,7 +380,9 @@ impl Mark {
     pub fn of(standing: Standing) -> Option<Mark> {
         match standing {
             Standing::Ahead => Some(Mark::Ahead),
-            Standing::Theirs | Standing::Both | Standing::Gone => Some(Mark::Attention),
+            Standing::Theirs | Standing::Both | Standing::Gone | Standing::Contested => {
+                Some(Mark::Attention)
+            }
             Standing::Same | Standing::Unread => None,
         }
     }
@@ -1576,12 +1583,13 @@ fn tooltip(
     }
 }
 
-/// The addresses of the slots holding exactly what an unlinked row was saved as. See
-/// [`crate::device::also_at`].
+/// The addresses of the slots an unlinked row may be linked to. See
+/// [`crate::device::link_offers`].
 fn also_at(row: &Row, workspace: &Workspace, device: &Device) -> Vec<String> {
     let entity = row.item.local().and_then(|id| workspace.get(id));
-    let also = entity.map(|entity| crate::device::also_at(&device.state, entity));
-    also.unwrap_or_default().into_iter().map(shown).collect()
+    let also = entity.map(|entity| crate::device::link_offers(&device.state, workspace, entity));
+    let also = also.unwrap_or_default().into_iter();
+    also.map(|(_, at)| shown(at)).collect()
 }
 
 /// The names of a row's tags. Only an asset on this computer has tags: a tag belongs to a

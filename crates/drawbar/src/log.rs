@@ -55,8 +55,8 @@ pub struct Entry {
 pub enum Undo {
     /// Files linked on their own: unlink each, and keep it off that keyboard.
     Unlink { keyboard: Keyboard, ids: Vec<u64> },
-    /// A save that queued a send: take the file out of the queue.
-    Unqueue(u64),
+    /// Sends queued for drawbar's own reasons: take the files out of the queue.
+    Unqueue(Vec<u64>),
     /// Files brought in from the keyboard, each as it was before.
     Restore(Vec<Restored>),
     /// A link that followed its sound to another slot: the link it had before.
@@ -85,7 +85,7 @@ impl Undo {
                     workspace.unlink(id, &keyboard, true);
                 }
             }
-            Undo::Unqueue(id) => queue.forget(id),
+            Undo::Unqueue(ids) => ids.into_iter().for_each(|id| queue.forget(id)),
             Undo::Restore(kept) => {
                 for Restored { id, bytes, link } in kept {
                     if workspace.get(id).is_none_or(|entity| entity.is_unsaved()) {

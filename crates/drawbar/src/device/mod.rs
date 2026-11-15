@@ -513,7 +513,7 @@ pub enum DeviceEvent {
         id: u64,
         class: ObjectClass,
         at: Location,
-        /// The name the write was given. The slot takes its [`slot_label`].
+        /// The name the write was given, which names the slot without its format tag.
         name: String,
         /// What the write carried: what the slot now holds and what the asset is saved as
         /// from here on (see [`Workspace::landed`] and [`Workspace::landed_file`]). The
@@ -611,6 +611,10 @@ pub struct DeviceState {
     /// by class and slot. Cleared when the instrument reports a change or disconnects.
     needs: HashMap<(ObjectClass, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
+    /// The assets linked to a slot another asset is linked to as well, where neither is
+    /// known to be the one the slot holds. Two libraries can each link one before they
+    /// sync.
+    contested: std::collections::BTreeSet<u64>,
 }
 
 impl DeviceCard {
@@ -887,6 +891,30 @@ impl DeviceState {
         self.needs.clear();
         self.detail = Detail::default();
         self.scan.clear();
+        self.contested.clear();
+    }
+
+    /// The user chose `id` for the slot its rivals were linked to as well, and linking it
+    /// unlinked them.
+    pub(crate) fn uncontest(&mut self, id: u64) {
+        self.contested.remove(&id);
+    }
+
+    /// Whether a stored link names a slot this keyboard can have: a class this build
+    /// knows and the keyboard declares, a name that is not blank, and an address inside
+    /// the class's banks. Unknown until the partition table and the class's banks arrive.
+    fn names_a_slot(&self, held: &Held) -> bool {
+        let class = held.class();
+        let declared =
+            self.partitions.is_empty() || self.partitions.iter().any(|row| row.class == class);
+        let fits = match &held.spot {
+            Spot::Named(name) => !name.trim().is_empty(),
+            Spot::At { bank, slot } => self
+                .geometry
+                .get(&class)
+                .is_none_or(|banks| banks.iter().any(|it| it.index == *bank && *slot < it.slots)),
+        };
+        !matches!(class, ObjectClass::Unknown(_)) && declared && fits
     }
 }
 
@@ -1049,15 +1077,14 @@ pub fn link_copy(
     }
 }
 
-/// Link each asset with no link on the attached keyboard to the slot that holds exactly
-/// its saved body and that it names, where nothing else is linked there, and log them in
-/// one line.
+/// Link each asset with no link on the attached keyboard to the slot it names, where that
+/// slot holds exactly its saved body and nothing else is linked there, and log them in
+/// one line. Other slots holding the same body do not matter.
 ///
-/// It names the slot by the address its header stores or the slot it came off. That slot
-/// must be the only one of its class holding the body, so every bank of the class must
-/// have been read. A piano or sample names the slot of its name, which must hold a body
-/// of its length. A rescue whose slot is empty names that slot. A new asset, and one the
-/// user keeps off the keyboard, names none.
+/// It names the slot its header stores, then the slot it came off or was rescued from,
+/// and the first of them holding its body is the one. A piano or sample names the slot
+/// of its name, which must hold a body of its length. A new asset, and one the user keeps
+/// off the keyboard, names none.
 fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
     let Some(keyboard) = state.keyboard() else {
         return;
@@ -1099,39 +1126,90 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
 
 /// The slot [`link_found`] links an asset to, and what the two agree on.
 fn found(state: &DeviceState, keyboard: &Keyboard, entity: &LocalEntity) -> Option<Held> {
-    let unlinked = entity.links.iter().all(|link| link.keyboard != *keyboard);
-    if !unlinked || matches!(entity.origin, Origin::Fresh) || !fit(state, entity).allowed() {
+    if entity.kept_off(keyboard)
+        || held_here(state, entity).is_some()
+        || matches!(entity.origin, Origin::Fresh)
+    {
         return None;
     }
     let class = home(entity)?;
     let print = entity.saved_print()?;
-    if let Origin::Rescued { at } = entity.origin {
-        let vacant = matches!(state.slot(class, at), Some(None));
-        return vacant
-            .then(|| spot_at(state, class, at, &entity.name))
-            .flatten()
-            .and_then(|spot| Held::new(class, spot, print));
+    let held = match class.is_library() {
+        true => {
+            let name = slot_label(&entity.name)?;
+            let (at, info) = occupied(state, class).find(|(_, info)| info.name.trim() == name)?;
+            (info.body_len == print.len).then_some(Spot::of(class, at, &name))
+        }
+        false => named_slots(entity, class)
+            .find(|at| {
+                let info = state.slot(class, *at).flatten();
+                info.is_some_and(|info| info.crc32 == Some(print.crc))
+            })
+            .map(Spot::at),
+    };
+    let held = Held::new(class, held?, print)?;
+    fit(state, entity).allowed().then_some(held)
+}
+
+/// Settle slots two assets are linked to, as two libraries that each linked one before
+/// they synced leave them: where exactly one of them is known to hold what the slot
+/// holds, the others are unlinked, in one log line. Where none or several are, all of
+/// them wait for the user.
+fn settle_claims(state: &mut DeviceState, workspace: &mut Workspace, log: &mut Log) {
+    let Some(keyboard) = state.keyboard() else {
+        return;
+    };
+    let mut slots: std::collections::BTreeMap<(u32, Spot), Vec<(u64, &Held)>> = Default::default();
+    for entity in workspace.listed() {
+        if let Some(held) = held_here(state, entity) {
+            let code = crate::store::keys::class_code(held.class()).unwrap_or_default();
+            slots
+                .entry((code, held.spot.clone()))
+                .or_default()
+                .push((entity.id, held));
+        }
     }
-    if class.is_library() {
-        let name = slot_label(&entity.name)?;
-        let (at, info) = occupied(state, class).find(|(_, info)| info.name.trim() == name)?;
-        return (info.body_len == print.len)
-            .then(|| Held::new(class, Spot::of(class, at, &name), print))
-            .flatten();
+    let mut contested = std::collections::BTreeSet::new();
+    let mut losers = Vec::new();
+    for claims in slots.values().filter(|claims| claims.len() > 1) {
+        let (_, there) = there(state, claims[0].1);
+        let crc = match there {
+            There::Holds { crc: Some(crc), .. } => crc,
+            There::Unread | There::Vacant | There::Holds { crc: None, .. } => {
+                contested.extend(claims.iter().map(|(id, _)| *id));
+                continue;
+            }
+        };
+        let holds = |(id, held): &&(u64, &Held)| {
+            held.knew(crc)
+                || workspace
+                    .get(*id)
+                    .and_then(LocalEntity::saved_print)
+                    .is_some_and(|print| print.crc == crc)
+        };
+        let mut holders = claims.iter().filter(holds);
+        match (holders.next(), holders.next()) {
+            (Some((holder, _)), None) => {
+                losers.extend(claims.iter().map(|(id, _)| *id).filter(|id| id != holder))
+            }
+            _ => contested.extend(claims.iter().map(|(id, _)| *id)),
+        }
     }
-    let mut holding = holding(state, class, print.crc);
-    let at = holding.next()?;
-    if holding.next().is_some() || !state.read_through(class) {
-        return None;
+    state.contested = contested;
+    if losers.is_empty() {
+        return;
     }
-    named_slots(entity, class)
-        .any(|named| named == at)
-        .then(|| Held::new(class, Spot::at(at), print))
-        .flatten()
+    for id in &losers {
+        workspace.unlink(*id, &keyboard, false);
+    }
+    log.say(format!(
+        "{} unlinked from a slot another file holds.",
+        counted(losers.len(), "file", "files")
+    ));
 }
 
 /// The slots of `class` an asset names: the address its header stores, then the slot it
-/// came off.
+/// came off or was rescued from.
 pub fn named_slots(entity: &LocalEntity, class: ObjectClass) -> impl Iterator<Item = Location> {
     let stored = entity
         .container
@@ -1141,11 +1219,11 @@ pub fn named_slots(entity: &LocalEntity, class: ObjectClass) -> impl Iterator<It
             bank: bank.into(),
             slot: slot.into(),
         });
-    let came_off = entity
-        .origin
-        .slot()
-        .filter(|(from, _)| *from == class)
-        .map(|(_, at)| at);
+    let came_off = match entity.origin {
+        Origin::Device { class: from, at } if from == class => Some(at),
+        Origin::Rescued { at } => Some(at),
+        Origin::Device { .. } | Origin::File(_) | Origin::Fresh => None,
+    };
     stored.into_iter().chain(came_off)
 }
 
@@ -1221,6 +1299,13 @@ pub fn there(state: &DeviceState, held: &Held) -> (Option<Location>, There) {
     }
 }
 
+/// An asset's link on the attached keyboard, unless it names no slot that keyboard can
+/// have, which counts as no link.
+pub fn held_here<'e>(state: &DeviceState, entity: &'e LocalEntity) -> Option<&'e Held> {
+    let held = entity.held_on(&state.keyboard()?)?;
+    state.names_a_slot(held).then_some(held)
+}
+
 /// An asset's link on the attached keyboard, and how the asset compares with its slot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Linked {
@@ -1235,13 +1320,18 @@ pub struct Linked {
 /// How an asset compares with the slot it is linked to on the attached keyboard. `None`
 /// while nothing is attached, or the asset has no link there.
 pub fn standing_of(state: &DeviceState, entity: &LocalEntity) -> Option<Linked> {
-    let held = entity.held_on(&state.keyboard()?)?;
+    let held = held_here(state, entity)?;
     let (at, there) = there(state, held);
+    let standing = match crate::link::standing(held, entity.saved_print(), there) {
+        Standing::Unread => Standing::Unread,
+        _ if state.contested.contains(&entity.id) => Standing::Contested,
+        standing => standing,
+    };
     Some(Linked {
         class: held.class(),
         at,
         there,
-        standing: crate::link::standing(held, entity.saved_print(), there),
+        standing,
     })
 }
 
@@ -1270,38 +1360,43 @@ pub fn standing_on<'w>(
         .find(|entity| slot_of(state, entity) == Some((class, at)))
 }
 
-/// The slots of its class holding exactly what an asset with no link on the attached
-/// keyboard was saved as. Only a hint: nothing is linked, merged or sent by it.
-pub fn also_at(state: &DeviceState, entity: &LocalEntity) -> Vec<Location> {
-    let linked = state
-        .keyboard()
-        .is_some_and(|keyboard| entity.held_on(&keyboard).is_some());
-    match (linked, home(entity), entity.saved_print()) {
-        (false, Some(class), Some(print)) => holding(state, class, print.crc).collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// The slots [`also_at`] finds that no other asset is linked to: those Link to offers.
+/// The slots of the attached keyboard an asset with no link there may be linked to: the
+/// ones holding exactly what it was saved as, and the slot its header or origin names
+/// where that slot keeps a sound under its name, first. Only those no other asset is
+/// linked to. Only a hint: nothing is linked, merged or sent by it.
 pub fn link_offers(
     state: &DeviceState,
     workspace: &Workspace,
     entity: &LocalEntity,
 ) -> Vec<(ObjectClass, Location)> {
-    let (Some(keyboard), Some(class)) = (state.keyboard(), home(entity)) else {
+    let (Some(keyboard), Some(class), Some(print)) =
+        (state.keyboard(), home(entity), entity.saved_print())
+    else {
         return Vec::new();
     };
-    also_at(state, entity)
-        .into_iter()
-        .filter(|at| {
-            let name = state
-                .slot(class, *at)
-                .flatten()
-                .map_or("", |info| info.name.trim());
-            workspace
-                .linked_at(&keyboard, class, &Spot::of(class, *at, name))
-                .is_none()
+    if held_here(state, entity).is_some() {
+        return Vec::new();
+    }
+    let label = slot_label(&entity.name);
+    let free = |at: &Location| {
+        let name = state
+            .slot(class, *at)
+            .flatten()
+            .map_or("", |info| info.name.trim());
+        workspace
+            .linked_at(&keyboard, class, &Spot::of(class, *at, name))
+            .is_none()
+    };
+    let named = named_slots(entity, class).filter(free).find(|at| {
+        let info = state.slot(class, *at).flatten();
+        info.is_some_and(|info| {
+            info.crc32 == Some(print.crc) || Some(info.name.trim()) == label.as_deref()
         })
+    });
+    let holding = holding(state, class, print.crc).filter(|at| Some(*at) != named && free(at));
+    named
+        .into_iter()
+        .chain(holding)
         .map(|at| (class, at))
         .collect()
 }
@@ -2182,8 +2277,10 @@ impl Device {
         // the cache already shows, without waiting for the next walk.
         if heard || self.linked != workspace.revision() {
             let before = workspace.revision();
+            settle_claims(&mut self.state, workspace, log);
             link_found(&self.state, workspace, log);
             crate::bring::follow(self, workspace, log);
+            crate::bring::queue_ahead(self, workspace, queue, log);
             if heard || workspace.revision() != before {
                 self.revision += 1;
             }
@@ -3382,7 +3479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_linked_on_its_own_only_to_the_one_slot_holding_its_body_that_it_names() {
+    fn a_file_is_linked_on_its_own_to_the_slot_it_names_holding_its_body() {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         let crc = print(&body()).crc;
@@ -3419,7 +3516,149 @@ mod tests {
             .device
             .pretend_bodies(class, 1, &[None, Some(("Tine", crc)), Some(("Tine", crc))]);
         heard(&mut bench);
-        assert_eq!(held_at(&bench, copied), None, "two slots hold its body");
+        assert_eq!(
+            held_at(&bench, copied),
+            Some(Spot::at(at(2))),
+            "another slot holding its body does not matter"
+        );
+
+        bench.workspace.unlink(copied, &keyboard, false);
+        let origin = Origin::Device { class, at: at(2) };
+        let twin = bench
+            .workspace
+            .ingest("Twin.ne5p".into(), origin, body(), &mut bench.log);
+        bench.workspace.settle_files(&mut bench.log);
+        heard(&mut bench);
+        assert_eq!(
+            (held_at(&bench, copied), held_at(&bench, twin)),
+            (None, None),
+            "two files naming one slot link neither"
+        );
+    }
+
+    #[test]
+    fn link_to_offers_the_named_slot_first_even_edited_and_every_free_slot_holding_it() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        let (mine, other) = (gained("40"), body());
+        let slots = [
+            None,
+            Some(("A", print(&other).crc)),
+            Some(("Z", print(&mine).crc)),
+            Some(("X", print(&mine).crc)),
+        ];
+        bench.device.pretend_bodies(class, 1, &slots);
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let taken = file(&mut bench, "X.ne5p", mine.clone());
+        let held = Held::new(class, Spot::at(at(4)), print(&mine)).unwrap();
+        bench.workspace.link(taken, &keyboard, held);
+        let origin = Origin::Device { class, at: at(2) };
+        let id = bench
+            .workspace
+            .ingest("A.ne5p".into(), origin, mine, &mut bench.log);
+        bench.workspace.settle_files(&mut bench.log);
+        let entity = bench.workspace.get(id).unwrap();
+        let offers = link_offers(&bench.device.state, &bench.workspace, entity);
+        assert_eq!(offers, [(class, at(2)), (class, at(3))]);
+
+        bench.act(vec![crate::browser::Act::Link {
+            id,
+            class,
+            at: at(2),
+        }]);
+        let entity = bench.workspace.get(id).unwrap();
+        let linked = standing_of(&bench.device.state, entity).unwrap();
+        assert!(linked.standing.needs_attention(), "{:?}", linked.standing);
+    }
+
+    #[test]
+    fn a_stored_link_to_no_slot_this_keyboard_has_counts_as_none() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&ELECTRO5);
+        bench.device.pretend_geometry(class, &[("A", 2)]);
+        bench
+            .device
+            .pretend_bodies(class, 1, &[Some(("", 1)), None]);
+        let id = file(&mut bench, "A.ne5p", body());
+        let stored = [
+            r#"{"class":999,"spot":{"at":{"bank":0,"slot":0}},"base":{"crc":1,"len":121}}"#,
+            r#"{"class":4,"spot":{"named":""},"base":{"crc":1,"len":121}}"#,
+            r#"{"class":4,"spot":{"at":{"bank":0,"slot":9}},"base":{"crc":1,"len":121}}"#,
+            r#"{"class":4,"spot":{"at":{"bank":5,"slot":0}},"base":{"crc":1,"len":121}}"#,
+        ];
+        for held in stored {
+            let json = format!(r#"{{"keyboard":{{"model":"Nord Electro 5"}},"held":{held}}}"#);
+            let link: crate::link::Link = serde_json::from_str(&json).unwrap();
+            bench.workspace.follow_links(id, vec![link]);
+            let entity = bench.workspace.get(id).unwrap();
+            assert_eq!(standing_of(&bench.device.state, entity), None, "{held}");
+        }
+    }
+
+    /// Two files linked to slot 1 of bank 1, as two libraries that synced leave them.
+    fn claimed(bench: &mut crate::testing::Bench, slot: Option<u32>) -> (u64, u64) {
+        let class = ObjectClass::Program;
+        bench
+            .device
+            .pretend_bodies(class, 1, &[slot.map(|crc| ("A", crc))]);
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
+            .map(|(name, bytes)| file(bench, name, bytes));
+        for id in [first, second] {
+            let link = crate::link::Link {
+                keyboard: keyboard.clone(),
+                held: Some(held.clone()),
+            };
+            bench.workspace.follow_links(id, vec![link]);
+        }
+        heard(bench);
+        (first, second)
+    }
+
+    #[test]
+    fn of_two_files_linked_to_one_slot_the_one_it_holds_keeps_the_link() {
+        let mut bench = crate::testing::Bench::new();
+        let (first, second) = claimed(&mut bench, Some(print(&gained("40")).crc));
+        assert_eq!(held_at(&bench, first), None);
+        assert_eq!(held_at(&bench, second), Some(Spot::at(at(1))));
+        assert_eq!(
+            bench
+                .log
+                .transcript()
+                .matches("unlinked from a slot")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn two_files_linked_to_a_slot_holding_neither_wait_for_the_user() {
+        let mut bench = crate::testing::Bench::new();
+        let (first, second) = claimed(&mut bench, Some(print(&gained("41")).crc));
+        for id in [first, second] {
+            let entity = bench.workspace.get(id).unwrap();
+            let linked = standing_of(&bench.device.state, entity).unwrap();
+            assert_eq!(linked.standing, Standing::Contested);
+        }
+        assert!(crate::bring::since(&bench.device.state, &bench.workspace).is_empty());
+        bench.act(vec![crate::browser::Act::SendChecked(vec![first, second])]);
+        assert!(bench.queue.is_empty(), "nothing is queued on its own");
+
+        crate::bring::choose(&mut bench.device, &bench.workspace, &mut bench.log, first);
+        let crate::testing::Bench {
+            device,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut bench;
+        crate::bring::use_mine(device, workspace, queue, log);
+        heard(&mut bench);
+        assert_eq!(held_at(&bench, first), Some(Spot::at(at(1))));
+        assert_eq!(held_at(&bench, second), None);
+        assert!(bench.queue.holds(first));
     }
 
     #[test]

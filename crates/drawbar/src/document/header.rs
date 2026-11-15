@@ -1343,7 +1343,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         return Some(send(SEND_TO.to_string(), PICK.to_string(), Click::Pick));
     };
     match (linked.standing, linked.at) {
-        (Standing::Theirs | Standing::Both, _) => Some(Loud {
+        (Standing::Theirs | Standing::Both | Standing::Contested, _) => Some(Loud {
             short: "Choose".to_string(),
             glyph: Glyph::CircleAlert,
             ..send(
