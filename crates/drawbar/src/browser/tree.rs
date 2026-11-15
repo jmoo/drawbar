@@ -1360,6 +1360,10 @@ impl Browser {
                 }
             });
         }
+        let standing = crate::device::standing_of(&device.state, entity);
+        if standing.is_some_and(|linked| linked.standing.needs_attention()) {
+            offer(ui, "Choose…", None, Act::Choose(id), acts);
+        }
         offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);

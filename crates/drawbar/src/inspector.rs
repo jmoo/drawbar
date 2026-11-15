@@ -525,6 +525,7 @@ fn clicked(click: Click, id: u64) -> Option<Act> {
         Click::Load(class, at) => Some(Act::LoadOnInstrument { class, at }),
         Click::Save => Some(Act::SaveDoc(id)),
         Click::Build => Some(Act::Build(id)),
+        Click::Choose => Some(Act::Choose(id)),
         Click::Nothing => None,
     }
 }

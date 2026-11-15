@@ -68,6 +68,17 @@ A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel. Sending a sound renamed on this computer renames its
 slot, even when the slot already holds the same sound.
 
+## Changes made on the keyboard
+
+Once a newly attached keyboard has been read, drawbar lists the linked sounds that
+changed there since: changed slots, sounds moved to another slot, and sounds
+removed. **Bring them in** saves each changed slot into its file, moves each
+moved sound's link, and unlinks each removed sound's file, which stays on this
+computer. Slots changed later while the keyboard stays attached are brought in
+without asking. **Not now** leaves them marked. Pianos and samples are not brought
+in; copy them to this computer instead. Library undo, or **Undo** in the activity
+log, puts a file back.
+
 ## Safety
 
 - A move is a swap. Nothing is lost.

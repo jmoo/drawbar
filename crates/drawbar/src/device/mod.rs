@@ -178,6 +178,10 @@ pub enum Purpose {
     /// ⚠️ These bytes never reach the workspace: a copy nobody asked for would be a row
     /// nobody can account for.
     Compare,
+    /// The slot's content, to be saved as the file linked to it. See [`crate::bring`].
+    Pull,
+    /// The slot's content, for the question of which of it and its file is current.
+    Choose,
 }
 
 /// One object waiting to go back to the instrument.
@@ -260,7 +264,8 @@ impl DeviceCmd {
             DeviceCmd::SlotInfo { at, .. } => format!("info {}", shown(*at)),
             DeviceCmd::Deps { at, .. } => format!("deps {}", shown(*at)),
             DeviceCmd::Get { at, why, .. } => match why {
-                Purpose::Compare => format!("get {} (to compare)", shown(*at)),
+                Purpose::Compare | Purpose::Choose => format!("get {} (to compare)", shown(*at)),
+                Purpose::Pull => format!("get {} (to bring in)", shown(*at)),
                 Purpose::Copy | Purpose::View => format!("get {}", shown(*at)),
             },
             DeviceCmd::CopyAll { class, slots } => {
@@ -295,7 +300,11 @@ impl DeviceCmd {
             DeviceCmd::ScanBank { class, .. } => ("scan-bank", class, false),
             DeviceCmd::SlotInfo { class, .. } => ("info", class, false),
             DeviceCmd::Deps { class, .. } => ("deps", class, false),
-            DeviceCmd::Get { class, why, .. } => ("get", class, *why != Purpose::Compare),
+            DeviceCmd::Get { class, why, .. } => (
+                "get",
+                class,
+                !matches!(why, Purpose::Compare | Purpose::Choose),
+            ),
             DeviceCmd::Put { class, .. } => ("put", class, true),
             DeviceCmd::SendAll { class, .. } => ("send-all", class, true),
             DeviceCmd::Move { class, .. } => ("move", class, true),
@@ -336,9 +345,16 @@ impl DeviceCmd {
             DeviceCmd::Get {
                 class,
                 at,
-                why: Purpose::Compare,
-                ..
+                why: Purpose::Compare | Purpose::Choose,
             } => words(READING, format!("what is in {}", place(*class, *at))),
+            DeviceCmd::Get {
+                class,
+                at,
+                why: Purpose::Pull,
+            } => words(
+                ("Bringing in", "Brought in", "bring in"),
+                place(*class, *at),
+            ),
             DeviceCmd::Get { class, at, .. } => {
                 words(COPYING, format!("{} to this computer", place(*class, *at)))
             }
@@ -1048,7 +1064,7 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
         .listed()
         .filter_map(|entity| Some((entity.id, found(state, &keyboard, entity)?)))
         .collect();
-    let mut linked = 0;
+    let mut linked = Vec::new();
     for (id, held) in &found {
         let claimed = |(other, other_held): &(u64, Held)| {
             other != id && other_held.class() == held.class() && other_held.spot == held.spot
@@ -1060,18 +1076,23 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
             continue;
         }
         workspace.link(*id, &keyboard, held.clone());
-        linked += 1;
+        linked.push(*id);
     }
-    if linked > 0 {
-        log.say(format!(
-            "{} linked to {}.",
-            counted(linked, "file", "files"),
-            match linked {
-                1 => "the slot that holds it",
-                _ => "the slots that hold them",
-            }
-        ));
+    if linked.is_empty() {
+        return;
     }
+    log.say(format!(
+        "{} linked to {}.",
+        counted(linked.len(), "file", "files"),
+        match linked.len() {
+            1 => "the slot that holds it",
+            _ => "the slots that hold them",
+        }
+    ));
+    log.offer(crate::log::Undo::Unlink {
+        keyboard,
+        ids: linked,
+    });
 }
 
 /// The slot [`link_found`] links an asset to, and what the two agree on.
@@ -1430,6 +1451,9 @@ pub struct Device {
     kept: Vec<Location>,
     /// Counts what the instrument has reported and the links that moved since.
     revision: u64,
+    /// What drawbar asks, and has been told, about linked files while this keyboard is
+    /// attached.
+    pub asks: crate::bring::Asks,
 }
 
 /// The follow-up owed by the command in flight, set when it is dispatched.
@@ -1494,6 +1518,7 @@ impl Device {
             failed: false,
             kept: Vec::new(),
             revision: 0,
+            asks: crate::bring::Asks::default(),
         }
     }
 
@@ -1859,7 +1884,16 @@ impl Device {
     fn forget(&mut self) {
         self.state.forget_everything();
         self.running = None;
+        self.asks = crate::bring::Asks::default();
         self.revision += 1;
+    }
+
+    /// Whether a write to the instrument is running or waiting to run.
+    pub fn sending(&self) -> bool {
+        let writes =
+            |cmd: &DeviceCmd| matches!(cmd, DeviceCmd::Put { .. } | DeviceCmd::SendAll { .. });
+        let running = self.running.as_ref();
+        running.is_some_and(|running| running.writing.is_some()) || self.pending.iter().any(writes)
     }
 
     /// Log each slot just read whose body differs from what the asset linked to it was
@@ -2030,6 +2064,16 @@ impl Device {
                             queue.arrived(class, at, &name, &bytes, workspace);
                         }
                     }
+                    Purpose::Pull => {
+                        if let Some((class, at)) = origin.slot() {
+                            crate::bring::landed(self, workspace, log, class, at, bytes);
+                        }
+                    }
+                    Purpose::Choose => {
+                        if let Some((class, at)) = origin.slot() {
+                            self.asks.read(class, at, bytes, workspace);
+                        }
+                    }
                 },
                 DeviceEvent::Fetched(fetched) => self.fetched.push(fetched),
                 DeviceEvent::Gathered {
@@ -2048,6 +2092,7 @@ impl Device {
                 // an answer to the queue: nothing is being replaced.
                 DeviceEvent::Vacant { class, at, why } => match why {
                     Purpose::Compare => queue.vacant(class, at),
+                    Purpose::Pull | Purpose::Choose => self.asks.vacant(class, at),
                     Purpose::Copy | Purpose::View => {
                         self.failed = true;
                         log.error(format!("{} holds nothing to read", shown(at)));
@@ -2130,6 +2175,7 @@ impl Device {
         if heard || self.linked != workspace.revision() {
             let before = workspace.revision();
             link_found(&self.state, workspace, log);
+            crate::bring::follow(self, workspace, log);
             if heard || workspace.revision() != before {
                 self.revision += 1;
             }

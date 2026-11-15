@@ -178,6 +178,8 @@ pub struct Wants {
     pub keep: bool,
     /// The header's build of this project.
     pub build: bool,
+    /// The header's question of which of this document and its slot is current.
+    pub choose: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -453,6 +455,7 @@ impl Document {
             save: act.save,
             load: act.load,
             build: act.build,
+            choose: act.choose,
             ..Wants::default()
         };
         let mut details = None;

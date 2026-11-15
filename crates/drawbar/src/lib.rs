@@ -5,6 +5,7 @@
 pub mod about;
 pub mod app;
 pub mod audio;
+pub mod bring;
 pub mod browser;
 pub mod builds;
 pub mod bundle;
