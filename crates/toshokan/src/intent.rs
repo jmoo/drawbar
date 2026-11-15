@@ -123,18 +123,39 @@ impl<L: Driver> Intent<L> {
         self
     }
 
+    /// Adds the member stored as `value`, which may hold more than `T` reads, as a
+    /// member a newer writer wrote does.
+    pub fn add_stored<T: Value>(mut self, entity: EntityId, key: Set<T>, value: Raw) -> Self {
+        self.plan.facts.push((
+            FactChange::Add {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
+        self
+    }
+
     /// Removes every add of `value` this writer has observed.
     pub fn remove<T: Value>(mut self, entity: EntityId, key: Set<T>, value: &T) -> Self {
-        if let Some(value) = encode(&mut self.invalid, key.name(), value) {
-            self.plan.facts.push((
-                FactChange::Remove {
-                    entity,
-                    key: key.name().to_owned(),
-                    value,
-                },
-                None,
-            ));
+        match encode(&mut self.invalid, key.name(), value) {
+            Some(value) => self.remove_stored(entity, key, value),
+            None => self,
         }
+    }
+
+    /// Removes every add of the member stored as `value`, which may hold more than
+    /// `T` reads, as a member a newer writer wrote does.
+    pub fn remove_stored<T: Value>(mut self, entity: EntityId, key: Set<T>, value: Raw) -> Self {
+        self.plan.facts.push((
+            FactChange::Remove {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
         self
     }
 
@@ -146,12 +167,20 @@ impl<L: Driver> Intent<L> {
     }
 
     /// Gives `into` each member of each set `entity` holds that `into` does not,
-    /// and `entity`'s shown value of each register `into` holds no value of, then
+    /// and `entity`'s shown value of each register `into` holds no value of, under
+    /// every key, the schema's or not, then
     /// deletes `entity`. Refused unless both are shown and differ. An intent that
     /// only joins entities is no step of undo, which takes its writes for another
     /// writer's.
     pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
         self.plan.joins.push(Joined { entity, into });
+        self
+    }
+
+    /// Commits it as final: no step of undo, leaving redo as it was, and undo takes
+    /// its writes for another writer's.
+    pub fn as_final(mut self) -> Self {
+        self.plan.r#final = true;
         self
     }
 
@@ -530,7 +559,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         ops.push(op);
     }
     for joined in &plan.joins {
-        ops.extend(join(folded, schema, *joined)?);
+        ops.extend(join(folded, *joined)?);
     }
     if !plan.dismiss.is_empty() {
         ops.push(Op::Dismiss {
@@ -542,8 +571,8 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
 
 /// The ops that give `joined.into` what `joined.entity` holds and it does not:
 /// each member of each set, and the shown value of each register it holds no
-/// value of. Then the delete of `joined.entity`.
-fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Invalid> {
+/// value of, under every key, declared or not. Then the delete of `joined.entity`.
+fn join(folded: &Folded, joined: Joined) -> Result<Vec<Op>, Invalid> {
     let Joined { entity, into } = joined;
     if entity == into {
         return Err(Invalid::JoinedIntoItself(entity));
@@ -552,29 +581,24 @@ fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Inv
         return Err(Invalid::NoEntity(absent));
     }
     let mut ops = Vec::new();
-    for key in schema.keys() {
-        let name = key.name;
-        match key.kind {
-            KeyKind::Set => {
-                let held = folded.members(into, name);
-                let lacking = folded.members(entity, name).into_iter();
-                let lacking = lacking.filter(|member| held.binary_search(member).is_err());
-                ops.extend(lacking.map(|value| Op::Add {
-                    replaces: member_writes(folded, into, name, &value),
-                    entity: into,
-                    key: name.to_owned(),
-                    value,
-                    take: None,
-                }));
-            }
-            KeyKind::Register => {
-                let shown = folded.register(entity, name).pop();
-                let unset = folded.register(into, name).is_empty();
-                if let (Some(shown), true) = (shown, unset) {
-                    let value = Some(&shown.value);
-                    ops.push(register_write(folded, into, name.to_owned(), value, None));
-                }
-            }
+    for name in folded.sets(entity) {
+        let held = folded.members(into, name);
+        let lacking = folded.members(entity, name).into_iter();
+        let lacking = lacking.filter(|member| held.binary_search(member).is_err());
+        ops.extend(lacking.map(|value| Op::Add {
+            replaces: member_writes(folded, into, name, &value),
+            entity: into,
+            key: name.to_owned(),
+            value,
+            take: None,
+        }));
+    }
+    for name in folded.registers(entity) {
+        let shown = folded.register(entity, name).pop();
+        let unset = folded.register(into, name).is_empty();
+        if let (Some(shown), true) = (shown, unset) {
+            let value = Some(&shown.value);
+            ops.push(register_write(folded, into, name.to_owned(), value, None));
         }
     }
     ops.push(delete(folded, entity, None));
