@@ -142,8 +142,9 @@ Each file's loudest hit is its note, named by its pitch in the octave it was rea
 in, so file names are never read. A note's files become its layers by level, up to `--layers`,
 and a file within `--min-layer-gap` dB of a louder one, such as a second round-robin,
 is left out. Each file placed is written under `-o` at its own path, with the build
-command for them all. A file with no hit, no pitch, or too little level over its
-own noise is listed and left out. A file that rests under half a second has no noise
+command for them all. A file that does not read, or has no hit, no pitch, or too
+little level over its own noise, is listed and left out. Linked folders are not
+followed. A file that rests under half a second has no noise
 to read: its floor is listed as `-`, and it is kept however quiet.
 
 `prep` never changes a take. A take at another rate is resampled to the instrument's

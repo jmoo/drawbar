@@ -207,6 +207,13 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
             ));
         }
     }
+    if same_file(dir, &args.out) {
+        return Err(format!(
+            "{}: -o is the folder itself; give another, where each file is written at its own \
+             path",
+            dir.display()
+        ));
+    }
     let files = wavs_in(dir, &args.out)?;
     if files.is_empty() {
         return Err(format!("{}: no WAV files in it", dir.display()));
@@ -224,14 +231,26 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
     ));
 
     // Each file on its own: its hit, its pitch, and how far it stands over its floor.
+    #[derive(Default)]
     struct Found {
         hit: Option<plan::Planned>,
         floor_db: f64,
         rests: bool,
+        /// Why it could not be read, which leaves it out.
+        unread: Option<String>,
     }
     let mut found = Vec::new();
     for (file, out) in files.iter().zip(&outs) {
-        let loaded = load(file, out)?;
+        let loaded = match load(file, out) {
+            Ok(loaded) => loaded,
+            Err(why) => {
+                found.push(Found {
+                    unread: Some(why),
+                    ..Found::default()
+                });
+                continue;
+            }
+        };
         let mut options = plan_options(args, Vec::new(), layers);
         options.one_note = true;
         let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
@@ -246,6 +265,7 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
             }),
             floor_db: plan.floor_db,
             rests: plan.rests,
+            unread: None,
         });
     }
     let struck: Vec<_> = found
@@ -311,10 +331,13 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
                 ),
                 _ => (None, "not placed".into(), String::new()),
             },
-            (None, None) => (None, "no hit found".into(), String::new()),
+            (None, None) => match &found[i].unread {
+                Some(why) => (None, format!("not read: {why}"), String::new()),
+                None => (None, "no hit found".into(), String::new()),
+            },
         };
         let hit = found[i].hit.as_ref().map(|p| &p.hit);
-        let floor = found[i].rests.then_some(found[i].floor_db);
+        let floor = (found[i].rests && found[i].unread.is_none()).then_some(found[i].floor_db);
         rows.push((note, shown, hit.cloned(), floor, what, sustain));
     }
 
@@ -378,11 +401,16 @@ fn wavs_in(dir: &Path, out: &Path) -> Result<Vec<PathBuf>, String> {
         let entries =
             std::fs::read_dir(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
         for entry in entries {
-            let path = entry
-                .map_err(|e| format!("{}: {e}", folder.display()))?
-                .path();
-            if path.is_dir() {
+            let entry = entry.map_err(|e| format!("{}: {e}", folder.display()))?;
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            // A linked folder is not followed: a link back up would walk forever.
+            if kind.is_dir() {
                 folders.push(path);
+            } else if kind.is_symlink() && path.is_dir() {
+                continue;
             } else if path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
@@ -1061,9 +1089,15 @@ mod tests {
         };
         let bytes = wav::write(&silent, wav::Encoding::Int { bits: 24 }).unwrap();
         std::fs::write(set.join("silent.wav"), bytes).unwrap();
+        // A stub such as macOS leaves in a zipped set: not a WAV, listed and left out.
+        std::fs::write(set.join("._1.wav"), b"Mac OS X attributes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("..", set.join("high/up")).unwrap();
 
         let (set_s, out) = (set.to_str().unwrap(), dir.join("out"));
         let out_s = out.to_str().unwrap();
+        let err = prep(&Ui::piped(), prep_args(&[set_s, "-o", set_s])).unwrap_err();
+        assert!(err.contains("-o is the folder itself"), "{err}");
         let err = prep(
             &Ui::piped(),
             prep_args(&[set_s, "--notes", "C4", "-o", out_s]),
