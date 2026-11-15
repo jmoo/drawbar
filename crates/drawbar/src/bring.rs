@@ -461,7 +461,7 @@ pub fn change(
         (None, None) if by.is_none() => return Some(Change::Removed),
         _ => None,
     };
-    let to = unique.filter(|(to, _)| movable(state, workspace, keyboard, held, from, *to));
+    let to = unique.filter(|(to, _)| movable(state, workspace, keyboard, held, *to));
     let with = |to| workspace.linked_at(keyboard, held.class(), &Spot::at(to));
     match (to, by) {
         (Some((to, agrees)), _) => Some(Change::Moved {
@@ -481,13 +481,12 @@ fn name_at(state: &DeviceState, class: ObjectClass, at: Location) -> String {
 }
 
 /// Whether a link at `from` may follow its sound to `to`: no file is linked there, or the
-/// one linked there has its sound at `from`, which is a swap.
+/// one linked there has its sound elsewhere now, as in a swap or a rotation.
 fn movable(
     state: &DeviceState,
     workspace: &Workspace,
     keyboard: &Keyboard,
     held: &Held,
-    from: Location,
     to: Location,
 ) -> bool {
     let class = held.class();
@@ -501,11 +500,8 @@ fn movable(
         other.held_on(keyboard).is_some_and(|it| it.base.crc == crc)
             || other.saved_print().is_some_and(|it| it.crc == crc)
     };
-    let at_from = state
-        .slot(class, from)
-        .flatten()
-        .and_then(|info| info.crc32);
-    at_from.is_some_and(theirs)
+    let at_to = state.slot(class, to).flatten().and_then(|info| info.crc32);
+    at_to.is_some_and(|crc| !theirs(crc))
 }
 
 /// Whether the walk of every class holding a file linked on the attached keyboard has
@@ -628,22 +624,14 @@ impl Sheet {
         program.is_some_and(|it| self.way(it, rows, workspace) == Some(Way::Up))
     }
 
-    /// The way Sync takes `row`: the one the user picked, or else its own. A move onto a
-    /// file's slot goes only with that file's own move the other way, so half a swap goes
-    /// nowhere.
+    /// The way Sync takes `row`: the one the user picked, or else its own. A move goes
+    /// only among the [`moving`](Sheet::moving) ones.
     pub fn way(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> Option<Way> {
         if self.skipped.contains(&key(row)) {
             return None;
         }
-        if let Change::Moved {
-            with: Some(with), ..
-        } = row.change
-        {
-            let moving = |it: &&Row| it.id == with && matches!(it.change, Change::Moved { .. });
-            let partner = rows.iter().find(moving);
-            if partner.is_none_or(|it| self.skipped.contains(&key(it))) {
-                return None;
-            }
+        if matches!(row.change, Change::Moved { .. }) && !self.moving(rows).contains(&row.id) {
+            return None;
         }
         let ways = row.ways(workspace);
         let picked = self
@@ -651,6 +639,29 @@ impl Sheet {
             .get(&key(row))
             .filter(|way| ways.allowed.contains(way));
         picked.copied().or(ways.taken)
+    }
+
+    /// The files whose moves go: the largest set of moves not left out in which every
+    /// move onto another file's slot has that file's move too, so a swap or a rotation
+    /// goes whole or not at all.
+    fn moving(&self, rows: &[Row]) -> BTreeSet<u64> {
+        let moves = rows.iter().filter(|row| !self.skipped.contains(&key(row)));
+        let moves: Vec<(u64, Option<u64>)> = moves
+            .filter_map(|row| match row.change {
+                Change::Moved { with, .. } => Some((row.id, with)),
+                _ => None,
+            })
+            .collect();
+        let mut going: BTreeSet<u64> = moves.iter().map(|(id, _)| *id).collect();
+        loop {
+            let stuck = moves.iter().find(|(id, with)| {
+                going.contains(id) && with.is_some_and(|it| !going.contains(&it))
+            });
+            match stuck {
+                Some((id, _)) => going.remove(id),
+                None => return going,
+            };
+        }
     }
 
     /// Turn `row` to its next way.
@@ -2491,5 +2502,48 @@ mod tests {
         assert!(!said.iter().any(|it| it == "B" || it == "↑"), "{said:?}");
         bench.act(vec![Act::SyncAll]);
         assert_eq!(ids(&written(&bench)), [first], "the plan pressed on");
+    }
+
+    /// A rotation on the keyboard moves every link with its sound, or none: with one move
+    /// left out, none of them has a way, Sync counts none, and no link changes.
+    #[test]
+    fn a_rotation_goes_whole_or_not_at_all() {
+        let (a, b, c) = (body(), gained("40"), gained("41"));
+        let rotated = [
+            Some(("C", crc(&c))),
+            Some(("A", crc(&a))),
+            Some(("B", crc(&b))),
+        ];
+        for leave_out in [false, true] {
+            let mut bench = Bench::new();
+            walked_named(&mut bench, &rotated);
+            let files = [
+                linked(&mut bench, "A.ne5p", a.clone(), 1, &a),
+                linked(&mut bench, "B.ne5p", b.clone(), 2, &b),
+                linked(&mut bench, "C.ne5p", c.clone(), 3, &c),
+            ];
+            open_read(&mut bench);
+            if leave_out {
+                let third = row(&bench, files[2]);
+                bench.device.asks.sheet.as_mut().unwrap().skip(&third);
+            }
+            let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+            let sheet = bench.device.asks.sheet.as_ref().unwrap();
+            let steps = plan(sheet, &sync.list, &bench.device.state, &bench.workspace);
+            bench.press();
+            let slots: Vec<Option<Spot>> = files.iter().map(|id| slot_of(&bench, *id)).collect();
+            let expected = match leave_out {
+                false => [2, 3, 1],
+                true => [1, 2, 3],
+            };
+            let expected: Vec<Option<Spot>> = expected
+                .iter()
+                .map(|slot| Some(Spot::at(at(*slot))))
+                .collect();
+            assert_eq!(
+                (steps.len(), slots),
+                (3 * usize::from(!leave_out), expected)
+            );
+        }
     }
 }
