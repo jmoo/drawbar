@@ -159,17 +159,26 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     let skipped = |hit: &Hit| {
         options.skip.contains(&hit.number) || (options.one_note && Some(hit.number) != loudest)
     };
-    let notes = match options.notes.is_empty() {
-        true => layers::notes_of(&hits, skipped),
-        false => options.notes.clone(),
-    };
-    let assigned = layers::assign(&hits, &notes, skipped);
+    let (notes, assigned): (Vec<u8>, Vec<Option<(u8, Option<String>)>>) =
+        match options.notes.is_empty() {
+            true => (
+                layers::notes_of(&hits, skipped),
+                layers::self_named(&hits, skipped),
+            ),
+            false => (
+                options.notes.clone(),
+                layers::assign(&hits, &options.notes, skipped)
+                    .into_iter()
+                    .map(|a| a.map(|(j, warning)| (options.notes[j], warning)))
+                    .collect(),
+            ),
+        };
     let mut planned: Vec<Planned> = hits
         .iter()
         .zip(assigned)
         .map(|(hit, assigned)| {
             let (note, warning) = match assigned {
-                Some((j, warning)) => (Some(notes[j]), warning),
+                Some((note, warning)) => (Some(note), warning),
                 None => (None, None),
             };
             let over_db = hit.level_db - floor;

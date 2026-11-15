@@ -7,7 +7,9 @@ says how to use them.
 ## Finding the strokes
 
 `prep` measures the take's floor with its mains hum taken out. It finds every hit
-and gives it to the next note in the list whose pitch is nearest. By level, a
+and names its note. Given a note list, a hit goes to the next note in the list whose
+pitch is nearest. With none, a hit is named by its own pitch, and a note read an
+octave off the notes played either side of it is put back in line. By level, a
 note's hits within `--min-layer-gap` dB of a louder one are dropped, and the rest are
 spread evenly in dB. With `--order played`, the first hits played are kept, the
 first the loudest.
@@ -15,7 +17,8 @@ first the loudest.
 A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
 of a folder holds its note for most of its length, so its floor is the mean level of
 its quietest half second instead, and only its loudest hit counts. A folder's hits
-are sorted by pitch before their notes are named, so each has its neighbors to go by.
+are sorted by pitch before their notes are named, so a stretched note has its
+neighbors to go by. Each keeps the octave its pitch was read in.
 
 A hit standing less than 54 dB over the floor is left out: leveled with the others,
 its hiss would come up with it. Each kept hit becomes an attack, from its strike to

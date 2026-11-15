@@ -30,42 +30,57 @@ fn class_distance(pitch: f64, note: u8) -> f64 {
 /// third of a semitone.
 pub const STRETCH_JUMP: f64 = 0.7;
 
-/// The notes `hits` play, in playing order, found from their pitches: the list [`assign`]
-/// walks where the take comes with none. Hits `skipped` leaves out, and hits with no
-/// pitch, take no part.
-///
-/// Each hit is named by its pitch, rounded, and a run of hits on one note is one entry.
-/// Then, one run at a time, the octave move that most straightens the notes' line is
-/// made, while one straightens it by more than half an octave: the line's bend is the
-/// sum of how far each run lies off the middle of the runs either side, each counted to
-/// two octaves at most, so a take that starts again at the bottom keeps its jump. That
-/// catches the octave errors pitch estimates make on low notes, and leaves a take that
-/// steps evenly, by octaves too, as played. A take of two notes has no line to go by.
-///
-/// A piano's stretch tuning puts its top notes sharp of equal temperament and its bass
-/// flat, by more than half a semitone at the ends, where rounding would name the next
-/// note. Stretch changes smoothly from note to note, so a run whose offset from its note
-/// jumps more than [`STRETCH_JUMP`] semitones from the run before is named the note on
-/// the other side instead.
+/// The notes `hits` play, in playing order, found from their pitches: each run of hits
+/// on one note is one entry, as [`notes_by_hit`] names them.
 pub fn notes_of(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<u8> {
-    // Each run's note and the mean pitch of its hits.
-    let mut named: Vec<(f64, f64, f64)> = Vec::new();
-    for hit in hits.iter().filter(|hit| !skipped(hit)) {
-        let Some(pitch) = hit.pitch else {
-            continue;
-        };
-        let note = pitch.round().clamp(0.0, 127.0);
-        match named.last_mut() {
-            Some((last, sum, count)) if *last == note => {
-                *sum += pitch;
-                *count += 1.0;
+    let mut notes: Vec<u8> = notes_by_hit(hits, skipped).into_iter().flatten().collect();
+    notes.dedup();
+    notes
+}
+
+/// The note each of `hits` plays, found from their pitches, or none for a hit `skipped`
+/// leaves out or with no pitch.
+///
+/// Each hit is named by its pitch, rounded, and a run of hits on one note is named as
+/// one. A run whose offset from its note jumps more than [`STRETCH_JUMP`] semitones from
+/// the run before's is named the note on the other side: stretch tuning puts a piano's
+/// top notes sharp and its bass flat by more than half a semitone at the ends, and
+/// changes smoothly from note to note.
+///
+/// Then, one run at a time, the octave move that most straightens the runs' line is
+/// made, while one straightens it by more than half an octave. The line's bend is the
+/// sum of how far each run lies off the middle of the runs either side, each counted to
+/// two octaves at most. That catches the octave errors pitch estimates make on low
+/// notes, and leaves a take that steps evenly, by octaves too, or starts again at the
+/// bottom, as played.
+pub fn notes_by_hit(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<Option<u8>> {
+    named(hits, skipped, true)
+}
+
+/// [`notes_by_hit`], with the octave moves made only where `octaves` is set.
+fn named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool, octaves: bool) -> Vec<Option<u8>> {
+    // Each run's rounded note and the sum and count of its pitches, and each hit's run.
+    let mut runs: Vec<(f64, f64, f64)> = Vec::new();
+    let run_of: Vec<Option<usize>> = hits
+        .iter()
+        .map(|hit| {
+            let pitch = hit.pitch.filter(|_| !skipped(hit))?;
+            let note = pitch.round().clamp(0.0, 127.0);
+            match runs.last_mut() {
+                Some((last, sum, count)) if *last == note => {
+                    *sum += pitch;
+                    *count += 1.0;
+                }
+                _ => runs.push((note, pitch, 1.0)),
             }
-            _ => named.push((note, pitch, 1.0)),
-        }
-    }
-    let mut runs: Vec<f64> = Vec::with_capacity(named.len());
+            Some(runs.len() - 1)
+        })
+        .collect();
+    // Each run's note after the stretch check, and runs that now name one note merged.
+    let mut line: Vec<f64> = Vec::with_capacity(runs.len());
+    let mut merged_of: Vec<usize> = Vec::with_capacity(runs.len());
     let mut offset: Option<f64> = None;
-    for (note, sum, count) in named {
+    for (note, sum, count) in runs {
         let pitch = sum / count;
         let mut note = note;
         if let Some(before) = offset {
@@ -77,23 +92,25 @@ pub fn notes_of(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<u8> {
             }
         }
         offset = Some(pitch - note);
-        runs.push(note);
+        if line.last() != Some(&note) {
+            line.push(note);
+        }
+        merged_of.push(line.len() - 1);
     }
-    runs.dedup();
-    let bend = |runs: &[f64]| -> f64 {
-        runs.windows(3)
+    let bend = |line: &[f64]| -> f64 {
+        line.windows(3)
             .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs().min(24.0))
             .sum()
     };
-    loop {
-        let now = bend(&runs);
+    while octaves {
+        let now = bend(&line);
         let mut best: Option<(f64, usize, f64)> = None;
-        for i in 0..runs.len() {
-            for moved in [runs[i] - 12.0, runs[i] + 12.0] {
+        for i in 0..line.len() {
+            for moved in [line[i] - 12.0, line[i] + 12.0] {
                 if !(0.0..=127.0).contains(&moved) {
                     continue;
                 }
-                let mut tried = runs.clone();
+                let mut tried = line.clone();
                 tried[i] = moved;
                 let gain = now - bend(&tried);
                 if gain > 6.0 && best.is_none_or(|(most, _, _)| gain > most) {
@@ -102,12 +119,48 @@ pub fn notes_of(hits: &[Hit], skipped: impl Fn(&Hit) -> bool) -> Vec<u8> {
             }
         }
         match best {
-            Some((_, i, moved)) => runs[i] = moved,
+            Some((_, i, moved)) => line[i] = moved,
             None => break,
         }
     }
-    runs.dedup();
-    runs.into_iter().map(|note| note as u8).collect()
+    run_of
+        .into_iter()
+        .map(|run| run.map(|run| line[merged_of[run]] as u8))
+        .collect()
+}
+
+/// A warning where `pitch` is more than half a semitone from `note`'s pitch class.
+fn off_warning(pitch: f64, note: u8) -> Option<String> {
+    (class_distance(pitch, note) > 0.5).then(|| {
+        format!("its pitch is {:+.1} semitones off its note's", {
+            (pitch - f64::from(note) + 6.0).rem_euclid(12.0) - 6.0
+        })
+    })
+}
+
+/// The note and any warning of each of `hits` in a take with no note list: the note
+/// [`notes_by_hit`] names, a hit with no pitch taking the note of the named hit before
+/// it, and none for a hit `skipped` leaves out.
+pub fn self_named(
+    hits: &[Hit],
+    skipped: impl Fn(&Hit) -> bool + Copy,
+) -> Vec<Option<(u8, Option<String>)>> {
+    let mut last: Option<u8> = None;
+    hits.iter()
+        .zip(notes_by_hit(hits, skipped))
+        .map(|(hit, note)| {
+            if skipped(hit) {
+                return None;
+            }
+            match (note, hit.pitch) {
+                (Some(note), Some(pitch)) => {
+                    last = Some(note);
+                    Some((note, off_warning(pitch, note)))
+                }
+                _ => last.map(|note| (note, Some("no pitch found".to_string()))),
+            }
+        })
+        .collect()
 }
 
 /// The index into `notes` each of `hits` plays, or none for a hit `skipped` leaves out,
@@ -136,12 +189,7 @@ pub fn assign(
             {
                 j += 1;
             }
-            let warning = (class_distance(pitch, notes[j]) > 0.5).then(|| {
-                format!("its pitch is {:+.1} semitones off its note's", {
-                    (pitch - f64::from(notes[j]) + 6.0).rem_euclid(12.0) - 6.0
-                })
-            });
-            Some((j, warning))
+            Some((j, off_warning(pitch, notes[j])))
         })
         .collect()
 }
@@ -252,8 +300,9 @@ pub enum Placed {
 /// none for a file with no hit loud enough, which is placed nowhere.
 ///
 /// A set comes in no playing order and its file names are not trusted, so the hits are
-/// sorted by pitch and named by [`notes_of`], whose stretch and octave checks then have
-/// each note's neighbors to go by. A note's files are its hits, and its layers are chosen
+/// sorted by pitch and named as [`notes_by_hit`] names a take's, whose stretch check then
+/// has each note's neighbors to go by. Sorted by pitch they make no playing line, so no
+/// octave is moved: each file keeps the octave its pitch was read in. A note's files are its hits, and its layers are chosen
 /// from them by level as [`pick`] chooses a take's: `layers` at most, files within
 /// `min_gap_db` of a louder one kept being duplicates, as round-robins of one dynamic
 /// often are.
@@ -271,18 +320,14 @@ pub fn place(struck: &[Option<Hit>], layers: usize, min_gap_db: f64) -> Vec<Opti
         }
     }
     sorted.sort_by(|a, b| a.pitch.unwrap_or(0.0).total_cmp(&b.pitch.unwrap_or(0.0)));
-    let notes = notes_of(&sorted, |_| false);
-    let named: Vec<Option<u8>> = assign(&sorted, &notes, |_| false)
-        .into_iter()
-        .map(|a| a.map(|(k, _)| notes[k]))
-        .collect();
-    let mut distinct = notes.clone();
+    let notes = named(&sorted, |_| false, false);
+    let mut distinct: Vec<u8> = notes.iter().flatten().copied().collect();
     distinct.sort_unstable();
     distinct.dedup();
     for note in distinct {
         let group: Vec<&Hit> = sorted
             .iter()
-            .zip(&named)
+            .zip(&notes)
             .filter(|(_, n)| **n == Some(note))
             .map(|(hit, _)| hit)
             .collect();
@@ -386,6 +431,51 @@ mod tests {
     fn a_take_that_steps_by_octaves_keeps_its_octaves() {
         let hits = played(&[36.0, 48.0, 60.0, 72.0], 2);
         assert_eq!(notes_of(&hits, |_| false), [36, 48, 60, 72]);
+    }
+
+    /// Each hit keeps its own run's note: C2 and C3 are the same pitch class, and a walk
+    /// by pitch class would name them as one.
+    #[test]
+    fn a_take_that_steps_by_octaves_names_each_hit_its_octave() {
+        let hits = played(&[36.0, 48.0, 60.0, 72.0], 2);
+        let named: Vec<u8> = self_named(&hits, |_| false)
+            .into_iter()
+            .map(|n| n.unwrap().0)
+            .collect();
+        assert_eq!(named, [36, 36, 48, 48, 60, 60, 72, 72]);
+    }
+
+    #[test]
+    fn a_hit_with_no_pitch_takes_the_note_before_it_with_a_warning() {
+        let mut hits = played(&[48.0, 50.0], 1);
+        hits[1].pitch = None;
+        let named = self_named(&hits, |_| false);
+        assert_eq!(named[0], Some((48, None)));
+        assert_eq!(named[1], Some((48, Some("no pitch found".to_string()))));
+    }
+
+    /// Sorted by pitch, a set has no playing line, so its octaves are kept as read: a
+    /// file a semitone apart or an octave apart is its own note.
+    #[test]
+    fn a_set_s_files_keep_their_octaves() {
+        let notes = |pitches: &[f64]| -> Vec<u8> {
+            let struck: Vec<Option<Hit>> =
+                pitches.iter().map(|&p| Some(hit(0, -10.0, p))).collect();
+            place(&struck, 4, 1.0)
+                .into_iter()
+                .map(|p| match p {
+                    Some(Placed::Layer { note, .. }) => note,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(notes(&[36.0, 48.0, 60.0, 72.0]), [36, 48, 60, 72]);
+        assert_eq!(notes(&[24.0, 36.0, 38.0, 40.0]), [24, 36, 38, 40], "a sparse bass");
+        assert_eq!(
+            notes(&[93.45, 94.5, 95.6, 96.66, 97.7]),
+            [93, 94, 95, 96, 97],
+            "stretched top notes"
+        );
     }
 
     #[test]
