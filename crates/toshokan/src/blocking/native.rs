@@ -690,7 +690,7 @@ fn io_error(error: io::Error) -> IoError {
         ErrorKind::NotADirectory => IoError::NotDirectory,
         ErrorKind::DirectoryNotEmpty => IoError::NotEmpty,
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => IoError::NoSpace,
-        ErrorKind::PermissionDenied => IoError::Denied,
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => IoError::Denied,
         _ => IoError::Other(error.to_string()),
     }
 }
@@ -971,6 +971,12 @@ mod volume {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_only_volume_denies_access() {
+        let refused = io::Error::from(ErrorKind::ReadOnlyFilesystem);
+        assert_eq!(io_error(refused), IoError::Denied);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]

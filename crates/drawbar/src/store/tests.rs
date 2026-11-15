@@ -717,6 +717,11 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
 
     let acts = session.bench.browser.answer("Keep both");
     session.bench.act(acts);
+    assert_eq!(
+        session.bench.log.status().1,
+        "Your edits are kept as “untitled 2.ne5p”."
+    );
+    assert_eq!(session.said("back as it was last saved"), 0);
     session.sync();
     assert_eq!(root.read("untitled.ne5p"), theirs);
     assert_eq!(root.read("untitled 2.ne5p"), mine);
@@ -964,6 +969,17 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     let (title, answers) = second.bench.browser.asking().expect("a question is asked");
     assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
     assert!(title.contains("does not read"), "{title}");
+    assert_eq!(
+        second.bench.browser.asking_note(),
+        Some(
+            "It is not a whole Nord file, so it is no copy of what that slot held, and \
+             cannot be sent back."
+        )
+    );
+    let logged = second.bench.log.iter().any(|entry| {
+        entry.level == crate::log::Level::Error && entry.text.starts_with("nord-rescued-1-4.npno: ")
+    });
+    assert!(logged, "the activity log says why it does not read");
     assert_eq!(answers, ["Later", "Show the file", "Discard"]);
     second.choose("Discard");
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
@@ -1450,6 +1466,17 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     let second = Session::open(&root);
     let why = second.store.read_only().unwrap_or_default();
     assert!(why.contains("update drawbar"), "opened read-only: {why:?}");
+}
+
+#[test]
+fn a_picked_folder_that_opens_read_only_is_named_in_the_message() {
+    let (root, _) = newer_drawbar_wrote();
+    let bench = Bench::new();
+    let store = Store::start(crate::testing::backend(&bench.ctx, &root)).named("Sounds".into());
+    let mut session = Session { store, bench };
+    session.opened();
+    assert_eq!(session.said("The library “Sounds” opened read-only: "), 1);
+    assert_eq!(session.said("This computer's library"), 0);
 }
 
 /// A library that opens read-only keeps unsaved edits, which live in this install's own

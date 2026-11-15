@@ -1292,23 +1292,24 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         return;
     }
     let name = browser.folders.free(&dir, &entity.name, workspace);
+    let origin = entity.origin.clone();
     // One resting in its file is copied by the library, with the edit held of it.
     if let Some(copy) = workspace.copy_of(id) {
-        let (origin, len) = (entity.origin.clone(), entity.size());
+        let len = entity.size();
         workspace.arrive(dir.join(&name), origin, copy, len);
-        return workspace.revert(id, log);
+    } else {
+        let mine = match entity.whole() {
+            Ok(mine) => mine.into_owned(),
+            Err(e) => {
+                log.error(format!("{}: {e}", entity.name));
+                return log.trouble(format!("“{}” could not be read.", entity.name));
+            }
+        };
+        let copy = workspace.ingest(name.clone(), origin, mine, log);
+        workspace.place(copy, dir.join(&name));
     }
-    let mine = match entity.whole() {
-        Ok(mine) => mine.into_owned(),
-        Err(e) => {
-            log.error(format!("{}: {e}", entity.name));
-            return log.trouble(format!("“{}” could not be read.", entity.name));
-        }
-    };
-    let origin = entity.origin.clone();
-    let copy = workspace.ingest(name.clone(), origin, mine, log);
-    workspace.place(copy, dir.join(&name));
-    workspace.revert(id, log);
+    workspace.drop_edits(id);
+    log.say(format!("Your edits are kept as “{name}”."));
 }
 
 fn new_folder(browser: &mut Browser, workspace: &Workspace, parent: Option<u64>) {
@@ -1617,8 +1618,8 @@ pub(super) fn spare_slot(
     state.first_free(class, &queue.waiting_in(class))
 }
 
-/// The slot an asset belongs to ([`owed`]), or else the first free slot of its folder
-/// that nothing in the queue is waiting for.
+/// The slot an asset belongs to ([`owed`]), or else the empty slot it was rescued from,
+/// or else the first free slot of its folder that nothing in the queue is waiting for.
 ///
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
@@ -1634,7 +1635,14 @@ pub(super) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue
     else {
         return Bound::Nowhere;
     };
-    match spare_slot(state, class, queue) {
+    let rescued_from = match entity.origin {
+        Origin::Rescued { at } => Some(at),
+        _ => None,
+    };
+    let waiting = queue.waiting_in(class);
+    let home = rescued_from
+        .filter(|at| matches!(state.slot(class, *at), Some(None)) && !waiting.contains(at));
+    match home.or_else(|| spare_slot(state, class, queue)) {
         Some(at) => Bound::At(class, at),
         None => Bound::Full(class),
     }
@@ -3809,6 +3817,103 @@ mod tests {
             });
         poll(&mut bench);
         assert_eq!(dot(&bench), None);
+    }
+
+    #[test]
+    fn a_rescued_sample_is_queued_for_the_slot_it_was_rescued_from() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Sample;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench.device.pretend_scanned(class, 1, &["", "", "", ""]);
+        let home = Location::from_user(1, 3);
+        let id = bench.workspace.ingest(
+            "drawbar-pad.nsmp".into(),
+            Origin::Rescued { at: home },
+            crate::testing::sample_bytes(),
+            &mut bench.log,
+        );
+
+        assert_eq!(
+            bound_for(
+                bench.workspace.get(id).unwrap(),
+                &bench.device.state,
+                &bench.queue
+            ),
+            Bound::At(class, home)
+        );
+    }
+
+    /// A copy elsewhere neither claims a rescue nor hides it from its empty slot. Once
+    /// that slot holds something else, the copy wins: nothing is overwritten to put back
+    /// what the instrument still holds.
+    #[test]
+    fn a_rescued_program_is_queued_for_its_empty_slot_over_a_copy_elsewhere() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let id = bench.workspace.ingest(
+            "Africa Split".into(),
+            Origin::Rescued { at: at(2) },
+            Fresh::Program.bytes().unwrap(),
+            &mut bench.log,
+        );
+        let crc = bench.workspace.get(id).unwrap().saved.crc32().unwrap();
+        let copy = Some(("Africa Split", crc));
+        let copy_at = Location::from_user(1, 1);
+        let spot = |bench: &mut Bench| {
+            bench.device.relink(&mut bench.workspace);
+            let entity = bench.workspace.get(id).unwrap();
+            (
+                entity.spot(),
+                bound_for(entity, &bench.device.state, &bench.queue),
+            )
+        };
+
+        bench.device.pretend_bodies(class, 1, &[copy]);
+        assert_eq!(
+            spot(&mut bench),
+            (Some((class, copy_at)), Bound::At(class, copy_at)),
+            "before its own bank is read, the copy stands for it"
+        );
+
+        bench.device.pretend_bodies(class, 7, &[None, None, None]);
+        assert_eq!(spot(&mut bench), (None, Bound::At(class, at(2))));
+
+        bench
+            .device
+            .pretend_bodies(class, 7, &[None, None, Some(("Squabble B", !crc))]);
+        assert_eq!(
+            spot(&mut bench),
+            (Some((class, copy_at)), Bound::At(class, copy_at))
+        );
+    }
+
+    #[test]
+    fn a_rescued_program_sent_to_another_slot_stays_linked_there_after_a_rescan() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench.workspace.ingest(
+            "Africa Split".into(),
+            Origin::Rescued { at: at(2) },
+            bytes.clone(),
+            &mut bench.log,
+        );
+        let crc = bench.workspace.get(id).unwrap().saved.crc32().unwrap();
+
+        bench.workspace.landed(id, class, at(1), bytes);
+        bench
+            .device
+            .pretend_bodies(class, 7, &[None, Some(("Africa Split", crc)), None]);
+        bench.device.relink(&mut bench.workspace);
+
+        let entity = bench.workspace.get(id).unwrap();
+        assert_eq!(entity.spot(), Some((class, at(1))));
+        assert_eq!(
+            bound_for(entity, &bench.device.state, &bench.queue),
+            Bound::At(class, at(1))
+        );
     }
 
     /// The instrument keeps one sample of each name, so a sample whose name a slot
