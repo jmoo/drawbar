@@ -21,7 +21,7 @@ pub enum State {
     Waiting,
     /// Its slot holds an earlier version or nothing, and no write is waiting to settle
     /// that.
-    Differs,
+    Ready,
     /// The keyboard changed its slot, and only the user can settle that.
     Attention,
 }
@@ -31,17 +31,8 @@ impl State {
     pub fn title(self) -> &'static str {
         match self {
             State::Waiting => "Waiting to send",
-            State::Differs => "Ready to send",
+            State::Ready => "Ready to send",
             State::Attention => "Needs attention",
-        }
-    }
-
-    /// The word the library's bar puts after the count.
-    pub fn word(self) -> &'static str {
-        match self {
-            State::Waiting => "waiting",
-            State::Differs => "ready",
-            State::Attention => "need attention",
         }
     }
 
@@ -49,7 +40,7 @@ impl State {
     pub fn sentence(self) -> &'static str {
         match self {
             State::Waiting => "everything waiting to be sent to the instrument",
-            State::Differs => "newer on this computer than in its slot, and not waiting",
+            State::Ready => "newer on this computer than in its slot, and not waiting",
             State::Attention => "changed on the keyboard since it was last sent or copied",
         }
     }
@@ -208,23 +199,23 @@ mod tests {
         let admits = |filter: &Filter, state| {
             filter.admits(Kind::Program, Place::Computer, &worn(&[]), state)
         };
-        for state in [None, Some(State::Waiting), Some(State::Differs)] {
+        for state in [None, Some(State::Waiting), Some(State::Ready)] {
             assert!(admits(&filter, state), "{state:?}");
         }
 
         filter.narrow(Narrow::State(State::Waiting));
         assert!(admits(&filter, Some(State::Waiting)));
-        assert!(!admits(&filter, Some(State::Differs)));
+        assert!(!admits(&filter, Some(State::Ready)));
         assert!(!admits(&filter, None));
 
         // One state at a time: selecting the other replaces the first.
-        filter.narrow(Narrow::State(State::Differs));
-        assert!(admits(&filter, Some(State::Differs)));
+        filter.narrow(Narrow::State(State::Ready));
+        assert!(admits(&filter, Some(State::Ready)));
         assert!(!admits(&filter, Some(State::Waiting)));
 
         // It combines with the other filters.
         filter.narrow(Narrow::Kind(Kind::Live));
-        assert!(!admits(&filter, Some(State::Differs)));
+        assert!(!admits(&filter, Some(State::Ready)));
     }
 
     #[test]

@@ -759,7 +759,7 @@ impl Browser {
             if device.state.connected() {
                 self.instrument_lines(device, &mut below);
             }
-            for (state, count) in [State::Waiting, State::Differs, State::Attention]
+            for (state, count) in [State::Waiting, State::Ready, State::Attention]
                 .into_iter()
                 .zip(frame.counts)
             {
@@ -980,7 +980,7 @@ impl Browser {
             Line::State(state) => {
                 let count = match state {
                     State::Waiting => frame.counts[0],
-                    State::Differs => frame.counts[1],
+                    State::Ready => frame.counts[1],
                     State::Attention => frame.counts[2],
                 };
                 state_row(ui, state, count, filter, acts);
@@ -1861,7 +1861,7 @@ impl Browser {
 fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, acts: &mut Vec<Act>) {
     let (glyph, dot) = match state {
         State::Waiting => (Glyph::Clock, crate::app::accent(ui.visuals())),
-        State::Differs => (Glyph::Upload, crate::app::warn(ui.visuals())),
+        State::Ready => (Glyph::Upload, crate::app::warn(ui.visuals())),
         State::Attention => (Glyph::CircleAlert, crate::app::bad(ui.visuals())),
     };
     let asked = Narrow::State(state);
@@ -2515,7 +2515,7 @@ mod tests {
             Narrow::Tag(1),
             Narrow::Place(Place::Computer),
             Narrow::State(State::Waiting),
-            Narrow::State(State::Differs),
+            Narrow::State(State::Ready),
         ] {
             let mut bench = Bench::new();
             let id = bench

@@ -245,7 +245,7 @@ fn admits(filter: &Filter, row: &Row, tags: &BTreeSet<u64>, state: Option<State>
 pub fn state(item: Item, mark: Option<Mark>, queue: &Queue) -> Option<State> {
     match (item, mark) {
         (Item::Local(id), _) if queue.holds(id) => Some(State::Waiting),
-        (Item::Local(_), Some(Mark::Ahead)) => Some(State::Differs),
+        (Item::Local(_), Some(Mark::Ahead)) => Some(State::Ready),
         (Item::Local(_), Some(Mark::Attention)) => Some(State::Attention),
         _ => None,
     }
@@ -317,7 +317,7 @@ fn local(
 }
 
 /// The address of an asset's one link, while no keyboard is attached.
-fn away(entity: &LocalEntity, device: &DeviceState) -> Option<(ObjectClass, Location)> {
+pub(crate) fn away(entity: &LocalEntity, device: &DeviceState) -> Option<(ObjectClass, Location)> {
     if device.keyboard().is_some() {
         return None;
     }
@@ -392,9 +392,18 @@ pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
 /// What a mark means, in words, wherever a hover or hint explains one.
 pub fn mark_words(mark: Mark) -> &'static str {
     match mark {
-        Mark::Ahead => "ready to send to its slot",
-        Mark::Attention => "its slot changed on the keyboard",
-        Mark::Unsaved => "edited since it was last saved",
+        Mark::Ahead => "Ready to send",
+        Mark::Attention => "Needs attention",
+        Mark::Unsaved => "Edited since it was last saved",
+    }
+}
+
+/// The character a mark is drawn as in front of a name or an address.
+pub fn mark_sign(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Ahead => "↑",
+        Mark::Attention => "!",
+        Mark::Unsaved => "*",
     }
 }
 
@@ -410,7 +419,7 @@ pub fn counts(workspace: &Workspace, device: &DeviceState, queue: &Queue) -> [us
     let mut counts = [queue.len(), 0, 0];
     for entity in workspace.listed() {
         match state(Item::Local(entity.id), keyboard_mark(entity, device), queue) {
-            Some(State::Differs) => counts[1] += 1,
+            Some(State::Ready) => counts[1] += 1,
             Some(State::Attention) => counts[2] += 1,
             Some(State::Waiting) | None => {}
         }
@@ -462,6 +471,8 @@ fn played(class: ObjectClass, at: Location, device: &DeviceState) -> Needs {
 pub enum Column {
     Glyph,
     Kind,
+    /// The row's [`Mark`] against its slot.
+    Mark,
     Name,
     Tags,
     Where,
@@ -487,9 +498,10 @@ impl Order {
 }
 
 impl Column {
-    pub const ALL: [Column; 8] = [
+    pub const ALL: [Column; COLUMNS] = [
         Column::Glyph,
         Column::Kind,
+        Column::Mark,
         Column::Name,
         Column::Tags,
         Column::Where,
@@ -501,7 +513,7 @@ impl Column {
     /// The column's heading. The glyph column has none: its word is the kind beside it.
     fn head(self) -> &'static str {
         match self {
-            Column::Glyph => "",
+            Column::Glyph | Column::Mark => "",
             Column::Kind => "Kind",
             Column::Name => "Name",
             Column::Tags => "Tags",
@@ -516,6 +528,7 @@ impl Column {
     fn track(self) -> Track {
         match self {
             Column::Glyph => Track::Px(16.0),
+            Column::Mark => Track::Px(MARK),
             // 120 px holds a kind with its family, as in `Stage 4 program`. It is a capped
             // share so a narrow center gives the room to the name.
             Column::Kind => Track::Capped {
@@ -536,7 +549,7 @@ impl Column {
     /// the columns always fill the width; while it is hidden, the name keeps its share in
     /// its place and cannot be dragged either.
     fn resizable(self) -> bool {
-        !matches!(self, Column::Glyph | Column::Needs)
+        !matches!(self, Column::Glyph | Column::Mark | Column::Needs)
     }
 
     /// The column's name where its width is kept.
@@ -544,6 +557,7 @@ impl Column {
         match self {
             Column::Glyph => "glyph",
             Column::Kind => "kind",
+            Column::Mark => "mark",
             Column::Name => "name",
             Column::Tags => "tags",
             Column::Where => "where",
@@ -554,8 +568,10 @@ impl Column {
     }
 }
 
+const COLUMNS: usize = 9;
+
 /// The widths columns were dragged to, by column; `None` keeps the column's own track.
-pub type Widths = [Option<f32>; 8];
+pub type Widths = [Option<f32>; COLUMNS];
 
 /// The gap between two columns.
 const GAP: f32 = 10.0;
@@ -568,13 +584,14 @@ const COLUMN_MOST: f32 = 480.0;
 const GRIP: f32 = 8.0;
 
 /// The columns that give way to the name in a narrow table, first to go first.
-const YIELDING: [Column; 6] = [
+const YIELDING: [Column; 7] = [
     Column::Needs,
     Column::Tags,
     Column::Size,
     Column::Kind,
     Column::At,
     Column::Where,
+    Column::Mark,
 ];
 
 /// The width the name keeps while another column can give way: about 16 characters.
@@ -589,7 +606,7 @@ const NAME_LEAST: f32 = 100.0;
 /// only while an instrument is `attached`, since only an instrument names what a sound
 /// plays. While Needs is hidden, the name takes its own share whatever it was dragged to,
 /// so the columns still fill the width.
-pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
+pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; COLUMNS] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
         None => column.track(),
@@ -609,9 +626,9 @@ pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
 }
 
 /// The `shown` columns laid out across `width`, and the others empty.
-fn lay(width: f32, wanted: &[Track; 8], shown: &[bool; 8]) -> [Range<f32>; 8] {
+fn lay(width: f32, wanted: &[Track; COLUMNS], shown: &[bool; COLUMNS]) -> [Range<f32>; COLUMNS] {
     let fills = !shown[Column::Needs as usize];
-    let kept: Vec<Track> = (0..8)
+    let kept: Vec<Track> = (0..COLUMNS)
         .filter(|&at| shown[at])
         .map(|at| match fills && at == Column::Name as usize {
             true => Column::Name.track(),
@@ -688,7 +705,7 @@ impl Key {
             Column::Glyph | Column::Kind => Ranked::Text(word(row)),
             Column::Name => Ranked::Name,
             Column::Tags => Ranked::Count(row.tags as u64),
-            Column::Where => Ranked::Count(u64::from(row.where_.rank())),
+            Column::Mark | Column::Where => Ranked::Count(u64::from(row.where_.rank())),
             Column::At => Ranked::Address(address(row)),
             Column::Size => Ranked::Count(row.size),
             Column::Needs => Ranked::Text(row.needs.text()),
@@ -803,6 +820,9 @@ const ABOVE: f32 = 6.0;
 const SMALL: f32 = 11.0;
 const KIND: f32 = 15.0;
 
+/// The width of the mark column.
+const MARK: f32 = 10.0;
+
 /// A filter chip's height, its padding at each end, and the size of its glyph.
 const CHIP: f32 = 26.0;
 const CHIP_PAD: f32 = 10.0;
@@ -833,7 +853,7 @@ impl Default for Library {
         Library {
             by: Column::Name,
             order: Order::Up,
-            widths: [None; 8],
+            widths: [None; COLUMNS],
             table: None,
             counts: None,
             #[cfg(test)]
@@ -1094,7 +1114,7 @@ impl Library {
     /// column's width, and a double click gives the column back its own track.
     ///
     /// ⚠️ Added after the head, so a press on a grip drags it instead of sorting.
-    fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 8]) {
+    fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; COLUMNS]) {
         let fills = tracks[Column::Needs as usize].is_empty();
         for (column, track) in Column::ALL.iter().zip(tracks) {
             if !column.resizable() || track.is_empty() || (fills && *column == Column::Name) {
@@ -1128,7 +1148,7 @@ impl Library {
 
     /// The column heads. Clicking one sorts by that column, and clicking it again reverses
     /// the order.
-    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 8]) {
+    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; COLUMNS]) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::click());
         let visuals = ui.visuals().clone();
@@ -1216,7 +1236,7 @@ fn header(
     view_header(ui, Glyph::LibraryBig, accent, "Library", &shows, |ui| {
         let states = [
             (State::Attention, Glyph::CircleAlert, counts[2]),
-            (State::Differs, Glyph::Upload, counts[1]),
+            (State::Ready, Glyph::Upload, counts[1]),
             (State::Waiting, Glyph::Clock, counts[0]),
         ];
         for (state, glyph, count) in states {
@@ -1226,8 +1246,12 @@ fn header(
             if count == 0 && !on {
                 continue;
             }
-            let text = format!("{count} {}", state.word());
-            let signal = warn(ui.visuals());
+            let text = format!("{} {count}", state.title());
+            let signal = match state {
+                State::Waiting => accent,
+                State::Ready => warn(ui.visuals()),
+                State::Attention => crate::app::bad(ui.visuals()),
+            };
             if filter_chip(ui, glyph, Some(signal), &text, on)
                 .on_hover_text(state.sentence())
                 .clicked()
@@ -1322,7 +1346,7 @@ fn over(filter: &Filter) -> String {
         );
     }
     if let Some(state) = filter.state {
-        narrowed.push(state.word().to_string());
+        narrowed.push(state.title().to_lowercase());
     }
     let said = match narrowed.is_empty() {
         true => "everything".to_string(),
@@ -1340,7 +1364,7 @@ fn over(filter: &Filter) -> String {
 fn under(
     response: &egui::Response,
     content: egui::Rect,
-    tracks: &[Range<f32>; 8],
+    tracks: &[Range<f32>; COLUMNS],
 ) -> Option<Column> {
     let at = response.interact_pointer_pos().or(response.hover_pos())?;
     let x = at.x - content.left();
@@ -1351,10 +1375,11 @@ fn under(
         .map(|(column, _)| *column)
 }
 
-/// The Where pill's ink and fill: the signal of what the row needs, if anything.
+/// The Where pill's ink and fill: the accent while a write to the row's slot is waiting.
+/// The mark column says the rest.
 ///
 /// ⚠️ On the selection fill every signal fails contrast, so a selected row's pill takes
-/// the selection's text color and the word carries the state.
+/// the selection's text color.
 fn where_look(
     state: Option<State>,
     selected: bool,
@@ -1362,9 +1387,7 @@ fn where_look(
 ) -> (egui::Color32, egui::Color32) {
     let signal = match state {
         Some(State::Waiting) => Some(accent(visuals)),
-        Some(State::Differs) => Some(warn(visuals)),
-        Some(State::Attention) => Some(crate::app::bad(visuals)),
-        None => None,
+        Some(State::Ready | State::Attention) | None => None,
     };
     match (selected, signal) {
         (true, _) => {
@@ -1385,7 +1408,7 @@ fn paint(
     ui: &mut egui::Ui,
     row: &Row,
     width: f32,
-    tracks: &[Range<f32>; 8],
+    tracks: &[Range<f32>; COLUMNS],
     browser: &mut Browser,
     list: &[Item],
     workspace: &Workspace,
@@ -1430,6 +1453,19 @@ fn paint(
         );
     }
     write(cell(Column::Kind), &word(row), plain(TEXT, quiet));
+    if let Some(mark) = row.mark {
+        // ⚠️ On the selection fill every signal fails contrast, as in `where_look`.
+        let tint = match selected {
+            true => ink,
+            false => mark_ink(mark, &visuals),
+        };
+        let font = egui::FontId::new(NAME, crate::app::bold());
+        write(
+            cell(Column::Mark),
+            mark_sign(mark),
+            egui::TextFormat::simple(font, tint),
+        );
+    }
     let family = match selected {
         true => crate::app::bold(),
         false => egui::FontFamily::Proportional,
@@ -1467,15 +1503,12 @@ fn paint(
         pill_ink,
         pill_fill,
     );
-    if let Some((_, at)) = row.at {
-        let ink = match row.faint {
-            true => {
-                egui::TextFormat::simple(egui::FontId::monospace(MONO), quiet.gamma_multiply(0.5))
-            }
-            false => mono(MONO),
-        };
-        write(cell(Column::At), &shown(at), ink);
-    }
+    let at = row.at.map_or_else(|| "—".to_string(), |(_, at)| shown(at));
+    let at_ink = match row.faint || row.at.is_none() {
+        true => egui::TextFormat::simple(egui::FontId::monospace(MONO), quiet.gamma_multiply(0.5)),
+        false => mono(MONO),
+    };
+    write(cell(Column::At), &at, at_ink);
     write(
         cell(Column::Size),
         &crate::room::measure(row.size),
@@ -1494,16 +1527,11 @@ fn paint(
         }
     }
 
-    let mark = row.mark;
-    let response = match under(&response, content, tracks) {
-        Some(column) => response.on_hover_text(tooltip(
-            row,
-            column,
-            mark,
-            browser.tags(),
-            workspace,
-            device,
-        )),
+    let said = under(&response, content, tracks)
+        .map(|column| tooltip(row, column, browser.tags(), workspace, device))
+        .filter(|said| !said.is_empty());
+    let response = match said {
+        Some(said) => response.on_hover_text(said),
         None => response,
     };
     if response.double_clicked() {
@@ -1516,30 +1544,27 @@ fn paint(
 
 /// The hover text for a cell.
 ///
-/// Three columns add a fact the row does not carry: the tags column shows a count and
-/// the hover names the tags, the address may be one of several slots holding the same
-/// bytes, and the Where cell adds the [`Mark`] the tree paints for the row. All three
-/// are computed for the hovered row only.
+/// Two columns add a fact the row does not carry: the tags column shows a count and the
+/// hover names the tags, and the address may be one of several slots holding the same
+/// bytes. Both are computed for the hovered row only.
 fn tooltip(
     row: &Row,
     column: Column,
-    mark: Option<Mark>,
     tags: &Tags,
     workspace: &Workspace,
     device: &Device,
 ) -> String {
     match column {
         Column::Glyph | Column::Kind => word(row),
+        Column::Mark => row
+            .mark
+            .map_or_else(String::new, |mark| mark_words(mark).to_string()),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
             names => names.join(", "),
         },
-        // Under the sentence saying where the row is, what the tree's dot for it claims.
-        Column::Where => match mark {
-            Some(mark) => format!("{}\n{}", row.where_.sentence(), mark_words(mark)),
-            None => row.where_.sentence().to_string(),
-        },
+        Column::Where => row.where_.sentence().to_string(),
         Column::At => match (row.at, also_at(row, workspace, device)) {
             (Some((class, at)), _) => place(class, at),
             (None, also) if also.is_empty() => "in no slot".to_string(),
@@ -1625,7 +1650,7 @@ mod tests {
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; COLUMNS], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(
                     track.start >= 0.0 && track.end >= track.start,
@@ -1643,7 +1668,7 @@ mod tests {
                 );
             }
         }
-        let wide = tracks(900.0, &[None; 8], true);
+        let wide = tracks(900.0, &[None; COLUMNS], true);
         for (column, track) in Column::ALL.iter().zip(&wide) {
             assert!(track.end - track.start > 0.0, "{column:?} vanished at 900");
         }
@@ -1654,7 +1679,7 @@ mod tests {
     fn a_narrow_table_hides_secondary_columns_before_the_name_shrinks() {
         let mut hidden_before = Vec::new();
         for width in (130..=900).rev().step_by(10).map(|width| width as f32) {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; COLUMNS], true);
             let name = &tracks[Column::Name as usize];
             assert!(
                 name.end - name.start >= NAME_LEAST,
@@ -1679,19 +1704,19 @@ mod tests {
 
     #[test]
     fn the_kind_reaches_120_px_when_wide_and_yields_to_the_name_when_narrow() {
-        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
+        let width_of = |tracks: &[Range<f32>; COLUMNS], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
 
-        let wide = tracks(900.0, &[None; 8], true);
+        let wide = tracks(900.0, &[None; COLUMNS], true);
         assert!(
             (width_of(&wide, Column::Kind) - 120.0).abs() < 0.01,
             "at 900 the kind holds the longest word: {}",
             width_of(&wide, Column::Kind)
         );
 
-        let narrow = tracks(430.0, &[None; 8], true);
+        let narrow = tracks(430.0, &[None; COLUMNS], true);
         assert!(
             width_of(&narrow, Column::Name) >= 40.0,
             "at 430 the name is unreadable: {}",
@@ -1705,13 +1730,13 @@ mod tests {
 
     #[test]
     fn needs_is_hidden_until_an_instrument_is_attached() {
-        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
+        let width_of = |tracks: &[Range<f32>; COLUMNS], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
         let (attached, alone) = (
-            tracks(900.0, &[None; 8], true),
-            tracks(900.0, &[None; 8], false),
+            tracks(900.0, &[None; COLUMNS], true),
+            tracks(900.0, &[None; COLUMNS], false),
         );
         assert!(width_of(&attached, Column::Needs) > 0.0, "{attached:?}");
         assert_eq!(width_of(&alone, Column::Needs), 0.0, "{alone:?}");
@@ -1723,11 +1748,12 @@ mod tests {
 
     #[test]
     fn a_dragged_name_fills_the_width_while_needs_is_hidden() {
-        let mut widths = [None; 8];
+        let mut widths = [None; COLUMNS];
         widths[Column::Name as usize] = Some(200.0);
-        let name = |tracks: &[Range<f32>; 8]| tracks[Column::Name as usize].clone();
-        let end =
-            |tracks: &[Range<f32>; 8]| tracks.iter().map(|track| track.end).fold(0.0, f32::max);
+        let name = |tracks: &[Range<f32>; COLUMNS]| tracks[Column::Name as usize].clone();
+        let end = |tracks: &[Range<f32>; COLUMNS]| {
+            tracks.iter().map(|track| track.end).fold(0.0, f32::max)
+        };
 
         let attached = tracks(900.0, &widths, true);
         assert_eq!(
@@ -1775,7 +1801,7 @@ mod tests {
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; COLUMNS], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(track.start >= 0.0, "{column:?} at {width}: {track:?}");
                 assert!(track.end >= track.start, "{column:?} at {width}: {track:?}");
@@ -2028,7 +2054,7 @@ mod tests {
                 .count()
         }
         assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Differs),
+            narrowed(&workspace, &device, &queue, &tags, State::Ready),
             1
         );
         assert_eq!(
@@ -2051,7 +2077,7 @@ mod tests {
             1
         );
         assert_eq!(
-            narrowed(&workspace, &device, &queue, &tags, State::Differs),
+            narrowed(&workspace, &device, &queue, &tags, State::Ready),
             0
         );
     }
@@ -2074,31 +2100,34 @@ mod tests {
     }
 
     #[test]
-    fn a_where_cell_says_what_the_trees_mark_claims() {
+    fn a_row_is_marked_up_when_ready_to_send_and_bang_when_it_needs_attention() {
+        let sign = |standing| Mark::of(standing).map(mark_sign);
+        assert_eq!(sign(Standing::Ahead), Some("↑"));
+        assert_eq!(sign(Standing::Theirs), Some("!"));
+        assert_eq!(sign(Standing::Both), Some("!"));
+        assert_eq!(sign(Standing::Same), None);
+        assert_eq!(sign(Standing::Unread), None);
+    }
+
+    #[test]
+    fn the_mark_cell_names_its_mark_on_hover_and_an_unmarked_row_has_none() {
         let Bench {
             workspace, device, ..
         } = Bench::new();
         let tags = Tags::default();
-        let held = row(
+        let mut held = row(
             "Africa Split",
             Kind::Program,
             Where::Both(Standing::Ahead),
             Some(at(6, 0)),
             121,
         );
-
-        let plain = tooltip(&held, Column::Where, None, &tags, &workspace, &device);
-        assert_eq!(plain, Where::Both(Standing::Ahead).sentence());
-        let marked = tooltip(
-            &held,
-            Column::Where,
-            Some(Mark::Ahead),
-            &tags,
-            &workspace,
-            &device,
-        );
-        assert!(marked.starts_with(&plain), "{marked}");
-        assert!(marked.ends_with(mark_words(Mark::Ahead)), "{marked}");
+        let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device);
+        assert_eq!(hover(&held), "");
+        held.mark = Some(Mark::Ahead);
+        assert_eq!(hover(&held), "Ready to send");
+        held.mark = Some(Mark::Attention);
+        assert_eq!(hover(&held), "Needs attention");
     }
 
     /// The sentence about a selection: where the picked rows go, how many of those slots
@@ -2726,7 +2755,7 @@ mod tests {
             |library: &mut Library, events| library_frame(library, &mut bench, screen, events);
         let said = frame(&mut library, Vec::new());
         let name = testing::where_(&said, "Name");
-        let edge = egui::pos2(name.left() - GAP / 2.0, name.center().y);
+        let edge = egui::pos2(name.left() - MARK - 1.5 * GAP, name.center().y);
         let dragged = edge + egui::vec2(40.0, 0.0);
 
         frame(&mut library, vec![egui::Event::PointerMoved(edge)]);
@@ -2749,7 +2778,7 @@ mod tests {
             ],
         );
         let said = frame(&mut library, Vec::new());
-        assert_eq!(library.widths, [None; 8]);
+        assert_eq!(library.widths, [None; COLUMNS]);
         assert_eq!(testing::where_(&said, "Name").left(), name.left());
     }
 
@@ -2777,7 +2806,7 @@ mod tests {
         );
         let mut after = Library::default();
         after.restore(&store);
-        let mut only_at = [None; 8];
+        let mut only_at = [None; COLUMNS];
         only_at[Column::At as usize] = Some(60.0);
         assert_eq!(after.widths, only_at);
 
@@ -2788,7 +2817,7 @@ mod tests {
         );
         let mut after = Library::default();
         after.restore(&store);
-        assert_eq!(after.widths, [None; 8]);
+        assert_eq!(after.widths, [None; COLUMNS]);
     }
 
     /// Paints with both docks open and with none. Nothing checks pixels: this catches a layout
