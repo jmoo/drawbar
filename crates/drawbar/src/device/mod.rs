@@ -1224,7 +1224,8 @@ fn found(
 
 /// Settle slots two assets are linked to, as two libraries that each linked one before
 /// they synced leave them: of the files linked to a slot a walk has read, one keeps its
-/// link and the others are unlinked, in one log line whose Undo links them back.
+/// link and the others are unlinked, in one log line. Its Undo links each back where no
+/// slot had more than two.
 ///
 /// Every computer keeps the same one: the file saved as what the slot holds, else the one
 /// whose link knew what it holds, else the one whose link has the slot's name, else the
@@ -1242,10 +1243,15 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
             claims.push((entity, held));
         }
     }
-    let unlinked: Vec<(u64, Held)> = slots
+    let settled: Vec<(u64, &Vec<(&LocalEntity, &Held)>)> = slots
         .values()
         .filter(|claims| claims.len() > 1)
         .filter_map(|claims| Some((kept(state, claims)?, claims)))
+        .collect();
+    // Linking one file back unlinks the kept one, so only one file per slot can be.
+    let undoable = settled.iter().all(|(_, claims)| claims.len() == 2);
+    let unlinked: Vec<(u64, Held)> = settled
+        .into_iter()
         .flat_map(|(kept, claims)| {
             let others = claims.iter().filter(move |(entity, _)| entity.id != kept);
             others.map(|(entity, held)| (entity.id, (*held).clone()))
@@ -1261,10 +1267,12 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
         "{} unlinked from a slot another file is linked to.",
         counted(unlinked.len(), "file", "files")
     ));
-    log.offer(crate::log::Undo::Reclaim {
-        keyboard,
-        links: unlinked,
-    });
+    if undoable {
+        log.offer(crate::log::Undo::Reclaim {
+            keyboard,
+            links: unlinked,
+        });
+    }
 }
 
 /// Which of the files linked to one slot [`settle_claims`] keeps. `None` while no walk has
@@ -3991,8 +3999,8 @@ mod tests {
         assert_eq!(keeps(&neither, [greater, lesser]), [linked, off]);
     }
 
-    #[test]
-    fn a_slot_two_files_claim_is_settled_once_read_and_undo_links_the_other_back() {
+    /// Files all linked to one slot of bank 2, which is then read holding the first.
+    fn claiming(files: &[(&str, Vec<u8>)]) -> (crate::testing::Bench, Vec<u64>) {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
         bench.device.pretend_attached();
@@ -4000,26 +4008,29 @@ mod tests {
         let keyboard = bench.device.state.keyboard().cloned().unwrap();
         let slot = Location::from_user(2, 1);
         let held = Held::new(class, slot, "", print(&body())).unwrap();
-        let [first, second] = [("A.ne5p", body()), ("B.ne5p", gained("40"))]
-            .map(|(name, bytes)| file(&mut bench, name, bytes));
-        for id in [first, second] {
+        let ids: Vec<u64> = files
+            .iter()
+            .map(|(name, bytes)| file(&mut bench, name, bytes.clone()))
+            .collect();
+        for id in &ids {
             let link = crate::link::Link {
                 keyboard: keyboard.clone(),
                 held: Some(held.clone()),
             };
-            bench.workspace.follow_links(id, vec![link]);
+            bench.workspace.follow_links(*id, vec![link]);
         }
         heard(&mut bench);
-        let linked =
-            |bench: &crate::testing::Bench| [first, second].map(|id| held_at(bench, id).is_some());
-        assert_eq!(linked(&bench), [true, true], "bank 2 is unread");
+        assert!(
+            ids.iter().all(|id| held_at(&bench, *id).is_some()),
+            "bank 2 is unread"
+        );
 
         let info = ProgramInfo {
             location: slot,
             body_len: 121,
             format: "ne5p".into(),
             version: 4,
-            crc32: Some(print(&body()).crc),
+            crc32: Some(print(&files[0].1).crc),
             modified: None,
             name: "A".into(),
         };
@@ -4029,6 +4040,14 @@ mod tests {
             slots: vec![Some(info)],
         });
         heard(&mut bench);
+        (bench, ids)
+    }
+
+    #[test]
+    fn a_slot_two_files_claim_is_settled_once_read_and_undo_links_the_other_back() {
+        let (mut bench, ids) = claiming(&[("A.ne5p", body()), ("B.ne5p", gained("40"))]);
+        let pair = [ids[0], ids[1]];
+        let linked = |bench: &crate::testing::Bench| pair.map(|id| held_at(bench, id).is_some());
         assert_eq!(linked(&bench), [true, false]);
         assert!(bench
             .log
@@ -4040,6 +4059,27 @@ mod tests {
         );
         heard(&mut bench);
         assert_eq!(linked(&bench), [false, true], "the other one, in its place");
+        assert_eq!(bench.log.status().1, "Linked “B” again.");
+    }
+
+    /// Linking one back unlinks the kept one, so of several only the last would end up
+    /// linked.
+    #[test]
+    fn a_slot_three_files_claim_is_settled_with_no_undo() {
+        let files = [
+            ("A.ne5p", body()),
+            ("B.ne5p", gained("40")),
+            ("C.ne5p", gained("41")),
+        ];
+        let (mut bench, ids) = claiming(&files);
+        let linked: Vec<bool> = ids
+            .iter()
+            .map(|id| held_at(&bench, *id).is_some())
+            .collect();
+        assert_eq!(linked, [true, false, false]);
+        let line = "2 files unlinked from a slot another file is linked to.";
+        assert!(bench.log.iter().any(|entry| entry.text == line));
+        assert!(!bench.log.press(line), "no Undo");
     }
 
     #[test]
