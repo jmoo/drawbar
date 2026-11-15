@@ -1349,6 +1349,10 @@ impl Browser {
         let item = Item::Local(id);
         offer(ui, "Open", None, Act::Open(item), acts);
         self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
+        let standing = crate::device::standing_of(&device.state, entity);
+        if standing.is_some_and(|linked| linked.standing.needs_attention()) {
+            offer(ui, "Choose…", None, Act::Choose(id), acts);
+        }
         offer(ui, "Export…", None, Act::Export(id), acts);
         if ui.button("Rename").clicked() {
             self.start_rename(item, &entity.name);

@@ -9303,3 +9303,79 @@ fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
     let held = entity.held_on(&keyboard).expect("still linked");
     assert_eq!(held.spot, Spot::at(at));
 }
+
+impl Session {
+    /// Drain what the instrument reported, as a frame does.
+    fn heard(&mut self) {
+        let Bench {
+            log,
+            workspace,
+            tabs,
+            queue,
+            device,
+            ..
+        } = &mut self.bench;
+        device.poll(log, workspace, tabs, queue);
+    }
+}
+
+#[test]
+fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    let class = ObjectClass::Program;
+    let at = Location::from_user(1, 1);
+    let print = |bytes: &[u8]| crate::workspace::print_of(bytes).unwrap();
+    let device = &mut session.bench.device;
+    device.pretend_partitions(&crate::device::ELECTRO5);
+    device.pretend_geometry(class, &[("A", 1)]);
+    device.pretend_bodies(class, 1, &[Some(("untitled", print(&new).crc))]);
+    let keyboard = device.state.keyboard().unwrap();
+    let held = Held::new(class, Spot::at(at), print(&old)).unwrap();
+    session.link(id, &keyboard, held);
+    session.heard();
+    let Bench {
+        device,
+        workspace,
+        log,
+        ..
+    } = &mut session.bench;
+    crate::bring::bring_in(device, workspace, log);
+    device.pretend(crate::device::DeviceEvent::Got {
+        name: "untitled".into(),
+        origin: Origin::Device { class, at },
+        bytes: new.clone(),
+        why: crate::device::Purpose::Pull,
+    });
+    session.heard();
+    session.decided();
+    assert_eq!(root.read("untitled.ne5p"), new, "brought in");
+    let standing = |session: &Session| {
+        let entity = session.bench.workspace.get(id).unwrap();
+        crate::device::standing_of(&session.bench.device.state, entity).map(|it| it.standing)
+    };
+    assert_eq!(standing(&session), Some(crate::link::Standing::Same));
+
+    session.undo();
+    session.refocus();
+    session.read_all();
+    assert_eq!(root.read("untitled.ne5p"), old, "one step takes it back");
+    assert_eq!(session.only(), id);
+    assert_eq!(session.bytes(id), old);
+    assert_eq!(standing(&session), Some(crate::link::Standing::Ahead));
+    session.heard();
+    let pulls = session.bench.device.queued().iter().filter(|cmd| {
+        matches!(
+            cmd,
+            crate::device::DeviceCmd::Get {
+                why: crate::device::Purpose::Pull,
+                ..
+            }
+        )
+    });
+    assert_eq!(pulls.count(), 1, "not brought in again");
+}

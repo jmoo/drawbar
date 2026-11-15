@@ -241,6 +241,8 @@ pub enum Click {
     Load(ObjectClass, Location),
     /// Build this project into the instrument it describes.
     Build,
+    /// Ask which of this document and its slot is current.
+    Choose,
 }
 
 /// What an editor adds to the header that the asset alone does not say.
@@ -304,6 +306,7 @@ pub(super) struct Clicked {
     /// Whether the document is to be queued for a free slot.
     pub pick: bool,
     pub build: bool,
+    pub choose: bool,
     /// The slot the panel is to play, where Load on instrument was clicked.
     pub load: Option<(ObjectClass, Location)>,
     /// The face picked, where one was.
@@ -549,6 +552,7 @@ fn right(
             (true, Click::Pick) => act.pick = true,
             (true, Click::Load(class, at)) => act.load = Some((class, at)),
             (true, Click::Build) => act.build = true,
+            (true, Click::Choose) => act.choose = true,
             (false, _) | (true, Click::Nothing) => {}
         }
     }
@@ -1226,10 +1230,9 @@ fn phrase(mark: Mark, waiting: bool, standing: Standing) -> StateLine {
     }
 }
 
-/// The one loud action, and which of its three states it is in: a send to a free slot
-/// for a document with no link, a load of a slot that holds it, or a send to a slot that
-/// holds an earlier version. `None` where only the user can say which of the two is
-/// current.
+/// The one loud action, and which of its four states it is in: a send to a free slot
+/// for a document with no link, a load of a slot that holds it, a send to a slot that
+/// holds an earlier version, or the question of which of the two is current.
 ///
 /// A project's is its build, which [`project::loud`] gives.
 ///
@@ -1278,7 +1281,15 @@ pub(super) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
         ));
     };
     match (linked.standing, linked.at) {
-        (Standing::Theirs | Standing::Both, _) => None,
+        (Standing::Theirs | Standing::Both, _) => Some(Loud {
+            short: "Choose".to_string(),
+            glyph: Glyph::CircleAlert,
+            ..send(
+                "Choose…".to_string(),
+                "which of this and the keyboard’s is current".to_string(),
+                Click::Choose,
+            )
+        }),
         (Standing::Same | Standing::Unread, Some(at)) => Some(Loud {
             short: "Load".to_string(),
             glyph: Glyph::Keyboard,
@@ -1767,8 +1778,10 @@ mod tests {
         assert_eq!(held.hint, "replaces Set lists 7:4");
 
         device.pretend_bodies(class, 7, &[None, None, None, Some(("Blue Room", 7))]);
-        assert!(
-            action(workspace.get(id).unwrap(), &device.state).is_none(),
+        let held = action(workspace.get(id).unwrap(), &device.state).unwrap();
+        assert_eq!(
+            (held.label.as_str(), held.click),
+            ("Choose…", Click::Choose),
             "the keyboard changed it"
         );
     }

@@ -1256,6 +1256,7 @@ impl eframe::App for DrawbarApp {
         if self.shell.zoom_open {
             self.shell.zoom_open = self.zoom_popover(ctx, frame);
         }
+        self.asks(ctx);
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
@@ -1303,6 +1304,32 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
+    /// The questions drawbar asks about linked files and the answers given, and an Undo
+    /// pressed in the activity log.
+    fn asks(&mut self, ctx: &egui::Context) {
+        use crate::bring::Answer;
+
+        let (device, workspace, log) = (&mut self.device, &mut self.workspace, &mut self.log);
+        if let Some(found) = &device.asks.since {
+            match crate::bring::since_sheet(ctx, found, workspace) {
+                Some(Answer::Yes) => crate::bring::bring_in(device, workspace, log),
+                Some(Answer::Other | Answer::No) => device.asks.since = None,
+                None => {}
+            }
+        }
+        if let Some(choosing) = &device.asks.choosing {
+            match crate::bring::choice_sheet(ctx, choosing, workspace) {
+                Some(Answer::Yes) => {
+                    crate::bring::use_mine(device, workspace, &mut self.queue, log)
+                }
+                Some(Answer::Other) => crate::bring::use_keyboards(device, workspace, log),
+                Some(Answer::No) => device.asks.choosing = None,
+                None => {}
+            }
+        }
+        log.undo_pressed(workspace, &mut self.queue);
+    }
+
     /// The row of tabs between the two panel toggles, and the front tab's view in the
     /// document card under it.
     ///
@@ -1433,6 +1460,9 @@ impl DrawbarApp {
         }
         if wants.build {
             acts.push(browser::Act::Build(id));
+        }
+        if wants.choose {
+            acts.push(browser::Act::Choose(id));
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));

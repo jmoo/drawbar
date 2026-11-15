@@ -171,6 +171,8 @@ pub enum Act {
     },
     /// Stop waiting to send this one. Nothing is deleted.
     Unqueue(u64),
+    /// Ask which of a file and its slot on the attached keyboard is current.
+    Choose(u64),
     /// Empty the queue. Nothing is deleted, so it asks nothing.
     ClearQueue,
     /// Write everything in the queue, grouped by folder. Already confirmed.
@@ -323,6 +325,7 @@ impl Act {
             | Act::Export(id)
             | Act::SaveDoc(id)
             | Act::WriteBack(id)
+            | Act::Choose(id)
             | Act::Revert(id) => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
             Act::ExportBundle { ids, reading, .. } => [ids.as_slice(), reading].concat(),
@@ -769,6 +772,7 @@ pub fn apply(
             Act::Retarget { id, class, at } => {
                 retarget(workspace, device, queue, log, id, class, at)
             }
+            Act::Choose(id) => crate::bring::choose(device, workspace, log, id),
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
@@ -1749,7 +1753,10 @@ fn save_doc(
         match bound {
             // Already waiting for that slot, so the save only moved the baseline.
             Some(Bound::At(class, at)) if waiting != Some((class, at)) => {
-                enqueue(workspace, device, queue, log, id, class, at)
+                enqueue(workspace, device, queue, log, id, class, at);
+                if queue.holds(id) {
+                    log.offer(crate::log::Undo::Unqueue(id));
+                }
             }
             _ => log.say(saved),
         }

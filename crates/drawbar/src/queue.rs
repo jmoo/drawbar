@@ -851,7 +851,7 @@ fn wire_sum(bytes: &[u8]) -> Option<(Range<usize>, u32)> {
 /// otherwise it is an offset into the wire body. Bodies are compared as the wire carries
 /// them, without their file containers, because two containers of one body can differ
 /// in their headers alone.
-fn compare(here: &[u8], there: &[u8]) -> Diff {
+pub(crate) fn compare(here: &[u8], there: &[u8]) -> Diff {
     let (mine, held) = match (wire_body(here), wire_body(there)) {
         (Some(mine), Some(held)) => (mine, held),
         // Not a container this app can unwrap, so the whole input is compared.
@@ -1242,7 +1242,7 @@ pub fn table(ui: &mut egui::Ui, held: &Queued, name: &str) {
 
     let renamed = held.renames(name);
     let Diff::Fields(fields) = &held.diff else {
-        let (glyph, tint, said) = summarize(held, ui.visuals());
+        let (glyph, tint, said) = summary(&held.diff, held.class, held.at, ui.visuals());
         one_row(ui, width, &tracks, glyph, tint, &said);
         if let Some((was, given)) = renamed {
             field_row(ui, width, &tracks, NAME_ROW, was, &given);
@@ -1271,13 +1271,18 @@ const NAME_ROW: &str = "Name";
 ///
 /// ⚠️ Only a slot read and found empty is free. While the read is out, this says only
 /// that it is out.
-fn summarize(held: &Queued, visuals: &egui::Visuals) -> (Glyph, egui::Color32, String) {
+pub(crate) fn summary(
+    diff: &Diff,
+    class: ObjectClass,
+    at: Location,
+    visuals: &egui::Visuals,
+) -> (Glyph, egui::Color32, String) {
     let quiet = visuals.weak_text_color();
-    match &held.diff {
+    match diff {
         Diff::Pending => (
             Glyph::Gauge,
             quiet,
-            format!("reading what is in {}…", place(held.class, held.at)),
+            format!("reading what is in {}…", place(class, at)),
         ),
         Diff::Empty => (Glyph::CircleCheck, good(visuals), "the slot is free".into()),
         Diff::Identical => (
