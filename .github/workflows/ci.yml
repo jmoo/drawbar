@@ -41,6 +41,9 @@ jobs:
           store-size: 8G
       - if: runner.os != 'Windows'
         run: nix build .#nord.tests .#nord.packages --print-build-logs
+      # The executables scripts/release.bash attaches to each release.
+      - if: runner.os == 'Linux'
+        run: nix build .#drawbar-windows .#nord-cli-windows --print-build-logs
       # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
       - if: runner.os == 'Windows'
         shell: bash
