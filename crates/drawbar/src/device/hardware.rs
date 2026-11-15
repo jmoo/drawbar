@@ -481,6 +481,8 @@ impl Rig {
         // sheet closes covers both.
         let read = device.asks.sheet.as_ref();
         if released || (self.syncing && read.is_some_and(|sheet| sheet.read(&device.state))) {
+            let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+            crate::bring::accept(device, &sync, workspace);
             acts.push(Act::SyncAll);
         }
         // As the app holds a send until the library's files are checked for outside

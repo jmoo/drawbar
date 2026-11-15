@@ -865,7 +865,10 @@ impl DrawbarApp {
             radius: 8.0,
         }
         .show(ui)
-        .on_hover_text(format!("Sync with the keyboard  {keys}"));
+        .on_hover_text(match troubled {
+            true => format!("Sync with the keyboard  {keys}\nA sound placed on a slot cannot go."),
+            false => format!("Sync with the keyboard  {keys}"),
+        });
         if sync.clicked() {
             acts.push(Act::Sync(None));
         }

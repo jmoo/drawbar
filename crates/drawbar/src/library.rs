@@ -745,7 +745,7 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option
         .filter(|row| matches!(row.item, Item::Local(id) if queue.holds(id)))
         .count();
     if waiting > 0 {
-        said.push(format!("{waiting} already waiting"));
+        said.push(format!("{waiting} already in Sync"));
     }
     for class in [ObjectClass::Piano, ObjectClass::Sample] {
         let short = rows
@@ -1530,7 +1530,7 @@ fn tooltip(
 ) -> String {
     match column {
         Column::Glyph | Column::Kind => word(row),
-        Column::Mark => row.said.clone(),
+        Column::Mark => crate::bring::said_as_hover(&row.said),
         Column::Name => row.name.clone(),
         Column::Tags => match worn(row, tags) {
             names if names.is_empty() => "no tags".to_string(),
@@ -2091,26 +2091,26 @@ mod tests {
                 row.said(&workspace, &Queue::default()),
             )
         };
-        assert_eq!(marked(Change::Ahead), ("↑", "Newer here".into()));
+        assert_eq!(marked(Change::Ahead), ("↑", "newer here".into()));
         assert_eq!(
             marked(Change::Theirs),
-            ("↓", "Newer on the keyboard".into())
+            ("↓", "newer on the keyboard".into())
         );
-        assert_eq!(marked(Change::Both), ("!", "Both changed".into()));
+        assert_eq!(marked(Change::Both), ("!", "both changed".into()));
         assert_eq!(
             marked(Change::Removed),
-            ("!", "Removed on the keyboard".into())
+            ("!", "removed on the keyboard".into())
         );
         let by = "Clav".to_string();
         assert_eq!(
             marked(Change::Replaced { by }),
-            ("!", "Replaced by “Clav”".into())
+            ("!", "replaced by “Clav”".into())
         );
         let moved = Change::Moved {
             to: at(6, 3),
             agrees: true,
         };
-        assert_eq!(marked(moved), ("!", "Moved to 7:4".into()));
+        assert_eq!(marked(moved), ("!", "moved to 7:4".into()));
     }
 
     #[test]
@@ -2129,7 +2129,7 @@ mod tests {
         let hover = |held: &Row| tooltip(held, Column::Mark, &tags, &workspace, &device);
         assert_eq!(hover(&held), "");
         held.mark = Some(Mark::Up);
-        held.said = "Newer here".into();
+        held.said = "newer here".into();
         assert_eq!(hover(&held), "Newer here");
     }
 
@@ -2182,7 +2182,7 @@ mod tests {
         );
         let picked: Vec<&Row> = going.iter().collect();
         let said = consequence(&picked, &device.state, &queue).unwrap_or_default();
-        assert!(said.contains("1 already waiting"), "{said}");
+        assert!(said.contains("1 already in Sync"), "{said}");
 
         // A row already on the instrument goes nowhere, so nothing is claimed for it.
         let there = vec![row(

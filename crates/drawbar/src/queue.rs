@@ -14,10 +14,10 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{bad, good, ui as ui_text, warn};
 use crate::bring::{Change, Row, Rows, Sheet, Way, DIFFERS};
 use crate::browser::{cell_ink, Act, Carried, Held, Item, Kind};
-use crate::device::{fit, Device, DeviceState, Expect, Fit};
+use crate::device::{fit, Device, DeviceState, Fit};
 use crate::fields::fields_of;
 use crate::icon::{painted, sized, Glyph};
-use crate::link::{Keyboard, Spot};
+use crate::link::{Keyboard, Spot, Standing};
 use crate::log::Log;
 use crate::menu::MENU_FOOT;
 use crate::panel::{cut, row_ink, Track, GAP, GLYPH, PAD};
@@ -33,9 +33,6 @@ pub struct Queued {
     pub at: Location,
     /// What the slot holds, as the last read of its bank found it.
     pub replaces: Occupancy,
-    /// Made by Sync for a row that is not a send placed by hand: it leaves the queue
-    /// once written, refused or failed, and is never a row of its own.
-    pub transient: bool,
     /// Why the last attempt to write it stopped. Cleared when it is queued again, and
     /// when [`refit`] finds that the attached instrument accepts it.
     pub failure: Option<String>,
@@ -67,10 +64,6 @@ pub enum Diff {
     Fields(Vec<FieldDiff>),
     /// One of them has no registry, so the difference is an offset into the wire body.
     Bytes { first_at: usize },
-    /// The wire bodies differ in length or checksum. A piano or sample, and an asset
-    /// resting in its file, are compared by those alone, so where their bytes first
-    /// differ is not looked for.
-    Checksum,
     /// There is nothing to replace.
     Empty,
 }
@@ -139,20 +132,6 @@ impl Occupancy {
         }
     }
 
-    /// What a write over the slot expects to find there; `None` while nothing has read
-    /// it.
-    pub fn expect(&self) -> Option<Expect> {
-        match self {
-            Occupancy::Unknown => None,
-            Occupancy::Vacant => Some(Expect::Vacant),
-            Occupancy::Held(held) => Some(Expect::Holds {
-                crc: held.crc,
-                len: held.body_len,
-                name: held.name.clone(),
-            }),
-        }
-    }
-
     pub fn occupant(&self) -> Option<&Occupant> {
         match self {
             Occupancy::Held(held) => Some(held),
@@ -212,7 +191,7 @@ pub fn enqueue(
     class: ObjectClass,
     at: Location,
 ) {
-    let Some(put) = place_in(workspace, device, queue, log, (id, class, at), false) else {
+    let Some(put) = place_in(workspace, device, queue, log, (id, class, at)) else {
         return;
     };
     let name = workspace.get(id).map_or("", |it| it.name.as_str());
@@ -228,17 +207,6 @@ pub fn enqueue(
     });
 }
 
-/// Queue a row's write for the batch Sync sends now, saying only what it refused.
-pub fn enqueue_transient(
-    workspace: &Workspace,
-    device: &mut Device,
-    queue: &mut Queue,
-    log: &mut Log,
-    waiting: Waiting,
-) {
-    place_in(workspace, device, queue, log, waiting, true);
-}
-
 /// Queue an asset as [`enqueue`] does, saying only what it refused.
 fn place_in(
     workspace: &Workspace,
@@ -246,7 +214,6 @@ fn place_in(
     queue: &mut Queue,
     log: &mut Log,
     (id, class, at): Waiting,
-    transient: bool,
 ) -> Option<Put> {
     let entity = workspace.get(id)?;
     let name = &entity.name;
@@ -262,13 +229,21 @@ fn place_in(
         return None;
     }
     let linked = crate::device::standing_of(&device.state, entity);
-    if !transient && linked.is_some_and(|it| (it.class, it.at) == (class, Some(at))) {
+    if linked.is_some_and(|it| (it.class, it.at) == (class, Some(at))) {
         crate::bring::open(device, Some(id));
+        return None;
+    }
+    let keyboard_side = matches!(
+        linked.map(|it| it.standing),
+        Some(Standing::Theirs | Standing::Both | Standing::Gone)
+    );
+    if keyboard_side {
+        log.trouble(format!("Sync “{}” first.", display_name(name)));
         return None;
     }
     let holds = Occupancy::of(&device.state, class, at);
     let keyboard = device.state.keyboard().cloned();
-    Some(queue.put(entity, (class, at), holds, keyboard, transient))
+    Some(queue.put(entity, (class, at), holds, keyboard))
 }
 
 /// Show every waiting entry what the cache of the attached keyboard says its slot holds
@@ -282,8 +257,8 @@ pub fn refresh(state: &DeviceState, queue: &mut Queue) {
     }
 }
 
-/// A write found its slot holding `holds` instead of what it expected. A send placed by
-/// hand keeps its place and shows it, saying why it stopped; a row's write leaves.
+/// A write found its slot holding `holds` instead of what it expected: a send placed by
+/// hand keeps its place and shows what is there now.
 pub fn changed_under(queue: &mut Queue, (id, class, at): Waiting, holds: Option<&ProgramInfo>) {
     let waiting = queue.list.iter_mut();
     let mut waiting = waiting.filter(|held| (held.id, held.class, held.at) == (id, class, at));
@@ -293,10 +268,6 @@ pub fn changed_under(queue: &mut Queue, (id, class, at): Waiting, holds: Option<
     held.replaces = holds.map_or(Occupancy::Vacant, |info| {
         Occupancy::Held(Occupant::of(info))
     });
-    held.failure = Some("Its slot changed on the keyboard.".to_string());
-    if held.transient {
-        queue.forget(id);
-    }
 }
 
 /// Why a write of `entity` into `at` would be refused for its name: a slot of the
@@ -337,7 +308,7 @@ fn label_of(workspace: &Workspace, id: u64) -> Option<String> {
 /// Why the instrument would refuse the second of two queued writes of one name.
 fn waiting(class: ObjectClass, other: Location) -> String {
     format!(
-        "Something waiting for {} has the same name.",
+        "Something going to {} on Sync has the same name.",
         place(class, other)
     )
 }
@@ -345,7 +316,7 @@ fn waiting(class: ObjectClass, other: Location) -> String {
 /// Why the instrument refuses a second object of the name `holder` already has.
 fn taken(class: ObjectClass, holder: Location) -> String {
     format!(
-        "{} already has its name, and the instrument keeps one of each name. Send it \
+        "{} already has its name, and the instrument keeps one of each name. Place it \
          there to replace that one, or rename it.",
         place(class, holder)
     )
@@ -356,8 +327,7 @@ fn taken(class: ObjectClass, holder: Location) -> String {
 ///
 /// ⚠️ The queue outlives a disconnection, so each entry was checked against whatever was
 /// attached when it was queued. An entry this instrument refuses keeps its place and
-/// carries the reason. A send leaves it out of the batch, so nothing writes it until it
-/// is queued again against an instrument that accepts it.
+/// carries the reason, and its row goes nowhere until the instrument takes it.
 pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log: &mut Log) {
     // A rename after queueing can give two entries one name. The first in the queue is
     // written first, so the later one is held back.
@@ -405,9 +375,6 @@ pub fn refit(workspace: &Workspace, state: &DeviceState, queue: &mut Queue, log:
         }
         held.failure = refusal;
     }
-    queue
-        .list
-        .retain(|held| !(held.transient && held.failure.is_some()));
 }
 
 /// Discard what the previous instrument reported about the slots being waited for.
@@ -477,7 +444,6 @@ impl Queue {
         (class, at): (ObjectClass, Location),
         replaces: Occupancy,
         keyboard: Option<Keyboard>,
-        transient: bool,
     ) -> Put {
         let same = |held: &&mut Queued| (held.id, held.class, held.at) == (entity.id, class, at);
         if let Some(held) = self.list.iter_mut().find(same) {
@@ -497,7 +463,6 @@ impl Queue {
             class,
             at,
             replaces,
-            transient,
             failure: None,
             keyboard,
         });
@@ -533,35 +498,6 @@ impl Queue {
     /// nothing to the instrument.
     pub fn clear(&mut self) {
         self.list.clear();
-    }
-
-    /// Record why a write into `class` stopped, on the entry it stopped on.
-    ///
-    /// ⚠️ A batch writes its entries in queue order and each written entry leaves the
-    /// queue, so the entry it stopped on is the first of that class still waiting without
-    /// a failure. Entries that already carry one were left out of the batch, and no write
-    /// reached them.
-    pub fn stumbled(&mut self, class: ObjectClass, why: &str) {
-        if let Some(held) = self
-            .list
-            .iter_mut()
-            .find(|held| held.class == class && held.failure.is_none())
-        {
-            held.failure = Some(why.to_string());
-        }
-        self.list
-            .retain(|held| !(held.transient && held.failure.is_some()));
-    }
-
-    /// Take out every entry Sync made for a row, written or not: the rows stand for them.
-    pub fn forget_transient(&mut self) {
-        self.list.retain(|held| !held.transient);
-    }
-
-    /// Take out each entry Sync made for a row that is not among `sent`.
-    pub fn forget_unsent(&mut self, sent: &[u64]) {
-        self.list
-            .retain(|held| !held.transient || sent.contains(&held.id));
     }
 
     pub fn holds(&self, id: u64) -> bool {
@@ -779,7 +715,13 @@ fn head(ui: &mut egui::Ui, device: &DeviceState) -> bool {
 
 /// The sheet's foot: what to know before writing, then Not now and Sync. Returns false
 /// when the sheet should close.
-fn foot(ui: &mut egui::Ui, sheet: &Sheet, drawn: &Drawn, read: bool, acts: &mut Vec<Act>) -> bool {
+fn foot(
+    ui: &mut egui::Ui,
+    sheet: &mut Sheet,
+    drawn: &Drawn,
+    read: bool,
+    acts: &mut Vec<Act>,
+) -> bool {
     let visuals = ui.visuals().clone();
     let whole = ui.max_rect();
     let rect = egui::Rect::from_min_max(egui::pos2(whole.left(), whole.bottom() - 58.0), whole.max);
@@ -795,35 +737,27 @@ fn foot(ui: &mut egui::Ui, sheet: &Sheet, drawn: &Drawn, read: bool, acts: &mut 
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
     bar.spacing_mut().item_spacing.x = 8.0;
-    let refused = |row: &Row| {
-        let entry = drawn.queue.entry(row.id).filter(|held| !held.transient);
-        entry.is_some_and(|held| held.failure.is_some())
-    };
-    let going: Vec<(&Row, Way)> = drawn
-        .rows
-        .iter()
-        .filter(|row| !refused(row))
-        .filter_map(|row| Some((row, sheet.way(row, drawn.workspace)?)))
-        .collect();
-    let label = match going.len() {
+    let plan = crate::bring::plan(sheet, &drawn.rows, drawn.device, drawn.workspace);
+    let label = match plan.len() {
         0 => "Sync".to_string(),
         n => format!("Sync {n}"),
     };
-    let live = read && !going.is_empty();
+    let live = read && !plan.is_empty();
     let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live)
         .on_disabled_hover_text(match read {
             true => "Pick a direction for a row first.",
             false => "Reading the keyboard…",
         });
+    let up = plan.iter().filter(|step| step.way == Way::Up);
+    let up = up.filter_map(|step| Some((step.row.class, drawn.workspace.get(step.row.id)?)));
+    let warnings = crate::browser::send_warnings(up, drawn.device);
     if sync.clicked() {
+        sheet.accept(plan);
         acts.push(Act::SyncAll);
     }
     if crate::panel::tonal_button(&mut bar, None, "Not now").clicked() {
         open = false;
     }
-    let up = going.iter().filter(|(_, way)| *way == Way::Up);
-    let up = up.filter_map(|(row, _)| Some((row.class, drawn.workspace.get(row.id)?)));
-    let warnings = crate::browser::send_warnings(up, drawn.device);
     if let Some(first) = warnings.first() {
         let room = bar.available_width();
         bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |bar| {
@@ -875,7 +809,9 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &
         .auto_shrink([false; 2])
         .show(&mut column, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            for row in &drawn.rows {
+            let shown = drawn.rows.iter();
+            let shown = shown.filter(|row| sheet.shows(row, &drawn.rows, drawn.workspace));
+            for row in shown.collect::<Vec<_>>() {
                 if item(ui, row, sheet, drawn, acts).clicked() {
                     sheet.picked = Some(row.id);
                 }
@@ -891,23 +827,25 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, read: bool, acts: &
     let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
     let words = row.said(drawn.workspace, drawn.queue);
     title(&mut pane, &entity.name, &words);
-    let way = sheet.way(row, drawn.workspace);
-    let (sign, toward) = match way {
-        Some(Way::Up) => ("↑", "to the keyboard"),
-        Some(Way::Down) => ("↓", "to this computer"),
-        None => ("!", "pick a direction"),
+    let way = sheet.way(row, &drawn.rows, drawn.workspace);
+    let said = match (way, &row.change) {
+        (None, _) => "! pick a direction".to_string(),
+        (Some(Way::Up), _) => "↑ to the keyboard".to_string(),
+        (Some(Way::Down), Change::Moved { to, .. }) => format!("link follows to {}", shown(*to)),
+        (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink".to_string(),
+        (Some(Way::Down), _) => "↓ to this computer".to_string(),
     };
     let ink = match way {
         Some(_) => warn(pane.visuals()),
         None => bad(pane.visuals()),
     };
-    pane.label(egui::RichText::new(format!("{sign} {toward}")).color(ink));
+    pane.label(egui::RichText::new(said).color(ink));
     pane.add_space(4.0);
     let shown = sheet.shown.as_ref().filter(|it| it.id == row.id);
     let (Some(shown), Some(at)) = (shown, row.at) else {
         return;
     };
-    let entry = drawn.queue.entry(row.id).filter(|held| !held.transient);
+    let entry = placed(row, drawn.queue);
     let renamed = entry.and_then(|held| held.renames(&entity.name));
     table(
         &mut pane,
@@ -995,7 +933,7 @@ fn summary(
         Diff::Pending => (quiet, format!("reading what is in {}…", place(class, at))),
         Diff::Empty => (good(visuals), "the slot is free".into()),
         Diff::Identical => (quiet, "the keyboard holds the same".into()),
-        Diff::Fields(_) | Diff::Bytes { .. } | Diff::Checksum => (warn(visuals), DIFFERS.into()),
+        Diff::Fields(_) | Diff::Bytes { .. } => (warn(visuals), DIFFERS.into()),
     }
 }
 
@@ -1044,11 +982,11 @@ fn item(
         box_(rect.right() - PAD, SMALL).shrink(2.0),
         cell_ink(selected, leaving, &visuals),
     );
-    let placed = drawn.queue.entry(row.id).filter(|held| !held.transient);
+    let placed = placed(row, drawn.queue);
     if leave.on_hover_text("leave out of Sync").clicked() {
         match placed {
             Some(_) => acts.push(Act::Unqueue(row.id)),
-            None => sheet.skip(row.id),
+            None => sheet.skip(row),
         }
     }
     let right = way_control(
@@ -1114,6 +1052,13 @@ fn item(
     response.on_hover_text(format!("{}\n{words}", entity.name))
 }
 
+/// The send placed by hand a row stands for.
+fn placed<'a>(row: &Row, queue: &'a Queue) -> Option<&'a Queued> {
+    matches!(row.change, Change::Placed { .. })
+        .then(|| queue.entry(row.id))
+        .flatten()
+}
+
 /// The way control's width.
 const WAY: f32 = 44.0;
 
@@ -1130,7 +1075,7 @@ fn way_control(
     drawn: &Drawn,
     box_: egui::Rect,
 ) -> f32 {
-    let way = sheet.way(row, drawn.workspace);
+    let way = sheet.way(row, &drawn.rows, drawn.workspace);
     let ways = row.ways(drawn.workspace).allowed;
     let text = match (way, &row.change) {
         (None, _) => "!",
@@ -1156,15 +1101,16 @@ fn way_control(
         egui::FontId::proportional(NAME),
         ink,
     );
-    let hover = match (way, row.down_blocked(drawn.workspace)) {
-        (None, _) => format!("click to pick a direction\n{ARROWS}"),
-        (_, Some(why)) if !matches!(row.change, Change::Placed | Change::Plays { .. }) => {
-            format!("{ARROWS}\n{why}")
-        }
-        _ => ARROWS.to_string(),
+    let both = matches!(row.change, Change::Ahead | Change::Theirs | Change::Both);
+    let blocked = row.down_blocked(drawn.workspace).filter(|_| both);
+    let hover = match (way, blocked.map(crate::bring::Blocked::hint)) {
+        (None, Some(why)) => format!("click to pick a direction\n{ARROWS}\n{why}"),
+        (None, None) => format!("click to pick a direction\n{ARROWS}"),
+        (Some(_), Some(why)) => format!("{ARROWS}\n{why}"),
+        (Some(_), None) => ARROWS.to_string(),
     };
     if response.on_hover_text(hover).clicked() && turns {
-        sheet.flip(row, drawn.workspace);
+        sheet.flip(row, &drawn.rows, drawn.workspace);
     }
     box_.left() - GAP
 }
@@ -1640,7 +1586,6 @@ mod tests {
             (class, at(0)),
             Occupancy::Vacant,
             None,
-            false,
         );
         assert!(matches!(landed, Put::Made));
 
@@ -1649,7 +1594,6 @@ mod tests {
             (class, at(0)),
             Occupancy::Vacant,
             None,
-            false,
         );
         assert!(
             matches!(landed, Put::Instead(displaced) if displaced == first),
@@ -1662,14 +1606,12 @@ mod tests {
             (class, at(1)),
             Occupancy::Vacant,
             None,
-            false,
         );
         let landed = queue.put(
             workspace.get(first).unwrap(),
             (class, at(2)),
             Occupancy::Vacant,
             None,
-            false,
         );
         assert!(matches!(landed, Put::Moved), "one slot per asset");
         assert_eq!(queue.ids(), vec![second, first]);
@@ -1680,7 +1622,6 @@ mod tests {
             (class, at(2)),
             Occupancy::Vacant,
             None,
-            false,
         );
         assert!(matches!(landed, Put::Standing));
         assert_eq!(queue.ids(), vec![second, first]);
@@ -1742,18 +1683,11 @@ mod tests {
                 (class, at(slot as u32)),
                 Occupancy::Vacant,
                 None,
-                false,
             );
         }
 
         queue.forget(ids[0]);
-        queue.stumbled(class, "Programs 7:2 is occupied");
         assert_eq!(queue.ids(), ids[1..], "the rest are still waiting");
-        assert_eq!(
-            queue.entry(ids[1]).and_then(|held| held.failure.as_deref()),
-            Some("Programs 7:2 is occupied"),
-        );
-        assert!(queue.entry(ids[2]).unwrap().failure.is_none());
     }
 
     /// The diff between two bodies with registries lists only the fields that differ.
@@ -1854,7 +1788,7 @@ mod tests {
             id: program,
             class: ObjectClass::Program,
             at: Some(at(0)),
-            change: Change::Placed,
+            change: Change::Placed { refused: false },
         };
         let played = Row {
             id: piano,
@@ -1876,6 +1810,68 @@ mod tests {
             [placed],
             "already there"
         );
+    }
+
+    /// The piano a program plays goes when its program goes: leave the program out and
+    /// the piano's row is gone from the sheet and from Sync. With no room for the piano it
+    /// goes nowhere and is not counted, and the program still goes.
+    #[test]
+    fn a_played_pianos_row_follows_its_program_and_one_with_no_room_is_not_counted() {
+        use crate::bring::{plan, Change, Rows};
+        let (mut workspace, mut log, fresh) = bench();
+        workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
+        let (_, bytes) =
+            crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let counted = |device: &mut Device, skip: bool| {
+            let queue = after_queueing(&workspace, device, program);
+            crate::bring::open(device, None);
+            while let Some(class) = device.state.scan.take() {
+                device.state.scan.finished(class);
+            }
+            let sync = Rows::of(&device.state, &workspace, &queue);
+            let sheet = device.asks.sheet.as_mut().expect("open");
+            let placed = sync.list.iter().find(|row| row.id == program).unwrap();
+            if skip {
+                sheet.skip(placed);
+            }
+            let steps = plan(sheet, &sync.list, &device.state, &workspace);
+            let shown = sync
+                .list
+                .iter()
+                .filter(|row| sheet.shows(row, &sync.list, &workspace));
+            let shown: Vec<bool> = shown
+                .map(|row| matches!(row.change, Change::Plays { .. }))
+                .collect();
+            (steps.len(), shown)
+        };
+        assert_eq!(
+            counted(&mut pianos_read(&workspace, 2, "Grand"), false),
+            (2, vec![false, true])
+        );
+        assert_eq!(
+            counted(&mut pianos_read(&workspace, 2, "Grand"), true),
+            (0, vec![false]),
+            "left out, it takes its piano with it"
+        );
+        let mut full = pianos_read(&workspace, 2, "Grand");
+        full.pretend_lengths(
+            ObjectClass::Piano,
+            1,
+            &[Some(("Grand", 1000)), Some(("Upright", 9))],
+        );
+        full.pretend_lengths(
+            ObjectClass::Piano,
+            2,
+            &[Some(("Rhodes", 9)), Some(("Wurly", 9))],
+        );
+        assert_eq!(counted(&mut full, false), (1, vec![false, true]), "no room");
     }
 
     #[test]
@@ -1935,13 +1931,13 @@ mod tests {
             testing::painted(&frame())
         };
         let shown = painted(tine);
-        let row = testing::where_(&shown, "replaces “Bright Wurly”");
+        let row = testing::where_(&shown, "to 1:3 · replaces “Bright Wurly”");
         assert!(
             row.top() > testing::where_(&shown, "Tine").bottom() - 1.0,
             "the word sits under the name: {row:?}"
         );
-        assert!(shown.iter().any(|word| word.text == "Newer here"));
-        assert!(shown.iter().any(|word| word.text == "new"));
+        assert!(shown.iter().any(|word| word.text == "newer here"));
+        assert!(shown.iter().any(|word| word.text == "to 1:1 · new"));
     }
 
     /// Retargeting a waiting asset moves its entry without adding a second. The entry

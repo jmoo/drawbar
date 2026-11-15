@@ -30,6 +30,7 @@ mod row;
 mod selection;
 mod tree;
 
+pub(crate) use act::batches;
 pub use act::{
     apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
     LOAD_ON_INSTRUMENT, SYNC,

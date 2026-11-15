@@ -1212,6 +1212,7 @@ impl Browser {
         let kind = Kind::of(entity);
         let selected = self.selection.holds(item);
         let sync = self.synced.of(workspace, device, queue);
+        let dot = mark(&sync, entity.id, ui.visuals());
 
         // While a name is being typed, the row senses nothing: a drag sense over the
         // field would take the clicks that place the cursor.
@@ -1242,7 +1243,7 @@ impl Browser {
                 name: &entity.name,
                 note: trouble.or(owed.as_deref()).or(Some(word.as_str())),
                 unsaved: entity.is_unsaved(),
-                dot: mark(&sync, entity.id, ui.visuals()),
+                dot: dot.as_ref().map(|(ink, said)| (*ink, said.as_str())),
                 tags: wears,
                 child: true,
                 gray: !self.followed,
@@ -1996,13 +1997,14 @@ pub(crate) fn slot_items(
 }
 
 /// The status dot on a local row, with its color and hover text.
-fn mark<'a>(
-    sync: &'a crate::bring::Rows,
+fn mark(
+    sync: &crate::bring::Rows,
     id: u64,
     visuals: &egui::Visuals,
-) -> Option<(egui::Color32, &'a str)> {
+) -> Option<(egui::Color32, String)> {
     let (mark, said) = crate::library::keyboard_mark(sync, id)?;
-    Some((crate::library::mark_ink(mark, visuals), said))
+    let ink = crate::library::mark_ink(mark, visuals);
+    Some((ink, crate::bring::said_as_hover(said)))
 }
 
 /// Where a queued asset is going, for the note that says so.

@@ -556,7 +556,7 @@ fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
         };
         ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
         if let Some(mark) = picked.mark {
-            let said = format!(" · {}", picked.said.to_lowercase());
+            let said = format!(" · {}", picked.said);
             let ink = mark_ink(mark, ui.visuals());
             ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
         }

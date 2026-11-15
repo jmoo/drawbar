@@ -1718,9 +1718,8 @@ struct Running {
     rescan: Vec<(ObjectClass, u32)>,
     /// The [`DeviceCmd::Reload`] to send once the write has landed.
     reload: Option<DeviceCmd>,
-    /// The class the command writes into, so a refusal can be recorded against the queue
-    /// entry it stopped on.
-    writing: Option<ObjectClass>,
+    /// What the command writes: a view back to its slot, or a Sync's batch.
+    writing: Option<Writing>,
     /// A rescan or reload the app queued after a change. Its success stays off the status
     /// line, which keeps saying what the change did.
     follow_up: bool,
@@ -1728,6 +1727,15 @@ struct Running {
     respot: Option<Respot>,
     /// The slot the command reads to bring in, so a failed read brings nothing in later.
     pulling: Option<(ObjectClass, Location)>,
+}
+
+/// What a write the instrument is running writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Writing {
+    /// A view saved back to its slot.
+    Back,
+    /// A Sync's batch.
+    Batch,
 }
 
 /// Slots of one class whose links move. See [`Workspace::respot`].
@@ -1977,7 +1985,8 @@ impl Device {
             rescan,
             reload,
             writing: match &cmd {
-                DeviceCmd::Put { class, .. } | DeviceCmd::SendAll { class, .. } => Some(*class),
+                DeviceCmd::Put { .. } => Some(Writing::Back),
+                DeviceCmd::SendAll { .. } => Some(Writing::Batch),
                 _ => None,
             },
             follow_up: matches!(cmd, DeviceCmd::ScanBank { .. } | DeviceCmd::Reload { .. }),
@@ -2321,6 +2330,7 @@ impl Device {
                     self.disagreements(class, bank, workspace, log);
                     follow_names(&self.state, workspace, class, bank);
                     crate::queue::refresh(&self.state, queue);
+                    crate::queue::refit(workspace, &self.state, queue, log);
                 }
                 DeviceEvent::SlotInfo { class, at, info } => {
                     self.state.detail = Detail {
@@ -2359,7 +2369,7 @@ impl Device {
                     Purpose::Pull => {
                         if let Some((class, at)) = origin.slot() {
                             let name = info.name.trim();
-                            crate::bring::landed(self, workspace, log, class, at, bytes, name);
+                            crate::bring::landed(self, workspace, log, (class, at), bytes, name);
                         }
                     }
                 },
@@ -2427,7 +2437,8 @@ impl Device {
                     // what it plays.
                     self.pending
                         .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
-                    let synced = queue.holds(id);
+                    let running = self.running.as_ref();
+                    let synced = running.is_some_and(|it| it.writing == Some(Writing::Batch));
                     crate::queue::changed_under(queue, (id, class, at), holds.as_ref());
                     let name = workspace.get(id).map_or("", |entity| entity.name.as_str());
                     log.trouble(format!(
@@ -2461,8 +2472,7 @@ impl Device {
                         if let Some((class, at)) = running.pulling {
                             self.asks.unpull(class, at);
                         }
-                        if let Some(class) = running.writing {
-                            queue.stumbled(class, &text);
+                        if running.writing.is_some() {
                             self.pending
                                 .retain(|(cmd, _)| !matches!(cmd, DeviceCmd::SendAll { .. }));
                         }
@@ -4203,9 +4213,6 @@ mod tests {
         let class = ObjectClass::Program;
         bench.device.pretend_scanned(class, 1, &["", ""]);
         let id = file(&mut bench, "A.ne5p", body());
-        let keyboard = bench.device.state.keyboard().cloned().unwrap();
-        let held = Held::new(class, at(1), "", print(&body())).unwrap();
-        bench.workspace.link(id, &keyboard, held);
         crate::queue::enqueue(
             &bench.workspace,
             &mut bench.device,
@@ -4215,6 +4222,9 @@ mod tests {
             class,
             at(2),
         );
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let held = Held::new(class, at(1), "", print(&body())).unwrap();
+        bench.workspace.link(id, &keyboard, held);
         bench.device.pending.clear();
 
         bench.device.pretend_serial("B2");
@@ -4252,15 +4262,13 @@ mod tests {
         bench.act(vec![crate::browser::Act::SaveDoc(id)]);
         bench.act(vec![crate::browser::Act::Unqueue(id)]);
         bench.sync();
-        let entry = bench.queue.entry(id).unwrap();
-        assert_eq!(
-            (entry.keyboard.as_ref(), entry.failure.as_deref(), entry.at),
-            (Some(&other), None, at(1)),
+        let written = bench.device.queued().into_iter().any(|cmd| {
+            let to = |it: &Outgoing| (it.id, it.at) == (id, at(1));
+            matches!(cmd, DeviceCmd::SendAll { items, .. } if items.iter().any(to))
+        });
+        assert!(
+            written,
             "Sync writes it to its slot on the keyboard attached now"
         );
-        let written = bench.device.queued().into_iter().any(|cmd| {
-            matches!(cmd, DeviceCmd::SendAll { items, .. } if items.iter().any(|it| it.id == id))
-        });
-        assert!(written);
     }
 }

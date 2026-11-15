@@ -34,7 +34,7 @@ impl State {
         match self {
             State::Sync => "newer here or on the keyboard, or placed on a slot by hand",
             State::Attention => {
-                "changed on both sides, or emptied on the keyboard, since it was last synced"
+                "changed on both sides, or moved, replaced or removed on the keyboard"
             }
         }
     }

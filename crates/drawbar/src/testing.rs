@@ -556,6 +556,13 @@ impl Bench {
     pub fn sync(&mut self) {
         self.act(vec![Act::Sync(None)]);
         self.land();
+        self.press();
+    }
+
+    /// Press the sheet's Sync on what it shows now.
+    pub fn press(&mut self) {
+        let sync = crate::bring::Rows::of(&self.device.state, &self.workspace, &self.queue);
+        crate::bring::accept(&mut self.device, &sync, &self.workspace);
         self.act(vec![Act::SyncAll]);
     }
 

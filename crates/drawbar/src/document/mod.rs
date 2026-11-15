@@ -1959,6 +1959,8 @@ mod tests {
         while let Some(class) = open.device.state.scan.take() {
             open.device.state.scan.finished(class);
         }
+        let sync = Rows::of(&open.device.state, &open.workspace, &open.queue);
+        crate::bring::accept(&mut open.device, &sync, &open.workspace);
         open.act(vec![Act::SyncAll]);
         let sent = |open: &Open| {
             let batch = open.device.queued().into_iter().find_map(|cmd| match cmd {

@@ -490,7 +490,7 @@ fn left(
         },
     );
     match place.mark {
-        Some(_) => drawn.on_hover_text(&place.said),
+        Some(_) => drawn.on_hover_text(crate::bring::said_as_hover(&place.said)),
         None => drawn.on_hover_text(entity.origin.label()),
     };
 
@@ -1267,14 +1267,15 @@ fn state(entity: &LocalEntity, facts: &Facts<'_>) -> Option<StateLine> {
     if let Some(claim) = &facts.extras.state {
         return Some(claim.clone());
     }
-    let held = facts
-        .queue
-        .entry(entity.id)
-        .filter(|held| !held.transient)?;
+    let held = facts.queue.entry(entity.id)?;
+    let said = crate::queue::placed_words(entity.id, facts.queue);
     Some(StateLine {
         words: "to sync".to_string(),
         ink: Ink::Warn,
-        hint: format!("Goes to {} on Sync.", place(held.class, held.at)),
+        hint: crate::bring::said_as_hover(&format!(
+            "to {} · {said}",
+            crate::strings::shown(held.at)
+        )),
     })
 }
 

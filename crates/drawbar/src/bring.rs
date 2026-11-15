@@ -7,20 +7,21 @@ use std::rc::Rc;
 
 use nord_usb::{Location, ObjectClass};
 
+use crate::device::Expect;
 use crate::device::{
     occupied, slot_label, standing_of, there, Device, DeviceCmd, DeviceState, Purpose,
 };
-use crate::link::{Held, Keyboard, Spot, Standing, There};
+use crate::link::{Held, Keyboard, Print, Spot, Standing, There};
 use crate::log::{Log, Restored, Undo};
 use crate::queue::{compare, Diff, Queue};
-use crate::strings::{counted, display_name, place, shown};
+use crate::strings::{counted, display_name, shown};
 use crate::workspace::{print_of, LocalEntity, VerifyState, Workspace};
 
 /// What one row of the sheet says differs.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
-    /// Sent by hand to a slot it is not linked to.
-    Placed,
+    /// Sent by hand to a slot. `refused` where the keyboard attached now would refuse it.
+    Placed { refused: bool },
     /// A piano or sample only this computer has, which the program `by` plays and which
     /// goes up with it, to a free slot.
     Plays { by: u64 },
@@ -80,12 +81,16 @@ pub enum Sign {
 
 impl Row {
     /// The brief's table: each change's own way and the ways it may go. A slot's version
-    /// is brought in only where [`Row::down_blocked`] says nothing.
+    /// is brought in only where [`Row::down_blocked`] says nothing. A send the keyboard
+    /// refuses, and a piano or sample with no room, go nowhere.
     pub fn ways(&self, workspace: &Workspace) -> Ways {
         use Way::{Down, Up};
         let down = self.down_blocked(workspace).is_none();
         let (taken, allowed) = match (&self.change, down, self.at) {
-            (Change::Placed | Change::Plays { .. }, ..) => (Some(Up), vec![Up]),
+            (Change::Placed { refused: true }, ..) | (Change::Plays { .. }, _, None) => {
+                (None, vec![])
+            }
+            (Change::Placed { refused: false } | Change::Plays { .. }, ..) => (Some(Up), vec![Up]),
             (Change::Ahead, true, _) => (Some(Up), vec![Up, Down]),
             (Change::Ahead, false, _) => (Some(Up), vec![Up]),
             (Change::Theirs, true, _) => (Some(Down), vec![Down, Up]),
@@ -99,11 +104,11 @@ impl Row {
     }
 
     /// Why the keyboard's version cannot be brought into the file, if it cannot.
-    pub fn down_blocked(&self, workspace: &Workspace) -> Option<&'static str> {
+    pub fn down_blocked(&self, workspace: &Workspace) -> Option<Blocked> {
         let unsaved = workspace.get(self.id).is_some_and(LocalEntity::is_unsaved);
         match (self.class.is_library(), unsaved) {
-            (true, _) => Some(COPY_INSTEAD),
-            (false, true) => Some(SAVE_FIRST),
+            (true, _) => Some(Blocked::Library),
+            (false, true) => Some(Blocked::Unsaved),
             (false, false) => None,
         }
     }
@@ -120,20 +125,65 @@ impl Row {
         }
     }
 
-    /// The row's word line, which the library's hover repeats.
+    /// The row's word line, as the sheet and the inspector say it; a hover capitalizes it
+    /// with [`said_as_hover`].
     pub fn said(&self, workspace: &Workspace, queue: &Queue) -> String {
-        match &self.change {
-            Change::Placed => crate::queue::placed_words(self.id, queue),
+        let blocked = match (&self.change, self.down_blocked(workspace)) {
+            (Change::Theirs | Change::Both, Some(blocked)) => blocked.words(),
+            _ => "",
+        };
+        let said = match &self.change {
+            Change::Placed { .. } => {
+                let to = self.at.map(shown).unwrap_or_default();
+                format!("to {to} · {}", crate::queue::placed_words(self.id, queue))
+            }
+            Change::Plays { .. } if self.at.is_none() => "no room on the keyboard".into(),
             Change::Plays { by } => {
                 let name = workspace.get(*by).map_or("", |it| display_name(&it.name));
                 format!("new · “{name}” plays it")
             }
-            Change::Ahead => "Newer here".into(),
-            Change::Theirs => "Newer on the keyboard".into(),
-            Change::Both => "Both changed".into(),
-            Change::Moved { to, .. } => format!("Moved to {}", shown(*to)),
-            Change::Replaced { by } => format!("Replaced by “{by}”"),
-            Change::Removed => "Removed on the keyboard".into(),
+            Change::Ahead => "newer here".into(),
+            Change::Theirs => "newer on the keyboard".into(),
+            Change::Both => "both changed".into(),
+            Change::Moved { to, .. } => format!("moved to {}", shown(*to)),
+            Change::Replaced { by } => format!("replaced by “{by}”"),
+            Change::Removed => "removed on the keyboard".into(),
+        };
+        format!("{said}{blocked}")
+    }
+}
+
+/// [`Row::said`] for a hover: its first letter capitalized, and only that.
+pub fn said_as_hover(said: &str) -> String {
+    let mut chars = said.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// Why a file cannot take the keyboard's version.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Blocked {
+    /// A piano or sample: its slot is never read whole.
+    Library,
+    /// It holds edits not saved, which would be lost.
+    Unsaved,
+}
+
+impl Blocked {
+    /// What the row's word line adds.
+    fn words(self) -> &'static str {
+        match self {
+            Blocked::Library => " · copy it here instead",
+            Blocked::Unsaved => " · save first",
+        }
+    }
+
+    /// What a hover on its direction says.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Blocked::Library => "Copy it to this computer instead.",
+            Blocked::Unsaved => "Save your edits first.",
         }
     }
 }
@@ -146,9 +196,19 @@ pub struct Rows {
 }
 
 impl Rows {
+    /// The rows, and a mark for each but a piano or sample whose program does not go up
+    /// as it stands.
     pub fn of(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Rows {
         let list = rows(state, workspace, queue);
-        let marks = list.iter().map(|row| {
+        let up = |id: u64| {
+            let program = list.iter().find(|row| row.id == id);
+            program.is_some_and(|row| row.ways(workspace).taken == Some(Way::Up))
+        };
+        let marked = list.iter().filter(|row| match row.change {
+            Change::Plays { by } => up(by),
+            _ => true,
+        });
+        let marks = marked.map(|row| {
             let said = row.said(workspace, queue);
             (row.id, (row.sign(workspace), said))
         });
@@ -202,16 +262,11 @@ impl Synced {
     }
 }
 
-/// Why a piano or sample is never brought in: its slot is never read whole.
-const COPY_INSTEAD: &str = "Copy it to this computer instead.";
-
-/// Why a file with unsaved edits is never brought in over.
-const SAVE_FIRST: &str = "Save your edits first.";
-
 /// Every sound Sync would list: each send placed by hand, each linked file whose slot
-/// differs from it, unless a send placed by hand goes to that slot, and each piano or
-/// sample a program going up plays that only this computer has. A sound two files would
-/// move to has moved for neither.
+/// differs from it, unless a send placed by hand goes to that slot or is the file's own
+/// and its row is on this computer's side, and each piano or sample a program that may go
+/// up plays that only this computer has. A sound two files would move to has moved for
+/// neither.
 pub fn rows(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Vec<Row> {
     let Some(keyboard) = state.keyboard() else {
         return Vec::new();
@@ -219,18 +274,20 @@ pub fn rows(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Vec<Ro
     let placed: Vec<Row> = queue
         .entries()
         .iter()
-        .filter(|held| !held.transient)
         .map(|held| Row {
             id: held.id,
             class: held.class,
             at: Some(held.at),
-            change: Change::Placed,
+            change: Change::Placed {
+                refused: held.failure.is_some(),
+            },
         })
         .collect();
     let covered = |row: &Row| {
+        let file_side = row.change == Change::Ahead;
         placed
             .iter()
-            .any(|it| it.id == row.id || it.at == row.at && it.class == row.class)
+            .any(|it| (it.id == row.id && file_side) || (it.at == row.at && it.class == row.class))
     };
     let linked: Vec<Row> = workspace
         .listed()
@@ -264,7 +321,7 @@ pub fn rows(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Vec<Ro
     rows
 }
 
-/// The piano and sample files each program going up plays that the keyboard does not
+/// The piano and sample files each program that may go up plays that the keyboard does not
 /// hold and that have no row of their own, each as a row to the first free slot of its
 /// class.
 ///
@@ -274,7 +331,7 @@ fn played(state: &DeviceState, workspace: &Workspace, queue: &Queue, rows: &[Row
     let mut found: Vec<Row> = Vec::new();
     let going = rows
         .iter()
-        .filter(|row| row.ways(workspace).taken == Some(Way::Up));
+        .filter(|row| row.ways(workspace).allowed.contains(&Way::Up));
     for program in going.filter_map(|row| workspace.get(row.id)) {
         for (class, key) in crate::plays::named(program)
             .iter()
@@ -459,11 +516,10 @@ struct Pull {
     class: ObjectClass,
     at: Location,
     id: u64,
-    /// The file's link when Sync was pressed. The bytes land only on a file still linked
-    /// so.
-    held: Held,
-    /// The checksum the slot reported for the row. Bytes with another land nowhere.
-    crc: Option<u32>,
+    /// What the slot held in the sheet's read. Bytes of another version land nowhere.
+    expect: Expect,
+    /// The file as the sheet showed it, linked so. It lands on nothing else.
+    file: Seen,
 }
 
 /// How the sheet came to show.
@@ -480,9 +536,11 @@ pub struct Sheet {
     pub opened: Opened,
     pub picked: Option<u64>,
     /// The ways the user picked, for this showing only.
-    ways: BTreeMap<u64, Way>,
+    ways: BTreeMap<RowKey, Way>,
     /// The rows the user left out of this Sync.
-    skipped: BTreeSet<u64>,
+    skipped: BTreeSet<RowKey>,
+    /// The plan Sync was pressed on, until it runs.
+    accepted: Option<Vec<Step>>,
     /// How the picked row's file differs from its slot, once the slot is read.
     pub shown: Option<Shown>,
 }
@@ -492,8 +550,14 @@ pub struct Shown {
     pub id: u64,
     pub class: ObjectClass,
     pub at: Location,
-    /// A piano or sample is never read whole, so its difference stays [`Diff::Checksum`].
     pub diff: Diff,
+}
+
+/// A row as the sheet tells it apart: its file and its slot.
+type RowKey = (u64, Option<(u32, u32)>);
+
+fn key(row: &Row) -> RowKey {
+    (row.id, row.at.map(|at| (at.bank, at.slot)))
 }
 
 impl Sheet {
@@ -503,6 +567,7 @@ impl Sheet {
             picked,
             ways: BTreeMap::new(),
             skipped: BTreeSet::new(),
+            accepted: None,
             shown: None,
         }
     }
@@ -516,34 +581,60 @@ impl Sheet {
         }
     }
 
-    /// The way Sync takes `row`: the one the user picked, or else its own.
-    pub fn way(&self, row: &Row, workspace: &Workspace) -> Option<Way> {
-        if self.skipped.contains(&row.id) {
+    /// Whether the sheet lists `row`: a piano or sample a program plays only while that
+    /// program goes up.
+    pub fn shows(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> bool {
+        let Change::Plays { by } = row.change else {
+            return true;
+        };
+        let program = rows
+            .iter()
+            .find(|it| it.id == by && it.change != row.change);
+        program.is_some_and(|it| self.way(it, rows, workspace) == Some(Way::Up))
+    }
+
+    /// The way Sync takes `row`: the one the user picked, or else its own. Half a swap
+    /// goes nowhere.
+    pub fn way(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> Option<Way> {
+        if self.skipped.contains(&key(row)) {
             return None;
+        }
+        if let Change::Moved { to, .. } = row.change {
+            let partner = rows
+                .iter()
+                .find(|it| it.class == row.class && it.at == Some(to));
+            if partner.is_some_and(|it| self.skipped.contains(&key(it))) {
+                return None;
+            }
         }
         let ways = row.ways(workspace);
         let picked = self
             .ways
-            .get(&row.id)
+            .get(&key(row))
             .filter(|way| ways.allowed.contains(way));
         picked.copied().or(ways.taken)
     }
 
     /// Turn `row` to its next way.
-    pub fn flip(&mut self, row: &Row, workspace: &Workspace) {
+    pub fn flip(&mut self, row: &Row, rows: &[Row], workspace: &Workspace) {
         let ways = row.ways(workspace).allowed;
-        let next = match self.way(row, workspace) {
+        let next = match self.way(row, rows, workspace) {
             Some(way) => ways.iter().find(|it| **it != way).copied(),
             None => ways.first().copied(),
         };
-        self.skipped.remove(&row.id);
+        self.skipped.remove(&key(row));
         if let Some(next) = next {
-            self.ways.insert(row.id, next);
+            self.ways.insert(key(row), next);
         }
     }
 
-    pub fn skip(&mut self, id: u64) {
-        self.skipped.insert(id);
+    pub fn skip(&mut self, row: &Row) {
+        self.skipped.insert(key(row));
+    }
+
+    /// Sync, pressed on `plan`: [`apply`] runs it.
+    pub fn accept(&mut self, plan: Vec<Step>) {
+        self.accepted = Some(plan);
     }
 }
 
@@ -624,7 +715,7 @@ pub fn follow(device: &mut Device, workspace: &Workspace, queue: &Queue, log: &m
     let keyboard_side = |row: &Row| {
         !matches!(
             row.change,
-            Change::Placed | Change::Plays { .. } | Change::Ahead
+            Change::Placed { .. } | Change::Plays { .. } | Change::Ahead
         )
     };
     if rows(state, workspace, queue).iter().any(keyboard_side) {
@@ -650,10 +741,10 @@ pub fn show_picked(device: &mut Device, sync: &Rows, log: &mut Log) {
         return;
     }
     let (id, class) = (row.id, row.class);
-    let diff = match (class.is_library(), state.slot(class, at)) {
-        (_, Some(None)) => Diff::Empty,
-        (true, _) => Diff::Checksum,
-        (false, _) => {
+    let diff = match (class.is_library(), state.slot(class, at), &row.change) {
+        (_, _, Change::Moved { .. }) | (true, Some(Some(_)) | None, _) => return,
+        (_, Some(None), _) => Diff::Empty,
+        (false, _, _) => {
             let why = Purpose::Compare;
             device.send(DeviceCmd::Get { class, at, why }, log);
             Diff::Pending
@@ -669,57 +760,184 @@ pub fn show_picked(device: &mut Device, sync: &Rows, log: &mut Log) {
     }
 }
 
-/// Sync, pressed: each row goes the way the sheet shows, and the sheet closes. Returns
-/// whether it ran, leaving the files to write in the queue for the caller to send.
-/// Nothing runs while the sheet's read is still out.
-///
-/// ⚠️ The rows are worked out again from what the keyboard reported since the sheet
-/// opened. A row with no way is left as it is, and nothing about a link is stored for a
-/// write until it lands.
-pub fn apply(
-    device: &mut Device,
-    workspace: &mut Workspace,
-    queue: &mut Queue,
-    log: &mut Log,
-) -> bool {
-    let (Some(sheet), Some(keyboard)) =
-        (device.asks.sheet.take(), device.state.keyboard().cloned())
-    else {
-        return false;
-    };
-    if !sheet.read(&device.state) {
-        device.asks.sheet = Some(sheet);
-        return false;
+/// A file as the sheet showed it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Seen {
+    /// The stamp of its bytes, which any edit changes.
+    stamp: u64,
+    /// What a slot holding its bytes as they are would report: what a write sends.
+    body: Option<Print>,
+    saved: Option<Print>,
+    /// Whether it held edits not saved, which Sync saves before it writes.
+    unsaved: bool,
+    /// Its link on the attached keyboard.
+    held: Option<Held>,
+}
+
+impl Seen {
+    fn of(entity: &LocalEntity, keyboard: &Keyboard) -> Seen {
+        Seen {
+            stamp: entity.stamp,
+            body: entity.container.as_ref().and_then(|it| it.print()),
+            saved: entity.saved_print(),
+            unsaved: entity.is_unsaved(),
+            held: entity.held_on(keyboard).cloned(),
+        }
     }
-    let rows = rows(&device.state, workspace, queue);
-    queue.forget_transient();
+
+    /// Whether `now` is still the file shown for going `way`. A write sends the body as
+    /// it is, or as Sync saves the edits it was shown with; bringing a slot in replaces
+    /// the file, so nothing about it may have moved.
+    fn still(&self, now: &Seen, way: Way) -> bool {
+        match (way, self.unsaved) {
+            (Way::Up, true) => self.held == now.held,
+            (Way::Up, false) => (self.body, &self.held) == (now.body, &now.held),
+            (Way::Down, _) => self == now,
+        }
+    }
+}
+
+/// One row the user accepted, with the versions the sheet showed it with. It runs only
+/// while those still hold.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Step {
+    pub row: Row,
+    pub way: Way,
+    /// The file as shown.
+    file: Seen,
+    /// What the row's slot held in the read the sheet was built from; `None` while unread.
+    pub slot: Option<Expect>,
+    /// What a move's destination held in that read.
+    to: Option<Expect>,
+}
+
+impl Step {
+    fn of(row: &Row, way: Way, state: &DeviceState, workspace: &Workspace) -> Option<Step> {
+        let keyboard = state.keyboard()?;
+        let entity = workspace.get(row.id)?;
+        let read = |at: Option<Location>| Some(Expect::of(state.slot(row.class, at?)?));
+        let to = match row.change {
+            Change::Moved { to, .. } => read(Some(to)),
+            _ => None,
+        };
+        Some(Step {
+            row: row.clone(),
+            way,
+            file: Seen::of(entity, keyboard),
+            slot: read(row.at),
+            to,
+        })
+    }
+
+    /// Whether the file, its link, and what the keyboard reports for the slots it
+    /// touches are all still as the sheet showed them.
+    fn holds(&self, state: &DeviceState, workspace: &Workspace) -> bool {
+        let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(self.row.id)) else {
+            return false;
+        };
+        let file = Seen::of(entity, keyboard);
+        let read = |at: Option<Location>| Some(Expect::of(state.slot(self.row.class, at?)?));
+        let to = match self.row.change {
+            Change::Moved { to, .. } => read(Some(to)),
+            _ => None,
+        };
+        self.file.still(&file, self.way) && read(self.row.at) == self.slot && to == self.to
+    }
+}
+
+/// What the sheet's Sync does as the sheet stands: each row it shows with a way, and the
+/// versions it shows them with. The footer counts it, and pressing Sync freezes it.
+///
+/// ⚠️ A move whose destination's file is not moving away in the same plan cannot go:
+/// leaving out one move of a swap leaves out both.
+pub fn plan(sheet: &Sheet, rows: &[Row], state: &DeviceState, workspace: &Workspace) -> Vec<Step> {
+    let shown = rows.iter().filter(|row| sheet.shows(row, rows, workspace));
+    let mut steps: Vec<Step> = shown
+        .filter_map(|row| Step::of(row, sheet.way(row, rows, workspace)?, state, workspace))
+        .collect();
+    loop {
+        let blocked = steps.iter().position(|step| {
+            let Change::Moved { to, .. } = step.row.change else {
+                return false;
+            };
+            let owner = state
+                .keyboard()
+                .and_then(|keyboard| workspace.linked_at(keyboard, step.row.class, &Spot::at(to)));
+            owner.is_some_and(|owner| {
+                !steps
+                    .iter()
+                    .any(|it| it.row.id == owner && matches!(it.row.change, Change::Moved { .. }))
+            })
+        });
+        match blocked {
+            Some(index) => {
+                steps.remove(index);
+            }
+            None => return steps,
+        }
+    }
+}
+
+/// Sync, pressed where nothing paints the sheet: freeze the plan it shows now, unless
+/// one was pressed on already.
+pub fn accept(device: &mut Device, sync: &Rows, workspace: &Workspace) {
+    let state = &device.state;
+    let sheet = device.asks.sheet.as_mut();
+    if let Some(sheet) = sheet.filter(|sheet| sheet.read(state) && sheet.accepted.is_none()) {
+        sheet.accept(plan(sheet, &sync.list, state, workspace));
+    }
+}
+
+/// Run the plan the sheet's Sync froze, and close the sheet: check that every write can
+/// start, then run each step whose versions still hold. A step that no longer holds
+/// is named in the log, and the sheet opens again on the first one, reading the keyboard
+/// again.
+///
+/// ⚠️ Nothing changes, neither a link nor a slot, if a write cannot start.
+pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
+    let Some(mut sheet) = device.asks.sheet.take() else {
+        return;
+    };
+    let (Some(steps), Some(keyboard)) = (sheet.accepted.take(), device.state.keyboard().cloned())
+    else {
+        device.asks.sheet = Some(sheet);
+        return;
+    };
+    let (going, stale): (Vec<Step>, Vec<Step>) = steps
+        .into_iter()
+        .partition(|step| step.holds(&device.state, workspace));
+    let writes: Vec<&Step> = going.iter().filter(|step| step.way == Way::Up).collect();
+    let batches = match crate::browser::batches(&writes, workspace) {
+        Ok(batches) => batches,
+        Err(why) => {
+            log.trouble(format!("Nothing was synced: {why}"));
+            device.asks.sheet = Some(sheet);
+            return;
+        }
+    };
     device.asks.pulling.clear();
     device.asks.brought = None;
-    let (mut moves, mut unlinks, mut writes) = (Vec::new(), Vec::new(), Vec::new());
-    for row in &rows {
-        let held = workspace
-            .get(row.id)
-            .and_then(|it| it.held_on(&keyboard))
-            .cloned();
-        match (sheet.way(row, workspace), &row.change, row.at, held) {
-            (None, ..) | (Some(Way::Up), Change::Placed, ..) => {}
-            (Some(Way::Up), _, Some(at), _) => writes.push((row.id, row.class, at)),
-            (Some(Way::Down), Change::Moved { .. }, ..) => moves.push(row),
-            (Some(Way::Down), Change::Replaced { .. } | Change::Removed, ..) => {
-                unlinks.push(row.id)
-            }
+    let (mut moves, mut unlinks) = (Vec::new(), Vec::new());
+    for step in &going {
+        match (
+            step.way,
+            &step.row.change,
+            step.row.at,
+            &step.file.held,
+            &step.slot,
+        ) {
+            (Way::Up, ..) => {}
+            (Way::Down, Change::Moved { .. }, ..) => moves.push(&step.row),
+            (Way::Down, Change::Replaced { .. } | Change::Removed, ..) => unlinks.push(step.row.id),
             (
-                Some(Way::Down),
+                Way::Down,
                 Change::Ahead | Change::Theirs | Change::Both,
                 Some(at),
-                Some(held),
+                Some(_),
+                Some(expect),
             ) => {
-                let crc = device
-                    .state
-                    .slot(row.class, at)
-                    .flatten()
-                    .and_then(|it| it.crc32);
-                let (class, id) = (row.class, row.id);
+                let (class, id) = (step.row.class, step.row.id);
+                let (expect, file) = (expect.clone(), step.file.clone());
                 pull(
                     device,
                     log,
@@ -727,22 +945,31 @@ pub fn apply(
                         class,
                         at,
                         id,
-                        held,
-                        crc,
+                        expect,
+                        file,
                     },
                 );
             }
-            (Some(Way::Up), _, None, _)
-            | (Some(Way::Down), Change::Ahead | Change::Theirs | Change::Both, ..)
-            | (Some(Way::Down), Change::Placed | Change::Plays { .. }, ..) => {}
+            (Way::Down, Change::Ahead | Change::Theirs | Change::Both, ..)
+            | (Way::Down, Change::Placed { .. } | Change::Plays { .. }, ..) => {}
         }
     }
     follow_moves(&device.state, workspace, log, &keyboard, &moves);
     unlink(workspace, log, &keyboard, &unlinks);
-    for waiting in writes {
-        crate::queue::enqueue_transient(workspace, device, queue, log, waiting);
+    for (class, items) in batches {
+        device.send(DeviceCmd::SendAll { class, items }, log);
     }
-    true
+    let Some(first) = stale.first() else {
+        return;
+    };
+    for step in &stale {
+        let name = workspace.get(step.row.id).map_or("", |it| it.name.as_str());
+        log.trouble(format!(
+            "“{}” was not synced: it changed since the sheet showed it.",
+            display_name(name)
+        ));
+    }
+    open(device, Some(first.row.id));
 }
 
 /// Read a slot to bring it in.
@@ -874,40 +1101,45 @@ pub fn landed(
     device: &mut Device,
     workspace: &mut Workspace,
     log: &mut Log,
-    class: ObjectClass,
-    at: Location,
+    (class, at): (ObjectClass, Location),
     bytes: Vec<u8>,
     name: &str,
 ) {
     let Some(keyboard) = device.state.keyboard() else {
         return;
     };
-    let still = |pull: &Pull| {
-        let entity = workspace.get(pull.id);
-        (pull.class, pull.at) == (class, at)
-            && entity.is_some_and(|entity| entity.held_on(keyboard) == Some(&pull.held))
-    };
-    let Some(index) = device.asks.pulling.iter().position(still) else {
+    let file = |pull: &Pull| Some(Seen::of(workspace.get(pull.id)?, keyboard));
+    let Some(index) = device
+        .asks
+        .pulling
+        .iter()
+        .position(|pull| (pull.class, pull.at) == (class, at))
+    else {
         return;
     };
     let pull = device.asks.pulling.remove(index);
-    let file = workspace
-        .get(pull.id)
-        .map_or("", |it| display_name(&it.name))
-        .to_string();
-    if print_of(&bytes).map(|print| print.crc) != pull.crc {
-        log.trouble(format!(
-            "“{file}” was not synced: {} changed on the keyboard.",
-            place(class, at)
-        ));
-        if device.asks.sheet.is_none() {
-            open(device, Some(pull.id));
-        }
+    let read = print_of(&bytes).map(|print| Expect::Holds {
+        crc: Some(print.crc),
+        len: print.len,
+        name: name.trim().to_string(),
+    });
+    let shown = file(&pull).is_some_and(|now| pull.file.still(&now, Way::Down));
+    let landed = shown
+        && read.is_some_and(|read| pull.expect.matches(&read))
+        && bring(device, workspace, log, (class, at, pull.id), (bytes, name))
+            .map(|restored| brought(&mut device.asks, workspace, log, restored))
+            .is_some();
+    if landed {
         return;
     }
-    match bring(device, workspace, log, (class, at, pull.id), (bytes, name)) {
-        Some(restored) => brought(&mut device.asks, workspace, log, restored),
-        None => log.trouble(format!("“{file}” was not synced: it changed here.")),
+    let file = workspace
+        .get(pull.id)
+        .map_or("", |it| display_name(&it.name));
+    log.trouble(format!(
+        "“{file}” was not synced: it changed since the sheet showed it."
+    ));
+    if device.asks.sheet.is_none() {
+        open(device, Some(pull.id));
     }
 }
 
@@ -1045,13 +1277,14 @@ mod tests {
 
     /// Turn `id`'s row in the open sheet until it goes `way`.
     fn pick(bench: &mut Bench, id: u64, way: Way) {
+        let all = rows(&bench.device.state, &bench.workspace, &bench.queue);
         let row = row(bench, id);
         let sheet = bench.device.asks.sheet.as_mut().expect("open");
         for _ in 0..3 {
-            if sheet.way(&row, &bench.workspace) == Some(way) {
+            if sheet.way(&row, &all, &bench.workspace) == Some(way) {
                 return;
             }
-            sheet.flip(&row, &bench.workspace);
+            sheet.flip(&row, &all, &bench.workspace);
         }
         panic!("{row:?} cannot go {way:?}");
     }
@@ -1219,7 +1452,10 @@ mod tests {
         }
         assert_eq!(
             listed(&bench),
-            [(placed, Change::Placed), (ahead, Change::Ahead)]
+            [
+                (placed, Change::Placed { refused: false }),
+                (ahead, Change::Ahead)
+            ]
         );
     }
 
@@ -1238,7 +1474,7 @@ mod tests {
             };
             row.ways(workspace).taken
         };
-        assert_eq!(taken(Change::Placed), Some(Way::Up));
+        assert_eq!(taken(Change::Placed { refused: false }), Some(Way::Up));
         assert_eq!(taken(Change::Ahead), Some(Way::Up));
         assert_eq!(taken(Change::Theirs), Some(Way::Down));
         assert_eq!(taken(Change::Both), None);
@@ -1270,12 +1506,12 @@ mod tests {
             (None, vec![Way::Up]),
             "nothing is picked"
         );
-        assert_eq!(piano.down_blocked(&bench.workspace), Some(COPY_INSTEAD));
+        assert_eq!(piano.down_blocked(&bench.workspace), Some(Blocked::Library));
 
         let log = &mut bench.log;
         bench.workspace.replace_bytes(id, gained("60"), log);
         assert_eq!(row.ways(&bench.workspace).allowed, [Way::Up]);
-        assert_eq!(row.down_blocked(&bench.workspace), Some(SAVE_FIRST));
+        assert_eq!(row.down_blocked(&bench.workspace), Some(Blocked::Unsaved));
     }
 
     #[test]
@@ -1288,12 +1524,12 @@ mod tests {
         assert!(running.is_some_and(|it| it.running), "the keyboard is read");
         assert_eq!(listed(&bench), [(id, Change::Ahead)]);
 
-        bench.act(vec![Act::SyncAll]);
+        bench.press();
         assert_eq!(written(&bench), [], "nothing before the read lands");
         assert!(bench.device.asks.sheet.is_some(), "and the sheet stays");
 
         bench.land();
-        bench.act(vec![Act::SyncAll]);
+        bench.press();
         assert_eq!(written(&bench).len(), 1);
         assert!(bench.device.asks.sheet.is_none());
     }
@@ -1317,7 +1553,7 @@ mod tests {
             slots: vec![Some(program_info(1, "Someone", now))],
         });
         bench.land();
-        bench.act(vec![Act::SyncAll]);
+        bench.press();
         let expect = Expect::Holds {
             crc: Some(now),
             len: 121,
@@ -1369,7 +1605,7 @@ mod tests {
             assert_eq!(listed(&bench), [(id, change.clone())]);
             open_read(&mut bench);
             pick(&mut bench, id, Way::Down);
-            bench.act(vec![Act::SyncAll]);
+            bench.press();
             assert_eq!(pulls(&bench), [at(1)], "{change:?}");
             assert_eq!(written(&bench), [], "{change:?}");
 
@@ -1397,7 +1633,7 @@ mod tests {
             let before = standing(&bench, id);
             open_read(&mut bench);
             pick(&mut bench, id, Way::Up);
-            bench.act(vec![Act::SyncAll]);
+            bench.press();
             let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
             assert_eq!(ids, [id], "{change:?}");
             assert_eq!(pulls(&bench), [], "{change:?}");
@@ -1431,7 +1667,7 @@ mod tests {
         heard(&mut bench);
         open_read(&mut bench);
         pick(&mut bench, id, Way::Up);
-        bench.act(vec![Act::SyncAll]);
+        bench.press();
         let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [id]);
     }
@@ -1446,8 +1682,9 @@ mod tests {
         let both = linked(&mut bench, "A.ne5p", gained("50"), 1, &body());
         let skipped = linked(&mut bench, "B.ne5p", body(), 2, &body());
         open_read(&mut bench);
-        bench.device.asks.sheet.as_mut().unwrap().skip(skipped);
-        bench.act(vec![Act::SyncAll]);
+        let left_out = row(&bench, skipped);
+        bench.device.asks.sheet.as_mut().unwrap().skip(&left_out);
+        bench.press();
         assert_eq!((written(&bench), pulls(&bench)), (vec![], vec![]));
         assert_eq!(standing(&bench, both), Some(Standing::Both));
         assert_eq!(standing(&bench, skipped), Some(Standing::Theirs));
@@ -1462,7 +1699,7 @@ mod tests {
             assert_eq!(listed(&bench), [(id, Change::Removed)]);
             open_read(&mut bench);
             pick(&mut bench, id, way);
-            bench.act(vec![Act::SyncAll]);
+            bench.press();
             let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
             match way {
                 Way::Up => assert_eq!(
@@ -1673,7 +1910,7 @@ mod tests {
         let said = bench.log.status().1.to_string();
         assert_eq!(
             said,
-            "“A” was not synced: Programs 1:1 changed on the keyboard."
+            "“A” was not synced: it changed since the sheet showed it."
         );
         let sheet = bench.device.asks.sheet.as_ref().expect("read again");
         assert_eq!(sheet.picked, Some(id));
@@ -1706,7 +1943,10 @@ mod tests {
             .workspace
             .replace_bytes(id, gained("60"), &mut bench.log);
         got(&mut bench, 1, theirs.clone(), Purpose::Pull);
-        assert_eq!(bench.log.status().1, "“A” was not synced: it changed here.");
+        assert_eq!(
+            bench.log.status().1,
+            "“A” was not synced: it changed since the sheet showed it."
+        );
         bench.act(vec![Act::Revert(id)]);
 
         bench.sync();
@@ -1733,7 +1973,10 @@ mod tests {
             class,
             at: at1,
         }]);
-        assert_eq!(listed(&bench), [(placed, Change::Placed)]);
+        assert_eq!(
+            listed(&bench),
+            [(placed, Change::Placed { refused: false })]
+        );
         bench.sync();
         let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [placed]);
@@ -1776,10 +2019,11 @@ mod tests {
         let before = bench.workspace.get(id).unwrap().held_on(&keyboard).cloned();
         open_read(&mut bench);
         pick(&mut bench, id, Way::Up);
-        bench.act(vec![Act::SyncAll]);
+        bench.press();
         assert_eq!(written(&bench).len(), 1);
         let now = bench.workspace.get(id).unwrap().held_on(&keyboard).cloned();
         assert_eq!(now, before, "nothing stored at the press");
+        bench.device.pump();
 
         let panel = program_info(1, "A", crc(&gained("42")));
         bench.device.pretend(DeviceEvent::Changed {
@@ -1893,5 +2137,221 @@ mod tests {
             said.iter().any(|word| word.text.starts_with(first)),
             "{said:?}"
         );
+    }
+
+    fn ids(steps: &[(u64, Expect)]) -> Vec<u64> {
+        steps.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// A send placed by hand that the keyboard refused because its slot changed comes
+    /// back in the sheet saying what the slot holds now, counted, and nothing is written
+    /// until Sync is pressed; then exactly the rows counted are written.
+    #[test]
+    fn a_refused_placed_send_is_shown_again_counted_and_written_only_when_pressed() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[None, Some(crc(&body()))]);
+        let ahead = linked(&mut bench, "A.ne5p", gained("40"), 2, &body());
+        let log = &mut bench.log;
+        let placed = bench
+            .workspace
+            .ingest("B.ne5p".into(), Origin::Fresh, gained("41"), log);
+        bench.workspace.settle_files(log);
+        let (class, at1) = (PROGRAM, at(1));
+        bench.act(vec![Act::Send {
+            id: placed,
+            class,
+            at: at1,
+        }]);
+        bench.sync();
+        bench.device.pump();
+        let panel = program_info(1, "Clav", crc(&gained("42")));
+        bench.device.pretend(DeviceEvent::Changed {
+            id: placed,
+            class,
+            at: at1,
+            holds: Some(panel.clone()),
+        });
+        bench.device.pretend(DeviceEvent::Finished);
+        heard(&mut bench);
+        assert!(bench.device.asks.sheet.is_some(), "the sheet reads again");
+        let slots = vec![Some(panel), Some(program_info(2, "B", crc(&body())))];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 1,
+            slots,
+        });
+        bench.land();
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        let row = sync.list.iter().find(|row| row.id == placed).unwrap();
+        assert_eq!(
+            row.said(&bench.workspace, &bench.queue),
+            "to 1:1 · replaces “Clav”"
+        );
+        let sheet = bench.device.asks.sheet.as_ref().unwrap();
+        let counted = plan(sheet, &sync.list, &bench.device.state, &bench.workspace);
+        assert_eq!(counted.len(), 2);
+        let before = written(&bench).len();
+        bench.press();
+        let now = written(&bench);
+        assert_eq!(
+            ids(&now[before..]),
+            [placed, ahead],
+            "exactly the rows counted"
+        );
+    }
+
+    /// A linked file changed after the sheet was painted is not written by that Sync, as
+    /// a row the sheet showed or as one it did not, and the sheet comes back for it.
+    #[test]
+    fn a_file_changed_after_the_sheet_was_painted_is_not_written() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body())), Some(crc(&body()))]);
+        let ahead = linked(&mut bench, "A.ne5p", gained("40"), 1, &body());
+        let agreed = linked(&mut bench, "B.ne5p", body(), 2, &body());
+        open_read(&mut bench);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        accept(&mut bench.device, &sync, &bench.workspace);
+        for (id, gain) in [(ahead, "50"), (agreed, "51")] {
+            bench
+                .workspace
+                .replace_bytes(id, gained(gain), &mut bench.log);
+            bench.workspace.mark_saved(id);
+        }
+        bench.act(vec![Act::SyncAll]);
+        assert_eq!(written(&bench), []);
+        let sheet = bench
+            .device
+            .asks
+            .sheet
+            .as_ref()
+            .expect("back for a second look");
+        assert_eq!(sheet.picked, Some(ahead));
+    }
+
+    /// A file saved again after its ↓ row was accepted, before the slot's bytes arrive,
+    /// is not overwritten.
+    #[test]
+    fn a_file_saved_again_before_its_slot_arrives_is_not_overwritten() {
+        let mut bench = Bench::new();
+        let theirs = gained("40");
+        walked(&mut bench, &[Some(crc(&theirs))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        bench.sync();
+        assert_eq!(pulls(&bench), [at(1)]);
+        bench
+            .workspace
+            .replace_bytes(id, gained("60"), &mut bench.log);
+        bench.workspace.mark_saved(id);
+        got(&mut bench, 1, theirs, Purpose::Pull);
+        assert_eq!(
+            bench.workspace.get(id).unwrap().bytes.to_vec(),
+            gained("60")
+        );
+    }
+
+    /// Where a write cannot start, nothing changes: no link moves, nothing is unlinked or
+    /// read, and the log says nothing was synced.
+    #[test]
+    fn nothing_changes_when_the_batch_cannot_start() {
+        let mut bench = Bench::new();
+        walked_named(&mut bench, &[None, Some(("A", crc(&body())))]);
+        let moved = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let log = &mut bench.log;
+        let placed = bench
+            .workspace
+            .ingest("B.ne5p".into(), Origin::Fresh, gained("41"), log);
+        bench.workspace.settle_files(log);
+        let unread = Location::from_user(2, 1);
+        bench.act(vec![Act::Send {
+            id: placed,
+            class: PROGRAM,
+            at: unread,
+        }]);
+        bench.sync();
+        assert_eq!(
+            slot_of(&bench, moved),
+            Some(Spot::at(at(1))),
+            "the link stays"
+        );
+        assert_eq!((written(&bench), pulls(&bench)), (vec![], vec![]));
+        assert!(bench.log.status().1.starts_with("Nothing was synced"));
+    }
+
+    /// Where the slot reports no checksum, the bytes brought in are checked by their
+    /// length and the name the slot reports.
+    #[test]
+    fn a_slot_that_reports_no_checksum_is_brought_in_by_length_and_name() {
+        let mut bench = Bench::new();
+        let theirs = crate::workspace::Fresh::Stage4Program.bytes().unwrap();
+        let len = print(&theirs).len;
+        bench.device.pretend_partitions(&ELECTRO5);
+        bench.device.pretend_geometry(PROGRAM, &[("A", 1)]);
+        bench
+            .device
+            .pretend_lengths(PROGRAM, 1, &[Some(("A", len))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        assert_eq!(listed(&bench), [(id, Change::Theirs)]);
+        bench.sync();
+        let origin = Origin::Device {
+            class: PROGRAM,
+            at: at(1),
+        };
+        let mut info = crate::device::reported(at(1), "A");
+        info.body_len = len;
+        bench.device.pretend(DeviceEvent::Got {
+            info,
+            origin,
+            bytes: theirs.clone(),
+            why: Purpose::Pull,
+        });
+        heard(&mut bench);
+        assert_eq!(bench.workspace.get(id).unwrap().bytes.to_vec(), theirs);
+    }
+
+    /// A batch that fails leaves nothing behind in the queue: the file is its own row
+    /// again, never one placed by hand.
+    #[test]
+    fn a_failed_batch_leaves_nothing_behind() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body()))]);
+        let id = linked(&mut bench, "A.ne5p", gained("40"), 1, &body());
+        bench.sync();
+        bench.device.pump();
+        bench
+            .device
+            .pretend(DeviceEvent::OpFailed("refused".into()));
+        let slots = vec![Some(program_info(1, "A", crc(&body())))];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class: PROGRAM,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        assert!(bench.queue.is_empty());
+        assert_eq!(listed(&bench), [(id, Change::Ahead)]);
+    }
+
+    /// Leaving out one move of a swap leaves out both.
+    #[test]
+    fn half_a_swap_cannot_go() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(&mut bench, &[Some(("B", crc(&b))), Some(("A", crc(&a)))]);
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        open_read(&mut bench);
+        let left_out = row(&bench, second);
+        bench.device.asks.sheet.as_mut().unwrap().skip(&left_out);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        let sheet = bench.device.asks.sheet.as_ref().unwrap();
+        let mine = row(&bench, first);
+        assert_eq!(sheet.way(&mine, &sync.list, &bench.workspace), None);
+        assert_eq!(
+            plan(sheet, &sync.list, &bench.device.state, &bench.workspace),
+            []
+        );
+        bench.press();
+        assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
+        assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }
 }

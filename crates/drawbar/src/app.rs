@@ -775,9 +775,8 @@ impl DrawbarApp {
             self.document.forget(id);
         }
         if unqueued > 0 {
-            self.log.say(format!(
-                "{unqueued} placed on a slot left Sync with the library they are in."
-            ));
+            self.log
+                .say(format!("{unqueued} left out of Sync with their library."));
         }
         self.browser.leave_library();
         self.shell.filter.keep_tags(&self.browser.tags);

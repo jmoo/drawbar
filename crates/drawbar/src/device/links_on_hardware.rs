@@ -414,15 +414,20 @@ fn sync_with(rig: &mut Rig, id: u64, way: Way) {
         sheet.is_some_and(|sheet| sheet.read(&device.state))
     });
     let bench = &mut rig.bench;
-    let row = rows(bench).into_iter().find(|row| row.id == id);
-    let row = row.unwrap_or_else(|| panic!("{id} has no row: {:?}", rows(bench)));
+    let all = rows(bench);
+    let row = all.iter().find(|row| row.id == id).cloned();
+    let row = row.unwrap_or_else(|| panic!("{id} has no row: {all:?}"));
     let sheet = bench.device.asks.sheet.as_mut().expect("open");
     for _ in 0..3 {
-        if sheet.way(&row, &bench.workspace) != Some(way) {
-            sheet.flip(&row, &bench.workspace);
+        if sheet.way(&row, &all, &bench.workspace) != Some(way) {
+            sheet.flip(&row, &all, &bench.workspace);
         }
     }
-    assert_eq!(sheet.way(&row, &bench.workspace), Some(way), "{row:?}");
+    assert_eq!(
+        sheet.way(&row, &all, &bench.workspace),
+        Some(way),
+        "{row:?}"
+    );
     rig.syncing = true;
     synced(rig, |_| {});
 }

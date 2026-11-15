@@ -14,7 +14,7 @@ use crate::filter::Narrow;
 use crate::folders::{Clash, Occupant};
 use crate::log::Log;
 use crate::newproject::Making;
-use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
+use crate::queue::{enqueue, retarget, Occupancy, Queue};
 use crate::shell::{Dock, Shell};
 use crate::store::{names, outside_len, CopyOf, LibPath, Outside, Part};
 use crate::strings::place;
@@ -776,7 +776,9 @@ pub fn apply(
             }
             Act::SendTo(id) => {
                 send_to(workspace, device, queue, log, id);
-                crate::bring::open(device, Some(id));
+                if queue.holds(id) {
+                    crate::bring::open(device, Some(id));
+                }
             }
             Act::Link { id, class, at } => link_to(workspace, &device.state, log, id, class, at),
             Act::Unlink(id) => unlink(workspace, &device.state, log, id),
@@ -787,15 +789,13 @@ pub fn apply(
             Act::Unqueue(id) => {
                 queue.forget(id);
                 if let Some(entity) = workspace.get(id) {
-                    log.say(format!("“{}” left out of Sync.", entity.name));
+                    log.say(format!(
+                        "“{}” left out of Sync.",
+                        crate::strings::display_name(&entity.name)
+                    ));
                 }
             }
-            Act::SyncAll => {
-                if crate::bring::apply(device, workspace, queue, log) {
-                    let sent = send_batch(queue, workspace, device, log);
-                    queue.forget_unsent(&sent);
-                }
-            }
+            Act::SyncAll => crate::bring::apply(device, workspace, log),
             Act::Rearrange { class, from, to } => {
                 device.send(DeviceCmd::Move { class, from, to }, log)
             }
@@ -1468,112 +1468,43 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
     browser.tags.tag(ids, tag);
 }
 
-/// Drain the queue, one command per folder.
-///
-/// Every queued write goes through here, with the same refusal, grouping and per-item
-/// flow. An entry leaves the queue when its [`crate::device::DeviceEvent::Sent`] arrives,
-/// so a batch that stops halfway leaves the rest of the queue in place. Each write
-/// expects its slot to hold what the sheet shows; one whose slot has not been read waits
-/// for the read. Returns the files it asked to write.
-fn send_batch(
-    queue: &mut Queue,
+/// The writes of a Sync plan, grouped by folder in plan order, pianos and samples first
+/// so that a program lands after what it plays: a session belongs to a folder. Each
+/// expects its slot to hold what the sheet showed. Why none can start, where one cannot:
+/// a file still being checked, one the instrument must not be sent, or a slot not read.
+pub(crate) fn batches(
+    writes: &[&crate::bring::Step],
     workspace: &Workspace,
-    device: &mut Device,
-    log: &mut Log,
-) -> Vec<u64> {
-    // ⚠️ The instrument attached now may not be the one each entry was queued against:
-    // the queue survives a disconnection, so every entry is checked again.
-    crate::queue::refit(workspace, &device.state, queue, log);
-    crate::queue::refresh(&device.state, queue);
-    let unread = will_write(queue).find(|held| held.replaces.expect().is_none());
-    if let Some(entity) = unread.and_then(|held| workspace.get(held.id)) {
-        log.say(format!("“{}” waits for its slot to be read.", entity.name));
-    }
-    let mut checking = None;
-    for held in will_write(queue) {
-        let entity = workspace
-            .get(held.id)
-            .filter(|entity| entity.awaits_check());
-        if let Some(entity) = entity {
-            workspace.check_soon(held.id);
-            checking.get_or_insert_with(|| entity.name.clone());
-        }
-    }
-    if let Some(name) = checking {
-        log.trouble(format!(
-            "Nothing was synced: “{name}” is still being checked."
-        ));
-        return Vec::new();
-    }
-    // The whole batch is checked before the first delete-then-write.
-    let batch = match grouped(queue, workspace) {
-        Ok(batch) => batch,
-        Err((name, e)) => {
-            log.error(format!("{name}: {e}"));
-            log.trouble(format!(
-                "Nothing was synced: “{name}” cannot be sent. The details are below."
-            ));
-            return Vec::new();
-        }
-    };
-    let sent = batch
-        .iter()
-        .flat_map(|(_, items)| items.iter().map(|item| item.id));
-    let sent = sent.collect();
-    for (class, items) in batch {
-        device.send(DeviceCmd::SendAll { class, items }, log);
-    }
-    sent
-}
-
-/// One folder's writes, in queue order.
-type Batch = (ObjectClass, Vec<Outgoing>);
-
-/// What will be written, grouped by folder in queue order, pianos and samples first so
-/// that a program lands after what it plays. A session belongs to a folder, so a batch
-/// is split by folder. An asset the instrument must not be sent stops the batch, named
-/// with why. An asset resting in its file is sent from it, unread here. A program that
-/// plays a queued piano or sample left out of the batch is left out too.
-fn grouped(queue: &Queue, workspace: &Workspace) -> Result<Vec<Batch>, (String, String)> {
-    let staying: Vec<crate::plays::Key> = queue
-        .entries()
-        .iter()
-        .filter(|held| held.failure.is_some() || held.replaces.expect().is_none())
-        .filter_map(|held| workspace.get(held.id).and_then(crate::plays::key_of))
-        .collect();
-    let mut by_class: Vec<Batch> = Vec::new();
-    for held in will_write(queue) {
-        let (Some(entity), Some(expect)) = (workspace.get(held.id), held.replaces.expect()) else {
+) -> Result<Vec<(ObjectClass, Vec<Outgoing>)>, String> {
+    let mut by_class: Vec<(ObjectClass, Vec<Outgoing>)> = Vec::new();
+    for step in writes {
+        let row = &step.row;
+        let (Some(entity), Some(at)) = (workspace.get(row.id), row.at) else {
             continue;
         };
-        let plays = crate::plays::named(entity).iter();
-        if plays
-            .map(|plays| plays.key())
-            .any(|key| staying.contains(&key))
-        {
-            continue;
+        let name = &entity.name;
+        if entity.awaits_check() {
+            workspace.check_soon(row.id);
+            return Err(format!("“{name}” is still being checked."));
         }
+        let Some(expect) = step.slot.clone() else {
+            return Err(format!("“{name}” waits for its slot to be read."));
+        };
+        let payload = Payload::of(entity).map_err(|e| format!("“{name}” cannot be sent: {e}."))?;
         let item = Outgoing {
             id: entity.id,
-            at: held.at,
-            name: entity.name.clone(),
-            payload: Payload::of(entity).map_err(|e| (entity.name.clone(), e))?,
+            at,
+            name: name.clone(),
+            payload,
             expect,
         };
-        match by_class.iter_mut().find(|(class, _)| *class == held.class) {
+        match by_class.iter_mut().find(|(class, _)| *class == row.class) {
             Some((_, items)) => items.push(item),
-            None => by_class.push((held.class, vec![item])),
+            None => by_class.push((row.class, vec![item])),
         }
     }
     by_class.sort_by_key(|(class, _)| !class.is_library());
     Ok(by_class)
-}
-
-/// What a batch would write: every waiting entry the attached instrument has not
-/// refused. A refused entry stays in the queue, so nothing that counts or names the write
-/// may include it.
-pub(super) fn will_write(queue: &Queue) -> impl Iterator<Item = &Queued> {
-    queue.entries().iter().filter(|held| held.failure.is_none())
 }
 
 /// What writing `writes` should be warned about, each warning once, in order.
@@ -1999,85 +1930,62 @@ mod tests {
     use crate::testing::Bench;
     use crate::workspace::Origin;
 
+    /// What one Sync of everything placed sends, folder by folder, as the click path runs
+    /// it.
+    fn sent_batches(bench: &mut Bench) -> Vec<(ObjectClass, Vec<Outgoing>)> {
+        bench.sync();
+        let queued = bench.device.queued().into_iter();
+        queued
+            .filter_map(|cmd| match cmd {
+                DeviceCmd::SendAll { class, items } => Some((*class, items.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A piano queued after the program that plays it is still written first.
     #[test]
     fn a_send_writes_pianos_before_programs() {
+        let mut bench = Bench::new();
         let Bench {
-            mut workspace,
-            mut device,
-            mut queue,
-            mut log,
+            workspace,
+            device,
+            queue,
+            log,
             ..
-        } = Bench::new();
+        } = &mut bench;
         let program = Fresh::Program.bytes().unwrap();
-        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, program, &mut log);
+        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, program, log);
         let piano = crate::testing::piano(1);
-        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, &mut log);
+        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, log);
         device.pretend_scanned(ObjectClass::Program, 1, &[""]);
         device.pretend_lengths(ObjectClass::Piano, 1, &[None, None]);
         let program_at = Location::from_user(1, 1);
         let piano_at = Location::from_user(1, 2);
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            workspace,
+            device,
+            queue,
+            log,
             program,
             ObjectClass::Program,
             program_at,
         );
         enqueue(
-            &workspace,
-            &mut device,
-            &mut queue,
-            &mut log,
+            workspace,
+            device,
+            queue,
+            log,
             piano,
             ObjectClass::Piano,
             piano_at,
         );
 
-        let classes: Vec<ObjectClass> = grouped(&queue, &workspace)
-            .unwrap()
+        let classes: Vec<ObjectClass> = sent_batches(&mut bench)
             .into_iter()
             .map(|(class, _)| class)
             .collect();
         assert_eq!(classes, [ObjectClass::Piano, ObjectClass::Program]);
-    }
-
-    /// A program never goes out ahead of a queued piano it plays that is not going.
-    #[test]
-    fn a_program_waits_with_the_piano_it_plays_while_that_piano_waits_for_a_read() {
-        let Bench {
-            mut workspace,
-            mut device,
-            mut queue,
-            mut log,
-            ..
-        } = Bench::new();
-        let fresh = Fresh::Program.bytes().unwrap();
-        let tine = crate::plays::slot_key(ObjectClass::Piano, "Tine").1;
-        let set = [("piano_panel.id".to_string(), tine.to_string())];
-        let (_, bytes) = crate::fields::apply(&fresh, &set).unwrap();
-        let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
-        let piano = crate::testing::piano(1);
-        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, piano, &mut log);
-        device.pretend_scanned(ObjectClass::Program, 1, &[""]);
-        let unread = Location::from_user(2, 1);
-        let waiting = [
-            (piano, ObjectClass::Piano, unread),
-            (program, ObjectClass::Program, Location::from_user(1, 1)),
-        ];
-        for (id, class, at) in waiting {
-            enqueue(&workspace, &mut device, &mut queue, &mut log, id, class, at);
-        }
-        assert_eq!(queue.len(), 2);
-
-        let batch = grouped(&queue, &workspace).unwrap();
-        assert!(
-            batch.is_empty(),
-            "{:?}",
-            batch.iter().map(|(class, _)| class).collect::<Vec<_>>()
-        );
     }
 
     fn at(slot: u32) -> Location {
@@ -2207,10 +2115,27 @@ mod tests {
             matches!(&held.replaces, Occupancy::Held(now) if now.name == "Squabble B"),
             "the sheet shows what the slot holds now"
         );
-        let why = held.failure.clone().unwrap_or_default();
-        assert!(why.contains("changed on the keyboard"), "{why}");
+        assert!(
+            held.failure.is_none(),
+            "the read shows what is there instead"
+        );
         let (_, said) = bench.log.status();
         assert!(said.contains("“Mine.ne5p” was not synced"), "{said}");
+        assert!(
+            bench.device.asks.sheet.is_some(),
+            "the sheet reads the keyboard again"
+        );
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class,
+            bank: 7,
+            slots: vec![Some(program_slot(at(0), "Squabble B"))],
+        });
+        poll(&mut bench);
+        assert_eq!(
+            batches(&bench),
+            Vec::<Vec<(u64, Expect)>>::new(),
+            "nothing until pressed"
+        );
 
         bench.sync();
         assert_eq!(
@@ -2937,7 +2862,7 @@ mod tests {
     }
 
     #[test]
-    fn send_to_another_slot_queues_a_linked_file_for_the_first_free_one() {
+    fn send_to_on_a_file_newer_on_the_keyboard_is_refused_and_its_row_stays() {
         let mut bench = Bench::new();
         let id = hinted(&mut bench);
         let class = ObjectClass::Program;
@@ -2947,12 +2872,12 @@ mod tests {
             at: at(0),
         }]);
         bench.act(vec![Act::SendTo(id)]);
-        let said = bench.log.transcript();
-        assert_eq!(
-            bench.queue.entry(id).map(|held| held.at),
-            Some(at(1)),
-            "{said}"
-        );
+        assert!(!bench.queue.holds(id));
+        assert!(bench.device.asks.sheet.is_none(), "nothing was placed");
+        assert_eq!(bench.log.status().1, "Sync “Africa Split” first.");
+        let rows = crate::bring::rows(&bench.device.state, &bench.workspace, &bench.queue);
+        let own = rows.iter().find(|row| row.id == id).map(|row| &row.change);
+        assert_eq!(own, Some(&crate::bring::Change::Theirs));
     }
 
     /// ⚠️ A refused asset never gets a queue entry, however it was aimed: a send writes
@@ -3091,7 +3016,7 @@ mod tests {
 
         bench.act(vec![Act::Unqueue(ids[1])]);
         assert_eq!(bench.queue.ids(), vec![ids[0], ids[2]]);
-        assert_eq!(bench.log.status().1, "“sound 1.ne5p” left out of Sync.");
+        assert_eq!(bench.log.status().1, "“sound 1” left out of Sync.");
         assert_eq!(
             bench.workspace.listed().count(),
             3,
@@ -3131,13 +3056,14 @@ mod tests {
     /// order.
     #[test]
     fn a_batch_is_grouped_into_one_command_per_folder() {
+        let mut bench = Bench::new();
         let Bench {
-            mut workspace,
-            mut device,
-            mut queue,
-            mut log,
+            workspace,
+            device,
+            queue,
+            log,
             ..
-        } = Bench::new();
+        } = &mut bench;
         device.pretend_scanned(ObjectClass::Program, 7, &["", ""]);
         device.pretend_scanned(ObjectClass::SetList, 7, &[""]);
         let bytes = Fresh::Program.bytes().unwrap();
@@ -3153,20 +3079,12 @@ mod tests {
                     at: at(slot),
                 },
                 bytes.clone(),
-                &mut log,
+                log,
             );
-            enqueue(
-                &workspace,
-                &mut device,
-                &mut queue,
-                &mut log,
-                id,
-                class,
-                at(slot),
-            );
+            enqueue(workspace, device, queue, log, id, class, at(slot));
         }
 
-        let grouped = grouped(&queue, &workspace).expect("every asset reads");
+        let grouped = sent_batches(&mut bench);
         assert_eq!(grouped.len(), 2, "one command per folder");
         let programs = grouped
             .iter()
@@ -3275,9 +3193,9 @@ mod tests {
             said.extend(painted_sheet(&mut bench));
         }
         for slot in [
-            "replaces “Africa Split”",
-            "new",
-            "checking",
+            "to 7:1 · replaces “Africa Split”",
+            "to 7:2 · new",
+            "to 8:1 · checking",
             "Programs 7:1",
             "Programs 7:2",
             "Programs 8:1",
@@ -3615,16 +3533,6 @@ mod tests {
             ids[1..],
             "what was not written is still queued"
         );
-        let stopped = bench.queue.entry(ids[1]).expect("the one it stopped on");
-        assert!(
-            stopped
-                .failure
-                .as_deref()
-                .is_some_and(|why| why.contains("7:2")),
-            "{:?}",
-            stopped.failure
-        );
-        assert!(bench.queue.entry(ids[2]).unwrap().failure.is_none());
         assert!(
             bench.log.transcript().contains("7:2"),
             "the log names the slot"
@@ -4527,7 +4435,10 @@ mod tests {
         ]);
         assert_eq!(bench.queue.ids(), vec![ids[0]]);
         let said = bench.log.status().1;
-        assert!(said.contains("Something waiting for Samples 1:1"), "{said}");
+        assert!(
+            said.contains("Something going to Samples 1:1 on Sync"),
+            "{said}"
+        );
 
         bench.device.pretend_scanned(class, 1, &["", "", "lead"]);
         crate::queue::refit(
@@ -4582,7 +4493,8 @@ mod tests {
         let failure = |id| bench.queue.entry(id).and_then(|held| held.failure.clone());
         assert_eq!(failure(ids[1]), None, "the first in the queue goes");
         assert!(
-            failure(ids[2]).is_some_and(|why| why.contains("Something waiting for Samples 1:1")),
+            failure(ids[2])
+                .is_some_and(|why| why.contains("Something going to Samples 1:1 on Sync")),
             "the renamed one would be refused after the first landed"
         );
     }
