@@ -1145,66 +1145,38 @@ fn build_rules(args: &BuildArgs, stated: Option<encode::Kind>) -> Result<encode:
     })
 }
 
-/// The kind `takes` state, at `paths`: the one they agree on, none where none states one.
+/// The kind `takes`, named `names`, state: the one they agree on, none where none
+/// states one.
 fn stated_kind(
-    paths: &[PathBuf],
+    names: &[String],
     takes: &[(wav::Audio, wav::Marks, wav::Settings)],
 ) -> Result<Option<encode::Kind>, String> {
-    let mut stated: Option<(encode::Kind, &Path)> = None;
-    for (path, (_, _, settings)) in paths.iter().zip(takes) {
-        let Some(word) = &settings.kind else {
-            continue;
-        };
-        let kind = encode::Kind::from_word(word).ok_or_else(|| {
-            format!(
-                "{}: states kind {word:?}, which is no kind of instrument",
-                path.display()
-            )
-        })?;
-        match stated {
-            Some((first, at)) if first != kind => {
-                return Err(format!(
-                    "{} states kind {}, but {} states {}; pass --kind to choose",
-                    at.display(),
-                    first.word(),
-                    path.display(),
-                    kind.word()
-                ));
-            }
-            _ => stated = Some((kind, path)),
-        }
-    }
-    Ok(stated.map(|(kind, _)| kind))
+    let stated = names
+        .iter()
+        .zip(takes)
+        .map(|(name, (_, _, settings))| (name.as_str(), settings));
+    build::stated_kind(stated).map_err(|e| format!("{e}; pass --kind to choose"))
 }
 
-/// The strokes of `takes`, named `names`, in stroke order, as [`build::strokes`] makes
-/// them, noting each take built raw and each root pitched.
+/// The strokes of `takes`, named `names`, ready for a `version` library, as
+/// [`build::prepared`] makes them, noting each take built raw and each root pitched.
 fn take_strokes<'a>(
     ui: &Ui,
     names: &'a [String],
     takes: &'a [(wav::Audio, wav::Marks, wav::Settings)],
+    version: Version,
     leveled: bool,
-) -> Result<Vec<build::Stroke<'a>>, String> {
+) -> Result<Vec<build::Prepared<'a>>, String> {
     let inputs: Vec<build::Take> = names
         .iter()
         .zip(takes)
-        .map(|(file, (audio, marks, settings))| {
-            // A take its editor set to raw is built as recorded.
-            let clean = settings.clean != Some(false);
-            if !clean {
-                ui.note(format!("{file}: built as recorded, not cleaned"));
-            }
-            build::Take {
-                file,
-                audio,
-                marks,
-                clean,
-                floor: settings.floor.unwrap_or_default(),
-            }
-        })
+        .map(|(file, (audio, marks, settings))| build::Take::stated(file, audio, marks, settings))
         .collect();
-    let strokes = build::strokes(&inputs, leveled).map_err(|e| e.to_string())?;
-    for stroke in strokes.iter().filter(|stroke| stroke.shift != 0) {
+    for take in inputs.iter().filter(|take| !take.clean) {
+        ui.note(format!("{}: built as recorded, not cleaned", take.file));
+    }
+    let prepared = build::prepared(&inputs, version, leveled).map_err(|e| e.to_string())?;
+    for stroke in prepared.iter().map(|p| &p.stroke).filter(|s| s.shift != 0) {
         ui.note(format!(
             "{}: pitched {:+} semitones to a root of {}, to reach keys the take does not",
             stroke.whose(),
@@ -1212,7 +1184,7 @@ fn take_strokes<'a>(
             note::name(stroke.root)
         ));
     }
-    Ok(strokes)
+    Ok(prepared)
 }
 /// What [`recordings`] did to the strokes, for the notes a build prints.
 #[derive(Default)]
@@ -1235,17 +1207,14 @@ fn recordings(
     let mut counts = Counts::default();
     for (((file, layer), gain), under_attack) in files.iter().zip(values).zip(gains).zip(balances) {
         let pcm = file.pcm(gain)?;
-        let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
-            .map_err(|e| format!("{}: {e}", file.whose()))?;
-        let sustain = pcm
-            .sample_loop
-            .map(|found| encode::sustain(found, pcm.rate))
-            .transpose()
-            .map_err(|e| format!("{}: {e}", file.whose()))?;
+        let (recording, clipped) =
+            build::recording(&pcm, file.root(), file.bank(), layer, under_attack)
+                .map_err(|e| format!("{}: {e}", file.whose()))?;
+        let sustain = recording.sustain;
         counts.looped += usize::from(sustain.is_some());
-        counts.clipped += audio.clipped;
+        counts.clipped += clipped;
         counts.resampled += usize::from(pcm.rate != codec::RATE);
-        let frames = audio.channels.first().map_or(0, Vec::len);
+        let frames = recording.channels.first().map_or(0, Vec::len);
         ui.out(format!(
             "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
             file.name(),
@@ -1268,14 +1237,7 @@ fn recordings(
                 None => String::new(),
             }
         ));
-        recordings.push(encode::Recording {
-            root: file.root(),
-            bank: file.bank(),
-            layer,
-            channels: audio.channels,
-            sustain,
-            under_attack,
-        });
+        recordings.push(recording);
     }
     Ok((recordings, counts))
 }
@@ -1294,9 +1256,10 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             })
             .collect::<Result<Vec<_>, String>>()?,
     };
+    let names: Vec<String> = args.input.iter().map(|p| p.display().to_string()).collect();
     // --kind, or a template's kind, decides over what the takes state.
     let stated = match args.kind.is_none() && args.template.is_none() {
-        true => stated_kind(&args.input, &takes)?,
+        true => stated_kind(&names, &takes)?,
         false => None,
     };
     let rules = build_rules(&args, stated)?;
@@ -1324,28 +1287,25 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     // A format 6 build without a template plays each stroke at its root's loudest
     // layer, so a take's strokes are pitched to reach every key and leveled.
     let leveled = matches!((&donor, version), (encode::Donor::Rules(_), Version::V6));
-    let names: Vec<String> = args.input.iter().map(|p| p.display().to_string()).collect();
-    let files: Vec<StrokeFile> = match takes.is_empty() {
-        true => stroke_files(&args.input[0])?,
-        false => take_strokes(ui, &names, &takes, leveled)?
-            .into_iter()
-            .map(StrokeFile::Region)
-            .collect(),
-    };
-    let values = layer_values(&files, version)?;
-    let regions: Vec<&build::Stroke> = files
-        .iter()
-        .filter_map(|file| match file {
-            StrokeFile::Region(stroke) => Some(stroke),
-            StrokeFile::File { .. } => None,
-        })
-        .collect();
-    let (gains, balances) = match takes.is_empty() {
-        true => (vec![1.0; files.len()], vec![None; files.len()]),
-        false => (
-            build::gains(&regions, leveled),
-            build::release_balance(&regions, &values, leveled),
-        ),
+    let (files, values, gains, balances) = match takes.is_empty() {
+        true => {
+            let files = stroke_files(&args.input[0])?;
+            let values = layer_values(&files, version)?;
+            let count = files.len();
+            (files, values, vec![1.0; count], vec![None; count])
+        }
+        false => {
+            let prepared = take_strokes(ui, &names, &takes, version, leveled)?;
+            let mut files = Vec::with_capacity(prepared.len());
+            let (mut values, mut gains, mut balances) = (Vec::new(), Vec::new(), Vec::new());
+            for p in prepared {
+                files.push(StrokeFile::Region(p.stroke));
+                values.push(p.value);
+                gains.push(p.gain);
+                balances.push(p.under_attack);
+            }
+            (files, values, gains, balances)
+        }
     };
     let balanced = balances.iter().flatten().count();
     let raised = gains.iter().filter(|&&gain| gain != 1.0).count();
@@ -1878,6 +1838,65 @@ mod tests {
                 "stroke {stroke} plays {built:.2} dB, recorded {recorded:.2}"
             );
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The CLI builds a take as [`build::prepared`] prepares it, the steps drawbar
+    /// shares: the same library, byte for byte, from rules at format 6, leveled and
+    /// pitched out to every key.
+    #[test]
+    fn a_take_builds_as_the_shared_steps_prepare_it() {
+        let dir = crate::edit::tests::scratch("piano-take-shared");
+        let mut samples = tone(261.6, 9_000);
+        samples.extend(tone(329.6, 8_000));
+        let audio = wav::Audio {
+            rate: codec::RATE,
+            channels: 2,
+            samples,
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(100, 7_900, "060-b0-v00"),
+                region(8_000, 1_000, "060-b2-v00"),
+                region(9_000, 8_000, "064-b0-v00"),
+            ],
+            loops: vec![wav::Loop::forward(5_000, 6_999)],
+        };
+        let path = dir.join("take.wav");
+        write_take(&path, &audio, &marks);
+        let from_cli = build_from(&path, &dir.join("take.npno")).unwrap();
+
+        let (take, marks, settings) = crate::wav::take(&path).unwrap();
+        let name = path.display().to_string();
+        let inputs = [build::Take::stated(&name, &take, &marks, &settings)];
+        let prepared = build::prepared(&inputs, Version::V6, true).unwrap();
+        let recordings: Vec<encode::Recording> =
+            prepared.iter().map(|p| p.recording().unwrap().0).collect();
+        let Ok(crate::PianoAction::Build(args)) = piano(&[
+            "build",
+            "x.wav",
+            "--name",
+            "Take",
+            "--kind",
+            "wurlitzer",
+            "--format",
+            "6",
+            "-o",
+            "x.npno",
+        ]) else {
+            panic!("build did not parse");
+        };
+        let donor = encode::Donor::Rules(build_rules(&args, None).unwrap());
+        let library = encode::build(
+            &donor,
+            &encode::Options::new("Take").variant(&args.variant),
+            &recordings,
+        )
+        .unwrap();
+        assert!(
+            to_bytes(&library, &dir.join("shared.npno")).unwrap() == from_cli,
+            "the CLI built another library than the shared steps"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

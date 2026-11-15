@@ -1,12 +1,16 @@
 //! A take's regions as the strokes a library is built from: each region cleaned, its
 //! ends and loop shaped, the take's lowest and highest roots pitched out to reach every
-//! key, and each stroke's gain and release balance.
+//! key, and each stroke's layer value, gain and release balance. [`prepared`] does it
+//! all, so every caller builds a take alike.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{malformed, Result};
-use crate::formats::npno::encode::{parse_stroke_name, LayerTag, Stem, FADE_SUFFIX};
-use crate::formats::npno::Bank;
+use crate::formats::npno::encode::{
+    self, parse_stroke_name, Clash, Kind, LayerTag, Recording, Stem, FADE_SUFFIX,
+};
+use crate::formats::npno::{Bank, Version};
+use crate::note;
 use crate::take::clean::{self, Noise};
 use crate::take::detect::Floor;
 use crate::take::layers::{self, TAKE_PEAK_DB};
@@ -131,14 +135,172 @@ pub fn dither_seed(root: u8, bank: Bank, layer: LayerTag) -> u64 {
 }
 
 /// Sorts strokes by root, bank, layer and name.
-pub fn in_stroke_order(strokes: &mut [Stroke]) {
+fn in_stroke_order(strokes: &mut [Stroke]) {
     strokes.sort_by_key(|s| (s.root, s.bank.code(), s.layer, s.name()));
+}
+
+impl<'a> Take<'a> {
+    /// The take at `file` as its `settings` say it is built: cleaned unless its editor
+    /// set it to raw, its noise floor read as prep read it.
+    pub fn stated(
+        file: &'a str,
+        audio: &'a Audio,
+        marks: &'a Marks,
+        settings: &wav::Settings,
+    ) -> Take<'a> {
+        Take {
+            file,
+            audio,
+            marks,
+            clean: settings.clean != Some(false),
+            floor: settings.floor.unwrap_or_default(),
+        }
+    }
+}
+
+/// The kind of instrument `takes` state, each a take's name and settings: the one they
+/// agree on, or none where none states one. A kind that is none, or two that disagree,
+/// are refused.
+pub fn stated_kind<'s>(
+    takes: impl IntoIterator<Item = (&'s str, &'s wav::Settings)>,
+) -> Result<Option<Kind>> {
+    let mut stated: Option<(Kind, &str)> = None;
+    for (file, settings) in takes {
+        let Some(word) = &settings.kind else {
+            continue;
+        };
+        let Some(kind) = Kind::from_word(word) else {
+            return malformed(format!(
+                "{file}: states kind {word:?}, which is no kind of instrument"
+            ));
+        };
+        match stated {
+            Some((first, at)) if first != kind => {
+                return malformed(format!(
+                    "{at} states kind {}, but {file} states {}",
+                    first.word(),
+                    kind.word()
+                ));
+            }
+            _ => stated = Some((kind, file)),
+        }
+    }
+    Ok(stated.map(|(kind, _)| kind))
+}
+
+/// A take's stroke ready for the encoder: its layer value in the library, the gain
+/// that brings it to the take's peak, and how far under its own attack a release
+/// plays.
+pub struct Prepared<'a> {
+    pub stroke: Stroke<'a>,
+    pub value: u8,
+    pub gain: f32,
+    pub under_attack: Option<f64>,
+}
+
+impl Prepared<'_> {
+    /// The stroke as the encoder takes it, and how many samples resampling clipped.
+    pub fn recording(&self) -> Result<(Recording, usize)> {
+        let pcm = self.stroke.pcm(self.gain);
+        match recording(
+            &pcm,
+            self.stroke.root,
+            self.stroke.bank,
+            self.value,
+            self.under_attack,
+        ) {
+            Ok(made) => Ok(made),
+            Err(e) => malformed(format!("{}: {e}", self.stroke.whose())),
+        }
+    }
+}
+
+/// The strokes of `takes` ready for a `version` library, in stroke order: each take's
+/// regions cleaned as it says, given their layer values, and where `leveled`, as a
+/// format 6 library from rules is, its lowest and highest roots pitched to reach the
+/// keys beyond them, each stroke raised to the take's peak and each release balanced
+/// under its attack. A layer value no velocity of `version` selects is refused.
+pub fn prepared<'a>(
+    takes: &[Take<'a>],
+    version: Version,
+    leveled: bool,
+) -> Result<Vec<Prepared<'a>>> {
+    let strokes = strokes(takes, leveled)?;
+    let named: Vec<(u8, Bank, LayerTag)> = strokes
+        .iter()
+        .map(|stroke| (stroke.root, stroke.bank, stroke.layer))
+        .collect();
+    let values = match encode::layer_values(&named, version) {
+        Ok(values) => values,
+        Err(clash) => {
+            let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+            return malformed(match clash.how {
+                Clash::BothForms => format!(
+                    "{what} names some of its layers by index (l..) and some by value \
+                     (v..); all layers of one root and bank must use the same form"
+                ),
+                Clash::Twice => format!("{what} names one of its layers twice"),
+            });
+        }
+    };
+    let highest = version.highest_played_layer();
+    if let Some((stroke, value)) = strokes.iter().zip(&values).find(|(_, &v)| v > highest) {
+        return malformed(format!(
+            "{}: no velocity selects layer value {value}; {highest} is the largest a key \
+             of a format {} library ever sounds",
+            stroke.whose(),
+            version.number()
+        ));
+    }
+    let refs: Vec<&Stroke> = strokes.iter().collect();
+    let gains = gains(&refs, leveled);
+    let balances = release_balance(&refs, &values, leveled);
+    Ok(strokes
+        .into_iter()
+        .zip(values)
+        .zip(gains)
+        .zip(balances)
+        .map(|(((stroke, value), gain), under_attack)| Prepared {
+            stroke,
+            value,
+            gain,
+            under_attack,
+        })
+        .collect())
+}
+
+/// `pcm`, a stroke of `root` and `bank` at layer value `value`, as the encoder takes
+/// it: resampled to the instrument's rate with its loop, and released `under_attack`
+/// its attack. Also how many samples resampling clipped.
+pub fn recording(
+    pcm: &Pcm16,
+    root: u8,
+    bank: Bank,
+    value: u8,
+    under_attack: Option<f64>,
+) -> Result<(Recording, usize)> {
+    let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)?;
+    let sustain = pcm
+        .sample_loop
+        .map(|found| encode::sustain(found, pcm.rate))
+        .transpose()?;
+    Ok((
+        Recording {
+            root,
+            bank,
+            layer: value,
+            channels: audio.channels,
+            sustain,
+            under_attack,
+        },
+        audio.clipped,
+    ))
 }
 
 /// The strokes of `takes`, in stroke order: each take's regions, cleaned unless its
 /// editor set it to raw, and, where `leveled`, its lowest and highest roots pitched to
 /// reach the keys beyond them, as [`pitched_roots`] says.
-pub fn strokes<'a>(takes: &[Take<'a>], leveled: bool) -> Result<Vec<Stroke<'a>>> {
+fn strokes<'a>(takes: &[Take<'a>], leveled: bool) -> Result<Vec<Stroke<'a>>> {
     let mut out = Vec::new();
     for take in takes {
         let noise = take
@@ -162,7 +324,7 @@ pub fn strokes<'a>(takes: &[Take<'a>], leveled: bool) -> Result<Vec<Stroke<'a>>>
 /// The regions of `take`, named `file`, with what their labels say each stroke is, in
 /// stroke order, each cleaned of the take's `noise` by its root's pitch, or as recorded
 /// where there is none.
-pub fn region_strokes<'a>(
+fn region_strokes<'a>(
     file: &'a str,
     take: &'a Audio,
     marks: &'a Marks,
@@ -262,7 +424,7 @@ pub fn region_strokes<'a>(
 /// others. Kept at their recorded levels instead, a take's treble roots sounded dead.
 /// Confirmed on hardware. In any other library a stroke plays at its own level, so
 /// nothing changes.
-pub fn gains(strokes: &[&Stroke], leveled: bool) -> Vec<f32> {
+fn gains(strokes: &[&Stroke], leveled: bool) -> Vec<f32> {
     let target = 10f32.powf(TAKE_PEAK_DB as f32 / 20.0);
     strokes
         .iter()
@@ -275,10 +437,10 @@ pub fn gains(strokes: &[&Stroke], leveled: bool) -> Vec<f32> {
 
 /// The lowest and highest keys a take's roots are pitched out toward: the instrument's
 /// 88.
-pub const KEYS: (u8, u8) = (21, 108);
+const KEYS: (u8, u8) = (21, 108);
 
 /// The furthest a root is pitched to play keys its take does not reach, in semitones.
-pub const MOST_PITCHED: i32 = 12;
+const MOST_PITCHED: i32 = 12;
 
 /// Extra roots that reach the keys a take's lowest and highest roots do not, each the
 /// strokes of that root pitched, for a format 6 library built from rules.
@@ -287,7 +449,7 @@ pub const MOST_PITCHED: i32 = 12;
 /// The lowest root's strokes are pitched down to the root that reaches [`KEYS`]' lowest,
 /// and the highest's up to the one that reaches its highest, by at most
 /// [`MOST_PITCHED`] semitones.
-pub fn pitched_roots<'a>(strokes: &[Stroke<'a>]) -> Result<Vec<Stroke<'a>>> {
+fn pitched_roots<'a>(strokes: &[Stroke<'a>]) -> Result<Vec<Stroke<'a>>> {
     let roots: BTreeSet<u8> = strokes.iter().map(|stroke| stroke.root).collect();
     let (Some(&lowest), Some(&highest)) = (roots.first(), roots.last()) else {
         return Ok(Vec::new());
@@ -351,7 +513,7 @@ pub fn pitched_roots<'a>(strokes: &[Stroke<'a>]) -> Result<Vec<Stroke<'a>>> {
 ///
 /// One recording holds both strokes, so their balance is the instrument's: a format 6
 /// library from rules plays the release at it, lifted as quiet key-offs need.
-pub fn release_balance(strokes: &[&Stroke], values: &[u8], leveled: bool) -> Vec<Option<f64>> {
+fn release_balance(strokes: &[&Stroke], values: &[u8], leveled: bool) -> Vec<Option<f64>> {
     let attacks: BTreeMap<(u8, u8), f64> = strokes
         .iter()
         .zip(values)
@@ -442,6 +604,64 @@ mod tests {
             region_stroke(&take, &high, 107),
         ];
         assert!(pitched_roots(&strokes).unwrap().is_empty());
+    }
+
+    #[test]
+    fn takes_state_the_kind_they_agree_on() {
+        let says = |kind: Option<&str>| wav::Settings {
+            kind: kind.map(str::to_string),
+            ..wav::Settings::default()
+        };
+        let (grand, wurli, none) = (says(Some("grand")), says(Some("wurlitzer")), says(None));
+        let kind = |takes: &[(&str, &wav::Settings)]| stated_kind(takes.iter().copied());
+        assert_eq!(kind(&[("a", &none)]).unwrap(), None);
+        assert_eq!(
+            kind(&[("a", &grand), ("b", &none), ("c", &grand)]).unwrap(),
+            Some(Kind::Grand)
+        );
+        let err = kind(&[("a", &grand), ("b", &wurli)]).unwrap_err();
+        assert!(
+            err.to_string().contains("a states kind grand, but b"),
+            "{err}"
+        );
+        let err = kind(&[("a", &says(Some("kazoo")))]).unwrap_err();
+        assert!(err.to_string().contains("no kind of instrument"), "{err}");
+    }
+
+    /// A take whose regions name one layer twice is refused before anything is built.
+    #[test]
+    fn a_layer_named_twice_is_refused() {
+        let take = Audio {
+            rate: 35_002,
+            channels: 1,
+            samples: vec![0.1; 1_000],
+        };
+        let marks = Marks {
+            regions: vec![
+                Region {
+                    start: 0,
+                    frames: 400,
+                    label: "060-b0-v00".into(),
+                },
+                Region {
+                    start: 500,
+                    frames: 400,
+                    label: "060-b0-v00".into(),
+                },
+            ],
+            loops: Vec::new(),
+        };
+        let takes = [Take::stated(
+            "take.wav",
+            &take,
+            &marks,
+            &wav::Settings {
+                clean: Some(false),
+                ..wav::Settings::default()
+            },
+        )];
+        let err = prepared(&takes, Version::V6, true).err().expect("refused");
+        assert!(err.to_string().contains("twice"), "{err}");
     }
 
     /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
