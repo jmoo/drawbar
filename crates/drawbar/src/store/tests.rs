@@ -3094,6 +3094,7 @@ fn a_fetched_object_lands_under_its_slot_name_and_its_file_goes() {
             tag: "nsmp".into(),
             file: scratch.at("fetched-0-4.nsmp"),
             len: sample.len() as u64,
+            print: crate::workspace::print_of(&sample).unwrap(),
         })]);
     session.sync();
 

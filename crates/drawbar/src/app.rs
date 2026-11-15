@@ -1146,8 +1146,12 @@ impl eframe::App for DrawbarApp {
             &mut self.log,
         );
         self.tabs.prune(&self.workspace);
-        self.workspace
+        let kept = self
+            .workspace
             .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        for id in kept {
+            crate::device::link_kept(&self.device.state, &mut self.workspace, id);
+        }
         self.midi.report(&mut self.log);
         // ⚠️ Drained every frame, whatever is in front, so keys played over the library
         // or the keyboard are dropped instead of sounding when a document comes forward.

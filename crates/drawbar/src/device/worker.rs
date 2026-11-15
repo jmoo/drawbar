@@ -19,6 +19,7 @@ use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
 use super::{slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
+use crate::link::Print;
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -1248,24 +1249,33 @@ async fn fetch<T: Transport, C>(
     let extension = info.format.trim_end_matches('\0');
     let name = format!("fetched-{}-{}.{extension}", at.bank, at.slot);
     let mut kept = scratch.create(&name).await.map_err(Error::Io)?;
-    let read: Result<(), Error> = async {
-        op::read_into(s, at, &mut kept).await?;
+    let read: Result<u32, Error> = async {
+        let received = op::read_into(s, at, &mut kept).await?;
         kept.close().await?;
-        Ok(kept.finish().await?)
+        kept.finish().await?;
+        Ok(received.body_crc32)
     }
     .await;
     let file = match read {
-        Ok(()) => kept.outside().await.map_err(Error::Io),
+        Ok(crc) => kept
+            .outside()
+            .await
+            .map_err(Error::Io)
+            .map(|file| (file, crc)),
         Err(e) => Err(e),
     };
     match file {
-        Ok(file) => Ok(Fetched {
+        Ok((file, crc)) => Ok(Fetched {
             class,
             at,
             name: entity_name(info),
             tag: extension.to_string(),
             len: u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
             file,
+            print: Print {
+                crc,
+                len: info.body_len,
+            },
         }),
         Err(e) => {
             let _ = kept.remove().await;
@@ -3063,7 +3073,10 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 4000)], &[]).forgetful();
         let payload = Payload::File {
             file: file.clone(),
-            crc32,
+            print: Print {
+                crc: crc32,
+                len: body.len() as u32,
+            },
         };
         let ((flow, events), largest) =
             crate::testing::largest_allocation(|| drive(&mut device, put_piano(payload)));
@@ -3103,7 +3116,10 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 0 };
         let mut sent = Vec::new();
         for payload in [
-            Payload::File { file, crc32: 0 },
+            Payload::File {
+                file,
+                print: Print { crc: 0, len: 0 },
+            },
             Payload::Bytes(bytes.clone()),
         ] {
             let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
@@ -3127,7 +3143,7 @@ mod wire_tests {
         let (_dir, file, _) = resting_piano(40);
         let payload = || Payload::File {
             file: file.clone(),
-            crc32: 0,
+            print: Print { crc: 0, len: 0 },
         };
         drive(
             &mut Puppet::stocked(&[("Bank 1", 400)], &[]),
@@ -3177,7 +3193,7 @@ mod wire_tests {
         let (_dir, file, _) = resting_piano(40);
         let payload = || Payload::File {
             file: file.clone(),
-            crc32: 0,
+            print: Print { crc: 0, len: 0 },
         };
         drive(
             &mut Puppet::stocked(&[("Bank 1", 400)], &[]),

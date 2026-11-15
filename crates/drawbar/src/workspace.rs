@@ -241,6 +241,12 @@ impl Container {
     }
 }
 
+/// What a slot holding the body of the container `bytes` reports. `None` for bytes that
+/// are not one.
+pub fn print_of(bytes: &[u8]) -> Option<Print> {
+    Container::read(bytes)?.print()
+}
+
 /// Where the body sits in a file `inspect` read.
 fn body_of(info: &nord_format::cbin::Info) -> Option<std::ops::Range<usize>> {
     let start = usize::try_from(info.header.generation.body_start()).ok()?;
@@ -2069,8 +2075,14 @@ impl Workspace {
     /// ⚠️ A view is the only copy of what it holds: nothing lists it and the store skips
     /// it. An edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
+    pub fn close_views(
+        &mut self,
+        open: impl Fn(u64) -> bool,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> Vec<u64> {
         let mut rescued = Vec::new();
+        let mut kept = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
@@ -2081,6 +2093,7 @@ impl Workspace {
             }
             entity.kept = true;
             rescued.push(entity.name.clone());
+            kept.push(entity.id);
             true
         });
         for name in &rescued {
@@ -2090,9 +2103,10 @@ impl Workspace {
             ));
         }
         if self.entities.len() == before && rescued.is_empty() {
-            return;
+            return kept;
         }
         self.moved();
+        kept
     }
 
     /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
@@ -2150,6 +2164,55 @@ impl Workspace {
                 },
             ),
             false => self.change_links(id, |links| links.retain(|link| link.keyboard != keyboard)),
+        }
+    }
+
+    /// The asset linked to the slot of `class` at `spot` on `keyboard`.
+    pub fn linked_at(
+        &self,
+        keyboard: &Keyboard,
+        class: ObjectClass,
+        spot: &link::Spot,
+    ) -> Option<u64> {
+        self.entities
+            .iter()
+            .find(|entity| {
+                entity
+                    .held_on(keyboard)
+                    .is_some_and(|held| held.class() == class && held.spot == *spot)
+            })
+            .map(|entity| entity.id)
+    }
+
+    /// Follow slots of `class` that drawbar moved on `keyboard`: a link at the first spot
+    /// of a pair goes to the second, or is removed where there is none. Every pair moves
+    /// at once, so a swap moves both links.
+    pub fn respot(
+        &mut self,
+        keyboard: &Keyboard,
+        class: ObjectClass,
+        moves: &[(link::Spot, Option<link::Spot>)],
+    ) {
+        let moved: Vec<(u64, Option<link::Held>)> = self
+            .entities
+            .iter()
+            .filter_map(|entity| {
+                let held = entity
+                    .held_on(keyboard)
+                    .filter(|held| held.class() == class)?;
+                let (_, to) = moves.iter().find(|(from, _)| *from == held.spot)?;
+                Some((entity.id, to.clone().map(|to| held.moved(to))))
+            })
+            .collect();
+        for (id, held) in moved {
+            let keyboard = keyboard.clone();
+            self.change_links(id, |links| {
+                links.retain(|link| link.keyboard != keyboard);
+                links.extend(held.map(|held| Link {
+                    keyboard,
+                    held: Some(held),
+                }));
+            });
         }
     }
 
@@ -3016,9 +3079,16 @@ impl Workspace {
 
     /// [`Workspace::arrive`] from a file the instrument was read into, which is deleted
     /// once the copy has landed.
-    pub fn arrive_fetched(&mut self, path: LibPath, origin: Origin, from: Outside, len: u64) {
+    pub fn arrive_fetched(
+        &mut self,
+        path: LibPath,
+        origin: Origin,
+        from: Outside,
+        len: u64,
+    ) -> u64 {
         let id = self.arrive(path, origin, CopyOf::Outside(from.clone()), len);
         self.fetched.insert(id, from);
+        id
     }
 
     /// The copy of `id` did not land: say whether it was of a file the instrument was read

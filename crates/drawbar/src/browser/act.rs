@@ -657,7 +657,10 @@ pub fn apply(
                 log.say("Reading the instrument again…");
             }
             Act::ReadAgain(class) => device.read_class(class),
-            Act::Keep(id) => workspace.keep(id, log),
+            Act::Keep(id) => {
+                workspace.keep(id, log);
+                crate::device::link_kept(&device.state, workspace, id);
+            }
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
             Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, log),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
@@ -749,7 +752,7 @@ pub fn apply(
                 log,
             ),
             Act::CopyAll { class, slots } => device.send(DeviceCmd::CopyAll { class, slots }, log),
-            Act::Arrive(fetched) => arrive(browser, workspace, fetched),
+            Act::Arrive(fetched) => arrive(browser, workspace, &device.state, fetched),
             Act::ExportBundle { ids, slots, .. } => {
                 export_bundle(browser, workspace, device, log, ids, slots)
             }
@@ -1131,15 +1134,14 @@ fn unpack(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, read:
 /// An object read off the instrument into a file, copied into the top level of the
 /// library under its slot's name, numbered past any name taken there. The file goes once
 /// the copy has answered.
-fn arrive(browser: &Browser, workspace: &mut Workspace, fetched: Fetched) {
+fn arrive(browser: &Browser, workspace: &mut Workspace, state: &DeviceState, fetched: Fetched) {
     let root = LibPath::root();
     let wanted = names::portable(&format!("{}.{}", fetched.name, fetched.tag));
     let name = browser.folders.free(&root, &wanted, workspace);
-    let origin = Origin::Device {
-        class: fetched.class,
-        at: fetched.at,
-    };
-    workspace.arrive_fetched(root.join(&name), origin, fetched.file, fetched.len);
+    let (class, at) = (fetched.class, fetched.at);
+    let origin = Origin::Device { class, at };
+    let id = workspace.arrive_fetched(root.join(&name), origin, fetched.file, fetched.len);
+    crate::device::link_copy(state, workspace, id, class, at, fetched.print);
 }
 
 /// Write `ids` and what they need as one bundle. Slots are copied to this computer first,
@@ -2014,13 +2016,13 @@ mod tests {
         };
         let Payload::File {
             file: sent,
-            crc32: said,
+            print: said,
         } = &item.payload
         else {
             panic!("the batch carries bytes in place of the file")
         };
         assert!(Arc::ptr_eq(sent, &file), "the file it rests in");
-        assert_eq!(Some(*said), crc32);
+        assert_eq!(Some(said.crc), crc32);
         assert_eq!(file.take_reads(), [], "nothing read it");
         let sent = item.payload.clone();
 
