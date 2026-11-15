@@ -20,15 +20,15 @@ tabs show and hide the side panels, and dragging a panel's edge resizes it.
 ## Menus
 
 On macOS the menus are in the menu bar. On Windows they are at the left of the
-top bar. On Linux and in the browser they are behind the ☰ button. In the
+top bar. On Linux and in the browser they are under the ☰ button. In the
 browser, a few keys use ⌥ (⌃ on a Mac) in place of ⌘.
 
 ## The activity log
 
 Click the status line, or press ⌥⌘L, for the log. **Problems** shows only what
 went wrong. The copy button puts the whole log on the clipboard for a bug report.
-What drawbar does on its own, such as linking files or bringing in a changed slot,
-has an **Undo** beside it.
+When drawbar links files, brings in changed slots, or queues sends on its own, the
+line that says so has an **Undo** beside it.
 
 ## Selecting
 
@@ -41,9 +41,10 @@ shows how many files it has.
 ## Reading the Library
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
-or both. A file is on both when it is linked to a slot of the attached keyboard,
-and **At** gives that slot. Copying a slot to this computer or sending a file to a
-slot links the two; **Link to** and **Unlink** in a row's menu change a link.
+or both. A file is on both when the slot it is linked to on the attached keyboard
+holds something, and **At** gives that slot. Copying a slot to this computer or
+sending a file to a slot links the two; **Link to** and **Unlink** in a row's menu
+change a link.
 
 The mark before a name says how a file stands with its slot: `↑` (Ready to send)
 when the file is newer, and `!` (Needs attention) when the keyboard changed or
