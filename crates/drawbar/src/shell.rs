@@ -2830,7 +2830,7 @@ mod tests {
             let _ = frame_from(&ctx, app, input);
             settled(&ctx, app, LARGE)
         };
-        let queue = crate::browser::Bulk::Queue.label();
+        let queue = crate::browser::Bulk::Export.label();
 
         let morph = in_inspector(&painted, "Morph").expect("the Morph card");
         let selection = in_inspector(&painted, "Selection").expect("the Selection card");
@@ -3117,9 +3117,10 @@ mod tests {
             let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
         };
 
-        click(&mut app, crate::browser::Bulk::Queue.label());
+        click(&mut app, "Send to…");
         assert!(app.queue.holds(split), "the document is queued");
         assert!(!app.queue.holds(grand), "the library's selection is not");
+        app.shell.review_open = false;
 
         click(&mut app, "Sunday");
         assert_eq!(
