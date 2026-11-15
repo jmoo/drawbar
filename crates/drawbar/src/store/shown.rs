@@ -10,7 +10,7 @@ use toshokan::{EntityId, FileState, RelPath, View};
 
 use super::keys::{Came, LINKS, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::{Key, LibPath, Stat};
-use crate::link::Link;
+use crate::link::{Keyboard, Link};
 
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Shown {
@@ -282,14 +282,31 @@ fn values(view: &View, key: toshokan::Set<String>) -> BTreeSet<String> {
     listed.map(|(value, _)| value).collect()
 }
 
-/// One link per keyboard, in order: of two that writers left apart, the greatest.
+/// One link per keyboard, in order: of those writers left apart, the latest
+/// ([`later`]).
 fn one_per_keyboard(links: impl Iterator<Item = Link>) -> Vec<Link> {
     let sorted: BTreeSet<Link> = links.collect();
-    let by_keyboard: BTreeMap<_, Link> = sorted
-        .into_iter()
-        .map(|link| (link.keyboard.clone(), link))
-        .collect();
+    let mut by_keyboard: BTreeMap<Keyboard, Link> = BTreeMap::new();
+    for link in sorted {
+        match by_keyboard.get(&link.keyboard) {
+            Some(held) if later(held, &link) => {}
+            _ => {
+                by_keyboard.insert(link.keyboard.clone(), link);
+            }
+        }
+    }
     by_keyboard.into_values().collect()
+}
+
+/// Whether `a` is the later of two links on one keyboard: a link over a keep-off, the
+/// one whose slot knew the other's base, or else the greater.
+fn later(a: &Link, b: &Link) -> bool {
+    match (&a.held, &b.held) {
+        (Some(a), Some(b)) if a.knew(b.base.crc) != b.knew(a.base.crc) => a.knew(b.base.crc),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => a > b,
+    }
 }
 
 /// `path` as drawbar shows it: none with a name that starts with a dot.
@@ -308,6 +325,34 @@ mod tests {
 
     use super::*;
     use crate::store::keys;
+
+    /// Of two links two writers left on one keyboard, the one whose slot knew the other's
+    /// base is the later, whichever orders first, and any link is later than a keep-off.
+    #[test]
+    fn of_two_links_on_one_keyboard_the_later_shows() {
+        use crate::link::{Held, Print, Spot};
+        use nord_usb::ObjectClass;
+
+        let keyboard = Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: None,
+        };
+        let at = |slot, base| Held::new(ObjectClass::Program, Spot::At { bank: 0, slot }, base);
+        let older = at(6, Print { crc: 9, len: 121 }).unwrap();
+        let newer = at(1, older.base)
+            .unwrap()
+            .agreed(Print { crc: 2, len: 121 });
+        let link = |held: Option<&Held>| Link {
+            keyboard: keyboard.clone(),
+            held: held.cloned(),
+        };
+        let (older, newer, off) = (link(Some(&older)), link(Some(&newer)), link(None));
+        assert!(newer < older, "the order alone would show the older");
+        let shown = |links: [&Link; 2]| one_per_keyboard(links.into_iter().cloned());
+        assert_eq!(shown([&older, &newer]), std::slice::from_ref(&newer));
+        assert_eq!(shown([&newer, &older]), std::slice::from_ref(&newer));
+        assert_eq!(shown([&off, &older]), [older]);
+    }
 
     /// Until a change joins them, the file two drawbars each tagged before either saw the
     /// other's tag shows the tags of both, and the entity joined into its own shows nothing.
