@@ -801,7 +801,7 @@ fn send_into_vacant(rig: &mut Rig, id: u64, class: ObjectClass, slot: Location) 
 }
 
 /// A piano library resting in its file is sent to an empty slot through the queue and the
-/// worker: it lands byte for byte, the asset stands on the slot, and the send holds no
+/// worker: it lands byte for byte, the asset is linked to the slot, and the send holds no
 /// more than a few transfer chunks and never the file.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]

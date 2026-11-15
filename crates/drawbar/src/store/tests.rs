@@ -9198,3 +9198,41 @@ fn a_link_made_here_outlasts_the_answers_that_come_before_it_is_kept() {
     let again = Session::open(&root);
     assert_eq!(again.links(again.only()), linked);
 }
+
+#[test]
+fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let class = ObjectClass::Program;
+    let at = Location::from_user(8, 1);
+    session.bench.device.pretend_attached();
+    let keyboard = session.bench.device.state.keyboard().unwrap();
+    let sent = session.bench.workspace.get(id).unwrap().bytes.to_vec();
+    session
+        .bench
+        .device
+        .pretend(crate::device::DeviceEvent::Sent {
+            id,
+            class,
+            at,
+            sent: crate::device::Payload::Bytes(sent),
+        });
+    let Bench {
+        log,
+        workspace,
+        tabs,
+        queue,
+        device,
+        ..
+    } = &mut session.bench;
+    device.poll(log, workspace, tabs, queue);
+    session.decided();
+    let name = session.bench.workspace.get(id).unwrap().name.clone();
+    session.close();
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(again.named(&name)).unwrap();
+    let held = entity.held_on(&keyboard).expect("still linked");
+    assert_eq!(held.spot, Spot::at(at));
+}

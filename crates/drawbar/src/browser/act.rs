@@ -2006,11 +2006,11 @@ mod tests {
     }
 
     /// A piano resting in its file is queued and batched without being read: the batch
-    /// carries the file, and once it lands the asset stands on the slot with the
+    /// carries the file, and once it lands the asset is linked to the slot with the
     /// checksum of the file, saved as the file, which nothing holds whole.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn a_resting_piano_is_sent_from_its_file_and_stands_on_the_slot_it_landed_in() {
+    fn a_resting_piano_is_sent_from_its_file_and_is_linked_to_the_slot_it_landed_in() {
         use std::sync::Arc;
 
         let mut bench = Bench::new();
@@ -2073,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_kept_asset_settles_its_baseline_and_queues_it_where_it_stands() {
+    fn saving_a_linked_asset_settles_its_baseline_and_queues_it_for_its_slot() {
         let mut bench = Bench::new();
         let bytes = Fresh::Program.bytes().unwrap();
         let crc = crate::workspace::print_of(&bytes).unwrap().crc;
@@ -3851,6 +3851,12 @@ mod tests {
         let keyboard = bench.device.state.keyboard().unwrap();
         let held = entity.held_on(&keyboard).map(|held| held.spot.clone());
         assert_eq!(held, Some(crate::link::Spot::Named("drawbar-pad".into())));
+        let linked = crate::device::standing_of(&bench.device.state, entity).unwrap();
+        assert_eq!(
+            (linked.at, linked.standing),
+            (None, Standing::Ahead),
+            "gone from the keyboard"
+        );
         assert_eq!(
             bound_for(entity, &bench.device.state, &bench.queue),
             Bound::At(class, Location::from_user(1, 1))

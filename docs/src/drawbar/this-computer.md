@@ -129,8 +129,9 @@ time it starts.
 ## Saving
 
 Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
-writes the file, and queues it for sending if the sound came from a slot on the
-connected instrument. **Revert** goes back to the last save.
+writes the file, and queues it for sending if the sound is linked to a slot of the
+connected instrument and is now newer than that slot. **Revert** goes back to the
+last save.
 
 Unsaved edits are kept when you quit: those of sounds in your library, and those
 of a sound you were viewing in a slot of the instrument. A slot's edits come

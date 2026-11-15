@@ -7,18 +7,21 @@ you queue the document and send it.
 ## The document header
 
 Every document has the same strip across the top: its kind and name, a format
-badge, where it lives (a slot, a folder, or this computer), its size, and its
-state: `edited`, `matches keyboard`, `differs from keyboard`, `waiting to send`
-or `on the keyboard`. Hover any of them for the detail.
+badge, where it lives (the slot it is linked to, a folder, or this computer), its
+size, and its state: `edited`, `ready to send`, `waiting to send` or `changed on
+the keyboard`. Hover any of them for the detail.
 
 To the right are the two faces, **Revert**, **Export…**, and the document's
-main action, usually **Queue send**. That action is grayed out when there is
-nowhere to send to, and becomes a warning such as `Won't fit · 70 MB over` when
-the send cannot happen yet.
+main action. It is **Send to…** for a document linked to no slot, which queues it
+for a free slot; **Load on instrument** when its slot holds it, which makes the
+panel play that slot; and **Send to 1:7** when the slot holds an earlier version.
+A document whose slot the keyboard changed has none. The action is grayed out when
+there is nowhere to send to, and becomes a warning such as `Won't fit · 70 MB
+over` when the send cannot happen yet. The panel plays what the instrument holds,
+so edits you have not sent are not heard.
 
-A document that belongs to a slot on the connected instrument also has **Load on
-instrument**, which makes the panel play that slot. The panel plays what the
-instrument holds there, so edits you have not sent are not heard.
+Saving a linked document that is then newer than its slot queues the send to that
+slot.
 
 ## The faces
 

@@ -39,10 +39,19 @@ shows how many files it has.
 ## Reading the Library
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
-or both, with `=` when the two copies match and `≠` when they differ. It turns
-red when a send is waiting. While an instrument is attached, the **Needs** column
-names the sample or piano a sound plays. A name in italics with a `*` has unsaved
-edits. Hover anything for an explanation.
+or both. A file is on both when it is linked to a slot of the attached keyboard,
+and **At** gives that slot. drawbar links a file to a slot when you copy the slot
+to this computer, when a send to it lands, and when the file names the slot that
+holds exactly its sound. Copies, new files and imports start with no link. Equal
+sounds alone link nothing; the inspector shows them as **also at**.
+
+A file's mark says how it stands with its slot: none when the two are the same,
+yellow when the file is newer and a send would settle it, and red when the
+keyboard changed the slot, which only you can settle. An address in gray
+is a slot not read yet, or the slot on a keyboard that is not attached. While an
+instrument is attached, the **Needs** column names the sample or piano a sound
+plays. A name in italics with a `*` has unsaved edits. Hover anything for an
+explanation.
 
 ## Folders and tags
 

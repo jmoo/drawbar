@@ -3536,4 +3536,72 @@ mod tests {
         heard(&mut bench);
         assert_eq!(held_at(&bench, copied), None, "two slots hold its body");
     }
+
+    #[test]
+    fn a_duplicate_has_no_link_and_sending_it_elsewhere_leaves_the_original_where_it_was() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_attached();
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let original = file(&mut bench, "A.ne5p", body());
+        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        bench.workspace.link(original, &keyboard, held);
+        let copy = bench.workspace.duplicate(original, &mut bench.log).unwrap();
+        assert_eq!(held_at(&bench, copy), None);
+
+        bench.device.pretend(DeviceEvent::Sent {
+            id: copy,
+            class,
+            at: at(2),
+            sent: Payload::Bytes(body()),
+        });
+        heard(&mut bench);
+        assert_eq!(held_at(&bench, copy), Some(Spot::at(at(2))));
+        assert_eq!(held_at(&bench, original), Some(Spot::at(at(1))));
+    }
+
+    #[test]
+    fn another_keyboard_sees_no_link_and_is_sent_nothing_queued_for_this_one() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        bench.device.pretend_scanned(class, 1, &["", ""]);
+        let id = file(&mut bench, "A.ne5p", body());
+        let keyboard = bench.device.state.keyboard().unwrap();
+        let held = Held::new(class, Spot::at(at(1)), print(&body())).unwrap();
+        bench.workspace.link(id, &keyboard, held);
+        crate::queue::enqueue(
+            &bench.workspace,
+            &mut bench.device,
+            &mut bench.queue,
+            &mut bench.log,
+            id,
+            class,
+            at(1),
+        );
+        bench.device.pending.clear();
+
+        if let Connection::Connected(card) = &mut bench.device.state.connection {
+            card.serial = Some("B2".into());
+        }
+        let entity = bench.workspace.get(id).unwrap();
+        assert_eq!(standing_of(&bench.device.state, entity), None);
+        crate::queue::refit(
+            &bench.workspace,
+            &bench.device.state,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+        let why = bench.queue.entry(id).and_then(|held| held.failure.clone());
+        assert_eq!(why.as_deref(), Some("It was queued for another keyboard."));
+        bench.act(vec![crate::browser::Act::SendAll]);
+        assert!(
+            !bench
+                .device
+                .queued()
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. })),
+            "nothing is written"
+        );
+        assert!(bench.queue.holds(id), "it keeps its place");
+    }
 }

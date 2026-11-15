@@ -1,8 +1,8 @@
 //! The set list document: the four programs an Electro 5 song plays.
 //!
 //! The file stores only four addresses: no names and no program bytes. A name shown here
-//! comes from the attached instrument's scan of that bank or from an asset on this
-//! computer that stands on that slot. Where neither answers, the row says so.
+//! comes from the attached instrument's scan of that bank or from the asset on this
+//! computer linked to that slot. Where neither answers, the row says so.
 
 use std::collections::HashMap;
 
@@ -229,8 +229,7 @@ fn panel(at: program::Location) -> Location {
 /// What is known about one address.
 ///
 /// ⚠️ The order matters: the attached instrument's scan comes first, and an asset here
-/// speaks only for the slot it came off. A file opened from disk stands on no slot and
-/// resolves nothing.
+/// speaks only for the slot it is linked to. A file linked to no slot resolves nothing.
 fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, Stands) {
     let slot = Item::Slot {
         class: ObjectClass::Program,
@@ -885,8 +884,6 @@ mod tests {
             }
         }
 
-        /// An asset on this computer that stands on a slot, which is the other place a
-        /// name can come from.
         /// A program here linked to the slot `at` of the keyboard [`Device`] attaches as.
         fn kept(&mut self, at: Location, name: &str, bytes: Vec<u8>) {
             let class = ObjectClass::Program;

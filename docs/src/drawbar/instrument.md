@@ -45,8 +45,9 @@ Drag to move things:
 ## Sending
 
 Nothing is written until you send. Dropping a sound on a slot, **Queue for
-sending**, and saving a sound that came from a slot all add to the queue. **Send**
-in the top bar counts what is waiting.
+sending**, and saving a sound newer than the slot it is linked to all add to the
+queue. A sound with no link goes to the first free slot. **Send** in the top bar
+counts what is waiting.
 
 Click **Send**, or press ⇧⌘S, to review the queue. Click a destination to change
 it, click × to remove a row, and select a row to see what the slot holds now and
@@ -54,8 +55,10 @@ what it will hold after sending.
 **Send all** writes everything. If the instrument refuses something, the rest
 stays queued.
 
-When sounds on this computer no longer match the slots they came from, a
-**Queue** button appears beside **Send**. Click it to queue them all.
+When sounds on this computer are newer than the slots they are linked to, a
+**Queue** button appears beside **Send**. Click it to queue them all. A slot the
+keyboard changed is never queued over; the sound is listed under **Needs
+attention**.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel. Sending a sound renamed on this computer renames its
@@ -78,4 +81,5 @@ slot, even when the slot already holds the same sound.
 ## Disconnecting
 
 Unplug, and the instrument's slots disappear. The send queue is kept, so plug
-back in and send.
+back in and send. A sound queued for one keyboard is not sent to another: it keeps
+its place and says why.
