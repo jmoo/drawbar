@@ -9,8 +9,8 @@ use nord_format::bundle::archive::{Directory, DosTime, Entry};
 #[cfg(target_arch = "wasm32")]
 use nord_format::bundle::archive::{Tail, TAIL_MAX};
 use nord_format::bundle::{manifest, Class, Item, Key, Plan};
-use nord_format::components::library_id;
 use nord_format::cbin::Header;
+use nord_format::components::library_id;
 use nord_format::{Entity, Program};
 use nord_usb::{Location, ObjectClass};
 

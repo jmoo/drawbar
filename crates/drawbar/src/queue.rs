@@ -247,8 +247,9 @@ pub fn enqueue(
         return log.trouble(format!("“{name}” cannot go to {where_}. {why}"));
     }
     for id in missing_plays(entity, workspace, &device.state, queue) {
-        if let Some(Bound::At(class, at)) =
-            workspace.get(id).map(|file| bound_for(file, &device.state, queue))
+        if let Some(Bound::At(class, at)) = workspace
+            .get(id)
+            .map(|file| bound_for(file, &device.state, queue))
         {
             enqueue(workspace, device, queue, log, id, class, at);
         }
@@ -300,7 +301,9 @@ fn missing_plays(
         })
         .filter(|key| !waiting(*key))
         .filter_map(|key| {
-            let file = workspace.listed().find(|file| plays::key_of(file) == Some(key))?;
+            let file = workspace
+                .listed()
+                .find(|file| plays::key_of(file) == Some(key))?;
             Some(file.id)
         })
         .collect()
@@ -2545,13 +2548,22 @@ mod tests {
     #[test]
     fn a_queued_program_takes_the_piano_it_plays_that_the_instrument_lacks_ahead_of_it() {
         let (mut workspace, mut log, fresh) = bench();
-        let piano = workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        let piano = workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
         let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
         let (_, bytes) =
             crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
         let program = workspace.ingest("Keys.ne5p".into(), Origin::Fresh, bytes, &mut log);
         let order = |queue: &Queue| -> Vec<(u64, ObjectClass, Location)> {
-            queue.entries().iter().map(|held| (held.id, held.class, held.at)).collect()
+            queue
+                .entries()
+                .iter()
+                .map(|held| (held.id, held.class, held.at))
+                .collect()
         };
 
         let mut device = pianos_read(&workspace, 2, "Grand");
@@ -2571,11 +2583,19 @@ mod tests {
 
         let mut partly = pianos_read(&workspace, 1, "Grand");
         let queue = after_queueing(&workspace, &mut partly, program);
-        assert_eq!(order(&queue), [(program, ObjectClass::Program, at(0))], "a bank unread");
+        assert_eq!(
+            order(&queue),
+            [(program, ObjectClass::Program, at(0))],
+            "a bank unread"
+        );
 
         let mut holding = pianos_read(&workspace, 2, "Tine");
         let queue = after_queueing(&workspace, &mut holding, program);
-        assert_eq!(order(&queue), [(program, ObjectClass::Program, at(0))], "already there");
+        assert_eq!(
+            order(&queue),
+            [(program, ObjectClass::Program, at(0))],
+            "already there"
+        );
     }
 
     /// A piano slot reports no checksum. One whose body is another length than the

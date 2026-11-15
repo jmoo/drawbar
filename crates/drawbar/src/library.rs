@@ -143,10 +143,9 @@ impl Needs {
     pub fn sentence(&self) -> String {
         match self {
             Needs::Nothing => "Nothing here says what it plays.".to_string(),
-            Needs::Named { class, name } => format!(
-                "It plays the {} “{name}”.",
-                Kind::from_class(*class).chip()
-            ),
+            Needs::Named { class, name } => {
+                format!("It plays the {} “{name}”.", Kind::from_class(*class).chip())
+            }
             Needs::Wanted { class, id } => format!(
                 "It plays a {} that is not here ({id:#010x}).",
                 Kind::from_class(*class).chip()
@@ -215,7 +214,15 @@ pub fn rows(
             claimed.push(slot);
         }
         let worn = tags.worn(entity.id);
-        let row = local(entity, device, queue, worn.len(), &kept, instrument, &catalog);
+        let row = local(
+            entity,
+            device,
+            queue,
+            worn.len(),
+            &kept,
+            instrument,
+            &catalog,
+        );
         let state = state(row.item, row.where_, queue);
         if admits(filter, &row, worn, state) {
             rows.push(row);
@@ -281,7 +288,9 @@ pub fn row_of(
     let instrument = device.product().and_then(Family::from_product);
     let kept = Kept::of(workspace);
     let catalog = Catalog::of(workspace, device);
-    row_with(item, workspace, device, queue, tags, &kept, instrument, &catalog)
+    row_with(
+        item, workspace, device, queue, tags, &kept, instrument, &catalog,
+    )
 }
 
 /// [`row_of`], with what it reads of the whole list already taken.
@@ -300,7 +309,9 @@ fn row_with(
         Item::Local(id) => {
             let entity = workspace.get(id)?;
             let worn = tags.worn(id).len();
-            Some(local(entity, device, queue, worn, kept, instrument, catalog))
+            Some(local(
+                entity, device, queue, worn, kept, instrument, catalog,
+            ))
         }
         Item::Slot { class, at } => {
             Some(slot(class, at, device.slot(class, at).flatten()?, device))
@@ -794,8 +805,8 @@ pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option
         let named = Kind::from_class(class).chip();
         match short {
             0 => {}
-            1 => said.push(format!("1 needs a {named} the instrument has not named")),
-            n => said.push(format!("{n} need a {named} the instrument has not named")),
+            1 => said.push(format!("1 needs a {named} that is not here")),
+            n => said.push(format!("{n} need a {named} that is not here")),
         }
     }
     (!said.is_empty()).then(|| said.join(" · "))
@@ -1513,8 +1524,8 @@ fn paint(
         &crate::room::measure(row.size),
         mono(MONO),
     );
-    // ⚠️ Weak ink even for a bare id. An unresolved id is a question nobody has asked
-    // the instrument, not a library reported missing.
+    // ⚠️ Weak ink even for a bare id: an instrument not attached or not fully read may
+    // still hold it.
     write(cell(Column::Needs), &row.needs.text(), plain(TEXT, quiet));
 
     // A table row drags like a tree row, with the same payload, so it has the same drop
@@ -2502,8 +2513,7 @@ mod tests {
         assert_eq!(
             consequence(&picked, &device.state, &queue).as_deref(),
             Some(
-                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano the instrument has not \
-                 named"
+                "→ Programs 7:1–7:4 · 2 slots occupied · 1 needs a piano that is not here"
             )
         );
 

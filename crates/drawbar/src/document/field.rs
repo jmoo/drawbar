@@ -1635,7 +1635,7 @@ fn reference(
                 .font(egui::FontId::monospace(11.5))
                 .color(ink),
         )
-        .on_hover_text("the file stores the id; only the instrument knows the name");
+        .on_hover_text("the file stores the id, which is worked out from the name");
         ui.label(
             egui::RichText::new(under)
                 .font(egui::FontId::proportional(LABEL))

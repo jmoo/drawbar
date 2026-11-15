@@ -17,10 +17,10 @@ use nord_usb::{Location, ObjectClass};
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
 use crate::device::{fit, occupancy, Device, DeviceState, Fit};
-use crate::plays::Catalog;
 use crate::icon::{icon, painted, Glyph};
 use crate::library::{row_of, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
+use crate::plays::Catalog;
 use crate::queue::{Diff, Queue};
 use crate::room;
 use crate::shell::Shell;
@@ -736,7 +736,7 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
                         .color(quiet),
                 )
                 .on_hover_text(format!(
-                    "this names a {} the instrument has not listed by id",
+                    "the instrument holds no {} by this id",
                     Kind::from_class(class).chip()
                 ));
             }
@@ -789,7 +789,8 @@ fn sounds(item: Item, workspace: &Workspace, device: &DeviceState) -> Option<Sou
     }
     let decoded = entity.entity.as_deref();
     let seen = crate::document::setlist::Catalog { device, workspace };
-    if let Some(programs) = decoded.and_then(|song| crate::document::setlist::programs(song, &seen)) {
+    if let Some(programs) = decoded.and_then(|song| crate::document::setlist::programs(song, &seen))
+    {
         return Some(Sounds::Programs(programs));
     }
     let catalog = Catalog::of(workspace, device);
@@ -800,7 +801,10 @@ fn sounds(item: Item, workspace: &Workspace, device: &DeviceState) -> Option<Sou
     let dialed = crate::bundle::dialed(decoded)
         .and_then(|(category, model)| device.piano_at(category, model));
     if let Some(piano) = dialed {
-        plays.insert(0, sound(crate::plays::slot_key(ObjectClass::Piano, piano), &catalog));
+        plays.insert(
+            0,
+            sound(crate::plays::slot_key(ObjectClass::Piano, piano), &catalog),
+        );
     }
     (!plays.is_empty()).then_some(Sounds::Plays(plays))
 }
@@ -826,7 +830,12 @@ fn sound((class, id): crate::plays::Key, catalog: &Catalog) -> Sound {
 
 fn played_by(workspace: &Workspace, key: crate::plays::Key) -> Sounds {
     let programs = crate::plays::played_by(workspace, key)
-        .map(|entity| (entity.id, crate::strings::display_name(&entity.name).to_string()))
+        .map(|entity| {
+            (
+                entity.id,
+                crate::strings::display_name(&entity.name).to_string(),
+            )
+        })
         .collect();
     Sounds::PlayedBy(programs)
 }
@@ -853,7 +862,10 @@ fn sounds_card(ui: &mut egui::Ui, sounds: &Sounds, acts: &mut Vec<Act>) {
                     return faint(ui, "No program here plays it.");
                 }
                 for (id, name) in programs {
-                    if ui.link(egui::RichText::new(name).text_style(ui_text())).clicked() {
+                    if ui
+                        .link(egui::RichText::new(name).text_style(ui_text()))
+                        .clicked()
+                    {
                         acts.push(Act::Open(Item::Local(*id)));
                     }
                 }
@@ -869,7 +881,11 @@ fn sound_line(ui: &mut egui::Ui, sound: &Sound, acts: &mut Vec<Act>) {
         let quiet = ui.visuals().weak_text_color();
         icon(ui, Kind::from_class(sound.class).glyph(), GLYPH, quiet);
         if sound.lies == Lies::Nowhere {
-            ui.label(egui::RichText::new("!").text_style(ui_text()).color(warn(ui.visuals())));
+            ui.label(
+                egui::RichText::new("!")
+                    .text_style(ui_text())
+                    .color(warn(ui.visuals())),
+            );
         }
         ui.label(egui::RichText::new(&sound.name).text_style(ui_text()));
         let note = match sound.lies {
@@ -1270,7 +1286,9 @@ mod tests {
         let sets = [
             (
                 "piano_panel.id".into(),
-                crate::plays::slot_key(ObjectClass::Piano, piano).1.to_string(),
+                crate::plays::slot_key(ObjectClass::Piano, piano)
+                    .1
+                    .to_string(),
             ),
             ("sample_panel.id".into(), sample.to_string()),
         ];
@@ -1300,7 +1318,12 @@ mod tests {
             program_playing("Tine", 0x0999_0999),
             &mut log,
         );
-        workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
         device.pretend_lengths(ObjectClass::Sample, 1, &[None, Some(("Marimba", 1000))]);
         let marimba_at = Location::from_user(1, 2);
 
@@ -1354,11 +1377,19 @@ mod tests {
             program_playing("Wurli", 0),
             &mut log,
         );
-        let tine = workspace.ingest("Tine.npno".into(), Origin::Fresh, testing::piano(1), &mut log);
+        let tine = workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
         device.pretend_lengths(ObjectClass::Piano, 3, &[Some(("Tine", 1000))]);
         let by_keys = Some(Sounds::PlayedBy(vec![(keys, "Keys".into())]));
 
-        assert_eq!(sounds(Item::Local(tine), &workspace, &device.state), by_keys);
+        assert_eq!(
+            sounds(Item::Local(tine), &workspace, &device.state),
+            by_keys
+        );
         let slot = Item::Slot {
             class: ObjectClass::Piano,
             at: Location::from_user(3, 1),
@@ -1422,7 +1453,14 @@ mod tests {
             });
         });
         let said = testing::words(&output);
-        for word in ["Plays", "Tine", "on the keyboard only", "Copy", "!", "not here"] {
+        for word in [
+            "Plays",
+            "Tine",
+            "on the keyboard only",
+            "Copy",
+            "!",
+            "not here",
+        ] {
             assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
         }
     }

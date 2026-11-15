@@ -3124,7 +3124,12 @@ fn an_unpacked_bundle_exports_again_with_what_its_program_plays() {
             Err(why) => panic!("no bundle: {why}"),
         }
     };
-    let paths: Vec<&str> = export.plan.members.iter().map(|m| m.path.as_str()).collect();
+    let paths: Vec<&str> = export
+        .plan
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
     assert_eq!(
         paths,
         [

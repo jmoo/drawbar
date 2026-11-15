@@ -892,9 +892,7 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
     let unknown = || "—".to_string();
     match view.class {
         ObjectClass::SetList => plays(at, view.workspace).unwrap_or_else(unknown),
-        ObjectClass::Sample => {
-            played_by(info.name.trim(), view.workspace).unwrap_or_else(unknown)
-        }
+        ObjectClass::Sample => played_by(info.name.trim(), view.workspace).unwrap_or_else(unknown),
         ObjectClass::Piano => view
             .device
             .state

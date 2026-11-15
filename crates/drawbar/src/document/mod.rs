@@ -1531,7 +1531,8 @@ fn piano_lookup(
         .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
         .and_then(|field| library_id(&field.value));
     let id = stored.filter(|id| *id != 0);
-    let name = id.and_then(|id| crate::plays::name_of((ObjectClass::Piano, id), workspace, &device.state));
+    let name =
+        id.and_then(|id| crate::plays::name_of((ObjectClass::Piano, id), workspace, &device.state));
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
@@ -2783,7 +2784,11 @@ mod tests {
         let named = |workspace: &Workspace, device: &Device| {
             piano_lookup(Some(&fields), workspace, device).name
         };
-        assert_eq!(named(&workspace, &device), None, "no piano goes by that name");
+        assert_eq!(
+            named(&workspace, &device),
+            None,
+            "no piano goes by that name"
+        );
 
         device.pretend_lengths(ObjectClass::Piano, 4, &[Some(("drawbar-tine", 1000))]);
         assert_eq!(named(&workspace, &device).as_deref(), Some("drawbar-tine"));
@@ -2865,13 +2870,20 @@ mod tests {
         let mut other = Device::new(egui::Context::default());
         other.pretend_scanned(ObjectClass::Piano, 3, &["Clav D6"]);
         let elsewhere = piano_lookup(Some(&fields), &workspace, &other);
-        assert!(elsewhere.models.is_empty(), "another bank, another category");
+        assert!(
+            elsewhere.models.is_empty(),
+            "another bank, another category"
+        );
     }
 
     /// The instrument plays the piano the id names, whatever the dials say.
     #[test]
     fn dials_pointing_away_from_the_piano_the_id_names_are_called_out() {
-        let Bench { workspace, mut device, .. } = Bench::new();
+        let Bench {
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
         let white = crate::plays::slot_key(ObjectClass::Piano, "White Grand").1;
         let sets = [
             (panel::PIANO_ID.into(), white.to_string()),

@@ -1863,8 +1863,24 @@ mod tests {
         device.pretend_attached();
         let program_at = Location::from_user(1, 1);
         let piano_at = Location::from_user(1, 2);
-        enqueue(&workspace, &mut device, &mut queue, &mut log, program, ObjectClass::Program, program_at);
-        enqueue(&workspace, &mut device, &mut queue, &mut log, piano, ObjectClass::Piano, piano_at);
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            program,
+            ObjectClass::Program,
+            program_at,
+        );
+        enqueue(
+            &workspace,
+            &mut device,
+            &mut queue,
+            &mut log,
+            piano,
+            ObjectClass::Piano,
+            piano_at,
+        );
 
         let classes: Vec<ObjectClass> = grouped(&queue, &workspace)
             .unwrap()

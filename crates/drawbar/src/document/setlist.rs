@@ -220,7 +220,10 @@ impl Row {
 }
 
 /// The programs a set list plays, in order, each with its name where one resolves.
-pub(crate) fn programs(entity: &Entity, seen: &Catalog<'_>) -> Option<Vec<(Location, Option<String>)>> {
+pub(crate) fn programs(
+    entity: &Entity,
+    seen: &Catalog<'_>,
+) -> Option<Vec<(Location, Option<String>)>> {
     let file = song(entity)?;
     let resolved = file.body.programs().map(|at| {
         let at = panel(at);
@@ -284,7 +287,10 @@ fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
     if !seen.device.connected() {
         return Stands::Resolves;
     }
-    match wanted(program, &crate::plays::Catalog::of(seen.workspace, seen.device)) {
+    match wanted(
+        program,
+        &crate::plays::Catalog::of(seen.workspace, seen.device),
+    ) {
         Needs::Wanted { class, id } => Stands::Needs { class, id },
         Needs::Named { .. } | Needs::Nothing => Stands::Resolves,
     }
@@ -314,7 +320,7 @@ pub fn claim(entity: &Entity, seen: &Catalog<'_>) -> Option<super::StateLine> {
         words,
         ink,
         hint: "an entry points at a slot with no program, or at a program playing a \
-               library the instrument has not named"
+               library that is not here"
             .to_string(),
     })
 }
@@ -1098,7 +1104,7 @@ mod tests {
             claim.hint
         );
         assert!(
-            claim.hint.contains("has not named"),
+            claim.hint.contains("not here"),
             "the unnamed library: {}",
             claim.hint
         );
