@@ -9451,10 +9451,11 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     let Bench {
         device,
         workspace,
+        queue,
         log,
         ..
     } = &mut session.bench;
-    crate::bring::bring_in(device, workspace, log);
+    crate::bring::bring_in(device, workspace, queue, log);
     device.pretend(crate::device::DeviceEvent::Got {
         name: "untitled".into(),
         origin: Origin::Device { class, at },

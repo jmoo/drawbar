@@ -1312,7 +1312,9 @@ impl DrawbarApp {
         let (device, workspace, log) = (&mut self.device, &mut self.workspace, &mut self.log);
         if let Some(found) = &device.asks.since {
             match crate::bring::since_sheet(ctx, found, workspace) {
-                Some(Answer::Yes) => crate::bring::bring_in(device, workspace, log),
+                Some(Answer::Yes) => {
+                    crate::bring::bring_in(device, workspace, &mut self.queue, log)
+                }
                 Some(Answer::Other | Answer::No) => device.asks.since = None,
                 None => {}
             }

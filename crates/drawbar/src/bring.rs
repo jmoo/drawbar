@@ -421,7 +421,7 @@ pub fn ask_again(device: &mut Device, workspace: &Workspace) {
 /// keyboard stays attached; a moved sound's link follows it; a removed or replaced
 /// sound's file is unlinked and kept. What changed since the question was asked is left
 /// as it is.
-pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
+pub fn bring_in(device: &mut Device, workspace: &mut Workspace, queue: &mut Queue, log: &mut Log) {
     let asked = device.asks.since.take().unwrap_or_default();
     let Some(keyboard) = device.state.keyboard() else {
         return;
@@ -455,6 +455,7 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
             .map(|(_, to, _, held)| (held.spot.clone(), Some(Spot::at(*to)), None))
             .collect();
         workspace.respot(keyboard, class, &moves);
+        queue.respot(class, &moves);
     }
     for (found, to, agrees, before) in moved {
         let entity = workspace.get(found.id);
@@ -1114,9 +1115,44 @@ mod tests {
             [found(first, moved(1, 2)), found(second, moved(2, 1))]
         );
         heard(&mut bench);
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(2))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(1))));
+    }
+
+    #[test]
+    fn a_file_waiting_for_a_sound_that_moved_waits_for_where_it_moved_to() {
+        use crate::browser::Act;
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body())), None]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        bench
+            .workspace
+            .replace_bytes(id, gained("50"), &mut bench.log);
+        bench.act(vec![Act::SaveDoc(id)]);
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(1)));
+
+        let slots = vec![None, Some(program_info(2, "A", crc(&body())))];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class: PROGRAM,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
+
+        assert_eq!(slot_of(&bench, id), Some(Spot::at(at(2))));
+        assert_eq!(bench.queue.entry(id).map(|held| held.at), Some(at(2)));
     }
 
     #[test]
@@ -1144,7 +1180,12 @@ mod tests {
         let id = linked(&mut bench, "Tine.ne5p", body(), 1, &body());
         heard(&mut bench);
         assert!(bench.device.asks.since.is_some());
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         assert_eq!(slot_of(&bench, id), None);
         assert!(pulls(&bench).is_empty());
         assert_eq!(bench.workspace.get(id).unwrap().bytes.to_vec(), body());
@@ -1445,7 +1486,12 @@ mod tests {
         heard(&mut bench);
         assert_eq!(bench.device.asks.since.as_ref().map(Vec::len), Some(3));
 
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         assert_eq!(pulls(&bench), [at(1)]);
         assert_eq!(slot_of(&bench, moved), Some(Spot::at(at(4))));
         assert_eq!(standing(&bench, moved), Some(Standing::Same));
@@ -1481,7 +1527,12 @@ mod tests {
         walked(&mut bench, &[Some(crc(&one))]);
         let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
         heard(&mut bench);
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         let log = &mut bench.log;
         bench.workspace.replace_bytes(id, gained("60"), log);
         got(&mut bench, 1, one, Purpose::Pull);
@@ -1545,7 +1596,12 @@ mod tests {
         let moved = linked(&mut bench, "B.ne5p", other.clone(), 2, &other);
         heard(&mut bench);
 
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         got(&mut bench, 1, theirs, Purpose::Pull);
         let undo = |bench: &mut Bench, line: &str| {
             let pressed = bench.log.press(line);
@@ -1578,7 +1634,12 @@ mod tests {
         let first = linked(&mut bench, "A.ne5p", body(), 1, &body());
         let second = linked(&mut bench, "B.ne5p", body(), 2, &body());
         heard(&mut bench);
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         got(&mut bench, 1, one.clone(), Purpose::Pull);
         got(&mut bench, 2, two.clone(), Purpose::Pull);
         assert!(bench.log.transcript().contains("Brought in 2 sounds"));
@@ -1608,7 +1669,12 @@ mod tests {
         walked(&mut bench, &[Some(crc(&one))]);
         let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
         heard(&mut bench);
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         let log = &mut bench.log;
         bench.workspace.replace_bytes(id, gained("60"), log);
         bench.workspace.mark_saved(id);
@@ -1637,7 +1703,12 @@ mod tests {
         }]);
         bench.act(vec![crate::browser::Act::SendAll]);
         assert!(bench.device.sending());
-        bring_in(&mut bench.device, &mut bench.workspace, &mut bench.log);
+        bring_in(
+            &mut bench.device,
+            &mut bench.workspace,
+            &mut bench.queue,
+            &mut bench.log,
+        );
         heard(&mut bench);
         assert!(pulls(&bench).is_empty());
         assert_eq!(standing(&bench, id), Some(Standing::Theirs));
