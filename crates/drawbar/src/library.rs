@@ -15,7 +15,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, tint, ui as ui_text, warn};
 use crate::browser::{qualifier, Act, Browser, Item, Kept, Kind, Qualifier};
-use crate::device::{fit, read_only, standing_of, Device, DeviceState, Linked};
+use crate::device::{fit, place_of, read_only, standing_of, Device, DeviceState, Linked};
 use crate::filter::{Filter, Narrow, Place, State};
 use crate::icon::{painted, Glyph};
 use crate::link::{Standing, There};
@@ -193,7 +193,7 @@ pub fn rows(
     filter: &Filter,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    let mut claimed: Vec<(ObjectClass, Location)> = Vec::new();
+    let mut claimed = BTreeSet::new();
     let kept = Kept::of(workspace);
     let instrument = device.product().and_then(Family::from_product);
     let catalog = Catalog::of(workspace, device);
@@ -202,7 +202,7 @@ pub fn rows(
         let row = local(entity, device, worn.len(), &kept, instrument, &catalog);
         // Claim the row's slot so the instrument's list does not repeat it.
         if let Some(slot) = row.at.filter(|_| device.connected()) {
-            claimed.push(slot);
+            claimed.insert(Item::Slot { class: slot.0, at: slot.1 });
         }
         let state = state(row.item, row.mark, queue);
         if admits(filter, &row, worn, state) {
@@ -220,7 +220,7 @@ pub fn rows(
                     continue;
                 };
                 let at = Location::from_user(bank, index as u32 + 1);
-                if claimed.contains(&(class, at)) {
+                if claimed.contains(&Item::Slot { class, at }) {
                     continue;
                 }
                 let row = slot(class, at, info, device);
@@ -298,14 +298,8 @@ fn local(
     instrument: Option<Family>,
     catalog: &Catalog,
 ) -> Row {
-    let linked = standing_of(device, entity);
-    let (at, faint) = match &linked {
-        Some(linked) => (
-            linked.at.map(|at| (linked.class, at)),
-            linked.standing == Standing::Unread,
-        ),
-        None => (away(entity, device), true),
-    };
+    let placed = place_of(device, entity);
+    let linked = placed.filter(|_| device.connected());
     Row {
         item: Item::Local(entity.id),
         kind: Kind::of(entity),
@@ -314,23 +308,11 @@ fn local(
         tags,
         unsaved: entity.is_unsaved(),
         where_: whereabouts(entity, device, linked.as_ref()),
-        at,
-        faint,
+        at: placed.and_then(|placed| Some((placed.class, placed.at?))),
+        faint: placed.is_none_or(|placed| placed.faint()),
         mark: linked.and_then(|linked| Mark::of(linked.standing)),
         size: entity.size(),
         needs: wanted(entity, catalog),
-    }
-}
-
-/// The address of an asset's one link, while no keyboard is attached.
-pub(crate) fn away(entity: &LocalEntity, device: &DeviceState) -> Option<(ObjectClass, Location)> {
-    if device.keyboard().is_some() {
-        return None;
-    }
-    let mut held = entity.links.iter().filter_map(|link| link.held.as_ref());
-    match (held.next(), held.next()) {
-        (Some(held), None) => Some((held.class(), held.location()?)),
-        _ => None,
     }
 }
 
@@ -849,8 +831,10 @@ pub struct Library {
     widths: Widths,
     /// The order of the rows as last taken, kept until something it comes from changes.
     table: Option<Table>,
-    /// The header's counts, and the revisions they were counted at.
-    counts: Option<(Counted, [usize; 3])>,
+    counts: Counts,
+    /// What the rows find pianos and samples by, and the list and instrument revisions it
+    /// was taken at.
+    catalog: Option<((u64, u64), Catalog)>,
     /// How many times the order of the rows has been taken.
     #[cfg(test)]
     pub(crate) built: usize,
@@ -863,7 +847,8 @@ impl Default for Library {
             order: Order::Up,
             widths: [None; COLUMNS],
             table: None,
-            counts: None,
+            counts: Counts::default(),
+            catalog: None,
             #[cfg(test)]
             built: 0,
         }
@@ -927,6 +912,28 @@ struct Counted {
     revision: u64,
     device: u64,
     queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+}
+
+/// [`counts`], and what they were counted from.
+#[derive(Default)]
+pub struct Counts(Option<(Counted, [usize; 3])>);
+
+impl Counts {
+    /// [`counts`], counted again only when the list, the instrument or the queue has
+    /// changed.
+    pub fn of(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 3] {
+        let now = Counted {
+            revision: workspace.revision(),
+            device: device.revision(),
+            queue: queue.shape(),
+        };
+        if let Some((_, counts)) = self.0.as_ref().filter(|(at, _)| *at == now) {
+            return *counts;
+        }
+        let counts = counts(workspace, &device.state, queue);
+        self.0 = Some((now, counts));
+        counts
+    }
 }
 
 impl Library {
@@ -1020,20 +1027,14 @@ impl Library {
         }
     }
 
-    /// What is waiting, and what differs from its slot, counted again only when the list,
-    /// the instrument or the queue has changed.
-    fn counts(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> [usize; 3] {
-        let now = Counted {
-            revision: workspace.revision(),
-            device: device.revision(),
-            queue: queue.shape(),
-        };
-        if let Some((_, counts)) = self.counts.as_ref().filter(|(at, _)| *at == now) {
-            return *counts;
-        }
-        let counts = counts(workspace, &device.state, queue);
-        self.counts = Some((now, counts));
-        counts
+    /// What is waiting, ready to send, and needs the user. See [`Counts::of`].
+    pub(crate) fn counts(
+        &mut self,
+        workspace: &Workspace,
+        device: &Device,
+        queue: &Queue,
+    ) -> [usize; 3] {
+        self.counts.of(workspace, device, queue)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1075,6 +1076,13 @@ impl Library {
         }
 
         ui.spacing_mut().item_spacing.y = ROW_GAP;
+        let taken = (workspace.revision(), device.revision());
+        if self.catalog.as_ref().is_none_or(|(at, _)| *at != taken) {
+            self.catalog = Some((taken, Catalog::of(workspace, &device.state)));
+        }
+        let Some((_, catalog)) = &self.catalog else {
+            return;
+        };
         let shown = egui::ScrollArea::vertical()
             .id_salt("library_table")
             .auto_shrink([false; 2])
@@ -1082,7 +1090,6 @@ impl Library {
                 let shown = items.get(shown).unwrap_or_default();
                 let kept = Kept::of(workspace);
                 let instrument = device.state.product().and_then(Family::from_product);
-                let catalog = Catalog::of(workspace, &device.state);
                 let tags = browser.tags();
                 let rows: Vec<Row> = shown
                     .iter()
@@ -1094,7 +1101,7 @@ impl Library {
                             tags,
                             &kept,
                             instrument,
-                            &catalog,
+                            catalog,
                         )
                     })
                     .collect();

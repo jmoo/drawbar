@@ -7,7 +7,7 @@
 //! absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use eframe::egui;
 
@@ -16,7 +16,6 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
-use crate::device::link_offers;
 use crate::device::{fit, occupancy, Device, DeviceState, Fit};
 use crate::document::Click;
 use crate::icon::{icon, painted, Glyph};
@@ -509,9 +508,7 @@ fn about(
         .map(|loud| (loud.label, loud.hint, loud.click));
     let also = entity
         .filter(|_| row.at.is_none())
-        .map_or_else(Vec::new, |entity| {
-            link_offers(&device.state, workspace, entity)
-        });
+        .map_or_else(Vec::new, |entity| crate::device::link_offers(&device.state, workspace, entity));
     About::Row(Single {
         name: row.name.clone(),
         at: row.at.map(|(class, at)| place(class, at)),
@@ -633,19 +630,13 @@ fn as_listed(
     workspace: &Workspace,
     device: &DeviceState,
 ) -> Vec<Item> {
-    let items: Vec<Item> = items.collect();
-    if !items.iter().any(|item| matches!(item, Item::Slot { .. })) {
-        return items;
-    }
-    let mut spots = BTreeMap::new();
-    for entity in workspace.listed() {
-        if let Some((class, at)) = crate::device::slot_of(device, entity) {
-            spots.entry(Item::Slot { class, at }).or_insert(entity.id);
-        }
-    }
     let listed: BTreeSet<Item> = items
-        .into_iter()
-        .map(|item| spots.get(&item).map_or(item, |id| Item::Local(*id)))
+        .map(|item| match item {
+            Item::Slot { class, at } => crate::device::standing_on(device, workspace, class, at)
+                .filter(|entity| entity.kept)
+                .map_or(item, |entity| Item::Local(entity.id)),
+            item => item,
+        })
         .collect();
     listed.into_iter().collect()
 }

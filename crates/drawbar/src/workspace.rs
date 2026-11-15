@@ -2105,21 +2105,17 @@ impl Workspace {
         );
     }
 
-    /// Unlink an asset from `keyboard`. `apart` keeps it off that keyboard: nothing links
-    /// it there again on its own.
-    pub fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
-        match apart {
-            true => self.set_link(
-                id,
-                Link {
-                    keyboard: keyboard.clone(),
-                    held: None,
-                },
-            ),
-            false => self.change_links(id, keyboard, |links| {
-                links.retain(|link| link.keyboard != *keyboard)
-            }),
-        }
+    /// Unlink an asset from `keyboard`.
+    pub fn unlink(&mut self, id: u64, keyboard: &Keyboard) {
+        self.change_links(id, keyboard, |links| {
+            links.retain(|link| link.keyboard != *keyboard)
+        });
+    }
+
+    /// Keep an asset off `keyboard`: nothing links it there again on its own.
+    pub fn keep_off(&mut self, id: u64, keyboard: &Keyboard) {
+        let keyboard = keyboard.clone();
+        self.set_link(id, Link { keyboard, held: None });
     }
 
     /// The asset linked to the slot of `class` at `spot` on `keyboard`.
@@ -5904,10 +5900,10 @@ mod tests {
         assert_eq!(entity.links.len(), 1);
         assert_eq!(entity.held_on(&here), Some(&program_at(7)));
 
-        workspace.unlink(id, &here, false);
+        workspace.unlink(id, &here);
         let entity = workspace.get(id).unwrap();
         assert_eq!((entity.links.len(), entity.kept_off(&here)), (0, false));
-        workspace.unlink(id, &here, true);
+        workspace.keep_off(id, &here);
         let entity = workspace.get(id).unwrap();
         assert_eq!(
             (entity.held_on(&here), entity.kept_off(&here)),

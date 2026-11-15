@@ -1219,7 +1219,7 @@ fn export_bundle(
             }
             for (path, need) in &export.plan.unmet {
                 let stem = path.rsplit('/').next().unwrap_or(path);
-                let program = stem.rsplit_once('.').map_or(stem, |(stem, _)| stem);
+                let program = crate::device::slot_label(stem).unwrap_or_default();
                 log.trouble(format!(
                     "Left out: {}, which “{program}” plays, is not on this computer.",
                     crate::bundle::needed(*need, workspace, &device.state)
@@ -1624,13 +1624,6 @@ fn write_note(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> 
     (!note.is_empty()).then(|| note.join("\n\n"))
 }
 
-/// The slot an asset would be written back to: the one it stands for on the attached
-/// keyboard ([`crate::device::slot_of`]), when this app writes to that class.
-pub(super) fn owed(entity: &LocalEntity, state: &DeviceState) -> Option<(ObjectClass, Location)> {
-    let (class, at) = crate::device::slot_of(state, entity)?;
-    (!read_only(class)).then_some((class, at))
-}
-
 /// Where queueing an asset for sending would put it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Bound {
@@ -1656,14 +1649,14 @@ pub(super) fn spare_slot(
     state.first_free(class, &queue.waiting_in(class))
 }
 
-/// The slot an asset is linked to ([`owed`]), or else the first free slot of its folder
+/// The slot an asset is linked to ([`crate::device::owed`]), or else the first free slot of its folder
 /// that nothing in the queue is waiting for: where a piano or sample gone from the
 /// keyboard goes, and an asset with no link.
 ///
 /// ⚠️ Free means read and found empty. A folder no scan has reached offers no slot, for
 /// the reason [`crate::queue::Occupancy`] gives.
 pub(crate) fn bound_for(entity: &LocalEntity, state: &DeviceState, queue: &Queue) -> Bound {
-    bound_at(entity, state, queue, owed(entity, state))
+    bound_at(entity, state, queue, crate::device::owed(state, entity))
 }
 
 /// Where Send to… first puts an asset: a slot its header or origin names that a walk has
@@ -1755,14 +1748,9 @@ fn link_to(
     let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(id)) else {
         return;
     };
-    let name = state
-        .slot(class, at)
-        .flatten()
-        .map_or("", |info| info.name.trim());
-    let spot = crate::link::Spot::of(class, at, name);
-    let Some(held) = entity
-        .saved_print()
-        .and_then(|print| crate::link::Held::new(class, spot, print))
+    let Some(held) = crate::device::spot_at(state, class, at)
+        .zip(entity.saved_print())
+        .and_then(|(spot, print)| crate::link::Held::new(class, spot, print))
     else {
         return;
     };
@@ -1781,7 +1769,7 @@ fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64
         None => format!("“{}” is unlinked from the keyboard.", entity.name),
     };
     let before = entity.held_on(&keyboard).cloned();
-    workspace.unlink(id, &keyboard, true);
+    workspace.keep_off(id, &keyboard);
     log.say(said);
     if let Some(held) = before {
         log.offer(crate::log::Undo::Relink { id, keyboard, held });
@@ -1892,7 +1880,7 @@ fn save_doc(
         }
         return;
     }
-    let Some((class, at)) = owed(entity, &device.state) else {
+    let Some((class, at)) = crate::device::owed(&device.state, entity) else {
         return log.say(format!(
             "“{}” did not come from a slot this app writes to, so there is nowhere to \
              save it.",

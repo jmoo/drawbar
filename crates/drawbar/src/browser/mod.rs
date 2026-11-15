@@ -247,6 +247,7 @@ pub struct Browser {
     /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
     rows: Rows,
+    counts: crate::library::Counts,
     /// Acts waiting for the assets they read to be read, in the order they were asked.
     held: Vec<Act>,
     /// Where this computer's folders were drawn as places a drop lands, in drawing order:
@@ -271,6 +272,7 @@ impl Default for Browser {
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
             rows: Rows::default(),
+            counts: crate::library::Counts::default(),
             held: Vec::new(),
             targets: Vec::new(),
             followed: true,

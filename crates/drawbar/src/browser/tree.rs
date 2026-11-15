@@ -570,7 +570,11 @@ impl Browser {
         acts: &mut Vec<Act>,
     ) {
         self.follow_jump(device);
-        let frame = self.frame(workspace, device, queue);
+        let counts = match self.sections.places {
+            true => self.counts.of(workspace, device, queue),
+            false => [0; 3],
+        };
+        let frame = self.frame(workspace, device, counts);
         let around = self.lines_around(workspace, device, filter, &frame);
         let mut rows = std::mem::take(&mut self.rows);
         rows.update(self, workspace, around, ROW_GAP);
@@ -697,7 +701,7 @@ impl Browser {
         }
     }
 
-    fn frame(&self, workspace: &Workspace, device: &Device, queue: &Queue) -> Frame {
+    fn frame(&self, workspace: &Workspace, device: &Device, counts: [usize; 3]) -> Frame {
         let library = self.sections.places && self.open.contains(&Branch::Computer);
         let naming = Naming {
             kept: match library {
@@ -715,10 +719,6 @@ impl Browser {
                 .filter_map(|entity| entity.origin.slot())
                 .collect(),
             false => Vec::new(),
-        };
-        let counts = match self.sections.places {
-            true => crate::library::counts(workspace, &device.state, queue),
-            false => [0; 3],
         };
         Frame {
             naming,

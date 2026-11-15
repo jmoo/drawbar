@@ -82,7 +82,7 @@ impl Undo {
         match self {
             Undo::Unlink { keyboard, ids } => {
                 for id in ids {
-                    workspace.unlink(id, &keyboard, true);
+                    workspace.keep_off(id, &keyboard);
                 }
             }
             Undo::Unqueue(ids) => ids.into_iter().for_each(|id| queue.forget(id)),

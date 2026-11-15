@@ -2,6 +2,8 @@
 //! it was last attached, and which of a file and its slot is current. Bringing a slot in
 //! reads it and saves what it holds as the file linked to it.
 
+use std::collections::HashMap;
+
 use eframe::egui;
 use nord_usb::{Location, ObjectClass};
 
@@ -50,12 +52,13 @@ pub fn since(state: &DeviceState, workspace: &Workspace) -> Vec<Found> {
     let Some(keyboard) = state.keyboard() else {
         return Vec::new();
     };
+    let claims = claims(workspace, &keyboard);
     let judged: Vec<(Found, &Held)> = workspace
         .listed()
         .filter(|entity| !entity.is_unsaved())
         .filter_map(|entity| {
             let held = entity.held_on(&keyboard)?;
-            if claimants(workspace, &keyboard, held) > 1 {
+            if claims[&(held.class(), &held.spot)] > 1 {
                 return None;
             }
             let change = change(state, workspace, &keyboard, entity, held)?;
@@ -192,17 +195,17 @@ fn unmoved(state: &DeviceState, held: &Held) -> Option<Change> {
     })
 }
 
-/// How many files are linked to the slot `held` names on `keyboard`. Two libraries that
-/// linked one slot each before they synced both keep their link.
-pub fn claimants(workspace: &Workspace, keyboard: &Keyboard, held: &Held) -> usize {
-    workspace
-        .listed()
-        .filter(|entity| {
-            entity
-                .held_on(keyboard)
-                .is_some_and(|other| other.class() == held.class() && other.spot == held.spot)
-        })
-        .count()
+/// How many files are linked to each slot on `keyboard`. Two libraries that linked one
+/// slot each before they synced both keep their link.
+fn claims<'w>(
+    workspace: &'w Workspace,
+    keyboard: &Keyboard,
+) -> HashMap<(ObjectClass, &'w Spot), usize> {
+    let mut claims = HashMap::new();
+    for held in workspace.listed().filter_map(|entity| entity.held_on(keyboard)) {
+        *claims.entry((held.class(), &held.spot)).or_default() += 1;
+    }
+    claims
 }
 
 /// Whether the walk of every class holding a file linked on the attached keyboard has
@@ -456,7 +459,7 @@ pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     }
     for found in &now {
         if let Change::Removed(_) | Change::Replaced { .. } = found.change {
-            workspace.unlink(found.id, &keyboard, false);
+            workspace.unlink(found.id, &keyboard);
         }
     }
     if !device.sending() {
@@ -520,7 +523,7 @@ pub fn landed(
             let held = entity.held_on(&keyboard);
             held.is_some_and(|held| {
                 entity.saved_print() == Some(held.base)
-                    && claimants(workspace, &keyboard, held) == 1
+                    && claims(workspace, &keyboard)[&(held.class(), &held.spot)] == 1
             })
         })
     });
@@ -662,36 +665,18 @@ pub fn since_sheet(ctx: &egui::Context, found: &[Found], workspace: &Workspace) 
             .map_or("", |it: &LocalEntity| display_name(&it.name))
             .to_string()
     };
-    let changed: Vec<(String, String)> = found
-        .iter()
-        .filter_map(|found| match found.change {
-            Change::Changed(at) => Some((name(found.id), shown(at))),
-            _ => None,
-        })
-        .collect();
-    let moved: Vec<(String, String)> = found
-        .iter()
-        .filter_map(|found| match found.change {
-            Change::Moved { from, to, .. } => {
-                Some((name(found.id), format!("{} → {}", shown(from), shown(to))))
-            }
-            _ => None,
-        })
-        .collect();
-    let replaced: Vec<(String, String)> = found
-        .iter()
-        .filter_map(|found| match &found.change {
-            Change::Replaced { at, by } => Some((format!("{} → {by}", name(found.id)), shown(*at))),
-            _ => None,
-        })
-        .collect();
-    let removed: Vec<(String, String)> = found
-        .iter()
-        .filter_map(|found| match found.change {
-            Change::Removed(at) => Some((name(found.id), at.map(shown).unwrap_or_default())),
-            _ => None,
-        })
-        .collect();
+    let mut groups: [Vec<(String, String)>; 4] = Default::default();
+    for found in found {
+        let name = name(found.id);
+        let (group, line) = match &found.change {
+            Change::Changed(at) => (0, (name, shown(*at))),
+            Change::Moved { from, to, .. } => (1, (name, format!("{} → {}", shown(*from), shown(*to)))),
+            Change::Replaced { at, by } => (2, (format!("{name} → {by}"), shown(*at))),
+            Change::Removed(at) => (3, (name, at.map(shown).unwrap_or_default())),
+        };
+        groups[group].push(line);
+    }
+    let [changed, moved, replaced, removed] = groups;
     let groups = [
         (format!("{} changed", changed.len()), changed),
         (format!("{} moved", moved.len()), moved),

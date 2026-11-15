@@ -828,7 +828,7 @@ impl DrawbarApp {
     /// Send, which opens the review of what is waiting, with a warn dot while something
     /// waiting cannot go as it is. Before it, the offer to queue saved changes a send
     /// would otherwise skip. Neither is drawn without an instrument.
-    fn send_button(&self, ui: &mut egui::Ui, narrow: bool, acts: &mut Vec<Act>) {
+    fn send_button(&mut self, ui: &mut egui::Ui, narrow: bool, acts: &mut Vec<Act>) {
         if !self.attached() {
             return;
         }
@@ -862,7 +862,8 @@ impl DrawbarApp {
         if send.clicked() {
             acts.push(Act::ReviewQueue);
         }
-        let offer = crate::queue::offer(&self.workspace, &self.device.state, &self.queue);
+        let [_, ready, _] = self.library.counts(&self.workspace, &self.device, &self.queue);
+        let offer = crate::queue::offered(ready);
         if let Some((label, hint)) = offer {
             let queue = Pill {
                 glyph: Glyph::Plus,

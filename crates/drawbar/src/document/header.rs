@@ -11,9 +11,9 @@ use super::controls::{self, Sets};
 use super::{piano, project, sample, setlist, text, wav, SendBack, Shape};
 use crate::app::{accent, caption, good, tint, warn};
 use crate::browser::{Kind, Qualifier, LOAD_ON_INSTRUMENT};
-use crate::device::{loadable, read_only, standing_of, DeviceState, Linked};
+use crate::device::{loadable, owed, place_of, read_only, standing_of, DeviceState};
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{away, mark_ink, mark_sign, mark_words, Mark};
+use crate::library::{mark_ink, mark_sign, mark_words, Mark};
 use crate::link::Standing;
 use crate::panel::caps;
 use crate::queue::Queue;
@@ -1166,25 +1166,20 @@ impl Lives {
 /// Where the document lives: the slot it is linked to on the attached keyboard, its one
 /// link while nothing is attached, or else where it is [`stored`].
 pub(super) fn lives(entity: &LocalEntity, device: &DeviceState) -> Lives {
-    let linked = standing_of(device, entity);
-    let (text, faint) = match (linked, away(entity, device)) {
-        (
-            Some(Linked {
-                class,
-                at: Some(at),
-                standing,
-                ..
-            }),
-            _,
-        ) => (place(class, at), standing == Standing::Unread),
-        (Some(Linked { class, .. }), _) => (folder(class).to_string(), true),
-        (None, Some((class, at))) => (place(class, at), true),
-        (None, None) => (stored(entity), false),
+    let Some(placed) = place_of(device, entity) else {
+        return Lives {
+            text: stored(entity),
+            mark: None,
+            faint: false,
+        };
     };
     Lives {
-        text,
-        mark: linked.and_then(|linked| Mark::of(linked.standing)),
-        faint,
+        text: match placed.at {
+            Some(at) => place(placed.class, at),
+            None => folder(placed.class).to_string(),
+        },
+        mark: Mark::of(placed.standing),
+        faint: placed.faint(),
     }
 }
 
@@ -1307,7 +1302,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
     };
 
     if entity.is_unsaved() {
-        let queues = crate::device::slot_of(device, entity).filter(|(class, _)| !read_only(*class));
+        let queues = owed(device, entity);
         return Some(Loud {
             short: "Save".to_string(),
             glyph: Glyph::Save,
@@ -1352,7 +1347,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
                 Click::Choose,
             )
         }),
-        (Standing::Same | Standing::Unread, Some(at)) => Some(Loud {
+        (Standing::Same | Standing::Unread, Some(at)) if loadable(device, class, at) => Some(Loud {
             short: "Load".to_string(),
             glyph: Glyph::Keyboard,
             hint: format!("plays {} on the keyboard", place(class, at)),
@@ -1363,7 +1358,7 @@ pub(crate) fn action(entity: &LocalEntity, device: &DeviceState) -> Option<Loud>
                 Click::Nothing,
             )
         }),
-        (Standing::Same | Standing::Unread, None) => Some(idle(format!(
+        (Standing::Same | Standing::Unread, _) => Some(idle(format!(
             "{} has not been found on the keyboard yet",
             folder(class)
         ))),

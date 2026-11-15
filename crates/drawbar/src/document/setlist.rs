@@ -19,7 +19,6 @@ use crate::app;
 use crate::browser::{Item, Kind};
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{wanted, Needs};
 use crate::panel::cut;
 use crate::strings::{display_name, place, shown};
 use crate::workspace::{LocalEntity, Workspace};
@@ -259,7 +258,9 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
         Some(None) => return (None, None, Stands::Vacant),
         None => {}
     }
-    let Some(kept) = stands_on(at, seen.workspace, seen.device) else {
+    let Some(kept) =
+        crate::device::standing_on(seen.device, seen.workspace, ObjectClass::Program, at)
+    else {
         return (None, None, Stands::Unread);
     };
     (
@@ -269,30 +270,22 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
     )
 }
 
-/// The asset linked to the program slot `at` on the attached keyboard, or a view of it.
-fn stands_on<'w>(
-    at: Location,
-    workspace: &'w Workspace,
-    device: &DeviceState,
-) -> Option<&'w LocalEntity> {
-    crate::device::standing_on(device, workspace, ObjectClass::Program, at)
-}
-
 /// Whether the library a resolved program plays has a name.
 ///
 /// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
-/// piano id is normal ([`Needs::Wanted`] means unresolved, not missing), and flagging it
+/// piano id is normal ([`crate::library::Needs::Wanted`] means unresolved, not missing), and flagging it
 /// would flag every entry of every set list opened from disk.
 fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
     if !seen.device.connected() {
         return Stands::Resolves;
     }
-    match wanted(
-        program,
-        &crate::plays::Catalog::of(seen.workspace, seen.device),
-    ) {
-        Needs::Wanted { class, id } => Stands::Needs { class, id },
-        Needs::Named { .. } | Needs::Nothing => Stands::Resolves,
+    let Some(plays) = crate::plays::named(program).first() else {
+        return Stands::Resolves;
+    };
+    let (class, id) = plays.key();
+    match crate::plays::name_of((class, id), seen.workspace, seen.device) {
+        Some(_) => Stands::Resolves,
+        None => Stands::Needs { class, id },
     }
 }
 

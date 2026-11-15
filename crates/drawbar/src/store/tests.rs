@@ -9140,7 +9140,10 @@ impl Session {
     }
 
     fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
-        self.bench.workspace.unlink(id, keyboard, apart);
+        match apart {
+            true => self.bench.workspace.keep_off(id, keyboard),
+            false => self.bench.workspace.unlink(id, keyboard),
+        }
         self.decided();
     }
 }

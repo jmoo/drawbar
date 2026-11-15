@@ -509,11 +509,15 @@ pub fn offer(
     device: &DeviceState,
     queue: &Queue,
 ) -> Option<(String, String)> {
-    let changed = changed(workspace, device, queue).len();
-    (changed > 0).then(|| {
+    offered(changed(workspace, device, queue).len())
+}
+
+/// [`offer`], for `ready` assets.
+pub fn offered(ready: usize) -> Option<(String, String)> {
+    (ready > 0).then(|| {
         (
-            format!("Queue {changed}"),
-            format!("queue the {changed} ready to send"),
+            format!("Queue {ready}"),
+            format!("queue the {ready} ready to send"),
         )
     })
 }
