@@ -341,10 +341,10 @@ pub fn follow(device: &mut Device, workspace: &Workspace, log: &mut Log) {
         device.asks.since = (!found.is_empty()).then_some(found.clone());
     }
     if device.asks.bringing {
-        let unasked = found
+        let kept = found
             .into_iter()
             .filter(|found| !device.asks.undone.contains(&found.id));
-        pull_changed(device, workspace, log, unasked.collect(), false);
+        pull_changed(device, workspace, log, kept.collect(), false);
     }
 }
 
@@ -433,10 +433,10 @@ pub fn ask_again(device: &mut Device, workspace: &Workspace) {
 }
 
 /// Bring them in: every slot listed as changed on the keyboard is brought in, though an
-/// earlier bringing in of it was undone, and a slot changed later while this keyboard
-/// stays attached is brought in unasked; a moved sound's link follows it; a removed or
-/// replaced sound's file is unlinked and kept. What changed since the question was asked
-/// is left as it is.
+/// earlier bringing in of it was undone, and once one was listed, a slot changed later
+/// while this keyboard stays attached is brought in unasked; a moved sound's link follows
+/// it; a removed or replaced sound's file is unlinked and kept. What changed since the
+/// question was asked is left as it is.
 pub fn bring_in(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     let asked = device.asks.since.take().unwrap_or_default();
     let Some(keyboard) = device.state.keyboard().cloned() else {
