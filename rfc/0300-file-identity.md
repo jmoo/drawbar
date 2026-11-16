@@ -241,10 +241,11 @@ compacts keeps the member as it found it. The fixture state
   keeps the row. Where both hold work, the one with the older edit becomes an
   unsaved copy.
 - **Drafts.** An unsaved edit is kept under the key of the unsaved copy it is, else
-  its file's entity, else its path. At open each draft resolves to a row: by entity,
-  following joins, including one the same scan commits; or by path where the file
-  there holds the identity the edit was made over. A draft with no row, and the older
-  of two for one row, comes back as an unsaved copy.
+  its file's entity, else its path; one kept by entity also records its file's path.
+  At open each draft resolves to a row: by entity, following joins, including one the
+  same scan commits; or by its path, or the path it recorded where its entity has no
+  row, where the file there holds the identity the edit was made over. A draft with
+  no row, and the older of two for one row, comes back as an unsaved copy.
 - **Answers.** A save, import or rewrite answers with the `FileId` of the row it
   wrote. A file a commit wrote but did not name is answered as unheard and read
   again. Where the app lost an answer, the backend carries the rows of the files
@@ -266,6 +267,7 @@ toshokan's public API breaks. The changes include:
   `View::changes_since` replace `View::changed_since` and `View::is_unbound`.
 - `Committed::files` and `Committed::wrote` replace `Committed::paths` and
   `Committed::trees`.
+- `View::alike` is new: each entity alike to another, with that one.
 - `Refreshed::rewritten` and `Mismatch::listed` are new fields.
 - `Resumed::Applied` is boxed.
 
@@ -360,11 +362,9 @@ Within the design:
 
 ## Unresolved questions
 
-- **A join committed while this drawbar was closed.** Where another drawbar committed
-  the join, the view holds no record of which entity the joined one was folded into,
-  so a draft kept under the joined entity cannot be put back over its file. Either
-  toshokan records where a join folded an entity, or the draft falls back on
-  something else, such as its path and base identity.
+- **A file joined and also moved or changed while this drawbar was closed.** A draft
+  kept under the joined entity falls back on the path it recorded, so it comes back
+  as an unsaved copy where the file has since moved or changed.
 - **Undo's view of other writers' entries.** The check for another writer's later
   entries goes by clock reading, though the intent records which entries it was
   committed over. A tree another writer moved into the tree being moved back is not
