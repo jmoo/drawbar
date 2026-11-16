@@ -321,17 +321,30 @@ fn strokes<'a>(takes: &[Take<'a>], leveled: bool) -> Result<Vec<Stroke<'a>>> {
     Ok(out)
 }
 
-/// The regions of `take`, named `file`, with what their labels say each stroke is, in
-/// stroke order, each cleaned of the take's `noise` by its root's pitch, or as recorded
-/// where there is none.
-fn region_strokes<'a>(
-    file: &'a str,
-    take: &'a Audio,
-    marks: &'a Marks,
-    noise: Option<&Noise>,
-) -> Result<Vec<Stroke<'a>>> {
+/// A region of a take as the build cuts a stroke from it, before any audio is read:
+/// what its label says the stroke is, the loop it holds and the frame its fade starts
+/// at, both counted from its start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cut<'a> {
+    pub region: &'a Region,
+    pub sample_loop: Option<Loop>,
+    pub fade: Option<u32>,
+    pub root: u8,
+    pub bank: Bank,
+    pub layer: LayerTag,
+}
+
+/// The strokes `marks` cuts from a take of `total` frames, named `file`, in the order
+/// it holds them, each fade folded into the stroke it fades: every check a build makes
+/// on a take's marks before it reads its audio, so an editor can make them on each edit.
+///
+/// Refused where a region is no stroke or runs past the audio, a loop crosses a
+/// region's end or lies in no region or two, a fade does not end with the stroke it
+/// fades or fades a release, a looped stroke or one faded already, or no region is a
+/// stroke at all.
+pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a>>> {
     let named = |e: &dyn std::fmt::Display| format!("{file}: {e}");
-    let mut out = Vec::new();
+    let mut out: Vec<Cut> = Vec::new();
     let mut fades = Vec::new();
     let regions = match marks.regions_with_loops() {
         Ok(regions) => regions,
@@ -346,13 +359,10 @@ fn region_strokes<'a>(
             parse_stroke_name(&region.label, Stem::None).filter(|_| region.frames > 0)
         else {
             return malformed(named(&format!(
-                "region {:?} at frame {} is no stroke: a region here must span frames \
-                 and be labeled as a stroke's WAV is named, as in 060-b0-l00",
+                "region {:?} at frame {} is no stroke: a region here must span frames                  and be labeled as a stroke's WAV is named, as in 060-b0-l00",
                 region.label, region.start
             )));
         };
-        let channels = usize::from(take.channels.max(1));
-        let total = take.samples.len() / channels;
         if u64::from(region.start) + u64::from(region.frames) > total as u64 {
             return malformed(named(&format!(
                 "region {:?} runs to frame {}, past the audio's end at frame {total}",
@@ -360,27 +370,10 @@ fn region_strokes<'a>(
                 u64::from(region.start) + u64::from(region.frames)
             )));
         }
-        let audio = match noise {
-            Some(noise) => noise.stroke(
-                &take.samples,
-                channels,
-                region.start as usize,
-                region.frames as usize,
-                clean::f0(root),
-            ),
-            None => {
-                let at = |frame: u32| (frame as usize * channels).min(take.samples.len());
-                take.samples[at(region.start)..at(region.start + region.frames)].to_vec()
-            }
-        };
-        out.push(Stroke {
-            file,
-            take,
+        out.push(Cut {
             region,
-            audio,
             sample_loop,
             fade: None,
-            shift: 0,
             root,
             bank,
             layer,
@@ -388,7 +381,7 @@ fn region_strokes<'a>(
     }
     for (stroke, fade) in fades {
         let refuse = |why: &str| named(&format!("region {:?} {why}", fade.label));
-        let Some(owner) = out.iter_mut().find(|s| s.name() == stroke) else {
+        let Some(owner) = out.iter_mut().find(|cut| cut.region.label == stroke) else {
             return malformed(refuse(&format!(
                 "fades no stroke: no region is labeled {stroke:?}"
             )));
@@ -401,8 +394,7 @@ fn region_strokes<'a>(
         }
         if owner.bank == Bank::Release || owner.sample_loop.is_some() || owner.fade.is_some() {
             return malformed(refuse(&format!(
-                "fades {stroke:?}, which is a release, loops, or fades already; only an \
-                 attack or resonance that does not loop fades"
+                "fades {stroke:?}, which is a release, loops, or fades already; only an                  attack or resonance that does not loop fades"
             )));
         }
         owner.fade = Some(fade.start - owner.region.start);
@@ -410,6 +402,50 @@ fn region_strokes<'a>(
     if out.is_empty() {
         return malformed(named(&"no region to build a library from"));
     }
+    Ok(out)
+}
+
+/// The regions of `take`, named `file`, as [`cuts`] reads them, in stroke order, each
+/// cleaned of the take's `noise` by its root's pitch, or as recorded where there is none.
+fn region_strokes<'a>(
+    file: &'a str,
+    take: &'a Audio,
+    marks: &'a Marks,
+    noise: Option<&Noise>,
+) -> Result<Vec<Stroke<'a>>> {
+    let channels = usize::from(take.channels.max(1));
+    let total = take.samples.len() / channels;
+    let mut out: Vec<Stroke> = cuts(file, marks, total)?
+        .into_iter()
+        .map(|cut| {
+            let region = cut.region;
+            let audio = match noise {
+                Some(noise) => noise.stroke(
+                    &take.samples,
+                    channels,
+                    region.start as usize,
+                    region.frames as usize,
+                    clean::f0(cut.root),
+                ),
+                None => {
+                    let at = |frame: u32| (frame as usize * channels).min(take.samples.len());
+                    take.samples[at(region.start)..at(region.start + region.frames)].to_vec()
+                }
+            };
+            Stroke {
+                file,
+                take,
+                region,
+                audio,
+                sample_loop: cut.sample_loop,
+                fade: cut.fade,
+                shift: 0,
+                root: cut.root,
+                bank: cut.bank,
+                layer: cut.layer,
+            }
+        })
+        .collect();
     in_stroke_order(&mut out);
     Ok(out)
 }
@@ -726,6 +762,49 @@ mod tests {
 
     /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
     /// read out of bounds, cleaned or not.
+    #[test]
+    fn a_take_s_cuts_are_refused_as_its_build_refuses_them() {
+        let region = |start, frames, label: &str| Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        // An attack over 1000..9000 looping 5000..7000, and its key-off after.
+        let good = Marks {
+            regions: vec![
+                region(1000, 8000, "060-b0-v22"),
+                region(9000, 2000, "060-b2-v22"),
+            ],
+            loops: vec![Loop::forward(5000, 7000)],
+        };
+        let cut = cuts("take.wav", &good, 20_000).expect("builds");
+        assert_eq!(cut.len(), 2);
+        assert_eq!(
+            cut[0].sample_loop.map(|l| (l.start, l.end)),
+            Some((4000, 6000))
+        );
+        let refused = |marks: &Marks, why: &str| {
+            let err = cuts("take.wav", marks, 20_000).expect_err("refused");
+            assert!(err.to_string().contains(why), "{err}");
+        };
+        let mut crossed = good.clone();
+        crossed.regions[1] = region(6000, 5000, "060-b2-v22");
+        refused(&crossed, "crosses an end");
+        let mut twice = good.clone();
+        twice.regions[1] = region(4000, 7000, "060-b2-v22");
+        refused(&twice, "more than one");
+        let mut faded = good.clone();
+        faded.regions.push(region(8000, 1000, "060-b0-v22-fade"));
+        refused(&faded, "loops, or fades already");
+        refused(
+            &Marks {
+                regions: vec![region(1000, 30_000, "060-b0-v22")],
+                loops: Vec::new(),
+            },
+            "past the audio's end",
+        );
+    }
+
     #[test]
     fn a_region_past_the_audio_s_end_is_refused() {
         let take = Audio {
