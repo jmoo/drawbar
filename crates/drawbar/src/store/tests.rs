@@ -3943,7 +3943,7 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     let refused = Event::Committed {
         made: None,
         undoable: false,
-        forgot: false,
+        refused_step: None,
         finished: None,
         waiting: Waiting::Nothing,
         label: "Tag".into(),

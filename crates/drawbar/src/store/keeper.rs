@@ -25,7 +25,7 @@ use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
-    Part, Source, Stat, Tagged, Unwritable, Viewed, Waiting,
+    Part, RefusedStep, Source, Stat, Tagged, Unwritable, Viewed, Waiting,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -183,18 +183,18 @@ impl<F: Fs> Keeper<F> {
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
                 let committed = self.commit(intent, answer).await;
-                self.made(label, finished, committed, false, answer).await;
+                self.made(label, finished, committed, None, answer).await;
             }
             Cmd::Undo | Cmd::Redo => {
                 let again = matches!(cmd, Cmd::Redo);
-                let (done, forgot) = self.undone(again).await;
+                let (done, refused) = self.undone(again).await;
                 let label = if again { "Redo" } else { "Undo" };
-                self.made(label.to_string(), finished, done, forgot, answer)
+                self.made(label.to_string(), finished, done, refused, answer)
                     .await;
             }
             Cmd::Settle { orphan, how } => {
                 let settled = self.settled(orphan, how).await;
-                self.made("Settle".to_string(), finished, settled, false, answer)
+                self.made("Settle".to_string(), finished, settled, None, answer)
                     .await;
             }
             Cmd::Draft {
@@ -312,7 +312,7 @@ impl<F: Fs> Keeper<F> {
         label: String,
         finished: Option<EntryHash>,
         committed: Result<(Option<Made>, Viewed), String>,
-        forgot: bool,
+        refused_step: Option<RefusedStep>,
         answer: &mut impl FnMut(Event),
     ) {
         let made = committed.as_ref().ok().and_then(|(made, _)| *made);
@@ -328,7 +328,7 @@ impl<F: Fs> Keeper<F> {
             label,
             made: made.map(|(entry, _)| entry),
             undoable: made.is_some_and(|(_, undoable)| undoable),
-            forgot,
+            refused_step,
             finished,
             waiting,
             result: committed.map(|(_, viewed)| viewed),
@@ -670,11 +670,14 @@ impl<F: Fs> Keeper<F> {
     }
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
-    /// bound to that it moved for the app to follow. One refused is let go of, which
-    /// the second value says.
-    async fn undone(&mut self, again: bool) -> (Result<(Option<Made>, Viewed), String>, bool) {
+    /// bound to that it moved for the app to follow. One refused is let go of, or waits
+    /// for a file, as the second value says.
+    async fn undone(
+        &mut self,
+        again: bool,
+    ) -> (Result<(Option<Made>, Viewed), String>, Option<RefusedStep>) {
         let Some(library) = self.library.as_mut() else {
-            return (Err("the library is not open".to_string()), false);
+            return (Err("the library is not open".to_string()), None);
         };
         let committed = match again {
             true => library.redo().await,
@@ -687,9 +690,16 @@ impl<F: Fs> Keeper<F> {
                     true => library.forget_redo(),
                     false => library.forget_undo(),
                 }
-                return (Err(told(&e)), true);
+                return (Err(told(&e)), Some(RefusedStep::Forgotten));
             }
-            Err(e) => return (Err(told(&e)), false),
+            Err(e) => {
+                let waits = matches!(
+                    e,
+                    Error::Refused(Refusal::Invalid(toshokan::Invalid::NoFile(_)))
+                );
+                let waits = waits.then_some(RefusedStep::WaitsForFile);
+                return (Err(told(&e)), waits);
+            }
         };
         let viewed = Viewed {
             quiet: true,
@@ -699,7 +709,7 @@ impl<F: Fs> Keeper<F> {
         };
         (
             Ok((Some((committed.intent, committed.undoable)), viewed)),
-            false,
+            None,
         )
     }
 
@@ -1810,9 +1820,6 @@ async fn holds(
     Ok(storage::identity(at, stat.len, read).await? == identity)
 }
 
-/// Why an undo or a redo of a change to an entity whose file has not arrived waits.
-pub(super) const NO_FILE: &str = "it has no file";
-
 /// Why a change is refused that is too large for the library to log as one.
 const TOO_LARGE: &str = "it is too large a change to make at once; change fewer files at a time";
 
@@ -2287,7 +2294,7 @@ fn refused(refusal: &Refusal) -> String {
             format!("the file at {path} cannot be taken: {why}")
         }
         Refusal::Invalid(Invalid::NoEntity(_)) => "it is no longer in the library".to_string(),
-        Refusal::Invalid(Invalid::NoFile(_)) => NO_FILE.to_string(),
+        Refusal::Invalid(Invalid::NoFile(_)) => "it has no file".to_string(),
         Refusal::Invalid(Invalid::Bound(path)) => format!("“{path}” is another asset's file"),
         Refusal::Invalid(Invalid::ReservedPath(path)) => format!("“{path}” is drawbar's own"),
         Refusal::Invalid(Invalid::NotEmpty(path)) => format!("“{path}” holds files"),

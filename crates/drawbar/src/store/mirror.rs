@@ -22,8 +22,8 @@ use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::{self, Class, Shown};
 use super::{
     names, older, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Moving, Opened, Rescue, Source, Stat, Tagged, Unwritable, Viewed, Waiting, MOST_BYTES,
-    TAKE_IN,
+    LibPath, Moving, Opened, RefusedStep, Rescue, Source, Stat, Tagged, Unwritable, Viewed,
+    Waiting, MOST_BYTES, TAKE_IN,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -1681,7 +1681,7 @@ impl Store {
                 label,
                 made,
                 undoable,
-                forgot,
+                refused_step,
                 finished,
                 waiting,
                 result,
@@ -1690,8 +1690,13 @@ impl Store {
                 let landed = made.is_some();
                 let step = self.answering.pop_front().map(|sent| sent.step);
                 self.history.waited(finished, waiting, step.as_ref());
-                let forgotten = match (&step, forgot) {
-                    (Some(step), true) => self.history.forget(step),
+                let forgotten = match (&step, refused_step) {
+                    (Some(step), Some(RefusedStep::Forgotten)) => self.history.forget(step),
+                    _ => None,
+                };
+                let waits = match (&step, refused_step) {
+                    (Some(Step::Undo), Some(RefusedStep::WaitsForFile)) => Some(false),
+                    (Some(Step::Redo), Some(RefusedStep::WaitsForFile)) => Some(true),
                     _ => None,
                 };
                 match (made, step, undoable) {
@@ -1729,10 +1734,10 @@ impl Store {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
                         None if refused => {}
                         None if told => log.error(format!("{label}: {why}")),
-                        None if why == super::keeper::NO_FILE => {
+                        None if let Some(again) = waits => {
                             log.error(format!("{label}: {why}"));
                             let steps = [&self.history.done, &self.history.undone];
-                            let step = steps[usize::from(label == "Redo")].last();
+                            let step = steps[usize::from(again)].last();
                             if let Some((step, _)) = step {
                                 log.say(format!("{label} of {step} waits for its file."));
                             }
@@ -5433,5 +5438,57 @@ mod tests {
                  not shown.",
             ]
         );
+    }
+
+    /// A change refused because an entity has no file says the library did not change as
+    /// asked; an undo refused so says which step waits for the file.
+    #[test]
+    fn only_an_undo_refused_for_a_missing_file_waits_for_it() {
+        use crate::testing::{backend, Bench, Temp};
+        let root = Temp::new();
+        let mut bench = Bench::new();
+        let mut store = Store::start(backend(&bench.ctx, &root));
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut bench;
+        assert!(
+            store.next(workspace, browser, queue, log),
+            "opening answered"
+        );
+        while store.listing() || store.scanning() {
+            assert!(store.next(workspace, browser, queue, log), "listed");
+        }
+        let renamed = "Rename “Grand.ne5p”".to_string();
+        store.history.done.push((renamed, entry(1)));
+        let refused = |label: &str, refused_step| Event::Committed {
+            label: label.to_string(),
+            made: None,
+            undoable: false,
+            refused_step,
+            finished: None,
+            waiting: Waiting::Nothing,
+            result: Err("it has no file".to_string()),
+        };
+        store.awaits(Step::Change("Delete “Bass.ne5p”".into()), String::new());
+        store.fold(refused("Delete", None), workspace, browser, queue, log);
+        store.awaits(Step::Undo, String::new());
+        store.fold(
+            refused("Undo", Some(RefusedStep::WaitsForFile)),
+            workspace,
+            browser,
+            queue,
+            log,
+        );
+        let said = |words: &str| log.iter().filter(|said| said.text.contains(words)).count();
+        let transcript = log.transcript();
+        let asked = "The library did not change as asked: it has no file.";
+        assert_eq!(said(asked), 1, "{transcript}");
+        let waits = "Undo of Rename “Grand.ne5p” waits for its file.";
+        assert_eq!(said(waits), 1, "{transcript}");
+        assert_eq!(said("waits for its file"), 1, "{transcript}");
     }
 }

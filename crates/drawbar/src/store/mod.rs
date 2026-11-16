@@ -1005,6 +1005,15 @@ pub enum Waiting {
     This,
 }
 
+/// What became of an undo or a redo that was refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RefusedStep {
+    /// Let go of: the next reaches the step before it.
+    Forgotten,
+    /// Kept until a file it needs is back.
+    WaitsForFile,
+}
+
 /// Why nothing may be written to a library as it opened.
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Unwritable {
@@ -1105,9 +1114,7 @@ pub enum Event {
         /// Whether the change joined this session's undo: every one does but a
         /// dismissal.
         undoable: bool,
-        /// Whether an undo or a redo was refused, and let go of: the next reaches the
-        /// step before it.
-        forgot: bool,
+        refused_step: Option<RefusedStep>,
         /// The entry that logged the change of this session's own an earlier write left
         /// unfinished, where this one finished it first.
         finished: Option<toshokan::EntryHash>,
