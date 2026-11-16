@@ -463,9 +463,14 @@ impl<F: Fs> Keeper<F> {
     }
 
     /// The unsaved edits of assets an earlier session kept, each with the row of its file
-    /// in `view` and whether the file holds what it was made over, by a read of it now,
-    /// or `Err` where the edit or its file does not read.
-    async fn drafts(&mut self, view: &View) -> io::Result<Vec<Result<Kept, String>>> {
+    /// in `view`, following the joins `view` shows and `joining`, and whether the file holds
+    /// what it was made over, by a read of it now, or `Err` where the edit or its file does
+    /// not read.
+    async fn drafts(
+        &mut self,
+        view: &View,
+        joining: &[Joined],
+    ) -> io::Result<Vec<Result<Kept, String>>> {
         let fs = storage_of(&self.library)?;
         let mut drafts = Vec::new();
         for found in self.unsaved.read(fs, None).await? {
@@ -476,7 +481,7 @@ impl<F: Fs> Keeper<F> {
                     at,
                     bytes,
                 }) => {
-                    let row = row_kept(view, &of);
+                    let row = row_kept(view, joining, &of);
                     match file_holds(fs, row, base).await {
                         Ok(holds) => Ok(Kept {
                             row: row
@@ -650,7 +655,10 @@ impl<F: Fs> Keeper<F> {
             None => {}
         }
         let drafts = match whole && !std::mem::replace(&mut self.drafts_read, true) {
-            true => Some(self.drafts(&view).await.map_err(|e| e.to_string())),
+            true => {
+                let drafts = self.drafts(&view, &refreshed.scan.joined).await;
+                Some(drafts.map_err(|e| e.to_string()))
+            }
             false => None,
         };
         let drafts = drafts.map(|drafts| drafts.unwrap_or_else(|e| vec![Err(e)]));
@@ -974,13 +982,14 @@ fn storage_of<F: Fs>(library: &Option<Library<F>>) -> io::Result<&F> {
 }
 
 /// The row in `view` of the file a draft kept by `of` is of: its entity's, or that of
-/// the entity it was joined into, else the row at its path.
-fn row_kept<'v>(view: &'v View, of: &Key) -> Option<&'v toshokan::Row> {
+/// the entity it was joined into, as `view` or `joining` says, else the row at its path.
+fn row_kept<'v>(view: &'v View, joining: &[Joined], of: &Key) -> Option<&'v toshokan::Row> {
     match of {
         Key::Entity(entity) => {
             let mut entity = *entity;
-            for _ in 0..=view.joined().len() {
-                let joined = view.joined().iter().find(|joined| joined.entity == entity);
+            let joins = || view.joined().iter().chain(joining);
+            for _ in 0..=joins().count() {
+                let joined = joins().find(|joined| joined.entity == entity);
                 let Some(joined) = joined else { break };
                 entity = joined.into;
             }

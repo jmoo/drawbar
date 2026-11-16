@@ -878,3 +878,44 @@ fn a_save_over_a_rewrite_that_arrived_after_its_log_asks_whose_to_keep() {
         "{transcript}"
     );
 }
+
+/// The writers of the library at `from`, copied into the one at `to`, as sync brings them.
+fn bring_writers(from: &Temp, to: &Temp) {
+    let writers = ".drawbar/library/writers.2";
+    for dir in fs::read_dir(from.at(writers)).unwrap() {
+        let dir = dir.unwrap();
+        copy_tree(&dir.path(), &to.at(writers).join(dir.file_name()));
+    }
+}
+
+/// Two drawbars each tag `Strings.ne5p` before either sees the other, and each keeps an
+/// unsaved edit of it at quit. Reopened with the other's log, each joins the two entities
+/// and puts its edit back over the file, whichever entity the join kept.
+#[test]
+fn an_edit_kept_under_an_entity_a_join_deletes_goes_back_over_its_file() {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    let mut edited = Vec::new();
+    for (root, tag, gain) in [(&ours, "Live", "74"), (&theirs, "Gig", "12")] {
+        fs::write(root.at("Strings.ne5p"), &program).unwrap();
+        let mut session = Session::open(root);
+        let file = session.named("Strings.ne5p");
+        session.tag(&[file], tag);
+        edited.push(session.edit(file, gain));
+        session.autosave();
+        session.close();
+    }
+    bring_writers(&ours, &theirs);
+    bring_writers(&theirs, &ours);
+
+    for (root, edited) in [&ours, &theirs].into_iter().zip(edited) {
+        let session = Session::open(root);
+        let transcript = session.bench.log.transcript();
+        let listed = session.bench.workspace.listed();
+        let names: Vec<&str> = listed.map(|entity| entity.name.as_str()).collect();
+        assert_eq!(names, ["Strings.ne5p"], "{transcript}");
+        let file = session.named("Strings.ne5p");
+        assert!(session.bytes(file) == edited, "{transcript}");
+        assert_eq!(session.worn(file), ["Gig", "Live"], "{transcript}");
+    }
+}
