@@ -561,7 +561,15 @@ pub struct Detect {
     running: Option<(crate::work::Job<crate::work::Detected>, u64, f64)>,
     /// What the last search found, with the limit it was given, or why it found nothing.
     pub found: Option<Result<(crate::work::Detected, f64), String>>,
+    /// Whether Detect waits for the user to confirm it may replace the take's regions.
+    asking: bool,
 }
+
+/// What Detect asks before it replaces a take's regions.
+pub const DETECT_REPLACES: &str = "Detect will replace any notes already defined";
+
+/// How wide the Detect question is at most, in points, as the browser's are.
+const DETECT_ASK_WIDTH: f32 = 440.0;
 
 impl Default for Detect {
     fn default() -> Detect {
@@ -569,6 +577,7 @@ impl Default for Detect {
             limit: nord_format::take::plan::MIN_SNR_DB,
             running: None,
             found: None,
+            asking: false,
         }
     }
 }
@@ -1047,10 +1056,59 @@ impl State {
         self.marks_samples() && self.read.source.is_ok()
     }
 
-    /// Start Detect on the take, where its audio reads.
+    /// Start Detect on the take, where its audio reads: at once on a take that marks no
+    /// region, and on one that does once the user confirms it may replace them.
     pub fn start_detect(&mut self, ctx: &egui::Context) {
+        let marks_regions = (self.read.marks.as_ref()).is_ok_and(|marks| !marks.regions.is_empty());
+        match marks_regions {
+            true => self.detect.asking = true,
+            false => self.detect_now(ctx),
+        }
+    }
+
+    fn detect_now(&mut self, ctx: &egui::Context) {
         if let Ok(audio) = &self.read.source {
             self.detect.start(ctx, audio);
+        }
+    }
+
+    /// While Detect waits for the user to confirm it may replace the take's regions, ask,
+    /// and start it on Confirm.
+    pub fn confirm_detect(&mut self, ctx: &egui::Context) {
+        if !self.detect.asking {
+            return;
+        }
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("detect_confirm"))
+            .frame(crate::sheet::frame(&ctx.style().visuals))
+            .show(ctx, |ui| {
+                ui.set_width(crate::sheet::width(ui.ctx(), DETECT_ASK_WIDTH));
+                ui.add_space(crate::sheet::GAP * 4.0);
+                crate::sheet::section(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(DETECT_REPLACES).strong()).wrap());
+                });
+                crate::sheet::foot(
+                    ui,
+                    |_| {},
+                    |ui| {
+                        // Right to left: Confirm at the far right, Cancel at the left.
+                        if crate::sheet::primary(ui, None, "Confirm").clicked() {
+                            answer = Some(true);
+                        }
+                        if crate::sheet::secondary(ui, None, "Cancel").clicked() {
+                            answer = Some(false);
+                        }
+                    },
+                );
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    answer = Some(false);
+                }
+            });
+        if let Some(confirmed) = answer {
+            self.detect.asking = false;
+            if confirmed {
+                self.detect_now(ctx);
+            }
         }
     }
 
@@ -2014,6 +2072,25 @@ mod tests {
             "the old regions are gone"
         );
         assert!(detected_marks("12 x 060-b0-v00").is_err());
+    }
+
+    /// Detect asks before it replaces a take's regions, and starts at once on a take
+    /// that marks none.
+    #[test]
+    fn detect_asks_before_replacing_regions() {
+        let ctx = egui::Context::default();
+        let mut marked = opened(&marked_take(&[0.9, 0.3]));
+        marked.start_detect(&ctx);
+        assert!(
+            marked.detect.asking && !marked.detect.running(),
+            "it asks first"
+        );
+        let mut bare = opened(&take(&[0.9, 0.3]));
+        bare.start_detect(&ctx);
+        assert!(
+            !bare.detect.asking && bare.detect.running(),
+            "nothing to replace"
+        );
     }
 
     /// Detect's result marks the take only while it holds the audio searched, and says

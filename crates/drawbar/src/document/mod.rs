@@ -475,6 +475,7 @@ impl Document {
             if act.detect {
                 held.start_detect(ui.ctx());
             }
+            held.confirm_detect(ui.ctx());
         }
 
         let mut wants = Wants {
