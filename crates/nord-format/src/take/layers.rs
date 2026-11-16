@@ -144,7 +144,8 @@ pub(crate) type Named = Option<(u8, Option<String>)>;
 
 /// The note and any warning of each of `hits` in a take with no note list: the note
 /// [`notes_by_hit`] names, a hit with no pitch taking the note of the named hit before
-/// it, and none for a hit `skipped` leaves out.
+/// it, and none for a hit `skipped` leaves out. A hit named an octave or more from its
+/// pitch, to fit the notes either side, is warned about.
 pub(crate) fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) -> Vec<Named> {
     let mut last: Option<u8> = None;
     hits.iter()
@@ -156,7 +157,15 @@ pub(crate) fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) ->
             match (note, hit.pitch) {
                 (Some(note), Some(pitch)) => {
                     last = Some(note);
-                    Some((note, off_warning(pitch, note)))
+                    let octaves = ((f64::from(note) - pitch) / 12.0).round();
+                    let moved = (octaves != 0.0).then(|| {
+                        format!(
+                            "named {}, {octaves:+} octave(s) from its pitch, to fit the notes \
+                             either side",
+                            crate::note::name(note)
+                        )
+                    });
+                    Some((note, off_warning(pitch, note).or(moved)))
                 }
                 _ => last.map(|note| (note, Some("no pitch found".to_string()))),
             }
@@ -453,6 +462,23 @@ mod tests {
         let named = self_named(&hits, |_| false);
         assert_eq!(named[0], Some((48, None)));
         assert_eq!(named[1], Some((48, Some("no pitch found".to_string()))));
+    }
+
+    /// A run moved an octave to fit the line is named so: played C1, C2, D2, E2, the C1
+    /// hits are taken for C2 read an octave low, and each says it was moved.
+    #[test]
+    fn a_hit_moved_an_octave_says_so() {
+        let hits = played(&[24.0, 36.0, 38.0, 40.0], 1);
+        let named = self_named(&hits, |_| false);
+        let (note, warning) = named[0].clone().unwrap();
+        assert_eq!(note, 36);
+        let warning = warning.expect("a warning");
+        assert!(warning.contains("+1 octave(s) from its pitch"), "{warning}");
+        assert_eq!(
+            named[1],
+            Some((36, None)),
+            "a hit at its pitch says nothing"
+        );
     }
 
     /// Sorted by pitch, a set has no playing line, so its octaves are kept as read: a
