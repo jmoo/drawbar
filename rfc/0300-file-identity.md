@@ -289,15 +289,15 @@ next goes; that no unsaved edit is lost; that the drawbar that acted shows what 
 did; and that only a log's writer changes it. CI runs a few seeds per profile. A
 sweep of seeds 1–1000 passes in the desktop, browser and copying profiles.
 
-Non-test lines, base to head: `crates/toshokan/src` 23,591 to 26,348 (+2,757);
-`crates/drawbar/src/store` 14,125 to 14,753 (+628), of which `store/mirror.rs` 4,744
-to 5,195. Tests add 3,986 lines to toshokan's `tests/` and 5,213 to drawbar's store
+Non-test lines, base to head: `crates/toshokan/src` 23,596 to 26,360 (+2,764);
+`crates/drawbar/src/store` 14,198 to 14,926 (+728), of which `store/mirror.rs` 4,781
+to 5,237. Tests add 3,999 lines to toshokan's `tests/` and 5,364 to drawbar's store
 tests. `Library` grows from 34 fields to 45.
 
 ## Drawbacks
 
 - **Size.** One aim was to move identity reasoning out of drawbar. toshokan grew by
-  2,757 lines and drawbar's store by 628 more; `mirror.rs` alone grew by 451. The
+  2,764 lines and drawbar's store by 728 more; `mirror.rs` alone grew by 456. The
   app lost its replay but gained merges, unsaved copies, claims and answer recovery.
 - **Four changes in one.** Row identity, same-stat rewrite detection, the undo
   refusal rules with their format addition, and attribution could each have landed
