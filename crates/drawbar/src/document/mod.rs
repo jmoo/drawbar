@@ -1922,9 +1922,8 @@ mod tests {
         assert!(workspace.saving_edit(id));
 
         let (from, edit) = workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
@@ -1982,9 +1981,8 @@ mod tests {
         assert!(open.workspace.saving_edit(id));
 
         let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
         open.workspace.edit_saved(id, saved.clone());
         open.workspace.settle_files(&mut open.log);
@@ -3934,9 +3932,8 @@ mod tests {
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
         let (from, edit) = workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.npno")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.npno"), out.unwrap()).unwrap();
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));

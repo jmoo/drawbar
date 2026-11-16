@@ -1278,7 +1278,7 @@ pub fn key_map(
         edges,
     ) {
         Some(keys::BandAct::Pick(band)) => state.rows.pick(zones[band].row, true),
-        Some(keys::BandAct::Drag { bounds, .. }) => acts.push(MapAct::Bounds(bounds)),
+        Some(keys::BandAct::Drag { bounds }) => acts.push(MapAct::Bounds(bounds)),
         None => {}
     }
 
@@ -1959,7 +1959,7 @@ pub(super) fn velocity_field(
     ui.add_space(8.0);
     match acted? {
         keys::VelocityAct::Pick(block) => Some(VelocityAsk::Open(rows[block])),
-        keys::VelocityAct::Drag { zone, window, .. } => Some(VelocityAsk::Window {
+        keys::VelocityAct::Drag { zone, window } => Some(VelocityAsk::Window {
             block: zone,
             window,
         }),
