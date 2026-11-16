@@ -1,12 +1,14 @@
 //! RIFF/WAVE as a take arrives: integer PCM of 8 to 32 bits or IEEE float, plain or
 //! `WAVE_FORMAT_EXTENSIBLE`, read to `f32`.
 
+mod gain;
 mod marks;
 mod pcm16;
 mod settings;
 
 use std::ops::Range;
 
+pub use gain::{int_samples, scale, scaled};
 pub use marks::{read_marks, with_marks, Loop, Marks, Play, Region};
 pub use pcm16::{
     dithered, mono_pcm16, pcm16, pcm16_layout, quantize, read_pcm16, Pcm16, Pcm16Layout,
