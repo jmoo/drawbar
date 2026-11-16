@@ -531,7 +531,7 @@ fn right(
 ) {
     let visuals = ui.visuals().clone();
     let quiet = caption(&visuals);
-    // ⚠️ A take's Detect and its limit have a row of their own, under this one.
+    // A take's Detect and its limit have a row of their own, under this one.
     if facts.extras.limit.is_none() {
         loud(ui, entity, facts, stage, act);
     }

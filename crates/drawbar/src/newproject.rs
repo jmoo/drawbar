@@ -1370,7 +1370,7 @@ pub fn dialog(
     }
     if making == Making::Piano {
         start(ctx, workspace, log);
-        // ⚠️ wasm runs the build on the spot, so the result is already here.
+        // A build that answered at once is taken now; a later frame takes any other.
         return answered(workspace, log);
     }
     let draft = workspace.take_draft()?;

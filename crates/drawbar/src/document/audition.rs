@@ -51,9 +51,8 @@ const WRAP_LEAD: f64 = 1.0;
 
 /// How much of the gap between a sample and its root's loudest layer, in dB, the
 /// audition keeps. A rule build plays every layer at its root's loudest's level, and the
-/// instrument makes the dynamics from velocity in ways not measured; kept whole, soft
-/// layers were too quiet to judge, and brought all to one level, they sounded as loud
-/// as the hardest.
+/// instrument makes the dynamics from velocity in ways not measured: kept whole, the gap
+/// leaves soft layers too quiet to judge, and closed, they sound as loud as the hardest.
 ///
 /// The loudest layer plays at its recorded level, as Play original plays it.
 const LAYER_GAP_KEPT: f64 = 0.5;
@@ -63,7 +62,7 @@ const WRAP_MOST: f64 = 30.0;
 
 /// How far ahead of where the player has got a key-up starts, in seconds: past what the
 /// mixer has already taken, so the key-up joins the held sound at one sample, with
-/// nothing played twice. Heard as a click before.
+/// nothing played twice, which would be heard as a click.
 const SPLICE_LEAD: f64 = 0.02;
 
 /// The longest press of Play sample that is a click, in seconds: let go sooner, the

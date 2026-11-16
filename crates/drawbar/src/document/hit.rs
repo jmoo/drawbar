@@ -603,7 +603,7 @@ fn placed(
             .color(app::caption(ui.visuals())),
         );
     });
-    // ⚠️ The same row as over a picked sample, so the zoom stays where it was.
+    // The same row as over a picked sample, so the zoom stays where it was.
     ui.horizontal(|ui| {
         let shown = close.about(place, total, rate);
         if ui.button(take::ZOOM_IN).clicked() {
@@ -772,7 +772,7 @@ pub fn ui(
             take::legend(ui, edge.gamma_multiply(0.18), edge, "loop");
         }
     });
-    // ⚠️ The zoom, Add and Delete have a row of their own: beside the legend they
+    // The zoom, Add and Delete have a row of their own: beside the legend they
     // wrapped.
     ui.horizontal(|ui| {
         if ui.button(take::ZOOM_IN).clicked() {
@@ -873,7 +873,7 @@ pub fn ui(
     if let Some(attack) = &cuts.attack {
         spanned(attack, rect.top(), take::ink(Part::Attack, &visuals));
     }
-    // ⚠️ The loop fills the lower half, so the attack it sits in shows over it.
+    // The loop fills the lower half, so the attack it sits in shows over it.
     if let Some(found) = &cuts.looped {
         spanned(found, rect.center().y, app::accent(&visuals));
     }

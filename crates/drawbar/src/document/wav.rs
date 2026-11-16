@@ -743,9 +743,9 @@ impl Notes {
 const MB: usize = 1 << 20;
 
 /// The largest WAV drawbar-web opens, in bytes. Opening a take costs the page about nine
-/// times its file in memory, and finding its noise as much again in its worker
-/// (measured 2026-11-13 on a 132 MB take of 522 s, 24-bit stereo at 44.1 kHz: 1.2 GB
-/// each), and a browser tab gets at most 4 GB, often far less. A WAV of a few notes is
+/// times its file in memory, and finding its noise as much again in its worker (a 132 MB
+/// take of 522 s, 24-bit stereo at 44.1 kHz, takes 1.2 GB each), and a browser tab gets
+/// at most 4 GB, often far less. A WAV of a few notes is
 /// far smaller: past this, a take is for the desktop.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const WEB_MOST_BYTES: usize = 120 * MB;

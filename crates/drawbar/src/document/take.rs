@@ -592,7 +592,7 @@ pub fn ui(
     );
 
     for boxed in &shown_boxes {
-        // ⚠️ A picked hit is outlined in the body text color, not the accent: the accent
+        // A picked hit is outlined in the body text color, not the accent: the accent
         // is the loop's.
         let edge = match picked(boxed) {
             true => egui::Stroke::new(2.0_f32, visuals.text_color()),
