@@ -152,14 +152,7 @@ impl Prepped {
     /// large for the browser.
     fn of(bytes: &[u8]) -> Option<Result<Prepped, String>> {
         let marks = nord_format::wav::read_marks(bytes).ok()?;
-        let labeled = marks.regions.iter().any(|region| {
-            let label = region.label.as_str();
-            let stroke = label
-                .strip_suffix(nord_format::formats::npno::encode::FADE_SUFFIX)
-                .unwrap_or(label);
-            parse_stroke_name(stroke, Stem::None).is_some()
-        });
-        if !labeled {
+        if !crate::document::wav::marks_a_stroke(&marks) {
             return None;
         }
         let read = || {

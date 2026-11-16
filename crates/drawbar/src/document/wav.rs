@@ -268,7 +268,13 @@ pub fn is_wav(bytes: &[u8]) -> bool {
 /// Whether these bytes mark a region labeled as a stroke: a take `nord piano prep` has
 /// cut, against one as recorded.
 pub fn is_take(bytes: &[u8]) -> bool {
-    take::Marked::of(bytes).is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
+    wav::read_marks(bytes).is_ok_and(|marks| marks_a_stroke(&marks))
+}
+
+/// Whether `marks` label a region as a stroke the build takes: an attack, resonance or
+/// release, or an attack's fade.
+pub(crate) fn marks_a_stroke(marks: &wav::Marks) -> bool {
+    (marks.regions.iter()).any(|region| take::mark(&region.label, 0..0).hit.is_some())
 }
 
 /// What `db` multiplies a sample by, where the control offers that gain.
@@ -1074,10 +1080,7 @@ impl State {
 
     /// Whether the file marks samples, so the take's cards show.
     pub fn marks_samples(&self) -> bool {
-        self.read
-            .marked
-            .as_ref()
-            .is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
+        self.read.marks.as_ref().is_ok_and(marks_a_stroke)
     }
 
     /// Whether a library can be built from the take: it marks samples and its audio

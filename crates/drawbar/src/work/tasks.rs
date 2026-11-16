@@ -61,22 +61,45 @@ pub(crate) fn answer(task: Task, progress: &Progress) -> Result<wire::Message, S
 /// by level, a hit under `min_snr_db` over the floor left out.
 #[derive(Serialize, Deserialize)]
 pub struct FindHits {
-    rate: u32,
-    channels: u16,
-    samples: wire::Handed,
+    take: Mono,
     /// The too-quiet limit's bits, so it crosses exact.
     min_snr_db: u64,
 }
 
 impl FindHits {
     pub fn of(audio: &Audio, min_snr_db: f64) -> FindHits {
-        let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
         FindHits {
-            rate: audio.rate,
-            channels: audio.channels,
-            samples: wire::Handed::new(bytes),
+            take: Mono::of(audio),
             min_snr_db: min_snr_db.to_bits(),
         }
+    }
+}
+
+/// A take as both searches read it: its rate, and its [`nord_format::take::plan::mono`]
+/// sum as the little-endian bytes of each frame's `f64`, so it crosses exact. The sum is
+/// the one copy made to hand over, which the message takes.
+#[derive(Serialize, Deserialize)]
+struct Mono {
+    rate: u32,
+    frames: wire::Handed,
+}
+
+impl Mono {
+    fn of(audio: &Audio) -> Mono {
+        let mono = nord_format::take::plan::mono(audio);
+        let bytes = mono.iter().flat_map(|v| v.to_le_bytes()).collect();
+        Mono {
+            rate: audio.rate,
+            frames: wire::Handed::new(bytes),
+        }
+    }
+
+    /// The sum, as `plan::mono` gave it.
+    fn sum(self) -> Vec<f64> {
+        let bytes = self.frames.into_inner().unwrap_or_default();
+        (bytes.as_chunks::<8>().0.iter())
+            .map(|b| f64::from_le_bytes(*b))
+            .collect()
     }
 }
 
@@ -105,12 +128,11 @@ impl Work for FindHits {
     fn run(self, progress: &Progress) -> Detected {
         use nord_format::take::plan::{self, Fate, PlanOptions};
         progress.say("finding the take's notes");
-        let bytes = self.samples.into_inner().unwrap_or_default();
-        let mono = mono(&bytes, self.channels);
-        drop(bytes);
+        let rate = self.take.rate;
+        let mono = self.take.sum();
         let mut options = PlanOptions::new(Vec::new(), 4);
         options.min_snr_db = f64::from_bits(self.min_snr_db);
-        let found = plan::plan(&mono, self.rate, &options);
+        let found = plan::plan(&mono, rate, &options);
         let marks = nord_format::wav::Marks {
             regions: found.regions(),
             loops: found.loops(),
@@ -125,16 +147,10 @@ impl Work for FindHits {
     }
 }
 
-/// Find the noise of a take, as [`Noise::of`] finds it in its [`mono`] sum.
-///
-/// [`mono`]: nord_format::take::plan::mono
+/// Find the noise of a take, as [`Noise::of`] finds it in its mono sum.
 #[derive(Serialize, Deserialize)]
 pub struct FindNoise {
-    rate: u32,
-    channels: u16,
-    /// The take's samples, as their little-endian bytes: the one copy of them made to
-    /// hand over, which the message takes.
-    samples: wire::Handed,
+    take: Mono,
     /// Whether its floor is read as a one-note file's, as [`Floor::OneNote`].
     one_note: bool,
 }
@@ -142,30 +158,11 @@ pub struct FindNoise {
 impl FindNoise {
     /// The search for the noise of `audio`, its floor read by `floor`.
     pub fn of(audio: &Audio, floor: Floor) -> FindNoise {
-        let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
         FindNoise {
-            rate: audio.rate,
-            channels: audio.channels,
-            samples: wire::Handed::new(bytes),
+            take: Mono::of(audio),
             one_note: floor == Floor::OneNote,
         }
     }
-}
-
-/// [`nord_format::take::plan::mono`] of samples held as their bytes, summed in the same
-/// order, so to the bit what it gives.
-fn mono(bytes: &[u8], channels: u16) -> Vec<f64> {
-    let channels = usize::from(channels.max(1));
-    bytes
-        .chunks_exact(4 * channels)
-        .map(|frame| {
-            let sum: f64 = frame
-                .chunks_exact(4)
-                .map(|b| f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])))
-                .sum();
-            sum / channels as f64
-        })
-        .collect()
 }
 
 impl From<FindNoise> for Task {
@@ -179,14 +176,13 @@ impl Work for FindNoise {
 
     fn run(self, progress: &Progress) -> FoundNoise {
         progress.say("finding the take's hum and hiss");
-        let bytes = self.samples.into_inner().unwrap_or_default();
-        let mono = mono(&bytes, self.channels);
-        drop(bytes);
+        let rate = self.take.rate;
+        let mono = self.take.sum();
         let floor = match self.one_note {
             true => Floor::OneNote,
             false => Floor::Take,
         };
-        FoundNoise(Noise::of(&mono, self.rate, floor))
+        FoundNoise(Noise::of(&mono, rate, floor))
     }
 }
 
@@ -344,27 +340,6 @@ mod tests {
 
             assert_eq!(there, here, "{floor:?}");
             assert_eq!(bits(&there), bits(&here), "every measure, to the bit");
-        }
-    }
-
-    #[test]
-    fn a_take_s_mono_from_its_bytes_is_nord_format_s_mono_to_the_bit() {
-        for channels in [1u16, 2, 3] {
-            let samples: Vec<f32> = (0..3_000)
-                .map(|i| ((i * 37) % 101) as f32 / 97.0 - 0.5)
-                .collect();
-            let audio = Audio {
-                rate: 48_000,
-                channels,
-                samples,
-            };
-            let bytes: Vec<u8> = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let bits = |m: Vec<f64>| m.into_iter().map(f64::to_bits).collect::<Vec<_>>();
-            assert_eq!(
-                bits(mono(&bytes, channels)),
-                bits(nord_format::take::plan::mono(&audio)),
-                "{channels} channels"
-            );
         }
     }
 
