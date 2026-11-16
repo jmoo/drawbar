@@ -325,8 +325,9 @@ pub struct Audition {
     /// Whether a control was pressed while the take's noise is still being found, so
     /// the wait is said.
     waiting: bool,
-    /// The noise of the audio whose [`print`] this is, found or being found.
-    noise: Option<(u64, Search)>,
+    /// The noise of the audio whose [`print`] this is with its floor read so, found or
+    /// being found.
+    noise: Option<((u64, Floor), Search)>,
     /// The picked sample made ready to play, and what it was made from: the bytes'
     /// stamp, the sample, the kind and whether it is cleaned.
     pub(super) ready: Option<(Made, Option<Sounding>)>,
@@ -353,12 +354,11 @@ pub enum Cleaning<'a> {
     Ready(Option<&'a Noise>),
 }
 
-/// A print of `audio` with its floor read by `floor` that changes when a gain does: its
-/// length and a spread of its samples, so its noise is found again only for other audio.
-fn print(audio: &Audio, floor: Floor) -> u64 {
+/// A print of `audio` that changes when a gain does: its length and a spread of its
+/// samples, so what is found in it is found again only for other audio.
+pub(super) fn print(audio: &Audio) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (floor == Floor::OneNote).hash(&mut hasher);
     audio.samples.len().hash(&mut hasher);
     for v in audio.samples.iter().step_by(4_099) {
         v.to_bits().hash(&mut hasher);
@@ -373,7 +373,7 @@ impl Audition {
         let Some(floor) = clean else {
             return;
         };
-        let at = print(audio, floor);
+        let at = (print(audio), floor);
         match &mut self.noise {
             Some((held, Search::Running(job))) if *held == at => match job.poll() {
                 work::Answer::Running => {
@@ -399,7 +399,7 @@ impl Audition {
             return Cleaning::Off;
         };
         match &self.noise {
-            Some((at, found)) if *at == print(audio, floor) => match found {
+            Some((at, found)) if *at == (print(audio), floor) => match found {
                 Search::Running(_) => Cleaning::Finding,
                 Search::Done(noise) => Cleaning::Ready(Some(noise)),
                 Search::Lost => Cleaning::Ready(None),

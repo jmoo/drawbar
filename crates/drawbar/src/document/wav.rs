@@ -592,9 +592,11 @@ pub struct State {
 pub struct Detect {
     /// A note standing this little over the floor is skipped, in dB.
     pub limit: f64,
-    running: Option<crate::work::Job<crate::work::Detected>>,
-    /// What the last search found, or why it found nothing.
-    pub found: Option<Result<crate::work::Detected, String>>,
+    /// The search running, the [`audition::print`] of the audio it searches and the
+    /// limit it was given.
+    running: Option<(crate::work::Job<crate::work::Detected>, u64, f64)>,
+    /// What the last search found, with the limit it was given, or why it found nothing.
+    pub found: Option<Result<(crate::work::Detected, f64), String>>,
 }
 
 impl Default for Detect {
@@ -617,30 +619,40 @@ impl Detect {
     pub fn start(&mut self, ctx: &egui::Context, audio: &Audio) {
         if self.running.is_none() {
             let work = crate::work::FindHits::of(audio, self.limit);
-            self.running = Some(crate::work::hand(ctx, work));
+            let job = crate::work::hand(ctx, work);
+            self.running = Some((job, audition::print(audio), self.limit));
             self.found = None;
         }
     }
 
-    /// Take what the search found, once it has, as the set that marks it.
-    pub fn follow(&mut self, sets: &mut Sets) {
-        let Some(job) = &self.running else {
+    /// Take what the search found, once it has, as the set that marks it, where the take
+    /// still holds the `audio` it searched: a result for audio since changed, as by a
+    /// gain or Revert, is let go.
+    pub fn follow(&mut self, sets: &mut Sets, audio: Option<&Audio>) {
+        let Some((job, searched, limit)) = &self.running else {
             return;
         };
+        let (searched, limit) = (*searched, *limit);
         let found = match job.poll() {
             crate::work::Answer::Running => return,
             crate::work::Answer::Answered(found) => found,
             crate::work::Answer::Died => {
+                self.found = Some(Err(job.died("Detect")));
                 self.running = None;
-                self.found = Some(Err("Detect stopped without a result".to_string()));
                 return;
             }
         };
         self.running = None;
+        if audio.map(audition::print) != Some(searched) {
+            self.found = Some(Err(
+                "the take's audio changed while Detect ran: run it again".to_string(),
+            ));
+            return;
+        }
         if found.kept > 0 {
             sets.push((DETECTED.to_string(), found.value.clone()));
         }
-        self.found = Some(Ok(found));
+        self.found = Some(Ok((found, limit)));
     }
 
     /// What the last search found, in words.
@@ -650,18 +662,18 @@ impl Detect {
         }
         Some(match self.found.as_ref()? {
             Err(why) => why.clone(),
-            Ok(found) if found.kept == 0 => format!(
-                "Detect marked no sample: skipped {} at {:.0} dB or less over noise; the \
+            Ok((found, limit)) if found.kept == 0 => format!(
+                "Detect marked no sample: skipped {} at {limit:.0} dB or less over noise; the \
                  take's regions are as they were",
-                found.too_quiet, self.limit
+                found.too_quiet
             ),
-            Ok(found) => format!(
+            Ok((found, limit)) => format!(
                 "Detect marked {} sample(s) of {} note(s){}",
                 found.kept,
                 found.notes,
                 match found.too_quiet {
                     0 => String::new(),
-                    n => format!(", skipped {n} at {:.0} dB or less over noise", self.limit),
+                    n => format!(", skipped {n} at {limit:.0} dB or less over noise"),
                 }
             ),
         })
@@ -1112,7 +1124,8 @@ pub fn ui(
 ) -> (bool, Option<audition::Ask>) {
     let mut audition = false;
     let mut asked = None;
-    state.detect.follow(sets);
+    let audio = state.read.source.as_ref().ok();
+    state.detect.follow(sets, audio);
     if let Some(said) = state.detect.said() {
         let ink = match state.detect.found {
             Some(Err(_)) => crate::app::bad(ui.visuals()),
@@ -1979,7 +1992,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_marks_what_it_found_in_place_of_the_regions_and_undo_names_it() {
+    fn detect_marks_what_it_found_in_place_of_the_regions() {
         let found = wav::Marks {
             regions: vec![
                 wav::Region {
@@ -2014,5 +2027,59 @@ mod tests {
             "the old regions are gone"
         );
         assert!(detected_marks("12 x 060-b0-v00").is_err());
+    }
+
+    /// Detect's result marks the take only while it holds the audio searched, and says
+    /// the limit it ran with, whatever the field holds since.
+    #[test]
+    fn a_detect_result_for_audio_since_changed_is_let_go() {
+        let rate = 35_002u32;
+        let audio = Audio {
+            rate,
+            channels: 1,
+            samples: (0..rate as usize * 4)
+                .map(|i| {
+                    let t = i as f32 / rate as f32;
+                    match t {
+                        t if t < 1.0 => 0.0,
+                        t => 0.5 * (-(t - 1.0)).exp() * (std::f32::consts::TAU * 220.0 * t).sin(),
+                    }
+                })
+                .collect(),
+        };
+        let gained = Audio {
+            samples: audio.samples.iter().map(|v| v * 0.5).collect(),
+            ..audio.clone()
+        };
+        let ctx = egui::Context::default();
+        let settle = |detect: &mut Detect, now: &Audio| -> Sets {
+            loop {
+                let mut sets = Sets::new();
+                detect.follow(&mut sets, Some(now));
+                if !detect.running() {
+                    return sets;
+                }
+                std::thread::yield_now();
+            }
+        };
+        let mut detect = Detect::default();
+        detect.start(&ctx, &audio);
+        assert!(settle(&mut detect, &gained).is_empty(), "nothing marked");
+        let said = detect.said().unwrap();
+        assert!(said.contains("changed while Detect ran"), "{said}");
+
+        detect.start(&ctx, &audio);
+        let sets = settle(&mut detect, &audio);
+        assert_eq!(sets.len(), 1, "the take still holds what was searched");
+
+        detect.limit = 200.0;
+        detect.start(&ctx, &audio);
+        assert!(
+            settle(&mut detect, &audio).is_empty(),
+            "every note too quiet"
+        );
+        detect.limit = 70.0;
+        let said = detect.said().unwrap();
+        assert!(said.contains("at 200 dB") && !said.contains("70"), "{said}");
     }
 }

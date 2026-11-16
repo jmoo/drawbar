@@ -56,9 +56,9 @@ pub(crate) fn answer(task: Task, progress: &Progress) -> Result<wire::Message, S
     }
 }
 
-/// Find a take's samples, as `nord piano prep` does with no note list: each hit named
-/// by its pitch, its layers chosen by level, a hit under `min_snr_db` over the floor left
-/// out.
+/// Find a take's samples by `nord piano prep`'s rules with no note list, at the take's
+/// own rate where prep first resamples it: each hit named by its pitch, its layers chosen
+/// by level, a hit under `min_snr_db` over the floor left out.
 #[derive(Serialize, Deserialize)]
 pub struct FindHits {
     rate: u32,

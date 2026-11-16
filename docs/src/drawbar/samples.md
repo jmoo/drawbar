@@ -73,8 +73,10 @@ where a fade starts). **Play original** plays the picked sample as the take hold
 and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole sample**
 the whole sample again; drag the lane to move along. Its **+** and **−** set its scale as the take's do.
 
-**Detect**, on the header's second row for a WAV, finds the take's samples as
-`nord piano prep` does with no note list: each hit named by its pitch, a note's
+**Detect**, on the header's second row for a WAV, finds the take's samples by
+`nord piano prep`'s rules with no note list, at the take's own rate (prep first
+resamples to 35,002 Hz, so on a 44.1 or 48 kHz take the two can cut a few frames
+apart): each hit named by its pitch, a note's
 hits chosen as up to four layers by level, each attack cut from its strike to its
 key-up with a loop or a fade, and a key-off after it. It marks them in place of
 the take's regions, and the line over the take says

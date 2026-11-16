@@ -638,10 +638,11 @@ impl Draft {
     /// The build's result once it is ready, returned once. A failure is also kept for
     /// the dialog to show.
     fn settle(&mut self) -> Option<Result<Built, String>> {
-        let answer = match self.job.as_ref()?.poll() {
+        let job = self.job.as_ref()?;
+        let answer = match job.poll() {
             work::Answer::Running => return None,
             work::Answer::Answered(answer) => answer,
-            work::Answer::Died => Err("building the library stopped without a result".to_string()),
+            work::Answer::Died => Err(job.died("building the library")),
         };
         self.job = None;
         if let Err(why) = &answer {

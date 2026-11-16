@@ -39,6 +39,10 @@ impl Progress {
     }
 }
 
+/// How a job's progress starts once it has stopped without an answer, followed by why:
+/// "the work stopped: …", "the work could not start: …".
+pub(crate) const STOPPED: &str = "the work";
+
 /// A job's state when polled.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Answer<T> {
@@ -76,6 +80,16 @@ impl<T> Job<T> {
         self.progress.said()
     }
 
+    /// Why a job that [`Answer::Died`] gave no answer, in words naming `what` stopped:
+    /// the reason its worker or thread gave, where it gave one.
+    pub fn died(&self, what: &str) -> String {
+        let said = self.progress();
+        match said.strip_prefix(STOPPED) {
+            Some(why) => format!("{what}{why}"),
+            None => format!("{what} stopped without a result"),
+        }
+    }
+
     /// [`Self::poll`], blocking until the worker answers or exits, so never
     /// [`Answer::Running`].
     #[cfg(test)]
@@ -98,7 +112,18 @@ pub fn run<T: Send + 'static>(
     let reported = progress.clone();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(work(&reported));
+        let worked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&reported)));
+        match worked {
+            Ok(answer) => {
+                let _ = tx.send(answer);
+            }
+            Err(panic) => {
+                let why = (panic.downcast_ref::<&str>().map(|why| why.to_string()))
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "it panicked".to_string());
+                reported.say(format!("{STOPPED} stopped: {why}"));
+            }
+        }
         ctx.request_repaint();
     });
     Job { rx, progress }
@@ -191,5 +216,13 @@ mod tests {
     fn a_worker_that_panics_is_reported_as_dead() {
         let job: Job<u32> = run(&egui::Context::default(), |_| panic!("the work gave up"));
         assert_eq!(settled(&job), Answer::Died);
+        assert_eq!(
+            job.died("Detect"),
+            "Detect stopped: the work gave up",
+            "and says why"
+        );
+        let formatted: Job<u32> = run(&egui::Context::default(), |_| panic!("at {}", 3));
+        assert_eq!(settled(&formatted), Answer::Died);
+        assert_eq!(formatted.died("Detect"), "Detect stopped: at 3");
     }
 }
