@@ -188,8 +188,8 @@ pub fn highpassed(x: &[f64], rate: u32) -> Vec<f64> {
 ///
 /// An onset rises [`RISE_DB`] over the [`LOOKBACK`] before it and is still 15 dB over
 /// the floor 100 ms later, which a click is not. Of onsets closer than [`MIN_GAP`], the
-/// loudest wins. Only the first frame of a rise counts: the frames after it pass too,
-/// and a note whose level wavers would drift the onset 30 to 50 ms late.
+/// loudest wins. Only the first frame of a rise counts, since the frames after it pass
+/// too and would place the onset late.
 ///
 /// A one-note file whose level comes within [`RISE_DB`] of its loudest in its first
 /// [`LOOKBACK`] starts with a hit there: a sample set's files are cut at or just before

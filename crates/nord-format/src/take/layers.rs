@@ -140,12 +140,12 @@ fn off_warning(pitch: f64, note: u8) -> Option<String> {
 }
 
 /// A hit's note and any warning about its pitch, or none for a hit left out.
-pub type Named = Option<(u8, Option<String>)>;
+pub(crate) type Named = Option<(u8, Option<String>)>;
 
 /// The note and any warning of each of `hits` in a take with no note list: the note
 /// [`notes_by_hit`] names, a hit with no pitch taking the note of the named hit before
 /// it, and none for a hit `skipped` leaves out.
-pub fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) -> Vec<Named> {
+pub(crate) fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) -> Vec<Named> {
     let mut last: Option<u8> = None;
     hits.iter()
         .zip(notes_by_hit(hits, skipped))
@@ -303,8 +303,8 @@ pub enum Placed {
 /// A set comes in no playing order and its file names are not trusted, so the hits are
 /// sorted by pitch and named as [`notes_by_hit`] names a take's, whose stretch check then
 /// has each note's neighbors to go by. Sorted by pitch they make no playing line, so no
-/// octave is moved: each file keeps the octave its pitch was read in. A note's files are its hits, and its layers are chosen
-/// from them by level as [`pick`] chooses a take's: `layers` at most, files within
+/// octave is moved: each file keeps the octave its pitch was read in. A note's files are
+/// its hits, and its layers are chosen from them by level as [`pick`] chooses a take's: `layers` at most, files within
 /// `min_gap_db` of a louder one kept being duplicates, as round-robins of one dynamic
 /// often are.
 pub fn place(struck: &[Option<Hit>], layers: usize, min_gap_db: f64) -> Vec<Option<Placed>> {

@@ -19,16 +19,17 @@ of a folder holds its note for most of its length, so its floor is read on its r
 instead: the mean level of the quietest half second where it stays level, at least
 40 dB under its loudest, digital silence left out. Only its loudest hit counts, and
 it starts with a hit where it is cut at the strike. A file that rests less than
-that has no floor to read and is not held to the too-quiet limit. `prep` notes in
-each file it writes that its floor is read this way, and the build reads its noise
-the same way before cleaning it.
+that has no floor to read: it is not held to the too-quiet limit, and the build
+finds no noise in it and builds it as recorded. `prep` notes in each file it writes
+that its floor is read this way, and the build reads its noise the same way before
+cleaning it.
 
-A folder's hits are sorted by pitch before their notes are named, so a stretched note has its
-neighbors to go by. Each keeps the octave its pitch was read in.
+A folder's hits are sorted by pitch before their notes are named, so a stretched
+note has its neighbors to go by. Each keeps the octave its pitch was read in.
 
-A hit standing less than the [`--min-snr`](../nord-cli/libraries.md#building-from-a-recorded-take)
-limit over the floor is left out: leveled with the others,
-its hiss would come up with it. Each kept hit becomes an attack, from its strike to
+A hit standing less than the
+[`--min-snr`](../nord-cli/libraries.md#building-from-a-recorded-take) limit over the
+floor is left out: leveled with the others, its hiss would come up with it. Each kept hit becomes an attack, from its strike to
 its key-up, and a release from the key-up. A key-off that stands clear of neither
 the quiet before its hit nor the floor gets no release.
 

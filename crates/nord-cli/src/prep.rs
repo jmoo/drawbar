@@ -224,7 +224,7 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
         .collect();
     ui.note(format!(
         "{} one-note file(s) in {}; each file's loudest hit is its note, its floor read on \
-         its quietest {} s",
+         a rest of at least {} s after it, and a file with none is built as recorded",
         files.len(),
         dir.display(),
         nord_format::take::detect::QUIETEST
@@ -396,13 +396,14 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
     Ok(())
 }
 
-/// `path` as a shell reads it back: in double quotes where it holds anything but
-/// letters, digits and `/\._-:`.
+/// `path` as a shell reads it back: in single quotes where it holds anything but
+/// letters, digits and `/\._-:`, so the shell expands nothing in it, each `'` written
+/// as `'\''`.
 fn quoted(path: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:".contains(c);
     match path.chars().all(plain) {
         true => path.to_string(),
-        false => format!("\"{}\"", path.replace('"', "\\\"")),
+        false => format!("'{}'", path.replace('\'', r"'\''")),
     }
 }
 
@@ -1087,9 +1088,14 @@ mod tests {
         assert_eq!(quoted("out/C4.wav"), "out/C4.wav");
         assert_eq!(
             quoted("out/Upright Piano/C4.wav"),
-            "\"out/Upright Piano/C4.wav\""
+            "'out/Upright Piano/C4.wav'"
         );
-        assert_eq!(quoted("a\"b.wav"), "\"a\\\"b.wav\"");
+        assert_eq!(
+            quoted("Rhodes $5.wav"),
+            "'Rhodes $5.wav'",
+            "nothing expands"
+        );
+        assert_eq!(quoted("it's.wav"), r"'it'\''s.wav'");
     }
 
     /// A folder of one-note files, named for nothing they hold: each is placed by its
