@@ -1369,21 +1369,11 @@ impl Document {
             Shape::SetList => setlist::apply(&entity.bytes, &sets).map(Some),
             Shape::Text => text::apply(&entity.bytes, &sets).map(Some),
             Shape::Wav => {
-                let held = self
-                    .open
-                    .as_ref()
+                let held = (self.open.as_ref())
                     .filter(|open| open.id == id)
                     .and_then(|open| open.wav.as_ref());
-                let original = held.map_or(&entity.bytes[..], wav::State::original);
-                let applied = held.map_or(0.0, wav::State::applied);
-                wav::apply(original, &entity.bytes, &sets).map(|(out, db)| {
-                    if let (Some(db), Some(Ok(Some(clipped)))) =
-                        (db, held.zip(db).map(|(held, db)| held.clipping(db)))
-                    {
-                        log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
-                    }
-                    // A moved cut keeps the gain the bytes hold.
-                    gained = db.or(Some(applied));
+                wav::edited(held, entity, &sets, log).map(|(out, db)| {
+                    gained = Some(db);
                     Some(out)
                 })
             }

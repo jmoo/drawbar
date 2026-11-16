@@ -392,6 +392,25 @@ pub fn apply(
     Ok((out, total))
 }
 
+/// `entity`'s bytes with `sets` applied, `held` the document open on it where one is, and
+/// the total gain they hold against its original. A gain that clips is warned of.
+pub fn edited(
+    held: Option<&State>,
+    entity: &LocalEntity,
+    sets: &[(String, String)],
+    log: &mut crate::log::Log,
+) -> Result<(Vec<u8>, f64), String> {
+    let original = held.map_or(&entity.bytes[..], State::original);
+    let (out, db) = apply(original, &entity.bytes, sets)?;
+    if let (Some(db), Some(Ok(Some(clipped)))) =
+        (db, held.zip(db).map(|(held, db)| held.clipping(db)))
+    {
+        log.warn(format!("{}: at {db:+.1} dB {clipped}", entity.name));
+    }
+    // An edit that sets no gain keeps the one the bytes hold.
+    Ok((out, db.unwrap_or_else(|| held.map_or(0.0, State::applied))))
+}
+
 /// Refuse `marks` for the take in `current` where the build would refuse them, as
 /// [`nord_format::take::build::cuts`] checks, but would build the take as it is: an edit
 /// never breaks a take that builds, and a take that does not yet can still be mended.
