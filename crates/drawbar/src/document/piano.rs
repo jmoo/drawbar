@@ -2145,14 +2145,7 @@ impl State {
             .selected
             .and_then(|root| of_root.iter().position(|held| *held == root));
         let cell_lit = answering.and_then(|root| of_root.iter().position(|held| *held == root));
-        let acted = keys::size_cells(
-            &mut inner,
-            SPAN,
-            &summary.cells,
-            picked,
-            cell_lit,
-            keys::Edges::Both,
-        );
+        let acted = keys::size_cells(&mut inner, SPAN, &summary.cells, picked, cell_lit);
         let keyboard = egui::Rect::from_min_size(
             inner.next_widget_position(),
             egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
@@ -2185,7 +2178,7 @@ impl State {
                 let root = of_root[index];
                 view.rows.pick(root, true);
             }
-            Some(keys::BandAct::Drag { bounds, .. }) => {
+            Some(keys::BandAct::Drag { bounds }) => {
                 let was: Vec<(u8, u8)> = summary
                     .cells
                     .iter()
