@@ -572,6 +572,9 @@ pub struct State {
     /// The stamps of the bytes made here from `original`, and the gain each holds, so a
     /// revert to one of them shows its gain again.
     made: Vec<(u64, f64)>,
+    /// The stamp of the saved file `original` was taken against, so a save of any edit,
+    /// a gain or not, makes the saved file the new original.
+    saved_at: u64,
     notes: Notes,
     read: Read,
     /// What the take's lane shows, kept across new bytes.
@@ -831,9 +834,11 @@ fn saved(entity: &LocalEntity) -> Option<Bytes> {
 /// The gain in dB, to the control's step, that makes `edited` of `original`, where one
 /// does.
 ///
-/// Measured on the loudest sample the gain left unclipped, then proved: the original at
-/// that gain must be the edited bytes exactly, so an edit that is not a gain, or a gain
-/// off the control's steps, is never taken for one.
+/// Measured on the loudest sample the gain left unclipped, then proved: the original's
+/// samples at that gain must be the edited file's exactly, so an edit that is not a gain,
+/// or a gain off the control's steps, is never taken for one. Only the samples are
+/// proved: the marks and settings a gain carries over may sit in other chunks, in
+/// whatever order the edits wrote them.
 fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> {
     let ((was, before), (now, after)) = (original, edited);
     if before.samples.len() != after.samples.len() {
@@ -850,9 +855,13 @@ fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> 
         return None;
     }
     let db = (20.0 * ratio.log10() * 10.0).round() / 10.0;
-    // With the cuts the edited bytes mark, so moved cuts and a gain both count.
-    let (made, _) = apply(was, now, &[(GAIN.to_string(), format!("{db:.1}"))]).ok()?;
-    (made == now).then_some(db)
+    let (from, to) = (wav::layout(was).ok()?, wav::layout(now).ok()?);
+    if from.format.encoding != to.format.encoding {
+        return None;
+    }
+    let mut data = was[from.data].to_vec();
+    gain_in_place(&mut data, from.format.encoding, factor(db).ok()?);
+    (data[..] == now[to.data]).then_some(db)
 }
 
 impl State {
@@ -881,6 +890,7 @@ impl State {
             applied,
             original,
             made: vec![(entity.stamp, applied)],
+            saved_at: entity.saved.stamp(),
             notes,
             read,
             view: take::View::default(),
@@ -894,7 +904,7 @@ impl State {
     /// made keep the original and show their gain. Any others, and saved bytes, which
     /// the next gain starts from, open the document again.
     pub fn follow(&mut self, entity: &LocalEntity) {
-        let saved = self.applied != 0.0 && !entity.is_unsaved();
+        let saved = !entity.is_unsaved() && entity.saved.stamp() != self.saved_at;
         if self.read.stamp == entity.stamp && !saved {
             return;
         }
@@ -1627,6 +1637,25 @@ mod tests {
         assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 notes clip".into())));
     }
 
+    /// A gain is found again whatever order the edits around it moved the file's chunks
+    /// into: a category set, then a gain, then a moved cut.
+    #[test]
+    fn an_unsaved_gain_among_other_edits_opens_on_that_gain() {
+        let saved = marked_take(&[0.9, 0.3]);
+        let (mut workspace, id) = library(&saved);
+        let set = |path: &str, value: &str| [(path.to_string(), value.to_string())];
+        let (kinded, _) = apply(&saved, &saved, &set(KIND, "upright")).unwrap();
+        let (gained, _) = apply(&saved, &kinded, &set(GAIN, "3.0")).unwrap();
+        let (moved, _) = apply(&saved, &gained, &[cut(hit::Cut::AttackEnd, 51_000)]).unwrap();
+        edited(&mut workspace, id, moved);
+        let state = State::new(workspace.get(id).unwrap());
+        assert_eq!(state.gain, 3.0);
+        assert!(
+            state.original() == &saved[..],
+            "gains start from the saved file"
+        );
+    }
+
     #[test]
     fn a_working_copy_that_is_no_gain_of_the_saved_file_is_its_own_original() {
         let saved = take(&[0.9, 0.3, 0.05]);
@@ -1658,6 +1687,29 @@ mod tests {
         state.follow(workspace.get(id).unwrap());
         assert_eq!(state.gain, 0.0);
         assert!(state.original() == &out[..]);
+    }
+
+    /// A save of moved cuts alone makes the saved file the original too, so the next
+    /// gain starts from it.
+    #[test]
+    fn saving_moved_cuts_makes_the_saved_file_the_new_original() {
+        let saved = marked_take(&[0.9, 0.3]);
+        let (mut workspace, id) = library(&saved);
+        let mut state = State::new(workspace.get(id).unwrap());
+        let (out, _) = apply(&saved, &saved, &[cut(hit::Cut::AttackEnd, 51_000)]).unwrap();
+        edited(&mut workspace, id, out.clone());
+        state.follow(workspace.get(id).unwrap());
+        assert!(
+            state.original() == &saved[..],
+            "unsaved, the original stays"
+        );
+
+        workspace.mark_saved(id);
+        state.follow(workspace.get(id).unwrap());
+        assert!(
+            state.original() == &out[..],
+            "saved, the saved file is the original"
+        );
     }
 
     /// `take(peaks)` with an attack and release marked on its first note, and a loop.
