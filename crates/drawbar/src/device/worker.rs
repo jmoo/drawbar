@@ -1889,6 +1889,16 @@ mod wire_tests {
         workspace.get(id).expect("just made").bytes.to_vec()
     }
 
+    fn put_a_program(at: Location) -> DeviceCmd {
+        DeviceCmd::Put {
+            id: 1,
+            class: ObjectClass::Program,
+            at,
+            name: "Africa-Split.ne5p".into(),
+            payload: Payload::Bytes(a_program()),
+        }
+    }
+
     /// [`drive_keeping`], keeping occupants in a folder of the test's own.
     fn drive(puppet: &mut Puppet, cmd: DeviceCmd) -> (Flow, Receiver<DeviceEvent>) {
         let dir = crate::testing::Temp::new();
@@ -2070,16 +2080,7 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_the_first_write();
-        let (_, events) = drive(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-        );
+        let (_, events) = drive(&mut device, put_a_program(at));
 
         assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2100,17 +2101,7 @@ mod wire_tests {
         let dir = crate::testing::Temp::new();
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_every_write();
-        let (flow, events) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch_in(&dir),
-        );
+        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2144,17 +2135,7 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let dir = crate::testing::Temp::new();
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).watching(&dir);
-        let (flow, _) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch_in(&dir),
-        );
+        let (flow, _) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
         assert!(flow == Flow::Continue);
 
         let held = device.at_delete.clone().expect("a delete was sent");
@@ -2178,17 +2159,7 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
             .holding(len, "ne5p")
             .watching(&dir);
-        let (flow, _) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch_in(&dir),
-        );
+        let (flow, _) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
         assert!(flow == Flow::Continue);
 
         assert_eq!(device.at_reads.len(), 4, "a read of four chunks");
@@ -2211,17 +2182,7 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
             .holding(2 * 32720, "ne5p")
             .spoiling(&dir);
-        let (flow, events) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch_in(&dir),
-        );
+        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
         assert!(flow == Flow::Continue);
 
         assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
@@ -2242,17 +2203,7 @@ mod wire_tests {
         let scratch = Scratch::default();
         scratch.keep_in(Some(dir.at("tmp")));
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).pulling(&dir);
-        let (flow, events) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch,
-        );
+        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch);
         assert!(flow == Flow::Continue);
 
         assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
@@ -2267,17 +2218,7 @@ mod wire_tests {
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).hanging_up_on_delete();
         let dir = crate::testing::Temp::new();
-        let (flow, events) = drive_keeping(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at,
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-            &scratch_in(&dir),
-        );
+        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
         assert!(flow == Flow::Lost, "the instrument stopped answering");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2917,16 +2858,7 @@ mod wire_tests {
     #[test]
     fn a_geometry_that_cannot_be_read_stops_the_write_before_any_frame_of_it() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
-        let (flow, _) = drive(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at: Location { bank: 0, slot: 3 },
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-        );
+        let (flow, _) = drive(&mut device, put_a_program(Location { bank: 0, slot: 3 }));
         assert!(flow == Flow::Continue, "not a disconnection");
         assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0);
         assert_eq!(counted(&device, cmd::WRITE_DATA), 0);
@@ -2951,16 +2883,7 @@ mod wire_tests {
     #[test]
     fn a_write_past_the_end_is_refused_before_anything_is_deleted() {
         let mut device = a_small_library();
-        let (flow, events) = drive(
-            &mut device,
-            DeviceCmd::Put {
-                id: 1,
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 0 },
-                name: "Africa-Split.ne5p".into(),
-                payload: Payload::Bytes(a_program()),
-            },
-        );
+        let (flow, events) = drive(&mut device, put_a_program(Location { bank: 6, slot: 0 }));
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let why = refused(events);
