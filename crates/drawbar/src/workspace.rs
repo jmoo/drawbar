@@ -877,27 +877,9 @@ impl LocalEntity {
         file: Arc<OnDisk>,
         stamp: u64,
     ) -> LocalEntity {
-        let by_name = crate::browser::tagged(&name);
         LocalEntity {
-            id,
-            name,
-            path: None,
-            origin,
-            bytes: Bytes::default(),
-            entity: None,
-            plays: None,
-            parse_error: None,
-            container: None,
-            words: false,
-            verify: VerifyState::Reading,
             saved: Baseline::on_disk(file, stamp),
-            pending: false,
-            kept: true,
-            stamp,
-            link: None,
-            wrote: None,
-            seen: Default::default(),
-            by_name,
+            ..LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp)
         }
     }
 
