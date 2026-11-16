@@ -108,6 +108,12 @@ pub struct Cuts {
     pub fade: Option<Range<u32>>,
     /// The loop inside the attack, its end included.
     pub looped: Option<Range<u32>>,
+    /// The take's other loops, each end included, which none of the hit's regions may
+    /// reach into.
+    pub other_loops: Vec<Range<u32>>,
+    /// The take's other regions, the hit's key-off among them, which its loop may not
+    /// reach into.
+    pub other_regions: Vec<Range<u32>>,
 }
 
 impl Cuts {
@@ -133,6 +139,19 @@ impl Cuts {
                 .find(|found| found.start >= attack.start && found.end <= attack.end)
                 .cloned()
         });
+        cuts.other_loops = (marked.loops.iter())
+            .filter(|found| Some(*found) != cuts.looped.as_ref())
+            .cloned()
+            .collect();
+        let own = |mark: &take::Mark| {
+            mark.hit == Some(hit)
+                && (Some(&mark.frames) == cuts.attack.as_ref() && mark.label == cuts.label
+                    || mark.part == Part::Fade)
+        };
+        cuts.other_regions = (marked.regions.iter())
+            .filter(|mark| !own(mark))
+            .map(|mark| mark.frames.clone())
+            .collect();
         cuts
     }
 
@@ -162,9 +181,73 @@ impl Cuts {
     }
 
     /// Where `cut` may sit in a take of `total` frames: between the cuts either side of
-    /// it, so each span keeps a frame and the loop two, inside its attack. `None` where
-    /// the hit has no such cut.
+    /// it, so each span keeps a frame and the loop two, inside its attack, and short of
+    /// the take's other loops and regions, as [`Cuts::clear`] says. `None` where the hit
+    /// has no such cut.
     pub fn room(&self, cut: Cut, total: u32) -> Option<RangeInclusive<u32>> {
+        let (low, high) = self.held(cut, total)?;
+        let (low, high) = self.clear(cut, low, high);
+        Some(low..=high.min(total))
+    }
+
+    /// `low` and `high` for `cut` raised and lowered so that, as the build asks, no loop
+    /// reaches into a region that does not hold it: no region of the hit grows into
+    /// another loop, and its loop into no other region. A loop or region already reaching
+    /// into one is left to its owner to move, so a take the build refuses still edits.
+    fn clear(&self, cut: Cut, mut low: u32, mut high: u32) -> (u32, u32) {
+        let release_loops = self.other_loops.iter().chain(&self.looped);
+        let (span, loops): (_, Vec<&Range<u32>>) = match cut {
+            Cut::AttackStart | Cut::AttackEnd => (&self.attack, self.other_loops.iter().collect()),
+            Cut::ReleaseStart | Cut::ReleaseEnd => (&self.release, release_loops.collect()),
+            Cut::LoopStart | Cut::LoopEnd => (&self.looped, Vec::new()),
+            Cut::FadeFrom => (&None, Vec::new()),
+        };
+        let Some(span) = span else {
+            return (low, high);
+        };
+        // A region over start..end, a loop over its start to its end included.
+        let reaches = |found: &Range<u32>| found.start < span.end && span.start <= found.end;
+        let loop_reaches =
+            |region: &Range<u32>| region.start <= span.end && span.start < region.end;
+        match cut {
+            Cut::AttackStart | Cut::ReleaseStart => {
+                for found in loops
+                    .iter()
+                    .filter(|found| !reaches(found) && found.end < span.start)
+                {
+                    low = low.max(found.end + 1);
+                }
+            }
+            Cut::AttackEnd | Cut::ReleaseEnd => {
+                for found in loops
+                    .iter()
+                    .filter(|found| !reaches(found) && found.start >= span.end)
+                {
+                    high = high.min(found.start);
+                }
+            }
+            Cut::LoopStart => {
+                for region in (self.other_regions.iter())
+                    .filter(|region| !loop_reaches(region) && region.end <= span.start)
+                {
+                    low = low.max(region.end);
+                }
+            }
+            Cut::LoopEnd => {
+                for region in (self.other_regions.iter())
+                    .filter(|region| !loop_reaches(region) && region.start > span.end)
+                {
+                    high = high.min(region.start);
+                }
+            }
+            Cut::FadeFrom => {}
+        }
+        (low, high)
+    }
+
+    /// Where `cut` may sit between the hit's own cuts either side of it, as
+    /// [`Cuts::room`] says, before the take's other loops and regions are counted.
+    fn held(&self, cut: Cut, total: u32) -> Option<(u32, u32)> {
         let attack = self.attack.as_ref();
         let found = self.looped.as_ref();
         let fade = self.fade.as_ref();
@@ -194,7 +277,7 @@ impl Cuts {
             Cut::ReleaseStart => (0, release?.end.saturating_sub(1)),
             Cut::ReleaseEnd => (release?.start + 1, total),
         };
-        Some(low..=high.min(total))
+        Some((low, high))
     }
 }
 
@@ -439,12 +522,18 @@ const NOTE_WHERE: &str = "Click where the take marks no sample to add one there"
 const PLACE_BEFORE: f64 = 0.5;
 const PLACE_AFTER: f64 = 6.0;
 
-/// The Add and Delete menus, for the sample `cuts` describes, or for a place where none
-/// is picked.
-fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, wanted: &mut Option<Wanted>) {
+/// The Add and Delete menus, for the sample `cuts` describes in a take of `total`
+/// frames, or for a place where none is picked.
+fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, total: f64, wanted: &mut Option<Wanted>) {
     let attack = cuts.is_some_and(|cuts| cuts.attack.is_some());
     let looped = cuts.is_some_and(|cuts| cuts.looped.is_some());
+    // The build loops no sample that fades to silence.
+    let faded = cuts.is_some_and(|cuts| cuts.fade.is_some());
     let release = cuts.is_some_and(|cuts| cuts.release.is_some());
+    // An attack that runs to the take's end leaves no audio for a key-off.
+    let room_after = cuts
+        .and_then(|cuts| cuts.attack.as_ref())
+        .is_some_and(|attack| f64::from(attack.end) < total);
     let picked = cuts.is_some();
     let items = |ui: &mut egui::Ui,
                  items: [(&str, Piece, bool); 3],
@@ -467,8 +556,8 @@ fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, wanted: &mut Option<Wanted>) {
             ui,
             [
                 (NOTE, Piece::Note, !picked),
-                (LOOP_ITEM, Piece::Loop, attack && !looped),
-                (KEY_OFF, Piece::KeyOff, attack && !release),
+                (LOOP_ITEM, Piece::Loop, attack && !looped && !faded),
+                (KEY_OFF, Piece::KeyOff, attack && !release && room_after),
             ],
             Wanted::Add,
             wanted,
@@ -535,7 +624,7 @@ fn placed(
             close.span = None;
         }
         ui.add_space(8.0);
-        menus(ui, None, wanted);
+        menus(ui, None, total, wanted);
     });
     let width = take::lane_width(ui);
     let (rect, response) =
@@ -709,7 +798,7 @@ pub fn ui(
             close.span = None;
         }
         ui.add_space(8.0);
-        menus(ui, Some(&cuts), &mut wanted);
+        menus(ui, Some(&cuts), total, &mut wanted);
     });
 
     let shown = close.shown(&cuts, total, rate);
@@ -930,9 +1019,17 @@ mod tests {
         assert_eq!(c4.room(Cut::AttackStart, total), Some(0..=5000));
         assert_eq!(c4.room(Cut::LoopStart, total), Some(1000..=6998));
         assert_eq!(c4.room(Cut::LoopEnd, total), Some(5002..=9000));
-        assert_eq!(c4.room(Cut::AttackEnd, total), Some(7000..=total));
-        assert_eq!(c4.room(Cut::ReleaseStart, total), Some(0..=9499));
-        assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=total));
+        assert_eq!(
+            c4.room(Cut::AttackEnd, total),
+            Some(7000..=25_000),
+            "short of G4's loop"
+        );
+        assert_eq!(
+            c4.room(Cut::ReleaseStart, total),
+            Some(7001..=9499),
+            "clear of its own attack's loop"
+        );
+        assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=25_000));
         assert_eq!(c4.room(Cut::FadeFrom, total), None, "C4 v22 has no fade");
         let g4 = Cuts::of(&marked(), (67, LayerTag::Value(0)));
         assert_eq!(
@@ -941,6 +1038,55 @@ mod tests {
             "past its fade's start, and its loop's end"
         );
         assert_eq!(g4.room(Cut::FadeFrom, total), Some(20_000..=29_999));
+    }
+
+    /// No cut reaches into a loop another region holds, nor a loop into another region,
+    /// as the build refuses a loop crossing a region's end or lying in two.
+    #[test]
+    fn a_cut_stops_short_of_the_take_s_other_loops_and_regions() {
+        let region = |start: u32, end: u32, label: &str| take::mark(label, start..end);
+        let marked = Marked {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(9000, 9500, "060-b2-v22"),
+                region(12_000, 20_000, "062-b0-v22"),
+                region(20_000, 21_000, "062-b2-v22"),
+            ],
+            loops: vec![5000..7000, 15_000..16_000],
+        };
+        let total = 100_000;
+        let c4 = Cuts::of(&marked, (60, LayerTag::Value(22)));
+        let d4 = Cuts::of(&marked, (62, LayerTag::Value(22)));
+        assert_eq!(c4.room(Cut::AttackEnd, total), Some(7000..=15_000));
+        assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=15_000));
+        assert_eq!(d4.room(Cut::AttackStart, total), Some(7001..=15_000));
+        assert_eq!(d4.room(Cut::ReleaseStart, total), Some(16_001..=20_999));
+        assert_eq!(
+            d4.room(Cut::LoopStart, total),
+            Some(12_000..=15_998),
+            "C4's key-off ends before D4's attack starts"
+        );
+        // D4's loop moved down past C4's key-off is stopped at its end.
+        let early = Marked {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(9000, 9500, "060-b2-v22"),
+                region(8000, 20_000, "062-b0-v22"),
+            ],
+            loops: vec![5000..7000, 15_000..16_000],
+        };
+        let d4 = Cuts::of(&early, (62, LayerTag::Value(22)));
+        assert_eq!(d4.room(Cut::LoopStart, total), Some(9500..=15_998));
+        // A loop already reaching into another region is left to move.
+        let crossed = Marked {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(6000, 9500, "060-b2-v22"),
+            ],
+            loops: std::iter::once(5000..7000).collect(),
+        };
+        let c4 = Cuts::of(&crossed, (60, LayerTag::Value(22)));
+        assert_eq!(c4.room(Cut::ReleaseStart, total), Some(0..=9499));
     }
 
     #[test]

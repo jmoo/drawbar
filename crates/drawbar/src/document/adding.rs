@@ -44,13 +44,13 @@ const MIDDLE_C: u8 = 60;
 const LAYER_BEYOND: f64 = 10.0;
 
 /// A sample to add: the hit it names, the label of its attack, and the frames of its
-/// attack and its key-off.
+/// attack and its key-off, where the take runs on past the attack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Added {
     pub hit: Hit,
     pub label: String,
     pub attack: Range<u32>,
-    pub release: Range<u32>,
+    pub release: Option<Range<u32>>,
 }
 
 /// A stretch of the take, high-passed as [`detect`] reads it, and its envelope.
@@ -97,9 +97,10 @@ fn frames_of(audio: &Audio) -> usize {
 
 /// The sample of the hit at `place` in `audio`, whose file marks `marked`: from the hit's
 /// onset to its key-up, with a key-off after, named by its pitch and by its loudness
-/// against its note's other layers. Where no hit is found, it starts at `place`; where
-/// no key-up is, it lasts [`ATTACK`]; where no pitch is, it is named by the sample
-/// nearest it, or as middle C.
+/// against its note's other layers. A hit whose onset a sample already marks is passed
+/// over, so a click in the quiet after a sample adds no second one of it. Where no hit
+/// is found, it starts at `place`; where no key-up is, it lasts [`ATTACK`]; where no
+/// pitch is, it is named by the sample nearest it, or as middle C.
 pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
     let rate = f64::from(audio.rate.max(1));
     let secs = |seconds: f64| (seconds * rate) as usize;
@@ -110,7 +111,16 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
     let mut keyup = None;
     let mut pitch = None;
     if let Some(window) = Window::of(audio, place.saturating_sub(secs(BEFORE))..stop) {
-        let starts = detect::onsets(&window.env);
+        let marked_at = |frame: usize| {
+            marked.regions.iter().any(|mark| {
+                matches!(mark.part, Part::Attack | Part::Resonance)
+                    && mark.frames.contains(&(frame as u32))
+            })
+        };
+        let onsets = detect::onsets(&window.env);
+        let starts: Vec<usize> = (onsets.iter().copied())
+            .filter(|&at| !marked_at(window.frame(at)))
+            .collect();
         // The last hit to start by the click, a moment after it allowed; else the
         // nearest.
         let found = starts
@@ -124,7 +134,7 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
             })
             .copied();
         if let Some(start) = found {
-            let next = starts
+            let next = onsets
                 .iter()
                 .copied()
                 .find(|&at| at > start)
@@ -136,7 +146,8 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
             let heard =
                 (body + secs(0.05)).min(window.x.len())..(body + secs(0.55)).min(window.x.len());
             if heard.len() >= secs(0.1) {
-                pitch = detect::pitch(&window.x[heard], audio.rate, 5_000.0);
+                let top = (f64::from(audio.rate) / 2.0).min(5_000.0);
+                pitch = detect::pitch(&window.x[heard], audio.rate, top);
             }
         }
     }
@@ -162,12 +173,16 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
 
 /// The key-off of an attack over `attack_start` to `keyup` in `audio`: from the key-up
 /// to where the take falls to [`KEY_OFF_OVER_DB`] over its noise, at most
-/// [`KEY_OFF_MOST`] on, or [`KEY_OFF`] long where it never does.
-pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Range<u32> {
+/// [`KEY_OFF_MOST`] on, or [`KEY_OFF`] long where it never does. None where the take
+/// ends at the key-up.
+pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Option<Range<u32>> {
     let rate = f64::from(audio.rate.max(1));
     let secs = |seconds: f64| (seconds * rate) as usize;
     let total = frames_of(audio);
-    let keyup = (keyup as usize).min(total);
+    let keyup = keyup as usize;
+    if keyup >= total {
+        return None;
+    }
     let most = (keyup + secs(KEY_OFF_MOST)).min(total);
     let fallback = (keyup + secs(KEY_OFF)).min(total).max(keyup + 1);
     // From before the attack, so the window's floor is the take's quiet, not the tail's.
@@ -183,8 +198,8 @@ pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Range<u32> {
         // A key-off quiet from its start found no fall to end at.
         .filter(|&end| end >= keyup + secs(KEY_OFF_LEAST))
         .unwrap_or(fallback)
-        .clamp(keyup + 1, total.max(keyup + 1));
-    keyup as u32..end as u32
+        .clamp(keyup + 1, total);
+    Some(keyup as u32..end as u32)
 }
 
 /// A loop to drag, in an attack over `attack`: a quarter-second, or less on a short
@@ -317,9 +332,62 @@ mod tests {
         assert!((onset - 1.0).abs() < 0.05, "onset {onset}");
         let keyup = f64::from(added.attack.end) / f64::from(RATE);
         assert!((keyup - 3.0).abs() < 0.1, "key-up {keyup}");
-        assert_eq!(added.release.start, added.attack.end);
-        let quiet = f64::from(added.release.end) / f64::from(RATE);
+        let release = added.release.expect("a key-off");
+        assert_eq!(release.start, added.attack.end);
+        let quiet = f64::from(release.end) / f64::from(RATE);
         assert!(quiet > 3.05 && quiet < 3.5, "key-off end {quiet}");
+    }
+
+    /// A click in the quiet after a marked sample adds no second one of it: the sample at
+    /// the click is placed there, not over the marked one's onset.
+    #[test]
+    fn a_hit_already_marked_is_not_marked_again() {
+        let audio = take(0.5);
+        let marked = Marked {
+            regions: vec![take::mark("057-b0-v00", RATE..RATE * 3)],
+            loops: Vec::new(),
+        };
+        let added = sample(&audio, &marked, RATE * 4);
+        assert!(
+            added.attack.start >= RATE * 3,
+            "the attack starts at {}, inside the marked one",
+            added.attack.start
+        );
+    }
+
+    /// A note held to the take's end has no key-off: none is made past the audio.
+    #[test]
+    fn a_note_held_to_the_take_s_end_has_no_key_off() {
+        let mut audio = take(0.5);
+        audio.samples.truncate(RATE as usize * 2);
+        let added = sample(&audio, &Marked::default(), RATE + RATE / 2);
+        assert_eq!(added.attack.end, RATE * 2, "the attack runs to the end");
+        assert_eq!(added.release, None);
+        assert_eq!(key_off(&audio, RATE, RATE * 2), None);
+        assert!(key_off(&audio, RATE, RATE * 2 - 1).is_some());
+    }
+
+    /// A take at a rate whose Nyquist is under the pitch search's top still names its
+    /// hit: an 880 Hz note (A5) at 8 kHz.
+    #[test]
+    fn a_low_rate_take_s_hit_is_named() {
+        let rate = 8_000u32;
+        let samples = (0..rate as usize * 4)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                match t {
+                    t if t < 1.0 => 0.0,
+                    t => 0.5 * (-(t - 1.0)).exp() * (std::f32::consts::TAU * 880.0 * t).sin(),
+                }
+            })
+            .collect();
+        let audio = Audio {
+            rate,
+            channels: 1,
+            samples,
+        };
+        let added = sample(&audio, &Marked::default(), rate * 2);
+        assert_eq!(added.hit.0, 81, "A5");
     }
 
     /// Silence has no hit and no pitch: the sample is still added, at the click, named
@@ -344,7 +412,7 @@ mod tests {
             LayerTag::Value(22),
             "a value the note does not have"
         );
-        assert_eq!(added.release.len(), RATE as usize / 2);
+        assert_eq!(added.release.map(|r| r.len()), Some(RATE as usize / 2));
         let alone = sample(&audio, &Marked::default(), RATE);
         assert_eq!(alone.hit.0, MIDDLE_C);
     }

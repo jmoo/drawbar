@@ -446,12 +446,32 @@ pub fn apply(
         None => current.to_vec(),
     };
     if let Some(marks) = &marks {
+        refused_by_build(current, marks)?;
         out = wav::with_marks(&out, marks).map_err(error)?;
     }
     if wav::read_settings(&out).ok().as_ref() != Some(&settings) {
         out = wav::with_settings(&out, &settings).map_err(error)?;
     }
     Ok((out, total))
+}
+
+/// Refuse `marks` for the take in `current` where the build would refuse them, as
+/// [`nord_format::take::build::cuts`] checks, but would build the take as it is: an edit
+/// never breaks a take that builds, and a take that does not yet can still be mended.
+fn refused_by_build(current: &[u8], marks: &wav::Marks) -> Result<(), String> {
+    let frames = wav::layout(current).map_err(|e| e.to_string())?.frames();
+    let builds = |marks: &wav::Marks| nord_format::take::build::cuts("", marks, frames).map(|_| ());
+    let Err(why) = builds(marks) else {
+        return Ok(());
+    };
+    let before = wav::read_marks(current).map_err(|e| e.to_string())?;
+    match builds(&before) {
+        Ok(_) => Err(format!(
+            "the build would refuse this: {}",
+            why.to_string().trim_start_matches(": ")
+        )),
+        Err(_) => Ok(()),
+    }
 }
 
 /// The take's loud action: Detect, which marks its samples in place of its regions.
@@ -1191,10 +1211,12 @@ fn pieces(
     if let (Wanted::Add(Piece::Note), Some(place)) = (wanted, view.place) {
         let added = adding::sample(audio, marked, place);
         sets.push((format!("{ADDED}{}", added.label), span_value(&added.attack)));
-        sets.push((
-            format!("{ADDED}{}", adding::release_label(added.hit)),
-            span_value(&added.release),
-        ));
+        if let Some(release) = &added.release {
+            sets.push((
+                format!("{ADDED}{}", adding::release_label(added.hit)),
+                span_value(release),
+            ));
+        }
         (view.picked, view.place) = (Some(added.hit), None);
         return;
     }
@@ -1206,10 +1228,14 @@ fn pieces(
         return;
     };
     match wanted {
-        Wanted::Add(Piece::KeyOff) => sets.push((
-            format!("{ADDED}{}", adding::release_label(hit)),
-            span_value(&adding::key_off(audio, attack.start, attack.end)),
-        )),
+        Wanted::Add(Piece::KeyOff) => {
+            if let Some(release) = adding::key_off(audio, attack.start, attack.end) {
+                sets.push((
+                    format!("{ADDED}{}", adding::release_label(hit)),
+                    span_value(&release),
+                ));
+            }
+        }
         Wanted::Add(Piece::Loop) => sets.push((
             format!("{LOOPED}{}", cuts.label),
             span_value(&adding::default_loop(&attack, audio.rate)),
@@ -1711,6 +1737,53 @@ mod tests {
             .iter()
             .all(|region| !region.label.starts_with("069")));
         assert_eq!(marks.loops.len(), 1, "the other sample's loop stays");
+    }
+
+    /// What the edits leave the build accepts, as its own check of a take's marks says,
+    /// and an edit after which the build would refuse the take is refused when made.
+    #[test]
+    fn an_edit_the_build_would_refuse_is_refused() {
+        let bytes = marked_take(&[0.9, 0.3]);
+        let set = |path: String, value: &str| (path, value.to_string());
+        let builds = |bytes: &[u8]| {
+            let frames = wav::layout(bytes).unwrap().frames();
+            let marks = wav::read_marks(bytes).unwrap();
+            nord_format::take::build::cuts("take.wav", &marks, frames).map(|cuts| cuts.len())
+        };
+        let (out, _) = apply(
+            &bytes,
+            &bytes,
+            &[
+                set(format!("{ADDED}071-b0-v00"), "60000..70000"),
+                set(format!("{ADDED}071-b2-v00"), "70000..72000"),
+                set(format!("{LOOPED}071-b0-v00"), "64000..65000"),
+                cut(hit::Cut::AttackEnd, 51_000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(builds(&out).unwrap(), 4);
+
+        // A key-off over the loop of its own attack, a fade on a looped attack.
+        let refused = [
+            set(format!("{ADDED}069-b2-v30"), "41000..52000"),
+            set(format!("{ADDED}071-b0-v00-fade"), "68000..70000"),
+        ];
+        for edit in refused {
+            let why = apply(&out, &out, std::slice::from_ref(&edit)).unwrap_err();
+            assert!(why.starts_with("the build would refuse this"), "{why}");
+        }
+
+        // A take the build refuses already still edits, so it can be mended.
+        let broken = apply(&out, &out, &[set(format!("{ADDED}nonsense"), "100..200")]);
+        assert!(broken.is_err(), "no stroke");
+        // A loop crossing the key-off's start, mended by moving the key-off to hold it.
+        let mut marks = wav::read_marks(&out).unwrap();
+        marks.loops.push(wav::Loop::forward(51_500, 53_000));
+        let crossing = wav::with_marks(&out, &marks).unwrap();
+        assert!(builds(&crossing).is_err());
+        let (mended, _) =
+            apply(&crossing, &crossing, &[cut(hit::Cut::ReleaseStart, 51_000)]).unwrap();
+        assert!(builds(&mended).is_ok());
     }
 
     /// A rename relabels every region of the sample, keeps its loop, and refuses a name
