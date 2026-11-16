@@ -533,6 +533,8 @@ pub struct State {
     pub gain: f64,
     /// The total gain the bytes hold against `original`.
     applied: f64,
+    /// The total gain the audio `read` holds against `original`.
+    read_gain: f64,
     /// The file as last saved, which Revert goes back to; or, where those bytes cannot
     /// be had or the working copy is not a gain of them, the working copy itself.
     original: Bytes,
@@ -803,7 +805,40 @@ struct Read {
     close: take::Drawn,
 }
 
+/// A read of nothing, only to stand in while a read is moved out.
+impl Default for Read {
+    fn default() -> Read {
+        Read {
+            stamp: 0,
+            source: Err(String::new()),
+            too_large: false,
+            marks: Err(String::new()),
+            marked: Err(String::new()),
+            settings: wav::Settings::default(),
+            summary: take::Summary::default(),
+            drawn: take::Drawn::default(),
+            close: take::Drawn::default(),
+        }
+    }
+}
+
 impl Read {
+    /// `entity`'s bytes read as `old` read its audio: the marks and settings read again,
+    /// the audio, its summary and the lanes drawn of it kept.
+    fn again(entity: &LocalEntity, old: Read) -> Read {
+        let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
+        Read {
+            stamp: entity.stamp,
+            marked: marks
+                .as_ref()
+                .map(take::Marked::from_marks)
+                .map_err(Clone::clone),
+            marks,
+            settings: wav::read_settings(&entity.bytes).unwrap_or_default(),
+            ..old
+        }
+    }
+
     fn of(entity: &LocalEntity) -> Read {
         let refused = web_refusal(entity.bytes.len());
         let too_large = refused.is_some();
@@ -901,6 +936,7 @@ impl State {
         State {
             gain: applied,
             applied,
+            read_gain: applied,
             original,
             made: vec![(entity.stamp, applied)],
             saved_at: entity.saved.stamp(),
@@ -923,9 +959,17 @@ impl State {
         }
         match self.made.iter().find(|(stamp, _)| *stamp == entity.stamp) {
             Some(&(_, total)) if !saved => {
+                // Bytes made here at the gain the audio already holds differ from it in
+                // their marks and settings only, so the audio read is kept, not decoded
+                // again for each moved cut.
+                let same_audio = total == self.read_gain;
+                self.read_gain = total;
                 self.applied = total;
                 self.gain = total;
-                self.read = Read::of(entity);
+                self.read = match same_audio {
+                    true => Read::again(entity, std::mem::take(&mut self.read)),
+                    false => Read::of(entity),
+                };
             }
             _ => {
                 let (view, close, audition, detect) = (
@@ -1748,6 +1792,38 @@ mod tests {
         state.follow(workspace.get(id).unwrap());
         assert_eq!(state.gain, 0.0);
         assert!(state.original() == &out[..]);
+    }
+
+    /// A moved cut keeps the audio already read: only the marks are read again, and a
+    /// gain reads the audio anew.
+    #[test]
+    fn a_moved_cut_keeps_the_audio_read() {
+        let saved = marked_take(&[0.5, 0.3]);
+        let (mut workspace, id) = library(&saved);
+        let mut state = State::new(workspace.get(id).unwrap());
+        let before = state.audio().unwrap().samples.as_ptr();
+        let peak = |state: &State| {
+            (state.audio().unwrap().samples.iter()).fold(0f32, |most, v| most.max(v.abs()))
+        };
+        let was = peak(&state);
+        let (out, _) = apply(&saved, &saved, &[cut(hit::Cut::AttackEnd, 51_000)]).unwrap();
+        edited(&mut workspace, id, out);
+        state.made(workspace.get(id).unwrap().stamp, 0.0);
+        state.follow(workspace.get(id).unwrap());
+        assert_eq!(
+            state.audio().unwrap().samples.as_ptr(),
+            before,
+            "not decoded again"
+        );
+        let attack = state.read.marks.as_ref().unwrap().regions[0].frames;
+        assert_eq!(attack, 51_000 - 22_050, "the marks are the new ones");
+
+        let (out, db) = apply(&saved, &saved, &[(GAIN.to_string(), "3.0".into())]).unwrap();
+        edited(&mut workspace, id, out);
+        state.made(workspace.get(id).unwrap().stamp, db.unwrap());
+        state.follow(workspace.get(id).unwrap());
+        let louder = 20.0 * (peak(&state) / was).log10();
+        assert!((louder - 3.0).abs() < 0.1, "a gain reads anew: {louder} dB");
     }
 
     /// A save of moved cuts alone makes the saved file the original too, so the next
