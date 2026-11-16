@@ -4,7 +4,8 @@
 //! Each keep is a new file in `unsaved/`, made by [`storage::create`] and never changed,
 //! so no two windows write one file; the keep at the latest clock is the edit. An instance
 //! removes the files it kept or read of an edit once it keeps the edit again or it ends.
-//! A file is a JSON line, `{"of":…,"base":…,"at":…}`, then the bytes, named
+//! A file is a JSON line, `{"of":…,"base":…,"at":…}` with `"path":…` where the edit
+//! says where its file was, then the bytes, named
 //! `<tag>-<instance>-<count>`: the first 16 bytes of the BLAKE3 hash of `of` as JSON in
 //! hex, the instance's random id, and how many it had kept before.
 
@@ -16,7 +17,7 @@ use toshokan::asynch::Fs;
 use toshokan::io::{Kind, Root};
 use toshokan::{Identity, RelPath};
 
-use super::{storage, Key, Slot};
+use super::{storage, Key, LibPath, Slot};
 
 const DIR: &str = "unsaved";
 
@@ -42,6 +43,8 @@ pub struct Unsaved {
     pub base: Base,
     /// The store's clock when it was kept, which orders the files kept of one edit.
     pub at: u64,
+    /// Where an asset's file was when its edit was kept by its entity.
+    pub path: Option<LibPath>,
     pub bytes: Vec<u8>,
 }
 
@@ -50,6 +53,8 @@ struct Header {
     of: Of,
     base: Base,
     at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<LibPath>,
 }
 
 impl Unsaved {
@@ -58,6 +63,7 @@ impl Unsaved {
             of: self.of.clone(),
             base: self.base,
             at: self.at,
+            path: self.path.clone(),
         };
         let mut encoded = serde_json::to_vec(&header).expect("a header serializes");
         encoded.push(b'\n');
@@ -72,6 +78,7 @@ impl Unsaved {
             of: header.of,
             base: header.base,
             at: header.at,
+            path: header.path,
             bytes: kept[end + 1..].to_vec(),
         })
     }
@@ -139,9 +146,9 @@ impl Store {
         }
     }
 
-    /// Keep `bytes` as the edit of `of`, made over `base`, then let go of the files of
-    /// it this instance kept or read before. A crash leaves this keep, or what was kept
-    /// before, whole.
+    /// Keep `bytes` as the edit of `of`, made over `base` of the file at `path`, then let
+    /// go of the files of it this instance kept or read before. A crash leaves this keep,
+    /// or what was kept before, whole.
     ///
     /// A keep of what a file read holds keeps that file's clock: it is the same edit,
     /// and an edit made since in another window stays the newer.
@@ -150,6 +157,7 @@ impl Store {
         fs: &F,
         of: Of,
         base: Base,
+        path: Option<LibPath>,
         bytes: Vec<u8>,
     ) -> io::Result<()> {
         let tag = tag(&of);
@@ -165,6 +173,7 @@ impl Store {
             of,
             base,
             at,
+            path,
             bytes,
         };
         storage::create(fs, Root::Local, &file_at(&name), unsaved.encode()).await?;
@@ -351,20 +360,28 @@ mod tests {
     fn an_edit_kept_reads_back_until_it_is_let_go() {
         let local = MemDisk::new();
         let mut one = store(1, 10);
-        now(one.keep(&local, slot("A", 1), base(), b"edit\nwith lines".to_vec())).unwrap();
+        now(one.keep(
+            &local,
+            slot("A", 1),
+            base(),
+            None,
+            b"edit\nwith lines".to_vec(),
+        ))
+        .unwrap();
         let found = now(store(2, 0).read(&local, Some(&slot("A", 1)))).unwrap();
         let expected = Unsaved {
             of: slot("A", 1),
             base: base(),
             at: 10,
+            path: None,
             bytes: b"edit\nwith lines".to_vec(),
         };
         assert_eq!(found, [Ok(expected)]);
         assert_eq!(newest_of(&local, &slot("B", 1)), None, "another instrument");
         assert_eq!(newest_of(&local, &slot("A", 2)), None, "another bank");
         let file = Base::File(Identity::from_u128(5));
-        now(one.keep(&local, asset("a.ne5p"), file, b"draft".to_vec())).unwrap();
-        now(one.keep(&local, slot("A", 1), base(), b"again".to_vec())).unwrap();
+        now(one.keep(&local, asset("a.ne5p"), file, None, b"draft".to_vec())).unwrap();
+        now(one.keep(&local, slot("A", 1), base(), None, b"again".to_vec())).unwrap();
         assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"again");
         assert_eq!(names(&local).len(), 2, "a keep lets go of the one before");
         now(one.discard(&local, &slot("A", 1))).unwrap();
@@ -377,8 +394,8 @@ mod tests {
     fn of_two_instances_edits_of_one_asset_the_later_kept_is_the_newest() {
         let local = MemDisk::new();
         let (mut later, mut earlier) = (store(1, 20), store(2, 10));
-        now(later.keep(&local, slot("A", 1), base(), b"later".to_vec())).unwrap();
-        now(earlier.keep(&local, slot("A", 1), base(), b"earlier".to_vec())).unwrap();
+        now(later.keep(&local, slot("A", 1), base(), None, b"later".to_vec())).unwrap();
+        now(earlier.keep(&local, slot("A", 1), base(), None, b"earlier".to_vec())).unwrap();
         assert_eq!(names(&local).len(), 2, "neither lets go of the other's");
         assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"later");
     }
@@ -386,10 +403,10 @@ mod tests {
     #[test]
     fn an_edit_kept_after_another_was_read_is_newer_whatever_the_time_says() {
         let local = MemDisk::new();
-        now(store(1, 100).keep(&local, slot("A", 1), base(), b"first".to_vec())).unwrap();
+        now(store(1, 100).keep(&local, slot("A", 1), base(), None, b"first".to_vec())).unwrap();
         let mut behind = store(2, 50);
         now(behind.read(&local, None)).unwrap();
-        now(behind.keep(&local, slot("A", 1), base(), b"second".to_vec())).unwrap();
+        now(behind.keep(&local, slot("A", 1), base(), None, b"second".to_vec())).unwrap();
         let found = now(store(3, 0).read(&local, None)).unwrap();
         let newest = newest(found).unwrap();
         assert_eq!((newest.at, newest.bytes), (101, b"second".to_vec()));
@@ -398,18 +415,18 @@ mod tests {
     #[test]
     fn what_another_instance_kept_goes_only_once_this_one_keeps_the_edit() {
         let local = MemDisk::new();
-        now(store(1, 10).keep(&local, slot("A", 1), base(), b"theirs".to_vec())).unwrap();
+        now(store(1, 10).keep(&local, slot("A", 1), base(), None, b"theirs".to_vec())).unwrap();
         let mut mine = store(2, 20);
         now(mine.read(&local, Some(&slot("A", 1)))).unwrap();
         let read_only = Local(local.process(), false);
-        let refused = now(mine.keep(&read_only, slot("A", 1), base(), b"mine".to_vec()));
+        let refused = now(mine.keep(&read_only, slot("A", 1), base(), None, b"mine".to_vec()));
         assert!(refused.is_err());
         assert_eq!(
             newest_of(&local, &slot("A", 1)).unwrap(),
             b"theirs",
             "still kept"
         );
-        now(mine.keep(&local, slot("A", 1), base(), b"mine".to_vec())).unwrap();
+        now(mine.keep(&local, slot("A", 1), base(), None, b"mine".to_vec())).unwrap();
         assert_eq!(names(&local).len(), 1, "{:?}", names(&local));
         assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"mine");
     }
@@ -418,15 +435,15 @@ mod tests {
     fn a_keep_lets_go_of_only_the_files_this_instance_read() {
         let local = MemDisk::new();
         let mut theirs = store(1, 10);
-        now(theirs.keep(&local, slot("A", 1), base(), b"one".to_vec())).unwrap();
+        now(theirs.keep(&local, slot("A", 1), base(), None, b"one".to_vec())).unwrap();
         let mut mine = store(2, 20);
         now(mine.read(&local, Some(&slot("A", 1)))).unwrap();
         theirs = Store {
             clock: Box::new(At(30)),
             ..theirs
         };
-        now(theirs.keep(&local, slot("A", 1), base(), b"two".to_vec())).unwrap();
-        now(mine.keep(&local, slot("A", 1), base(), b"three".to_vec())).unwrap();
+        now(theirs.keep(&local, slot("A", 1), base(), None, b"two".to_vec())).unwrap();
+        now(mine.keep(&local, slot("A", 1), base(), None, b"three".to_vec())).unwrap();
         assert_eq!(names(&local).len(), 2, "the other's newer keep stays");
         assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"two");
     }
@@ -435,15 +452,15 @@ mod tests {
     fn a_keep_of_what_was_read_keeps_its_clock() {
         let local = MemDisk::new();
         let mut theirs = store(1, 10);
-        now(theirs.keep(&local, slot("A", 1), base(), b"one".to_vec())).unwrap();
+        now(theirs.keep(&local, slot("A", 1), base(), None, b"one".to_vec())).unwrap();
         let mut mine = store(2, 50);
         now(mine.read(&local, Some(&slot("A", 1)))).unwrap();
-        now(mine.keep(&local, slot("A", 1), base(), b"one".to_vec())).unwrap();
+        now(mine.keep(&local, slot("A", 1), base(), None, b"one".to_vec())).unwrap();
         theirs = Store {
             clock: Box::new(At(20)),
             ..theirs
         };
-        now(theirs.keep(&local, slot("A", 1), base(), b"two".to_vec())).unwrap();
+        now(theirs.keep(&local, slot("A", 1), base(), None, b"two".to_vec())).unwrap();
         assert_eq!(
             newest_of(&local, &slot("A", 1)).unwrap(),
             b"two",
@@ -514,11 +531,11 @@ mod tests {
             let disk = MemDisk::new();
             let (one, two) = (Local(disk.process(), true), Local(disk.process(), true));
             let (mut first, mut second) = (store(1, 10), store(2, 20));
-            now(first.keep(&one, slot("A", 1), base(), b"before".to_vec())).unwrap();
+            now(first.keep(&one, slot("A", 1), base(), None, b"before".to_vec())).unwrap();
             let (kept_one, kept_two) = interleaved(
                 lead,
-                first.keep(&one, slot("A", 1), base(), b"one".to_vec()),
-                second.keep(&two, slot("A", 1), base(), b"two".to_vec()),
+                first.keep(&one, slot("A", 1), base(), None, b"one".to_vec()),
+                second.keep(&two, slot("A", 1), base(), None, b"two".to_vec()),
             );
             assert!(
                 kept_one.is_ok() && kept_two.is_ok(),
@@ -533,7 +550,7 @@ mod tests {
             let mut third = store(3, 0);
             let (_, seen) = interleaved(
                 lead,
-                first.keep(&one, slot("A", 1), base(), b"three".to_vec()),
+                first.keep(&one, slot("A", 1), base(), None, b"three".to_vec()),
                 third.read(&two, Some(&slot("A", 1))),
             );
             let seen = newest(seen.unwrap()).map(|unsaved| unsaved.bytes);
@@ -545,14 +562,26 @@ mod tests {
     }
 
     #[test]
+    fn a_keep_whose_header_says_no_path_reads_with_none() {
+        let of = asset("a.ne5p");
+        let header = serde_json::json!({ "of": of, "base": base(), "at": 5 });
+        let mut kept = serde_json::to_vec(&header).unwrap();
+        kept.extend_from_slice(b"\nedit");
+        let read = Unsaved::decode(&kept).expect("it reads");
+        assert_eq!((read.of, read.at, read.path), (of, 5, None));
+        assert_eq!(read.bytes, b"edit");
+    }
+
+    #[test]
     fn a_file_that_does_not_say_whose_edit_it_is_does_not_read() {
         let local = MemDisk::new();
-        now(store(1, 10).keep(&local, slot("A", 1), base(), b"edit".to_vec())).unwrap();
+        now(store(1, 10).keep(&local, slot("A", 1), base(), None, b"edit".to_vec())).unwrap();
         let named = |count| format!("{}-{:032x}-{count}", tag(&slot("A", 1)), 7);
         let elsewhere = Unsaved {
             of: slot("A", 2),
             base: base(),
             at: 20,
+            path: None,
             bytes: b"another slot's".to_vec(),
         };
         let unread = [
@@ -597,7 +626,7 @@ mod tests {
     fn an_edit_whose_discard_failed_is_let_go_of_once_removing_works_again() {
         let local = MemDisk::new();
         let mut one = store(1, 10);
-        now(one.keep(&local, slot("A", 1), base(), b"reverted".to_vec())).unwrap();
+        now(one.keep(&local, slot("A", 1), base(), None, b"reverted".to_vec())).unwrap();
         let failing = Unremovable(local.process());
         assert!(now(one.discard(&failing, &slot("A", 1))).is_err());
         assert!(now(one.let_go_of_ended(&failing)).is_err());
@@ -615,9 +644,9 @@ mod tests {
     fn letting_go_of_an_ended_edit_spares_the_one_kept_after_it() {
         let local = MemDisk::new();
         let mut one = store(1, 10);
-        now(one.keep(&local, slot("A", 1), base(), b"reverted".to_vec())).unwrap();
+        now(one.keep(&local, slot("A", 1), base(), None, b"reverted".to_vec())).unwrap();
         assert!(now(one.discard(&Unremovable(local.process()), &slot("A", 1))).is_err());
-        now(one.keep(&local, slot("A", 1), base(), b"edited again".to_vec())).unwrap();
+        now(one.keep(&local, slot("A", 1), base(), None, b"edited again".to_vec())).unwrap();
         now(one.let_go_of_ended(&local)).unwrap();
         assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"edited again");
         assert_eq!(names(&local).len(), 1, "{:?}", names(&local));

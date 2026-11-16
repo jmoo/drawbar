@@ -888,35 +888,103 @@ fn bring_writers(from: &Temp, to: &Temp) {
     }
 }
 
+/// Two drawbars, at `ours` and `theirs`, each tag `Strings.ne5p` before either sees the
+/// other, and each keeps an unsaved edit of it at quit; then each folder gets the other's
+/// log. Returns the bytes of each edit.
+fn edited_unseen(ours: &Temp, theirs: &Temp) -> [Vec<u8>; 2] {
+    let program = Fresh::Program.bytes().unwrap();
+    let edited = [(ours, "Live", "74"), (theirs, "Gig", "12")].map(|(root, tag, gain)| {
+        fs::write(root.at("Strings.ne5p"), &program).unwrap();
+        let mut session = Session::open(root);
+        let file = session.named("Strings.ne5p");
+        session.tag(&[file], tag);
+        let edited = session.edit(file, gain);
+        session.autosave();
+        session.close();
+        edited
+    });
+    bring_writers(ours, theirs);
+    bring_writers(theirs, ours);
+    edited
+}
+
+fn assert_edit_over_strings(session: &Session, edited: &[u8]) {
+    let transcript = session.bench.log.transcript();
+    let listed = session.bench.workspace.listed();
+    let names: Vec<&str> = listed.map(|entity| entity.name.as_str()).collect();
+    assert_eq!(names, ["Strings.ne5p"], "{transcript}");
+    let file = session.named("Strings.ne5p");
+    assert!(session.bytes(file) == edited, "{transcript}");
+    assert_eq!(session.worn(file), ["Gig", "Live"], "{transcript}");
+}
+
 /// Two drawbars each tag `Strings.ne5p` before either sees the other, and each keeps an
 /// unsaved edit of it at quit. Reopened with the other's log, each joins the two entities
 /// and puts its edit back over the file, whichever entity the join kept.
 #[test]
 fn an_edit_kept_under_an_entity_a_join_deletes_goes_back_over_its_file() {
     let (ours, theirs) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    let mut edited = Vec::new();
-    for (root, tag, gain) in [(&ours, "Live", "74"), (&theirs, "Gig", "12")] {
-        fs::write(root.at("Strings.ne5p"), &program).unwrap();
-        let mut session = Session::open(root);
-        let file = session.named("Strings.ne5p");
-        session.tag(&[file], tag);
-        edited.push(session.edit(file, gain));
-        session.autosave();
-        session.close();
-    }
-    bring_writers(&ours, &theirs);
-    bring_writers(&theirs, &ours);
-
+    let edited = edited_unseen(&ours, &theirs);
     for (root, edited) in [&ours, &theirs].into_iter().zip(edited) {
-        let session = Session::open(root);
+        assert_edit_over_strings(&Session::open(root), &edited);
+    }
+}
+
+/// The library at `from` and this install's own state for it, copied to `to`.
+fn copy_library(from: &Temp, to: &Temp) {
+    copy_tree(&from.0, &to.0);
+    copy_tree(&from.local(), &to.local());
+}
+
+/// As [`edited_unseen`], where one drawbar then opens, joining the two entities, and
+/// quits, and its log reaches the other before it reopens: run both ways round, so the
+/// join deletes the entity one of them kept its edit under. `meanwhile` changes the
+/// other's folder before it reopens; returns it reopened, with the bytes of its edit.
+fn joined_while_closed(meanwhile: fn(&Temp)) -> Vec<(Session, Vec<u8>, Temp)> {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let [mine, others] = edited_unseen(&ours, &theirs);
+    let (ours_again, theirs_again) = (Temp::new(), Temp::new());
+    copy_library(&ours, &ours_again);
+    copy_library(&theirs, &theirs_again);
+    let ways = [(theirs, ours, mine), (ours_again, theirs_again, others)];
+    ways.map(|(joining, closed, edited)| {
+        Session::open(&joining).close();
+        bring_writers(&joining, &closed);
+        meanwhile(&closed);
+        (Session::open(&closed), edited, closed)
+    })
+    .into()
+}
+
+/// An edit kept under an entity another drawbar joined into its own while this one was
+/// closed goes back over the file at the path it was kept at.
+#[test]
+fn an_edit_kept_under_an_entity_another_drawbar_joined_goes_back_over_its_file() {
+    for (session, edited, _root) in joined_while_closed(|_| {}) {
+        assert_edit_over_strings(&session, &edited);
+    }
+}
+
+/// An edit kept under an entity another drawbar joined while this one was closed does not
+/// go over a file elsewhere holding what it was made over, once the file at its path
+/// changed.
+#[test]
+fn an_edit_whose_joined_entitys_file_changed_never_goes_over_a_copy_elsewhere() {
+    let program = Fresh::Program.bytes().unwrap();
+    let meanwhile = |root: &Temp| {
+        let program = Fresh::Program.bytes().unwrap();
+        fs::write(root.at("Strings.ne5p"), with_gain(&program, "99")).unwrap();
+        fs::write(root.at("Copy.ne5p"), &program).unwrap();
+    };
+    for (session, edited, _root) in joined_while_closed(meanwhile) {
         let transcript = session.bench.log.transcript();
-        let listed = session.bench.workspace.listed();
-        let names: Vec<&str> = listed.map(|entity| entity.name.as_str()).collect();
-        assert_eq!(names, ["Strings.ne5p"], "{transcript}");
-        let file = session.named("Strings.ne5p");
-        assert!(session.bytes(file) == edited, "{transcript}");
-        assert_eq!(session.worn(file), ["Gig", "Live"], "{transcript}");
+        let copy = session.named("Copy.ne5p");
+        assert!(session.bytes(copy) == program, "{transcript}");
+        let mut listed = session.bench.workspace.listed();
+        assert!(
+            listed.any(|entity| *entity.bytes == edited[..]),
+            "{transcript}"
+        );
     }
 }
 

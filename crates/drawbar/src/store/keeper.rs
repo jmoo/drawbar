@@ -218,7 +218,9 @@ impl<F: Fs> Keeper<F> {
                 let kept = match storage_of(&self.library) {
                     Ok(fs) => {
                         let of = Of::Slot(slot.clone());
-                        self.unsaved.keep(fs, of, Base::Slot(base), bytes).await
+                        self.unsaved
+                            .keep(fs, of, Base::Slot(base), None, bytes)
+                            .await
                     }
                     Err(e) => Err(e),
                 };
@@ -424,10 +426,17 @@ impl<F: Fs> Keeper<F> {
         replaces: Vec<Key>,
     ) -> io::Result<()> {
         let fs = storage_of(&self.library)?;
+        let path = match (of, &self.library) {
+            (Key::Entity(entity), Some(library)) => {
+                let view = library.view();
+                let row = row_kept(&view, &[], *entity);
+                row.and_then(|row| LibPath::parse(row.path.as_str()))
+            }
+            _ => None,
+        };
         let unsaved = &mut self.unsaved;
-        unsaved
-            .keep(fs, Of::Asset(of.clone()), Base::File(base), bytes)
-            .await?;
+        let (of, base) = (Of::Asset(of.clone()), Base::File(base));
+        unsaved.keep(fs, of, base, path, bytes).await?;
         for replaced in replaces {
             unsaved.discard(fs, &Of::Asset(replaced)).await?;
         }
@@ -463,9 +472,9 @@ impl<F: Fs> Keeper<F> {
     }
 
     /// The unsaved edits of assets an earlier session kept, each with the row of its file
-    /// in `view`, following the joins `view` shows and `joining`, and whether the file holds
-    /// what it was made over, by a read of it now, or `Err` where the edit or its file does
-    /// not read.
+    /// in `view`, following the joins `view` shows and `joining`, else at the path it was
+    /// kept at, and whether the file holds what it was made over, by a read of it now, or
+    /// `Err` where the edit or its file does not read.
     async fn drafts(
         &mut self,
         view: &View,
@@ -479,13 +488,18 @@ impl<F: Fs> Keeper<F> {
                     of: Of::Asset(of),
                     base: Base::File(base),
                     at,
+                    path: kept_at,
                     bytes,
                 }) => {
-                    let row = row_kept(view, joining, &of);
+                    let (followed, by_path) = match &of {
+                        Key::Entity(entity) => (row_kept(view, joining, *entity), kept_at.as_ref()),
+                        Key::File(path) | Key::Copy(path, _) => (None, Some(path)),
+                    };
+                    let row = followed.or_else(|| view.row_at(&relative(by_path?)?));
                     match file_holds(fs, row, base).await {
                         Ok(holds) => Ok(Kept {
                             row: row
-                                .filter(|_| holds || matches!(of, Key::Entity(_)))
+                                .filter(|_| holds || followed.is_some())
                                 .map(|row| row.file),
                             path: match &of {
                                 Key::Entity(_) => {
@@ -1009,23 +1023,21 @@ fn storage_of<F: Fs>(library: &Option<Library<F>>) -> io::Result<&F> {
         .ok_or_else(|| io::Error::other("the library is not open"))
 }
 
-/// The row in `view` of the file a draft kept by `of` is of: its entity's, or that of
-/// the entity whose row shows it, as `view` or `joining` says, else the row at its path.
-fn row_kept<'v>(view: &'v View, joining: &[Joined], of: &Key) -> Option<&'v toshokan::Row> {
-    match of {
-        Key::Entity(entity) => {
-            let mut entity = *entity;
-            let joining = joining.iter().map(|joined| (joined.entity, joined.into));
-            let shown_on = || shown::shown_on(view).chain(joining.clone());
-            for _ in 0..=shown_on().count() {
-                let into = shown_on().find(|(shown, _)| *shown == entity);
-                let Some((_, into)) = into else { break };
-                entity = into;
-            }
-            view.row_of(entity)
-        }
-        Key::File(path) | Key::Copy(path, _) => view.row_at(&relative(path)?),
+/// The row in `view` of `entity`'s file, or that of the entity whose row shows it, as
+/// `view` or `joining` says.
+fn row_kept<'v>(
+    view: &'v View,
+    joining: &[Joined],
+    mut entity: toshokan::EntityId,
+) -> Option<&'v toshokan::Row> {
+    let joining = joining.iter().map(|joined| (joined.entity, joined.into));
+    let shown_on = || shown::shown_on(view).chain(joining.clone());
+    for _ in 0..=shown_on().count() {
+        let into = shown_on().find(|(shown, _)| *shown == entity);
+        let Some((_, into)) = into else { break };
+        entity = into;
     }
+    view.row_of(entity)
 }
 
 /// Each of `entities`, and each entity `view` shows on the row of one, that wears the tag
