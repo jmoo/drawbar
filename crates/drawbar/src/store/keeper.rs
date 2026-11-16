@@ -20,7 +20,7 @@ use toshokan::report::{
 use toshokan::{EntryHash, Env, Error, Expect, FileId, Nonce, RelPath, Set, View, WriterId};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
-use super::shown::{Change, Changes};
+use super::shown::{self, Change, Changes};
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
@@ -785,50 +785,68 @@ impl<F: Fs> Keeper<F> {
                     ..committed
                 })
             }
-            Intent::Untag { entities, name } => Some(
-                facts(library, label, |mut built, _| {
-                    for entity in entities {
-                        built = built.remove(entity, TAGS, &name);
-                    }
-                    Ok(built)
-                })
-                .await?,
-            ),
+            Intent::Untag { entities, name } => {
+                let worn = wearing(&library.view(), &entities, &name);
+                match worn.is_empty() {
+                    true => None,
+                    false => Some(
+                        facts(library, label, |mut built, _| {
+                            for entity in worn {
+                                built = built.remove(entity, TAGS, &name);
+                            }
+                            Ok(built)
+                        })
+                        .await?,
+                    ),
+                }
+            }
             Intent::MakeTag { name } => {
                 let made = facts(library, label, |built, view| {
                     Ok(list_tag(built, view, name))
                 });
                 Some(made.await?)
             }
-            Intent::RenameTag { entities, from, to } => Some(
-                facts(library, label, |mut built, view| {
-                    for entity in entities {
-                        built = built
-                            .remove(entity, TAGS, &from)
-                            .add(entity, TAGS, to.clone());
-                    }
-                    for list in view.find(TAG_NAMES, &from) {
-                        built =
-                            built
-                                .remove(list, TAG_NAMES, &from)
-                                .add(list, TAG_NAMES, to.clone());
-                    }
-                    Ok(built)
-                })
-                .await?,
-            ),
-            Intent::RemoveTag { entities, name } => Some(
-                facts(library, label, |mut built, view| {
-                    for entity in entities {
-                        built = built.remove(entity, TAGS, &name);
-                    }
-                    for list in view.find(TAG_NAMES, &name) {
-                        built = built.remove(list, TAG_NAMES, &name);
-                    }
-                    Ok(built)
-                })
-                .await?,
-            ),
+            Intent::RenameTag { entities, from, to } => {
+                match holding(&library.view(), &entities, &from) {
+                    None => None,
+                    Some((worn, lists)) => Some(
+                        facts(library, label, |mut built, _| {
+                            for entity in worn {
+                                built =
+                                    built
+                                        .remove(entity, TAGS, &from)
+                                        .add(entity, TAGS, to.clone());
+                            }
+                            for list in lists {
+                                built = built.remove(list, TAG_NAMES, &from).add(
+                                    list,
+                                    TAG_NAMES,
+                                    to.clone(),
+                                );
+                            }
+                            Ok(built)
+                        })
+                        .await?,
+                    ),
+                }
+            }
+            Intent::RemoveTag { entities, name } => {
+                match holding(&library.view(), &entities, &name) {
+                    None => None,
+                    Some((worn, lists)) => Some(
+                        facts(library, label, |mut built, _| {
+                            for entity in worn {
+                                built = built.remove(entity, TAGS, &name);
+                            }
+                            for list in lists {
+                                built = built.remove(list, TAG_NAMES, &name);
+                            }
+                            Ok(built)
+                        })
+                        .await?,
+                    ),
+                }
+            }
             Intent::Forget { entity } => {
                 let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
                 Some(forgot.await?)
@@ -982,21 +1000,48 @@ fn storage_of<F: Fs>(library: &Option<Library<F>>) -> io::Result<&F> {
 }
 
 /// The row in `view` of the file a draft kept by `of` is of: its entity's, or that of
-/// the entity it was joined into, as `view` or `joining` says, else the row at its path.
+/// the entity whose row shows it, as `view` or `joining` says, else the row at its path.
 fn row_kept<'v>(view: &'v View, joining: &[Joined], of: &Key) -> Option<&'v toshokan::Row> {
     match of {
         Key::Entity(entity) => {
             let mut entity = *entity;
-            let joins = || view.joined().iter().chain(joining);
-            for _ in 0..=joins().count() {
-                let joined = joins().find(|joined| joined.entity == entity);
-                let Some(joined) = joined else { break };
-                entity = joined.into;
+            let joining = joining.iter().map(|joined| (joined.entity, joined.into));
+            let shown_on = || shown::shown_on(view).chain(joining.clone());
+            for _ in 0..=shown_on().count() {
+                let into = shown_on().find(|(shown, _)| *shown == entity);
+                let Some((_, into)) = into else { break };
+                entity = into;
             }
             view.row_of(entity)
         }
         Key::File(path) | Key::Copy(path, _) => view.row_at(&relative(path)?),
     }
+}
+
+/// Each of `entities`, and each entity `view` shows on the row of one, that wears the tag
+/// `name`.
+fn wearing(
+    view: &View,
+    entities: &[toshokan::EntityId],
+    name: &str,
+) -> BTreeSet<toshokan::EntityId> {
+    let shown = entities
+        .iter()
+        .flat_map(|entity| shown::showing_on(view, *entity));
+    let wearing = shown.filter(|entity| entity.members(TAGS).values.iter().any(|tag| tag == name));
+    wearing.map(|entity| entity.id()).collect()
+}
+
+/// The entities [`wearing`] gives, and each list of tags holding `name`, as `view` holds
+/// them; `None` where there is none.
+fn holding(
+    view: &View,
+    entities: &[toshokan::EntityId],
+    name: &str,
+) -> Option<(BTreeSet<toshokan::EntityId>, Vec<toshokan::EntityId>)> {
+    let worn = wearing(view, entities, name);
+    let lists = view.find(TAG_NAMES, &name.to_string());
+    (!worn.is_empty() || !lists.is_empty()).then_some((worn, lists))
 }
 
 /// Whether `row` is of a file the scan listed that holds the file of identity `base`, by

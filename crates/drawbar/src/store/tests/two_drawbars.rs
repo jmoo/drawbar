@@ -919,3 +919,40 @@ fn an_edit_kept_under_an_entity_a_join_deletes_goes_back_over_its_file() {
         assert_eq!(session.worn(file), ["Gig", "Live"], "{transcript}");
     }
 }
+
+/// Two drawbars each tag `Strings.ne5p` before either sees the other, and the file then
+/// changes outside, so it holds neither entity's facts: the higher entity is alike to the
+/// lower, and the file's row shows the tags of both. Renaming or removing a tag reaches the
+/// entity that wears it, whichever that is.
+#[test]
+fn a_tag_of_an_entity_alike_to_a_rows_own_shows_on_the_row_and_is_renamed_and_removed() {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(ours.at("Strings.ne5p"), &program).unwrap();
+    fs::write(theirs.at("Strings.ne5p"), &program).unwrap();
+    let (mut here, mut there) = (Session::open(&ours), Session::open(&theirs));
+    let file = here.named("Strings.ne5p");
+    here.tag(&[file], "Live");
+    let file = there.named("Strings.ne5p");
+    there.tag(&[file], "Gig");
+    fs::write(ours.at("Strings.ne5p"), with_gain(&program, "12")).unwrap();
+    bring_writers(&theirs, &ours);
+
+    here.refocus();
+    let file = here.named("Strings.ne5p");
+    let transcript = here.bench.log.transcript();
+    assert_eq!(here.worn(file), ["Gig", "Live"], "{transcript}");
+    here.rename_tag("Gig", "Show");
+    here.remove_tag("Live");
+    let transcript = here.bench.log.transcript();
+    assert_eq!(here.worn(file), ["Show"], "{transcript}");
+    here.close();
+    let again = Session::open(&ours);
+    let file = again.named("Strings.ne5p");
+    assert_eq!(
+        again.worn(file),
+        ["Show"],
+        "{}",
+        again.bench.log.transcript()
+    );
+}

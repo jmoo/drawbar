@@ -258,6 +258,13 @@ impl View {
         &self.parts().bindings.report.joined
     }
 
+    /// The entities whose file facts name the file another's do, which holds none of
+    /// their facts or is nowhere, each with the lowest of them, whose row shows it.
+    /// Each is bound to no file, is not missing, and is none of [`View::joined`].
+    pub fn alike(&self) -> &BTreeMap<EntityId, EntityId> {
+        &self.parts().bindings.alike
+    }
+
     /// The library file at `path` as the last scan listed it; `None` where it
     /// listed none, where a scan since could not list it, and for every file until
     /// a scan of every file has run.
@@ -284,7 +291,7 @@ impl View {
     }
 
     /// The row of `entity`'s file; `None` where it has no file fact or another's
-    /// row shows it, as for each of [`View::joined`].
+    /// row shows it, as for each of [`View::joined`] and [`View::alike`].
     pub fn row_of(&self, entity: EntityId) -> Option<&Row> {
         self.parts().rows.of(entity)
     }
@@ -378,7 +385,7 @@ impl EntityView<'_> {
     /// Where the view binds the entity's file; [`FileState::Missing`] at the
     /// logged path when no binding was derived for it, and `None` where it has no
     /// file fact or another's row shows it: it is one of [`View::joined`] or of
-    /// [`Bindings::alike`](crate::binding::Bindings::alike).
+    /// [`View::alike`].
     pub fn file(&self) -> Option<FileRef> {
         let bindings = &self.view.parts().bindings;
         if let Some(bound) = bindings.bound.get(&self.id) {

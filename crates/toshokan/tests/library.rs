@@ -815,6 +815,7 @@ through_both!(
     a_copy_has_no_entity_until_one_is_said,
     a_file_two_writers_adopted_unseen_is_the_lower_entitys,
     an_outside_edit_of_a_file_two_writers_adopted_gives_it_to_the_lower_entity,
+    the_higher_of_two_entities_naming_a_file_edited_outside_is_alike_to_the_lower,
     an_outside_delete_of_a_file_two_writers_adopted_leaves_one_missing_row,
     a_save_of_a_file_two_writers_adopted_and_edited_outside_is_why_the_other_is_lost,
     a_copy_seen_before_its_originals_rename_is_never_joined_into_it,
@@ -4164,6 +4165,18 @@ fn an_outside_edit_of_a_file_two_writers_adopted_gives_it_to_the_lower_entity<F:
         saved.map(|saved| (saved.file, saved.entity)),
         Some((row, Some(low)))
     );
+}
+
+fn the_higher_of_two_entities_naming_a_file_edited_outside_is_alike_to_the_lower<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _b, made) = adopted_by_both::<F>(&folder, &clock, [None, None]);
+    let (low, high) = (made[0].min(made[1]), made[0].max(made[1]));
+    put(&folder, NOTES, b"changed");
+    a.rescan().unwrap();
+    let view = a.view();
+    assert_eq!(view.alike(), &BTreeMap::from([(high, low)]));
+    assert_eq!(view.joined(), []);
 }
 
 fn an_outside_delete_of_a_file_two_writers_adopted_leaves_one_missing_row<F: Facade>() {

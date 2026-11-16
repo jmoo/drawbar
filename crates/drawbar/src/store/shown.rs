@@ -18,7 +18,7 @@ pub struct Row {
     pub path: LibPath,
     pub state: RowState,
     pub entity: Option<EntityId>,
-    /// The tags its entity wears, and those of each entity joined into it.
+    /// The tags its entity wears, and those of each entity joined into it or alike to it.
     pub worn: BTreeSet<String>,
     /// Whether it wears a tag, or one that does not read.
     pub wears: bool,
@@ -235,7 +235,7 @@ impl Shown {
         sorted(held)
     }
 
-    /// The entities wearing the tag `name`.
+    /// The entity of each row wearing the tag `name`.
     pub fn wearing(&self, name: &str) -> Vec<EntityId> {
         let worn = self.tagged().filter(|(_, row)| row.worn.contains(name));
         worn.filter_map(|(_, row)| row.entity).collect()
@@ -309,14 +309,24 @@ impl Shown {
     }
 }
 
-/// The entities whose tags show on `entity`'s row: itself, and each joined into it.
-fn showing_on(view: &View, entity: EntityId) -> impl Iterator<Item = toshokan::EntityView<'_>> {
+/// The entities whose tags show on `entity`'s row: itself, and each joined into it or
+/// alike to it.
+pub(super) fn showing_on(
+    view: &View,
+    entity: EntityId,
+) -> impl Iterator<Item = toshokan::EntityView<'_>> {
+    let on = shown_on(view).filter(move |(_, into)| *into == entity);
+    let on = on.filter_map(|(shown, _)| view.entity(shown));
+    view.entity(entity).into_iter().chain(on)
+}
+
+/// Each entity `view` shows on another's row, joined into it or alike to it, with that one.
+pub(super) fn shown_on(view: &View) -> impl Iterator<Item = (EntityId, EntityId)> + '_ {
     let joined = view
         .joined()
         .iter()
-        .filter(move |joined| joined.into == entity);
-    let joined = joined.filter_map(|joined| view.entity(joined.entity));
-    view.entity(entity).into_iter().chain(joined)
+        .map(|joined| (joined.entity, joined.into));
+    joined.chain(view.alike().iter().map(|(entity, into)| (*entity, *into)))
 }
 
 impl Change {
@@ -333,17 +343,13 @@ impl Change {
         let changed = view.changes_since(before);
         let mut entities: BTreeSet<EntityId> =
             view.folded().changed(before.folded()).into_iter().collect();
-        let (joined, was): (BTreeSet<_>, BTreeSet<_>) = (
-            view.joined().iter().copied().collect(),
-            before.joined().iter().copied().collect(),
-        );
-        for join in joined.symmetric_difference(&was) {
-            entities.extend([join.entity, join.into]);
+        let (on, was): (BTreeSet<_>, BTreeSet<_>) =
+            (shown_on(view).collect(), shown_on(before).collect());
+        for (shown, into) in on.symmetric_difference(&was) {
+            entities.extend([*shown, *into]);
         }
-        let into = joined
-            .union(&was)
-            .filter(|join| entities.contains(&join.entity));
-        let into: Vec<EntityId> = into.map(|join| join.into).collect();
+        let into = on.union(&was).filter(|(shown, _)| entities.contains(shown));
+        let into: Vec<EntityId> = into.map(|(_, into)| *into).collect();
         entities.extend(into);
         let mut files: BTreeSet<FileId> = changed.files.iter().map(|change| change.file).collect();
         let rows_of = |entity: &EntityId| {
