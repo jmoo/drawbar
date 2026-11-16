@@ -2,12 +2,12 @@
 //! and written by copying the file through with the edit in place, so neither the file
 //! nor the edited copy is ever held whole.
 //!
-//! The browser cannot wait for a read, so there the copy is laid out as [`Pieces`] first,
-//! and [`stream`] fetches each kept range as the writer takes it.
+//! The copy is laid out as [`Pieces`] first, and [`stream`] fetches each kept range as
+//! the writer takes it.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::ops::{AsyncFnMut, Range};
 
 use nord_format::cbin::Verifier;
@@ -107,42 +107,6 @@ pub enum Rewrite {
 }
 
 impl Rewrite {
-    /// Write the file this edit makes of `from` to `out`, reading what it keeps of `from`
-    /// by range.
-    ///
-    /// ⚠️ `from` must be the file the edit was made over. A file whose bytes are not the
-    /// ones its index read is refused with [`changed`], though `out` holds the copy.
-    pub fn write_from(
-        &self,
-        from: &mut (impl Read + Seek),
-        index: &ondisk::Index,
-        out: &mut (impl Write + Seek),
-    ) -> io::Result<()> {
-        match (self, index) {
-            (Rewrite::Sample(outline), ondisk::Index::Sample(index)) => {
-                let patch = index.patch(outline).map_err(io::Error::other)?;
-                patch.copy(from, out).map_err(|e| match e {
-                    nord_format::error::Error::Io(e) => e,
-                    e => changed(e.to_string()),
-                })
-            }
-            (Rewrite::Piano(library), ondisk::Index::Piano(index)) => {
-                unchanged(from, index)?;
-                library.write_from(out, from).map_err(|e| match e {
-                    nord_format::error::Error::Io(e) => e,
-                    e => io::Error::other(e.to_string()),
-                })
-            }
-            _ => Err(not_ours()),
-        }
-    }
-
-    /// [`Rewrite::write_from`] for a file resting on the desktop, read through its handle.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn write(&self, from: &OnDisk, out: &mut (impl Write + Seek)) -> io::Result<()> {
-        self.write_from(&mut from.at(), &from.index, out)
-    }
-
     /// The file this edit makes of `from`, as the bytes it holds and the ranges of `from`
     /// it keeps, in order.
     pub fn pieces(&self, from: &OnDisk) -> io::Result<Pieces> {
@@ -301,20 +265,6 @@ impl Seek for Recorder<'_> {
     }
 }
 
-/// Refuse a piano library whose prefix or stroke directory is no longer the one `index`
-/// read: the audio read by its ranges would not be the audio those records describe.
-/// See [`npno::Index::still_matches`].
-fn unchanged(from: &mut (impl Read + Seek), index: &npno::Index) -> io::Result<()> {
-    match index.still_matches(from) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(changed(
-            "its stroke directory is not the one drawbar read".to_string(),
-        )),
-        Err(nord_format::error::Error::Io(e)) => Err(e),
-        Err(e) => Err(changed(e.to_string())),
-    }
-}
-
 fn not_ours() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -430,12 +380,12 @@ pub fn is_changed(e: &io::Error) -> bool {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use std::io::{Cursor, SeekFrom};
+    use std::io::Cursor;
 
     use nord_format::formats::nsmp::codec::Layout;
 
     use super::*;
-    use crate::testing::{on_disk, zoned_sample, Temp};
+    use crate::testing::{on_disk, streamed, zoned_sample, Temp};
 
     /// An edit's working copy reads back as the edit. A copy of another version, or one
     /// naming a field or a bank code this build does not know, is refused rather than
@@ -462,27 +412,6 @@ mod tests {
         }
     }
 
-    /// A reader over bytes that records the span of every read.
-    struct Recording<'a> {
-        inner: Cursor<&'a [u8]>,
-        reads: Vec<Range<u64>>,
-    }
-
-    impl Read for Recording<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let at = self.inner.position();
-            let n = self.inner.read(buf)?;
-            self.reads.push(at..at + n as u64);
-            Ok(n)
-        }
-    }
-
-    impl Seek for Recording<'_> {
-        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-            self.inner.seek(to)
-        }
-    }
-
     /// Every generation of a three-zone instrument, and the same instrument renamed and
     /// with its middle zone's root moved, as a whole decode writes it.
     fn edited() -> Vec<(Vec<u8>, Rewrite, Vec<u8>)> {
@@ -505,52 +434,23 @@ mod tests {
             .collect()
     }
 
-    /// The bytes [`stream`] writes of `pieces` over `source`, and the ranges it read.
-    fn streamed(pieces: &Pieces, source: &[u8]) -> (io::Result<Vec<u8>>, Vec<Range<u64>>) {
-        let mut out = Vec::new();
-        let mut reads = Vec::new();
-        let read = async |range: Range<u64>| {
-            reads.push(range.clone());
-            Ok(source[range.start as usize..range.end as usize].to_vec())
-        };
-        let write = async |at: u64, bytes: Vec<u8>| {
-            let at = at as usize;
-            out.resize(out.len().max(at + bytes.len()), 0);
-            out[at..at + bytes.len()].copy_from_slice(&bytes);
-            Ok(())
-        };
-        let wrote = nord_usb::block_on(stream(pieces, read, write));
-        (wrote.map(|()| out), reads)
-    }
-
-    /// A sample's edit, written through its file by range on the desktop or laid out in
-    /// pieces for the browser, makes the bytes a whole decode, the same sets and a whole
-    /// write make, reading what it keeps a chunk at a time.
+    /// A sample's edit, laid out in pieces and streamed through its file, makes the bytes
+    /// a whole decode, the same sets and a whole write make, reading only what it keeps.
     #[test]
     fn an_edit_written_through_its_file_is_the_file_a_whole_edit_writes() {
         for (bytes, edit, whole) in edited() {
             let dir = Temp::new();
             let file = on_disk(&dir, "Zoned.nsmp", &bytes);
-            let mut source = Recording {
-                inner: Cursor::new(&bytes),
-                reads: Vec::new(),
-            };
-            let mut out = Cursor::new(Vec::new());
-            edit.write_from(&mut source, &file.index, &mut out).unwrap();
-            assert!(out.into_inner() == whole, "the desktop's copy");
-            let most = source.reads.iter().map(|read| read.end - read.start).max();
-            assert!(most <= Some(64 << 10), "reads of at most {most:?} bytes");
-
             let pieces = edit.pieces(&file).unwrap();
             let (out, reads) = streamed(&pieces, &bytes);
-            assert!(out.unwrap() == whole, "the browser's copy");
+            assert!(out.unwrap() == whole, "the streamed copy");
             let kept: u64 = reads.iter().map(|read| read.end - read.start).sum();
             assert!(kept < bytes.len() as u64, "it holds what the edit changed");
         }
     }
 
-    /// A file changed under its index since it was read is refused, however the copy
-    /// reads it: the copy's checksum is not the one the edit restated.
+    /// A file changed under its index since it was read is refused: the copy's checksum
+    /// is not the one the edit restated.
     #[test]
     fn a_file_changed_since_its_index_was_read_is_refused() {
         for (bytes, edit, _) in edited() {
@@ -560,14 +460,6 @@ mod tests {
             let last = changed.len() - 3;
             changed[last] ^= 0x40;
 
-            let e = edit
-                .write_from(
-                    &mut Cursor::new(&changed),
-                    &file.index,
-                    &mut Cursor::new(Vec::new()),
-                )
-                .unwrap_err();
-            assert!(is_changed(&e), "{e}");
             let (e, _) = streamed(&edit.pieces(&file).unwrap(), &changed);
             let e = e.unwrap_err();
             assert!(is_changed(&e), "{e}");
@@ -617,10 +509,9 @@ mod tests {
         library.set_trim(1, 6).unwrap();
     }
 
-    /// A piano plan written through its file reads each kept stroke by its range, once,
-    /// and writes the library a whole read and a whole layout write, on the desktop and
-    /// laid out in pieces for the browser alike. The browser's copy takes its checksum as
-    /// it streams.
+    /// A piano plan laid out in pieces and streamed through its file reads each run of
+    /// kept strokes by its range, once, and writes the library a whole read and a whole
+    /// layout write. The copy takes its checksum as it streams.
     #[test]
     fn a_piano_plan_written_through_its_file_is_the_library_a_whole_layout_writes() {
         let bytes = piano();
@@ -648,28 +539,9 @@ mod tests {
                 index.audio_ranges()[at.expect("a kept stroke")].clone()
             })
             .collect();
-        let edit = Rewrite::Piano(library);
-
-        let mut source = Recording {
-            inner: Cursor::new(&bytes),
-            reads: Vec::new(),
-        };
-        let mut out = Cursor::new(Vec::new());
-        edit.write_from(&mut source, &file.index, &mut out).unwrap();
-        assert!(out.into_inner() == whole, "the desktop's copy");
-        let first = index.audio_ranges()[0].start;
-        let (head, audio): (Vec<_>, Vec<_>) =
-            source.reads.into_iter().partition(|read| read.end <= first);
-        assert_eq!(
-            head.last().map(|read| read.end),
-            Some(first),
-            "the directory again"
-        );
-        assert_eq!(audio, kept, "one read of each kept stroke");
-
-        let pieces = edit.pieces(&file).unwrap();
+        let pieces = Rewrite::Piano(library).pieces(&file).unwrap();
         let (out, reads) = streamed(&pieces, &bytes);
-        assert!(out.unwrap() == whole, "the browser's copy");
+        assert!(out.unwrap() == whole, "the streamed copy");
         let mut runs: Vec<Range<u64>> = Vec::new();
         for range in kept {
             match runs.last_mut() {
@@ -678,35 +550,5 @@ mod tests {
             }
         }
         assert_eq!(reads, runs, "one read of each run of kept strokes");
-    }
-
-    /// A piano library replaced in place under its index by another of the same length,
-    /// its time put back, whose strokes sit elsewhere is refused before anything is
-    /// written: its audio would be read by ranges the new directory does not describe.
-    #[test]
-    fn a_piano_whose_directory_changed_under_its_index_is_not_written_through() {
-        let bytes = piano();
-        let theirs = piano_of([4, 3, 5]);
-        assert_eq!(bytes.len(), theirs.len(), "the same length");
-        let dir = Temp::new();
-        let file = on_disk(&dir, "Grand.npno", &bytes);
-        let path = dir.at("Grand.npno");
-        let time = std::fs::metadata(&path).unwrap().modified().unwrap();
-        std::fs::write(&path, &theirs).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .and_then(|held| held.set_modified(time))
-            .unwrap();
-        let ondisk::Index::Piano(index) = &file.index else {
-            panic!("a piano library")
-        };
-        let mut library = index.library().clone();
-        library.set_name("Trimmed").unwrap();
-
-        let mut out = Cursor::new(Vec::new());
-        let e = Rewrite::Piano(library).write(&file, &mut out).unwrap_err();
-        assert!(is_changed(&e), "{e}");
-        assert!(out.into_inner().is_empty(), "nothing was written");
     }
 }

@@ -4172,9 +4172,8 @@ mod tests {
         let (from, rewrite) = workspace.send_edit(id).expect("the store takes it");
         workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])));
 
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        rewrite.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = crate::testing::streamed(&rewrite.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = crate::testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
         workspace.edit_saved(id, saved.clone());
 

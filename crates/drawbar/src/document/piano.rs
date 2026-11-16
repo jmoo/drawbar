@@ -5513,9 +5513,8 @@ mod tests {
             panic!("a piano library's index")
         };
         let edit = rewrite_over(index, &plan).unwrap().expect("a plan to save");
-        let mut out = std::io::Cursor::new(Vec::new());
-        edit.write(&file, &mut out).unwrap();
-        assert_eq!(out.into_inner(), rebuild(&saved, &plan).unwrap());
+        let (out, _) = testing::streamed(&edit.pieces(&file).unwrap(), &saved);
+        assert_eq!(out.unwrap(), rebuild(&saved, &plan).unwrap());
         let save = Act::SaveDoc(editor.id);
         let held = editor.state.hold(&editor.ctx, save, &editor.workspace);
         assert!(
