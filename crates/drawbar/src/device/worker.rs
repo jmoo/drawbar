@@ -1046,9 +1046,7 @@ async fn occupied<T: Transport, C>(
 
 /// Shape cursor hits to the declared capacity, or through an open bank's last item.
 ///
-/// A hit outside a bounded bank is [`Error::Enumeration`]: the instrument answered about
-/// a slot it says it does not have, and widening the bank to fit would report slots no
-/// later read could reach.
+/// [`op::occupied_slots`] has already refused a hit outside a bounded bank.
 fn shape(
     found: &[(Location, ProgramInfo)],
     planned: &Planned,
@@ -1058,16 +1056,7 @@ fn shape(
     let mine: Vec<&(Location, ProgramInfo)> =
         found.iter().filter(|(at, _)| at.bank == bank).collect();
     let len = match planned.extent {
-        Extent::Known(slots) => {
-            if let Some((answered, _)) = mine.iter().find(|(at, _)| at.slot >= slots) {
-                return Err(Error::Enumeration {
-                    bank,
-                    answered: *answered,
-                    slots,
-                });
-            }
-            slots
-        }
+        Extent::Known(slots) => slots,
         Extent::Open => mine.iter().map(|(at, _)| at.slot + 1).max().unwrap_or(0),
     };
     if len > limit {
@@ -1366,11 +1355,8 @@ mod tests {
         assert_eq!(named(" Africa Split "), "Africa Split");
     }
 
-    /// A cursor hit past a bounded bank's capacity is refused: widening the bank would
-    /// report slots the instrument says it does not have. An unbounded bank has no
-    /// capacity to contradict, so it is shaped through its last item.
     #[test]
-    fn a_cursor_hit_past_a_declared_capacity_is_refused() {
+    fn a_cursor_hit_in_an_open_bank_shapes_it_through_its_last_item() {
         let at = Location { bank: 0, slot: 7 };
         let found = [(
             at,
@@ -1384,24 +1370,12 @@ mod tests {
                 name: "Africa Split".into(),
             },
         )];
-        let planned = |extent| Planned {
+        let planned = Planned {
             bank: NonZeroU32::new(1).expect("bank 1"),
-            extent,
+            extent: Extent::Open,
         };
 
-        match shape(&found, &planned(Extent::Known(4)), MOST_OCCUPIED) {
-            Err(Error::Enumeration {
-                bank,
-                answered,
-                slots,
-            }) => assert_eq!((bank, answered, slots), (0, at, 4)),
-            other => panic!(
-                "a hit at 1:8 in a bank of four: {:?}",
-                other.map(|slots| slots.len())
-            ),
-        }
-        let open =
-            shape(&found, &planned(Extent::Open), MOST_OCCUPIED).expect("an open bank takes it");
+        let open = shape(&found, &planned, MOST_OCCUPIED).expect("an open bank takes it");
         assert_eq!(open.len(), 8, "through the last item and no further");
     }
 }
