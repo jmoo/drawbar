@@ -131,11 +131,22 @@ impl Cuts {
                 _ => {}
             }
         }
+        // The loop inside the attack that no other sample's shorter attack holds: where
+        // an attack has grown over a neighbor's loop, that loop is still the neighbor's.
+        let inside = |found: &Range<u32>, span: &Range<u32>| {
+            found.start >= span.start && found.end <= span.end
+        };
         cuts.looped = cuts.attack.as_ref().and_then(|attack| {
-            marked
-                .loops
-                .iter()
-                .find(|found| found.start >= attack.start && found.end <= attack.end)
+            let theirs = |found: &Range<u32>| {
+                (marked.regions.iter()).any(|mark| {
+                    mark.hit.is_some_and(|other| other != hit)
+                        && matches!(mark.part, Part::Attack | Part::Resonance)
+                        && inside(found, &mark.frames)
+                        && mark.frames.len() < attack.len()
+                })
+            };
+            (marked.loops.iter())
+                .find(|found| inside(found, attack) && !theirs(found))
                 .cloned()
         });
         cuts.other_loops = (marked.loops.iter())
@@ -1048,6 +1059,28 @@ mod tests {
             "past its fade's start, and its loop's end"
         );
         assert_eq!(g4.room(Cut::FadeFrom, total), Some(20_000..=29_999));
+    }
+
+    /// An attack grown over a neighbor's loop does not take it for its own: the loop is
+    /// the shorter attack's, which holds it as it was marked.
+    #[test]
+    fn a_neighbor_s_loop_stays_the_neighbor_s() {
+        let region = |start: u32, end: u32, label: &str| take::mark(label, start..end);
+        let marked = Marked {
+            regions: vec![
+                region(1000, 9000, "060-b0-v22"),
+                region(3000, 20_000, "062-b0-v22"),
+            ],
+            loops: std::iter::once(5000..7000).collect(),
+        };
+        let c4 = Cuts::of(&marked, (60, LayerTag::Value(22)));
+        let d4 = Cuts::of(&marked, (62, LayerTag::Value(22)));
+        assert_eq!(c4.looped, Some(5000..7000));
+        assert_eq!(d4.looped, None, "not D4's, whose attack only grew over it");
+        assert!(
+            d4.room(Cut::LoopStart, 100_000).is_none(),
+            "so D4 has no loop to drag"
+        );
     }
 
     /// No cut reaches into a loop another region holds, nor a loop into another region,

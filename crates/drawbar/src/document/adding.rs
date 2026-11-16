@@ -161,8 +161,10 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
         .map(|midi| midi as u8)
         .or_else(|| nearest_root(marked, onset as u32))
         .unwrap_or(MIDDLE_C);
-    let value = layer(audio, marked, root, peak_db(audio, onset, secs(0.1)));
-    let hit = (root, LayerTag::Value(value));
+    let hit = (
+        root,
+        layer(audio, marked, root, peak_db(audio, onset, secs(0.1))),
+    );
     Added {
         hit,
         label: attack_label(hit),
@@ -233,10 +235,22 @@ fn nearest_root(marked: &Marked, frame: u32) -> Option<u8> {
         .map(|(root, _)| root)
 }
 
-/// The layer value a new sample of `root` whose peak is `db` takes: between the values
+/// The layer a new sample of `root` whose peak is `db` takes: a value between the values
 /// of the note's layers either side of it in loudness, the loudest valued lowest, and
-/// one no other sample of the note has.
-fn layer(audio: &Audio, marked: &Marked, root: u8, db: f64) -> u8 {
+/// one no other sample of the note has; or, where the note names its layers by index,
+/// the next index.
+fn layer(audio: &Audio, marked: &Marked, root: u8, db: f64) -> LayerTag {
+    // A note whose layers are named by index takes the next index: the build refuses a
+    // note named both ways.
+    let indexes: Vec<u8> = (marked.regions.iter())
+        .filter_map(|mark| match mark.hit? {
+            (r, LayerTag::Index(index)) if r == root => Some(index),
+            _ => None,
+        })
+        .collect();
+    if let Some(&most) = indexes.iter().max() {
+        return LayerTag::Index(most.saturating_add(1));
+    }
     let rate = f64::from(audio.rate.max(1));
     let mut known: Vec<(f64, u8)> = marked
         .regions
@@ -274,10 +288,11 @@ fn layer(audio: &Audio, marked: &Marked, root: u8, db: f64) -> u8 {
             _ => None,
         })
         .collect();
-    (0..=100)
+    let value = (0..=100)
         .filter(|value: &i32| !taken.contains(&(*value as u8)))
         .min_by_key(|value| ((value - target).abs(), *value))
-        .unwrap_or(target) as u8
+        .unwrap_or(target) as u8;
+    LayerTag::Value(value)
 }
 
 /// The label of `hit`'s attack.
@@ -415,6 +430,20 @@ mod tests {
         assert_eq!(added.release.map(|r| r.len()), Some(RATE as usize / 2));
         let alone = sample(&audio, &Marked::default(), RATE);
         assert_eq!(alone.hit.0, MIDDLE_C);
+    }
+
+    /// A note whose layers are named by index takes the next index, not a value: the
+    /// build refuses a note named both ways.
+    #[test]
+    fn a_note_named_by_index_takes_the_next_index() {
+        let audio = take(0.5);
+        let marked = Marked {
+            regions: vec![take::mark("057-b0-l00", RATE * 5..RATE * 6)],
+            loops: Vec::new(),
+        };
+        let added = sample(&audio, &marked, RATE * 2);
+        assert_eq!(added.hit, (57, LayerTag::Index(1)));
+        assert_eq!(added.label, "057-b0-l01");
     }
 
     /// A layer between two of its note's in loudness takes a value between theirs.

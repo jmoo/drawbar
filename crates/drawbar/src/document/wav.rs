@@ -122,7 +122,14 @@ fn renamed(marks: &wav::Marks, path: &str, label: &str, to: &str) -> Result<wav:
             take::Part::Attack => adding::attack_label(to),
             take::Part::Resonance => encode::stroke_name(to.0, Bank::Resonance, to.1),
             take::Part::Release => adding::release_label(to),
-            take::Part::Fade => adding::attack_label(to) + encode::FADE_SUFFIX,
+            // A fade keeps the bank of the stroke it fades, attack or resonance.
+            take::Part::Fade => {
+                let stroke = region.label.strip_suffix(encode::FADE_SUFFIX);
+                let bank = stroke
+                    .and_then(|stroke| encode::parse_stroke_name(stroke, encode::Stem::None))
+                    .map_or(Bank::Attack, |(_, bank, _)| bank);
+                encode::stroke_name(to.0, bank, to.1) + encode::FADE_SUFFIX
+            }
             take::Part::Other => continue,
         };
     }
@@ -213,10 +220,11 @@ fn pieced(marks: &wav::Marks, path: &str, value: &str) -> Option<Result<wav::Mar
             .hit
             .ok_or_else(|| format!("{path}: names no sample"))?;
         let cuts = hit::Cuts::of(&take::Marked::from_marks(marks), hit);
+        // The sample's own loop, as the lanes pair it: never a neighbor's its attack has
+        // grown over.
         let inside = |found: &wav::Loop| {
-            cuts.attack
-                .as_ref()
-                .is_some_and(|attack| found.start >= attack.start && found.end < attack.end)
+            (cuts.looped.as_ref())
+                .is_some_and(|own| found.start == own.start && found.end + 1 == own.end)
         };
         let of = |region: &wav::Region, part: Option<take::Part>| {
             let mark = take::mark(&region.label, 0..0);
@@ -1847,6 +1855,32 @@ mod tests {
             Ok((60, nord_format::formats::npno::encode::LayerTag::Index(1)))
         );
         assert!(hit::named("B4").is_err() && hit::named("H4 v30").is_err());
+    }
+
+    /// A resonance sample's fade is renamed with it, and keeps its bank, so the build
+    /// still finds the stroke it fades.
+    #[test]
+    fn a_resonance_sample_s_fade_is_renamed_with_it() {
+        let region = |start: u32, frames: u32, label: &str| wav::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = wav::Marks {
+            regions: vec![
+                region(22_050, 30_000, "057-b1-v22"),
+                region(40_000, 12_050, "057-b1-v22-fade"),
+            ],
+            loops: Vec::new(),
+        };
+        let bytes = wav::with_marks(&take(&[0.9, 0.3]), &marks).unwrap();
+        let sets = [(format!("{RENAMED}057-b1-v22"), "058-b0-v22".to_string())];
+        let (out, _) = apply(&bytes, &bytes, &sets).unwrap();
+        let marks = wav::read_marks(&out).unwrap();
+        let labels: Vec<&str> = marks.regions.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["058-b1-v22", "058-b1-v22-fade"]);
+        let frames = wav::layout(&out).unwrap().frames();
+        assert!(nord_format::take::build::cuts("take.wav", &marks, frames).is_ok());
     }
 
     #[test]

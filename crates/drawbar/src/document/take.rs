@@ -120,9 +120,9 @@ pub(super) fn mark(label: &str, frames: Range<u32>) -> Mark {
             format!("{} {} b1", note::name(root), layer(tag)),
         ),
         (Bank::Release, false) => (Part::Release, String::new()),
-        (Bank::Attack, true) => (Part::Fade, String::new()),
-        // ⚠️ The build fades attacks only, and refuses a fade on any other bank.
-        (_, true) => return other(),
+        // The build fades an attack or a resonance, and refuses a fade on a release.
+        (Bank::Attack | Bank::Resonance, true) => (Part::Fade, String::new()),
+        (Bank::Release, true) => return other(),
     };
     Mark {
         frames,
