@@ -289,75 +289,6 @@ fn factor(db: f64) -> Result<f64, String> {
     }
 }
 
-/// The values an integer sample of `bits` holds. 8-bit samples are stored unsigned, and
-/// are counted here from their midpoint, as the wider ones are.
-fn span(bits: u16) -> RangeInclusive<i64> {
-    let half = 1i64 << (bits - 1);
-    -half..=half - 1
-}
-
-/// `sample` times `factor`, rounded, and whether it was clipped to fit `bits`.
-fn scaled(sample: i32, factor: f64, bits: u16) -> (i32, bool) {
-    let exact = (f64::from(sample) * factor).round();
-    let span = span(bits);
-    let held = exact.clamp(*span.start() as f64, *span.end() as f64);
-    (held as i32, held != exact)
-}
-
-/// The integer sample stored in `at`, `bits` wide.
-fn int(at: &[u8], bits: u16) -> i32 {
-    match bits {
-        8 => i32::from(at[0]) - 128,
-        16 => i32::from(i16::from_le_bytes([at[0], at[1]])),
-        24 => i32::from_le_bytes([0, at[0], at[1], at[2]]) >> 8,
-        _ => i32::from_le_bytes([at[0], at[1], at[2], at[3]]),
-    }
-}
-
-/// Store `sample` in `at`, `bits` wide.
-fn put_int(at: &mut [u8], sample: i32, bits: u16) {
-    match bits {
-        8 => at[0] = (sample + 128) as u8,
-        16 => at.copy_from_slice(&(sample as i16).to_le_bytes()),
-        24 => at.copy_from_slice(&sample.to_le_bytes()[..3]),
-        _ => at.copy_from_slice(&sample.to_le_bytes()),
-    }
-}
-
-/// Each integer sample of the data chunk, in file order.
-fn ints<'a>(bytes: &'a [u8], data: Range<usize>, bits: u16) -> impl Iterator<Item = i32> + 'a {
-    bytes[data]
-        .chunks_exact(usize::from(bits / 8))
-        .map(move |at| int(at, bits))
-}
-
-/// Scale every sample of `data` by `factor` in the encoding it is stored in, and count
-/// the samples clipped. Float holds any level, so nothing clips there.
-fn gain_in_place(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
-    let mut clipped = 0;
-    match encoding {
-        Encoding::Int { bits } => {
-            for at in data.chunks_exact_mut(usize::from(bits / 8)) {
-                let (held, clips) = scaled(int(at, bits), factor, bits);
-                put_int(at, held, bits);
-                clipped += usize::from(clips);
-            }
-        }
-        Encoding::Float { bits: 32 } => {
-            for at in data.as_chunks_mut::<4>().0 {
-                let x = f64::from(f32::from_le_bytes(*at)) * factor;
-                *at = (x as f32).to_le_bytes();
-            }
-        }
-        Encoding::Float { .. } => {
-            for at in data.as_chunks_mut::<8>().0 {
-                *at = (f64::from_le_bytes(*at) * factor).to_le_bytes();
-            }
-        }
-    }
-    clipped
-}
-
 /// `current` with `sets` applied, and the gain in dB where one was set.
 ///
 /// A gain is applied to `original`, and `current`'s marks and settings carried over where
@@ -440,7 +371,7 @@ pub fn apply(
     let mut out = match total {
         Some(db) => {
             let mut out = original.to_vec();
-            gain_in_place(&mut out[layout.data], layout.format.encoding, factor(db)?);
+            wav::scale(&mut out[layout.data], layout.format.encoding, factor(db)?);
             let now = wav::read_marks(current).ok();
             match (&marks, now) {
                 (None, Some(now)) if wav::read_marks(original).ok() != Some(now.clone()) => {
@@ -721,7 +652,7 @@ impl Notes {
         let channels = usize::from(layout.format.channels);
         let mut peaks = vec![(0, 0); starts.len()];
         let mut note = 0;
-        for (at, sample) in ints(bytes, layout.data, bits).enumerate() {
+        for (at, sample) in wav::int_samples(bytes, layout.data, bits).enumerate() {
             while starts
                 .get(note + 1)
                 .is_some_and(|next| at / channels >= *next)
@@ -737,7 +668,7 @@ impl Notes {
 
     /// How many notes a gain of `factor` clips.
     fn clipped(&self, factor: f64) -> usize {
-        let clips = |sample: i32| scaled(sample, factor, self.bits).1;
+        let clips = |sample: i32| wav::scaled(sample, factor, self.bits).1;
         self.peaks
             .iter()
             .filter(|(low, high)| clips(*low) || clips(*high))
@@ -878,7 +809,7 @@ fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> 
         return None;
     }
     let mut data = was[from.data].to_vec();
-    gain_in_place(&mut data, from.format.encoding, factor(db).ok()?);
+    wav::scale(&mut data, from.format.encoding, factor(db).ok()?);
     (data[..] == now[to.data]).then_some(db)
 }
 
@@ -1408,7 +1339,7 @@ mod tests {
         let Encoding::Int { bits } = layout.format.encoding else {
             panic!("not PCM");
         };
-        ints(bytes, layout.data, bits).collect()
+        wav::int_samples(bytes, layout.data, bits).collect()
     }
 
     fn gained(bytes: &[u8], db: &str) -> Result<Vec<u8>, String> {
@@ -1419,7 +1350,7 @@ mod tests {
     fn clipped_samples(bytes: &[u8], db: f64) -> usize {
         let layout = wav::layout(bytes).unwrap();
         let mut data = bytes[layout.data].to_vec();
-        gain_in_place(&mut data, layout.format.encoding, factor(db).unwrap())
+        wav::scale(&mut data, layout.format.encoding, factor(db).unwrap())
     }
 
     /// A library holding `bytes` as a saved WAV, and its id.
@@ -1625,7 +1556,7 @@ mod tests {
                 let from = layout.data.start + 2 * (rate / 2 + 2 * rate * k);
                 let mut note = bytes[from..from + 2 * rate].to_vec();
                 let encoding = layout.format.encoding;
-                clipped += usize::from(gain_in_place(&mut note, encoding, factor(db).unwrap()) > 0);
+                clipped += usize::from(wav::scale(&mut note, encoding, factor(db).unwrap()) > 0);
             }
             assert_eq!(state.notes.clipped(factor(db).unwrap()), clipped, "{db} dB");
         }
