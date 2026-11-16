@@ -299,9 +299,8 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
                     Fate::Kept { value, .. } => Some((*value, sustain_of(&p.fate, rate))),
                     _ => None,
                 });
-                match kept {
-                    Some((value, sustain)) => {
-                        let (bytes, _) = marked(file, loaded, &plan, true)?;
+                match kept.map(|kept| (kept, marked(file, loaded, &plan, true))) {
+                    Some(((value, sustain), Ok((bytes, _)))) => {
                         planned.push((out, bytes));
                         (
                             Some(*note),
@@ -309,6 +308,9 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), S
                             sustain,
                         )
                     }
+                    // A file whose own settings this version refuses is left out, as one
+                    // that does not read is, and the rest of the folder goes on.
+                    Some((_, Err(why))) => (Some(*note), format!("not read: {why}"), String::new()),
                     None => (Some(*note), "no hit kept".into(), String::new()),
                 }
             }
@@ -551,8 +553,9 @@ fn load(path: &std::path::Path, out: &std::path::Path) -> Result<Loaded, String>
     })
 }
 
-/// The take read from `path` with `plan`'s regions, and those regions. A `one_note` file
-/// also states that its floor was read as one note's, so the build reads it so too.
+/// The take read from `path` with `plan`'s regions, and those regions. It states how its
+/// floor was read, a `one_note` file's as one note's and a take's as a take's, whatever
+/// an earlier prep wrote, so the build reads it as this prep did.
 fn marked(
     path: &std::path::Path,
     loaded: Loaded,
@@ -575,11 +578,10 @@ fn marked(
         false => loaded.bytes,
     };
     let mut written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
-    if one_note {
-        let settings = wav::Settings {
-            floor: Some(Floor::OneNote),
-            ..wav::read_settings(&written).map_err(|e| named(&e))?
-        };
+    let mut settings = wav::read_settings(&written).map_err(|e| named(&e))?;
+    let floor = one_note.then_some(Floor::OneNote);
+    if settings.floor != floor {
+        settings.floor = floor;
         written = wav::with_settings(&written, &settings).map_err(|e| named(&e))?;
     }
     Ok((written, marks))
@@ -1123,6 +1125,18 @@ mod tests {
         };
         let bytes = wav::write(&silent, wav::Encoding::Int { bits: 24 }).unwrap();
         std::fs::write(set.join("silent.wav"), bytes).unwrap();
+        // A note whose npno chunk this version refuses: listed as not read, and the rest of
+        // the folder still written.
+        let audio = take(44_100, 4.0, &[(0.5, 67.0, -12.0, 3.0)]);
+        let mut bytes = wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap();
+        let body = b"not a setting\n";
+        bytes.extend_from_slice(b"npno");
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(body);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(wav::read_settings(&bytes).is_err(), "refused");
+        std::fs::write(set.join("odd.wav"), bytes).unwrap();
         // A stub such as macOS leaves in a zipped set: not a WAV, listed and left out.
         std::fs::write(set.join("._1.wav"), b"Mac OS X attributes").unwrap();
         #[cfg(unix)]
@@ -1148,6 +1162,10 @@ mod tests {
         assert_eq!(labels("2.wav"), ["060-b0-v40", "060-b2-v40"]);
         assert_eq!(labels("high/3.wav"), ["064-b0-v00", "064-b2-v00"]);
         assert!(!out.join("silent.wav").exists(), "no hit, not written");
+        assert!(
+            !out.join("odd.wav").exists(),
+            "its settings refused, not written"
+        );
         let floor = wav::read_settings(&std::fs::read(out.join("1.wav")).unwrap())
             .unwrap()
             .floor;
@@ -1156,6 +1174,20 @@ mod tests {
             Some(Floor::OneNote),
             "the build reads its floor so too"
         );
+
+        // The same file prepped again as a take of its own reads its floor as a take's,
+        // and says so.
+        let again = dir.join("again.wav");
+        let one = out.join("1.wav");
+        prep(
+            &Ui::piped(),
+            prep_args(&[one.to_str().unwrap(), "-o", again.to_str().unwrap()]),
+        )
+        .unwrap();
+        let floor = wav::read_settings(&std::fs::read(&again).unwrap())
+            .unwrap()
+            .floor;
+        assert_eq!(floor, None, "a take's floor, not the folder's");
 
         let written = ["1.wav", "2.wav", "high/3.wav"].map(|n| out.join(n));
         let written: Vec<&str> = written.iter().map(|p| p.to_str().unwrap()).collect();
