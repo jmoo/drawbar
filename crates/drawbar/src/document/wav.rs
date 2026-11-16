@@ -373,7 +373,10 @@ pub fn apply(
             Some(held) => held,
             None => wav::read_marks(current).map_err(error)?,
         };
-        let frames = wav::layout(current).map_err(error)?.frames() as u32;
+        let frames = wav::layout(current).map_err(error)?.frames();
+        let frames = u32::try_from(frames).map_err(|_| {
+            format!("{path}: the take's {frames} frames are more than a cue can mark")
+        })?;
         marks = Some(hit::moved(&held, hit, cut, frame, frames)?);
     }
     let mut out = match total {
@@ -723,6 +726,29 @@ const MB: usize = 1 << 20;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const WEB_MOST_BYTES: usize = 120 * MB;
 
+/// The lowest rate a take is read at, in Hz: the detectors filter, find pitch and find
+/// noise up to frequencies a lower rate cannot hold, and the build resamples every take
+/// to 35,002 Hz anyway.
+const LEAST_RATE: u32 = 8_000;
+
+/// `audio`, or why a take at its rate, or of its length, is not read. A cue marks a
+/// frame as 32 bits, so the lanes count a take's frames so too.
+fn heard_rate(audio: Audio) -> Result<Audio, String> {
+    if audio.rate < LEAST_RATE {
+        return Err(format!(
+            "this WAV is at {} Hz; a take needs at least {LEAST_RATE} Hz",
+            audio.rate
+        ));
+    }
+    match u32::try_from(audio.frames()) {
+        Ok(_) => Ok(audio),
+        Err(_) => Err(format!(
+            "this WAV holds {} frames, more than a cue can mark",
+            audio.frames()
+        )),
+    }
+}
+
 /// Why drawbar-web works on no WAV of `len` bytes, where it is too large for the
 /// browser: opened, or built into a library. None on the desktop.
 pub(crate) fn web_refusal(len: usize) -> Option<String> {
@@ -783,7 +809,9 @@ impl Read {
         let too_large = refused.is_some();
         let source = match refused {
             Some(why) => Err(why),
-            None => wav::read(&entity.bytes).map_err(|e| e.to_string()),
+            None => wav::read(&entity.bytes)
+                .map_err(|e| e.to_string())
+                .and_then(heard_rate),
         };
         let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
         Read {
@@ -1178,6 +1206,7 @@ pub fn ui(
             let place = state.view.place;
             // Both lanes draw a dragged cut where it is now; the file moves it when the
             // drag ends.
+            // A take read holds no more frames than a u32 counts, as `heard_rate` asks.
             let frames = (audio.samples.len() / usize::from(audio.channels.max(1))) as u32;
             let dragged = match (&read.marks, picked, state.close.dragging(picked)) {
                 (Ok(marks), Some(hit), Some((cut, frame))) => {
@@ -2072,6 +2101,24 @@ mod tests {
             "the old regions are gone"
         );
         assert!(detected_marks("12 x 060-b0-v00").is_err());
+    }
+
+    /// A take at a rate the detectors cannot take is refused as it opens, not left to
+    /// panic: 30 Hz, and 7,999 Hz.
+    #[test]
+    fn a_take_at_too_low_a_rate_does_not_read() {
+        for rate in [30u32, 7_999] {
+            let audio = Audio {
+                rate,
+                channels: 1,
+                samples: vec![0.1; rate as usize * 2],
+            };
+            let bytes = wav::write(&audio, wav::Encoding::Int { bits: 16 }).unwrap();
+            let state = opened(&bytes);
+            let why = state.read.source.as_ref().unwrap_err();
+            assert!(why.contains("at least 8000 Hz"), "{why}");
+        }
+        assert!(opened(&take(&[0.5])).read.source.is_ok());
     }
 
     /// Detect asks before it replaces a take's regions, and starts at once on a take

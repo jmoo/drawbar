@@ -829,6 +829,7 @@ pub fn ui(
             })
             .map(|(cut, frame, _)| (cut, frame))
     };
+    // A take read holds no more frames than a u32 counts, as the WAV document asks.
     let frames = total as u32;
     if response.drag_started() {
         let pressed = ui.input(|input| input.pointer.press_origin());

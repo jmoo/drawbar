@@ -153,14 +153,20 @@ impl Voice {
     }
 
     /// Play `samples` from `at` seconds of the voice on, in place of its own from there.
-    /// They are at the voice's clock and channels.
+    /// They must be at the voice's clock and channels: the voice plays on as one source,
+    /// so others are refused.
     pub fn splice<S: Sample>(
         &mut self,
         at: f64,
         samples: &[S],
-        _channels: u16,
-        _rate: f32,
+        channels: u16,
+        rate: f32,
     ) -> Result<(), String> {
+        if channels.max(1) != self.channels.get() || clocked(rate) != self.rate {
+            return Err(
+                "a key-up at another pitch or channel count cannot join its voice".to_string(),
+            );
+        }
         let frame = (at * f64::from(self.rate.get())).round().max(0.0) as usize;
         let from = frame * usize::from(self.channels.get());
         let samples = samples.iter().map(|s| s.level()).collect();
