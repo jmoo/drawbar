@@ -567,6 +567,10 @@
         version.remove();
       }
 
+      /* eframe reports the WebGL context it could not get as a string, not an `Error`. */
+      const said = (error) => error.message || String(error);
+      const webgl = (error) => /WebGL/.test(said(error));
+
       /* The one row this page sends, under the app's rules: from drawbar.app to its
          collector, or from elsewhere to a developer's `drawbar.telemetry.collector`;
          never under Do Not Track or Global Privacy Control, never once sharing is off. */
@@ -588,11 +592,12 @@
         if (!collector || refused || off) {
           return;
         }
+        const kind = webgl(error) ? "WebGL" : error.name || "Error";
         const row = {
           event: "start_failed",
           version: built,
           step: step,
-          error: error.name || "Error",
+          error: kind,
         };
         navigator.sendBeacon(`${collector}/e`, JSON.stringify([row]));
       }
@@ -628,14 +633,13 @@
       }
 
       function fail(step, error) {
-        const said = error.message || String(error);
         splash.classList.add("failed");
         glyph.setAttribute("href", "#circle-alert");
         label.textContent = "drawbar could not start";
         figure.textContent = "";
-        note.textContent = /WebGL/.test(said) ? NOTE.webgl : NOTE[step];
+        note.textContent = webgl(error) ? NOTE.webgl : NOTE[step];
         const fetched = step === "browser" ? "" : size();
-        foot.textContent = [fetched, said].filter(Boolean).join(" · ");
+        foot.textContent = [fetched, said(error)].filter(Boolean).join(" · ");
         if (step === "browser") {
           document.getElementById("retry").hidden = true;
           const wrong = document.getElementById("wrong");
