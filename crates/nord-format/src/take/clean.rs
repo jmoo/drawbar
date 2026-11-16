@@ -37,13 +37,21 @@ pub struct Noise {
 
 impl Noise {
     /// The noise of `mono`, a take at `rate` as [`crate::take::plan::mono`] reads it,
-    /// its floor read by `floor`, as prep read it.
+    /// its floor read by `floor`, as prep read it. A one-note file with no rest has no
+    /// noise to read apart from its note, so none is found and it builds as recorded.
     pub fn of(mono: &[f64], rate: u32, floor: Floor) -> Noise {
         let x = detect::highpassed(mono, rate);
         let env = Envelope {
             floor,
             ..Envelope::of(&x, rate)
         };
+        if !env.rests() {
+            return Noise {
+                rate,
+                hum: None,
+                hiss: None,
+            };
+        }
         let hum = hum::find(&x, rate, &env).ok();
         let cleaned = match &hum {
             Some(found) => found.removed(&x, rate),
@@ -348,6 +356,43 @@ mod tests {
             take - one_note > 40.0,
             "one-note {one_note:.1} dB, take {take:.1} dB"
         );
+    }
+
+    /// A one-note file held to its end has no rest to read its noise on: none is found,
+    /// and cleaning leaves each partial of its note as it was.
+    #[test]
+    fn a_one_note_file_with_no_rest_comes_through_cleaning_unchanged() {
+        let rate = 35_002;
+        let f0 = 261.6;
+        let partial =
+            |k: u32, t: f64| (2.0 * PI * f0 * f64::from(k) * t).sin() * 0.2 / f64::from(k);
+        let noise = hiss(rate as usize * 3, -80.0);
+        let x: Vec<f64> = (noise.iter().enumerate())
+            .map(|(i, n)| {
+                let t = i as f64 / f64::from(rate);
+                (1..=6).map(|k| partial(k, t)).sum::<f64>() + n
+            })
+            .collect();
+        let noise = Noise::of(&x, rate, Floor::OneNote);
+        assert!(
+            noise.hum.is_none() && noise.hiss.is_none(),
+            "no noise found"
+        );
+        let cleaned = noise.stroke_mono(&x, 0, x.len(), f0);
+        // Each partial's level, by correlation with it over the middle second.
+        let level = |y: &[f64], k: u32| {
+            let (from, to) = (rate as usize, 2 * rate as usize);
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, v) in y[from..to].iter().enumerate() {
+                let w = 2.0 * PI * f0 * f64::from(k) * (from + i) as f64 / f64::from(rate);
+                (re, im) = (re + v * w.cos(), im + v * w.sin());
+            }
+            20.0 * (re.hypot(im) / (to - from) as f64).log10()
+        };
+        for k in 2..=6 {
+            let lost = level(&x, k) - level(&cleaned, k);
+            assert!(lost.abs() < 0.5, "partial {k} lost {lost:.1} dB");
+        }
     }
 
     /// Where the note stands over the hiss nothing changes; once it has died, the hiss
