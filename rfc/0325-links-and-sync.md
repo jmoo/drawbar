@@ -17,9 +17,11 @@ piano's or sample's id is a hash of its name, so no relation is stored.
 
 ## Motivation
 
-On `master`, drawbar guesses the slot a file belongs to each time it looks, from equal
-bytes and from the slot the file was copied off. Nothing is stored. The guess fails in
-ordinary use:
+Before this change, at
+[`aef7dc79`](https://github.com/jmoo/drawbar/commit/aef7dc7942313ea887ab6c4e46080e0d3314ad3c),
+drawbar guesses the slot a file belongs to each time it looks, from equal bytes and
+from the slot the file was copied off. Nothing is stored. The guess fails in ordinary
+use:
 
 | What the user does | What happens |
 |---|---|
@@ -222,7 +224,7 @@ bundle unpacked into the library exports again with what its programs play.
 
 | Option | Why not |
 |---|---|
-| Link by equal bytes, as on `master` | New programs and duplicates link by coincidence |
+| Link by equal bytes, as at `aef7dc79` | New programs and duplicates link by coincidence |
 | Trust the slot in each program's header | Every header names a slot, so New files and copies claim one, and an imported backup claims the user's slots. It gives no direction. It survives as evidence for the automatic link on attach and as the first slot Send to… offers |
 | Name each keyboard and ask which is attached | An identity drawbar cannot check |
 | Follow a moved slot silently | An emptied slot plus an unrelated identical copy looks the same, so a move is shown in the sheet first |
