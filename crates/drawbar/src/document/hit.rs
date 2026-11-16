@@ -106,10 +106,9 @@ pub struct Cuts {
     pub attack: Option<Range<u32>>,
     pub release: Option<Range<u32>>,
     pub fade: Option<Range<u32>>,
-    /// The loop inside the attack, its end included.
+    /// The loop inside the attack, its end the frame after its last.
     pub looped: Option<Range<u32>>,
-    /// The take's other loops, each end included, which none of the hit's regions may
-    /// reach into.
+    /// The take's other loops, likewise, which none of the hit's regions may reach into.
     pub other_loops: Vec<Range<u32>>,
     /// The take's other regions, the hit's key-off among them, which its loop may not
     /// reach into.
@@ -205,17 +204,15 @@ impl Cuts {
         let Some(span) = span else {
             return (low, high);
         };
-        // A region over start..end, a loop over its start to its end included.
-        let reaches = |found: &Range<u32>| found.start < span.end && span.start <= found.end;
-        let loop_reaches =
-            |region: &Range<u32>| region.start <= span.end && span.start < region.end;
+        // Regions and loops alike over start..end, the end the frame after the last.
+        let reaches = |other: &Range<u32>| other.start < span.end && span.start < other.end;
         match cut {
             Cut::AttackStart | Cut::ReleaseStart => {
                 for found in loops
                     .iter()
-                    .filter(|found| !reaches(found) && found.end < span.start)
+                    .filter(|found| !reaches(found) && found.end <= span.start)
                 {
-                    low = low.max(found.end + 1);
+                    low = low.max(found.end);
                 }
             }
             Cut::AttackEnd | Cut::ReleaseEnd => {
@@ -228,14 +225,14 @@ impl Cuts {
             }
             Cut::LoopStart => {
                 for region in (self.other_regions.iter())
-                    .filter(|region| !loop_reaches(region) && region.end <= span.start)
+                    .filter(|region| !reaches(region) && region.end <= span.start)
                 {
                     low = low.max(region.end);
                 }
             }
             Cut::LoopEnd => {
                 for region in (self.other_regions.iter())
-                    .filter(|region| !loop_reaches(region) && region.start > span.end)
+                    .filter(|region| !reaches(region) && region.start >= span.end)
                 {
                     high = high.min(region.start);
                 }
@@ -437,15 +434,14 @@ pub const WHOLE: &str = "Whole sample";
 const SNAP: f64 = 0.04;
 
 /// Where a loop's `cut` dragged to `frame` snaps to: the nearest frame within [`SNAP`]
-/// and `room` where the take rises through zero, the loop's first frame for its start
-/// and the frame after its last for its end, so the join is smooth. `frame` where there
-/// is none, or for any other cut. Alt held drops it where it is.
+/// and `room` where the take rises through zero. A loop's start cut is its first frame
+/// and its end cut the frame after its last, so both sit on a rise and the join is
+/// smooth. `frame` where there is none, or for any other cut. Alt held drops it where
+/// it is.
 pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) -> u32 {
-    let after = match cut {
-        Cut::LoopStart => 0,
-        Cut::LoopEnd => 1,
-        _ => return frame,
-    };
+    if !matches!(cut, Cut::LoopStart | Cut::LoopEnd) {
+        return frame;
+    }
     let channels = usize::from(audio.channels.max(1));
     let total = audio.samples.len() / channels;
     let level = |at: usize| -> f32 {
@@ -454,7 +450,7 @@ pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) 
             .sum()
     };
     let rises = |at: u32| {
-        let at = at as usize + after;
+        let at = at as usize;
         at >= 1 && at < total && level(at - 1) < 0.0 && level(at) >= 0.0
     };
     let reach = (SNAP * f64::from(audio.rate.max(1))) as u32;
@@ -934,7 +930,8 @@ mod tests {
     use super::*;
 
     /// A dragged loop cut snaps to where the take rises through zero: its start onto
-    /// the rise, its end onto the frame before it; any other cut stays put.
+    /// the rise, its end cut too, so its last frame is the one before the rise; any
+    /// other cut stays put.
     #[test]
     fn a_loop_cut_snaps_to_a_rising_zero_crossing() {
         // A 100 Hz square at 1000 frames a second: rises at 10, 20, 30...
@@ -947,7 +944,20 @@ mod tests {
         };
         let room = 0..=99;
         assert_eq!(snapped(&audio, Cut::LoopStart, 22, &room), 20);
-        assert_eq!(snapped(&audio, Cut::LoopEnd, 22, &room), 19);
+        assert_eq!(snapped(&audio, Cut::LoopEnd, 22, &room), 20);
+        let marks = wav::Marks {
+            regions: vec![wav::Region {
+                start: 0,
+                frames: 100,
+                label: "060-b0-v22".into(),
+            }],
+            loops: vec![wav::Loop::forward(10, 39)],
+        };
+        let end = moved(&marks, (60, LayerTag::Value(22)), Cut::LoopEnd, 20, 100).unwrap();
+        assert_eq!(
+            end.loops[0].end, 19,
+            "the loop's last frame is the one before the rise"
+        );
         assert_eq!(snapped(&audio, Cut::AttackEnd, 22, &room), 22);
         assert_eq!(
             snapped(&audio, Cut::LoopStart, 22, &(21..=29)),
@@ -1026,7 +1036,7 @@ mod tests {
         );
         assert_eq!(
             c4.room(Cut::ReleaseStart, total),
-            Some(7001..=9499),
+            Some(7000..=9499),
             "clear of its own attack's loop"
         );
         assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=25_000));
@@ -1059,8 +1069,8 @@ mod tests {
         let d4 = Cuts::of(&marked, (62, LayerTag::Value(22)));
         assert_eq!(c4.room(Cut::AttackEnd, total), Some(7000..=15_000));
         assert_eq!(c4.room(Cut::ReleaseEnd, total), Some(9001..=15_000));
-        assert_eq!(d4.room(Cut::AttackStart, total), Some(7001..=15_000));
-        assert_eq!(d4.room(Cut::ReleaseStart, total), Some(16_001..=20_999));
+        assert_eq!(d4.room(Cut::AttackStart, total), Some(7000..=15_000));
+        assert_eq!(d4.room(Cut::ReleaseStart, total), Some(16_000..=20_999));
         assert_eq!(
             d4.room(Cut::LoopStart, total),
             Some(12_000..=15_998),

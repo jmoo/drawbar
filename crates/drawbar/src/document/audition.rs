@@ -142,7 +142,9 @@ impl Sounding {
             .looped
             .as_ref()
             .map(|found| Loop::forward(found.start - span.start, found.end - 1 - span.start));
-        let fade = cuts.fade.as_ref().map(|fade| fade.start - span.start);
+        // A file may mark a fade from outside its attack: it fades from the nearer end.
+        let fade = (cuts.fade.as_ref())
+            .map(|fade| fade.start.clamp(span.start, span.end - 1) - span.start);
         let (mut attack, held) =
             sustain::shaped(&raw, channels, audio.rate, false, sample_loop, fade);
         let peak = raw.iter().fold(0.0f32, |most, v| most.max(v.abs()));
@@ -745,6 +747,23 @@ mod tests {
             "{} under, the build plays it {under} under",
             attack_db - release_db
         );
+    }
+
+    /// A fade a file marks from outside its attack plays, from the attack's nearer end.
+    #[test]
+    fn a_fade_from_outside_its_attack_plays() {
+        let (audio, cuts) = take();
+        let rules = Sounding::rules(encode::Kind::Wurlitzer);
+        let second = RATE;
+        for fade in [0..2 * second, 3 * second..4 * second] {
+            let cuts = Cuts {
+                attack: Some(second..2 * second),
+                looped: None,
+                fade: Some(fade),
+                ..cuts.clone()
+            };
+            assert!(Sounding::of(&audio, &cuts, 60, &rules, None, 0.0).is_some());
+        }
     }
 
     #[test]

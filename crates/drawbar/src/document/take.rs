@@ -80,7 +80,7 @@ pub struct Boxed {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Marked {
     pub regions: Vec<Mark>,
-    /// Each loop's frames, its end included.
+    /// Each loop's frames, its end the frame after its last, as a region's is.
     pub loops: Vec<Range<u32>>,
 }
 
