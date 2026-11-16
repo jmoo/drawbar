@@ -735,6 +735,18 @@ const MB: usize = 1 << 20;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const WEB_MOST_BYTES: usize = 120 * MB;
 
+/// Why drawbar-web works on no WAV of `len` bytes, where it is too large for the
+/// browser: opened, or built into a library. None on the desktop.
+pub(crate) fn web_refusal(len: usize) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    return too_large(len, WEB_MOST_BYTES);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = len;
+        None
+    }
+}
+
 /// Why a WAV of `len` bytes is not opened, where it is more than `most`.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn too_large(len: usize, most: usize) -> Option<String> {
@@ -779,10 +791,7 @@ struct Read {
 
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
-        #[cfg(target_arch = "wasm32")]
-        let refused = too_large(entity.bytes.len(), WEB_MOST_BYTES);
-        #[cfg(not(target_arch = "wasm32"))]
-        let refused = None;
+        let refused = web_refusal(entity.bytes.len());
         let too_large = refused.is_some();
         let source = match refused {
             Some(why) => Err(why),
@@ -1047,6 +1056,12 @@ impl State {
             .marked
             .as_ref()
             .is_ok_and(|marked| marked.regions.iter().any(|mark| mark.hit.is_some()))
+    }
+
+    /// Whether a library can be built from the take: it marks samples and its audio
+    /// reads, which on the web a take too large for the browser does not.
+    pub fn builds(&self) -> bool {
+        self.marks_samples() && self.read.source.is_ok()
     }
 
     /// Start Detect on the take, where its audio reads.

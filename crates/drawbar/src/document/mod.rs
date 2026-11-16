@@ -432,7 +432,7 @@ impl Document {
                 Some(held) if !viewing => header::Extras {
                     loud: Some(wav::detect_loud(held)),
                     limit: Some(held.detect.limit),
-                    piano: Some(held.marks_samples()),
+                    piano: Some(held.builds()),
                     ..header::Extras::default()
                 },
                 _ => extras(asset, device, workspace, pending),

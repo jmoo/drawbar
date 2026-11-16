@@ -24,7 +24,7 @@ use nord_format::formats::nsmpproj::{
 use nord_format::note;
 use nord_format::take::build as take_build;
 use nord_format::take::detect::Floor;
-use nord_format::wav::{Audio, Loop, Marks, Pcm16, Play, Region};
+use nord_format::wav::{Loop, Marks, Pcm16, Play};
 use nord_format::Entity;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -128,10 +128,15 @@ pub enum Heard {
     Take(Prepped),
 }
 
-/// A take marked with its strokes' regions.
+/// A take marked with its strokes' regions: its file, which the build decodes, and what
+/// the dialog shows of it, read without decoding its samples.
 pub struct Prepped {
-    audio: Audio,
+    /// The file, which only the build decodes.
+    bytes: Vec<u8>,
     marks: Marks,
+    /// Its rate and length in frames, as its container declares them.
+    rate: u32,
+    frames: u64,
     /// Whether its strokes are cleaned of its hum and hiss: unless its editor set it raw.
     clean: bool,
     /// How its noise floor is read before cleaning, as prep read it.
@@ -141,7 +146,10 @@ pub struct Prepped {
 }
 
 impl Prepped {
-    /// The take in `bytes`, if a region of it is labeled as a stroke.
+    /// The take in `bytes`, if a region of it is labeled as a stroke, its file left for
+    /// the caller to hand over. Refused where its settings do not read or state no kind
+    /// of instrument, as `nord piano build` refuses them, and on the web where it is too
+    /// large for the browser.
     fn of(bytes: &[u8]) -> Option<Result<Prepped, String>> {
         let marks = nord_format::wav::read_marks(bytes).ok()?;
         let labeled = marks.regions.iter().any(|region| {
@@ -155,14 +163,25 @@ impl Prepped {
             return None;
         }
         let read = || {
-            let audio = nord_format::wav::read(bytes).map_err(|e| e.to_string())?;
-            let settings = nord_format::wav::read_settings(bytes).unwrap_or_default();
+            if let Some(why) = crate::document::wav::web_refusal(bytes.len()) {
+                return Err(why);
+            }
+            let layout = nord_format::wav::layout(bytes).map_err(|e| e.to_string())?;
+            let settings = nord_format::wav::read_settings(bytes).map_err(|e| e.to_string())?;
+            let kind = match settings.kind.as_deref() {
+                Some(word) => Some(Kind::from_word(word).ok_or_else(|| {
+                    format!("states kind {word:?}, which is no kind of instrument")
+                })?),
+                None => None,
+            };
             Ok(Prepped {
-                audio,
+                bytes: Vec::new(),
                 marks,
+                rate: layout.format.rate,
+                frames: layout.frames() as u64,
                 clean: settings.clean != Some(false),
                 floor: settings.floor.unwrap_or_default(),
-                kind: settings.kind.as_deref().and_then(Kind::from_word),
+                kind,
             })
         };
         Some(read())
@@ -250,12 +269,18 @@ impl Take {
             Ok(Heard::Pcm(pcm)) => {
                 project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default()
             }
-            Ok(Heard::Take(take)) => {
-                project_frames(take.audio.frames() as u64, take.audio.rate).unwrap_or_default()
-            }
+            Ok(Heard::Take(take)) => project_frames(take.frames, take.rate).unwrap_or_default(),
             Err(_) => 0,
         };
-        let file = (making == Making::Project).then_some(bytes);
+        let mut source = source;
+        let file = match &mut source {
+            // A take's file goes to the build whole, so it is kept, not copied.
+            Ok(Heard::Take(take)) => {
+                take.bytes = bytes;
+                None
+            }
+            _ => (making == Making::Project).then_some(bytes),
+        };
         Take {
             path,
             file,
@@ -439,13 +464,15 @@ impl Draft {
         )
     }
 
-    /// The draft with the category the first picked take states, if one does.
+    /// The draft with the category its takes state, where they agree on one. The
+    /// category picked is the build's, as `nord piano build --kind` is, so takes that
+    /// disagree leave it as it was for the user to pick.
     fn stated(mut self) -> Draft {
-        if let Some(kind) = self
-            .takes
-            .iter()
-            .find_map(|take| take.prepped().and_then(|prepped| prepped.kind))
-        {
+        let mut kinds = (self.takes.iter())
+            .filter_map(|take| take.prepped()?.kind)
+            .collect::<Vec<_>>();
+        kinds.dedup();
+        if let [kind] = kinds[..] {
             self.kind = kind;
         }
         self
@@ -560,8 +587,7 @@ impl Draft {
                 })?;
                 marked.push(Marked {
                     path: take.path.clone(),
-                    audio: prepped.audio.clone(),
-                    marks: prepped.marks.clone(),
+                    bytes: wire::Handed::new(prepped.bytes.clone()),
                     clean: prepped.clean,
                     floor: prepped.floor,
                 });
@@ -774,14 +800,12 @@ struct Recorded {
     layer: u8,
 }
 
-/// A take marked with its strokes' regions, as a build reads it.
+/// A take marked with its strokes' regions, as a build reads it: its file, decoded by
+/// the build.
 #[derive(Serialize, Deserialize)]
 struct Marked {
     path: String,
-    #[serde(with = "audio")]
-    audio: Audio,
-    #[serde(with = "marks")]
-    marks: Marks,
+    bytes: wire::Handed,
     clean: bool,
     #[serde(with = "floor")]
     floor: Floor,
@@ -947,66 +971,6 @@ mod sample_loop {
     }
 }
 
-/// A take's audio, its samples as their little-endian bytes beside a message's text.
-mod audio {
-    use super::*;
-
-    pub fn serialize<S: Serializer>(audio: &Audio, serializer: S) -> Result<S::Ok, S::Error> {
-        let bytes = audio.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
-        (audio.rate, audio.channels, wire::Handed::new(bytes)).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Audio, D::Error> {
-        #[derive(Deserialize)]
-        struct Wire(u32, u16, #[serde(with = "wire::bytes")] Vec<u8>);
-        let Wire(rate, channels, bytes) = Wire::deserialize(deserializer)?;
-        let whole = bytes.chunks_exact(4);
-        if !whole.remainder().is_empty() {
-            return Err(serde::de::Error::custom("samples cut short"));
-        }
-        let samples = whole
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        Ok(Audio {
-            rate,
-            channels,
-            samples,
-        })
-    }
-}
-
-/// A take's regions and loops.
-mod marks {
-    use super::*;
-
-    pub fn serialize<S: Serializer>(marks: &Marks, serializer: S) -> Result<S::Ok, S::Error> {
-        let regions: Vec<(u32, u32, &str)> = marks
-            .regions
-            .iter()
-            .map(|r| (r.start, r.frames, r.label.as_str()))
-            .collect();
-        let loops: Vec<sample_loop::Wire> =
-            marks.loops.iter().copied().map(sample_loop::wire).collect();
-        (regions, loops).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Marks, D::Error> {
-        let (regions, loops) =
-            <(Vec<(u32, u32, String)>, Vec<sample_loop::Wire>)>::deserialize(deserializer)?;
-        Ok(Marks {
-            regions: regions
-                .into_iter()
-                .map(|(start, frames, label)| Region {
-                    start,
-                    frames,
-                    label,
-                })
-                .collect(),
-            loops: loops.into_iter().map(sample_loop::held).collect(),
-        })
-    }
-}
-
 /// A category, as the word `nord piano build --kind` takes.
 mod kind {
     use super::*;
@@ -1108,7 +1072,7 @@ impl Coding {
         };
         let (recordings, clipped) = match self.marked.is_empty() {
             true => recorded(&self.takes, progress)?,
-            false => marked(&self.marked, &donor, progress)?,
+            false => marked(self.marked, &donor, progress)?,
         };
         progress.say(format!("coding {} strokes…", recordings.len()));
         let library =
@@ -1157,7 +1121,7 @@ fn recorded(takes: &[Recorded], progress: &Progress) -> Result<(Vec<Recording>, 
 /// leveled, pitched out to every key, and each release at its balance under its attack.
 /// With the samples that saturated resampling them.
 fn marked(
-    takes: &[Marked],
+    takes: Vec<Marked>,
     donor: &Donor,
     progress: &Progress,
 ) -> Result<(Vec<Recording>, usize), String> {
@@ -1166,17 +1130,26 @@ fn marked(
         Donor::Rules(rules) => rules.version,
     };
     let leveled = matches!((donor, version), (Donor::Rules(_), Version::V6));
-    let inputs: Vec<take_build::Take> = takes
+    progress.say(format!("reading {} take(s)…", takes.len()));
+    let mut read = Vec::with_capacity(takes.len());
+    for take in takes {
+        let bytes = take.bytes.into_inner().unwrap_or_default();
+        let named = |e: nord_format::error::Error| format!("{}: {e}", take.path);
+        let audio = nord_format::wav::read(&bytes).map_err(named)?;
+        let marks = nord_format::wav::read_marks(&bytes).map_err(named)?;
+        read.push((take.path, audio, marks, take.clean, take.floor));
+    }
+    let inputs: Vec<take_build::Take> = read
         .iter()
-        .map(|take| take_build::Take {
-            file: &take.path,
-            audio: &take.audio,
-            marks: &take.marks,
-            clean: take.clean,
-            floor: take.floor,
+        .map(|(path, audio, marks, clean, floor)| take_build::Take {
+            file: path,
+            audio,
+            marks,
+            clean: *clean,
+            floor: *floor,
         })
         .collect();
-    progress.say(format!("cleaning {} take(s)…", takes.len()));
+    progress.say(format!("cleaning {} take(s)…", inputs.len()));
     let prepared = take_build::prepared(&inputs, version, leveled).map_err(|e| e.to_string())?;
     let count = prepared.len();
     let mut recordings = Vec::with_capacity(count);
@@ -1612,6 +1585,7 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 mod tests {
     use super::*;
     use nord_format::formats::npno::Loop;
+    use nord_format::wav::{Audio, Region};
 
     #[test]
     fn every_refusal_says_which_limit_it_hit() {
@@ -2248,6 +2222,60 @@ mod tests {
         assert_eq!(there.bytes, here.bytes, "the same file, to the byte");
         // the attack and its key-off, each also pitched down and up to reach the keys
         assert_eq!((here.strokes, here.roots), (6, 3));
+    }
+
+    /// The dialog builds a take as `nord piano build` does: nord-format's own steps, to
+    /// the byte.
+    #[test]
+    fn a_take_builds_as_nord_format_s_own_steps_build_it() {
+        let bytes = marked_take();
+        let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), bytes.clone())]).unwrap();
+        let built = draft
+            .coding(None)
+            .unwrap()
+            .code(&Progress::default())
+            .unwrap();
+
+        let audio = nord_format::wav::read(&bytes).unwrap();
+        let marks = nord_format::wav::read_marks(&bytes).unwrap();
+        let settings = nord_format::wav::read_settings(&bytes).unwrap();
+        let take = take_build::Take::stated("take.wav", &audio, &marks, &settings);
+        let kind = take_build::stated_kind([("take.wav", &settings)])
+            .unwrap()
+            .unwrap();
+        let rules = Rules {
+            loop_fade: kind.loop_fade(),
+            ..Rules::new(draft.version, kind)
+        };
+        let leveled = draft.version == Version::V6;
+        let recordings: Vec<Recording> = take_build::prepared(&[take], draft.version, leveled)
+            .unwrap()
+            .iter()
+            .map(|stroke| stroke.recording().unwrap().0)
+            .collect();
+        let library = build(
+            &Donor::Rules(rules),
+            &Options::new(&draft.name),
+            &recordings,
+        )
+        .unwrap();
+        let expected = nord_format::to_bytes(&Entity::Piano(library.to_piano().unwrap())).unwrap();
+        assert!(built.bytes == expected, "the same file, to the byte");
+    }
+
+    /// A take whose settings state no kind of instrument is refused, as the CLI refuses
+    /// it, not built as a grand.
+    #[test]
+    fn a_take_stating_no_known_kind_is_refused() {
+        let bytes = marked_take();
+        let settings = nord_format::wav::Settings {
+            kind: Some("theremin".into()),
+            ..Default::default()
+        };
+        let bytes = nord_format::wav::with_settings(&bytes, &settings).unwrap();
+        let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), bytes)]).unwrap();
+        let refused = draft.refusal().expect("refused");
+        assert!(refused.contains("no kind of instrument"), "{refused}");
     }
 
     #[test]
