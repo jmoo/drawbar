@@ -1,6 +1,8 @@
 //! The native entry. The wasm build starts at [`drawbar::start`] instead, called from
 //! `index.html`; this target exists so `cargo run -p drawbar` opens a window.
 
+#![windows_subsystem = "windows"]
+
 #[cfg(not(target_arch = "wasm32"))]
 use eframe::egui::ViewportBuilder;
 

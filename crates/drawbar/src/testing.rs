@@ -476,6 +476,29 @@ pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk
     Arc::new(indexed.expect("a piano or sample instrument is indexed"))
 }
 
+/// The bytes [`crate::rewrite::stream`] writes of `pieces` over `source`, and the ranges
+/// it read.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn streamed(
+    pieces: &crate::rewrite::Pieces,
+    source: &[u8],
+) -> (std::io::Result<Vec<u8>>, Vec<std::ops::Range<u64>>) {
+    let mut out = Vec::new();
+    let mut reads = Vec::new();
+    let read = async |range: std::ops::Range<u64>| {
+        reads.push(range.clone());
+        Ok(source[range.start as usize..range.end as usize].to_vec())
+    };
+    let write = async |at: u64, bytes: Vec<u8>| {
+        let at = at as usize;
+        out.resize(out.len().max(at + bytes.len()), 0);
+        out[at..at + bytes.len()].copy_from_slice(&bytes);
+        Ok(())
+    };
+    let wrote = nord_usb::block_on(crate::rewrite::stream(pieces, read, write));
+    (wrote.map(|()| out), reads)
+}
+
 /// An asset resting in `file`, restored as a library restores one, and its id. Its check
 /// is asked for, as opening or sending it asks.
 #[cfg(not(target_arch = "wasm32"))]

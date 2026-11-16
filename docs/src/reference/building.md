@@ -47,10 +47,11 @@ the house rules.
 | `corpus` | `nix build .#nord.all-corpus`, on `master` and in-repository pull requests |
 | `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
 
-On `master`, `release` publishes the crates, `telemetry` deploys the collector,
-and `pages` deploys drawbar.app. An optional `safari` workflow runs the browser
-suites in Safari when toshokan or drawbar's library changes. Cross targets are
-checked locally only.
+On `master`, `release` publishes the crates and attaches the Windows cross builds
+of drawbar and nord-cli to their GitHub releases, `telemetry` deploys the
+collector, and `pages` deploys drawbar.app. An optional `safari` workflow runs
+the browser suites in Safari when toshokan or drawbar's library changes. Other
+cross targets are checked locally only.
 
 ## Generated files
 

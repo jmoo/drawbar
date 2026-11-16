@@ -432,10 +432,7 @@ pub(super) fn locate(root: &Path, path: &str) -> io::Result<PathBuf> {
     while let Some(part) = parts.next() {
         // ⚠️ A `:` names a drive or a stream and a `\` separates folders, so either
         // can reach outside the library.
-        if let Some(why) = cfg!(windows)
-            .then(|| names::windows_refusal(part))
-            .flatten()
-        {
+        if let Some(why) = names::refused_here(part) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{part:?} is not a name Windows holds, since {why}"),
