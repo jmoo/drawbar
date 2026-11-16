@@ -16,11 +16,14 @@ first the loudest.
 
 A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
 of a folder holds its note for most of its length, so its floor is read on its rest
-instead: the mean level of the quietest half second where it stays level, at least
-40 dB under its loudest, digital silence left out. Only its loudest hit counts, and
-it starts with a hit where it is cut at the strike. A file that rests less than
-that has no floor to read: it is not held to the too-quiet limit, and the build
-finds no noise in it and builds it as recorded. `prep` notes in each file it writes
+instead: of the half seconds after its loudest frame, the quietest by median whose
+halves lie within 1 dB of each other, at least 10 dB under the loudest, mostly not
+digital silence, and with nothing 6 dB quieter after it, so a fade, zero padding, a
+slow decay or a plateau of the release is not taken for it. Only its loudest hit
+counts, and it starts with a hit where it is cut at the strike, standing 15 dB over
+its rest where it has one. A file with no rest has no floor to read: it is not held
+to the too-quiet limit, and the build finds no noise in it and builds it as
+recorded. A file of noise alone is as level as a held note, so it is taken for one. `prep` notes in each file it writes
 that its floor is read this way, and the build reads its noise the same way before
 cleaning it.
 

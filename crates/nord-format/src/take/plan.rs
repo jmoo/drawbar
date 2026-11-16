@@ -444,6 +444,73 @@ mod tests {
         }
     }
 
+    fn one_note() -> PlanOptions {
+        PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        }
+    }
+
+    /// A one-note file's floor is read on its rest however quiet the note: a C4 peaking
+    /// at -56 dB over -80 dB hiss, with 3 s of rest, stands 24 dB over it and is too
+    /// quiet.
+    #[test]
+    fn a_quiet_one_note_file_is_held_to_the_limit() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -56.0, 3.0)], -80.0);
+        let plan = plan(&x, rate, &one_note());
+        assert!(plan.rests);
+        assert!((plan.floor_db + 80.0).abs() < 2.0, "{}", plan.floor_db);
+        let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+        assert!(
+            matches!(fates.as_slice(), [Fate::TooQuiet { .. }]),
+            "{fates:?}"
+        );
+    }
+
+    /// A fade or zero padding after the rest does not move the floor read on it.
+    #[test]
+    fn a_fade_or_padding_after_the_rest_leaves_its_floor() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 3.0)], -80.0);
+        let faded = |seconds: f64| {
+            let mut y = x.clone();
+            let n = (seconds * f64::from(rate)) as usize;
+            let len = y.len();
+            for (i, v) in y[len - n..].iter_mut().enumerate() {
+                *v *= 1.0 - (i + 1) as f64 / n as f64;
+            }
+            y
+        };
+        let padded = [x.clone(), vec![0.0; rate as usize]].concat();
+        for (what, y) in [
+            ("as recorded", x.clone()),
+            ("a 30 ms fade", faded(0.03)),
+            ("a 200 ms fade", faded(0.2)),
+            ("zero padding", padded),
+        ] {
+            let plan = plan(&y, rate, &one_note());
+            assert!(plan.rests, "{what}");
+            assert!(
+                (plan.floor_db + 80.0).abs() < 2.0,
+                "{what}: {}",
+                plan.floor_db
+            );
+        }
+    }
+
+    /// A note dying 6 dB a second is no rest: over -110 dB hiss for 9 s, it never rests,
+    /// and is kept, not taken for too quiet over its own tail.
+    #[test]
+    fn a_slow_decay_is_no_rest() {
+        let rate = 35_002;
+        let x = take(rate, 9.0, &[(0.0, 60.0, -12.0, 9.0)], -110.0);
+        let plan = plan(&x, rate, &one_note());
+        assert!(!plan.rests, "a floor of {}", plan.floor_db);
+        let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+        assert!(matches!(fates.as_slice(), [Fate::Kept { .. }]), "{fates:?}");
+    }
+
     /// Only a one-note file starts with a hit: a take that starts mid-note does not.
     #[test]
     fn a_take_that_starts_mid_note_has_no_hit_at_its_start() {

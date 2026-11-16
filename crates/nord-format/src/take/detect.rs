@@ -55,9 +55,10 @@ pub enum Floor {
     /// them for far more than that.
     #[default]
     Take,
-    /// The mean level of the quietest [`QUIETEST`] seconds of its rest: a one-note file
-    /// holds its note for most of its length and may rest only after the key-up. One
-    /// that rests less than that has no floor to read, and its quietest frame stands in.
+    /// The median level of its rest, the quietest [`QUIETEST`] seconds after its note
+    /// has died that stay level: a one-note file holds its note for most of its length
+    /// and may rest only after the key-up. One with no rest has no floor to read, and
+    /// its quietest frame stands in.
     OneNote,
 }
 
@@ -69,14 +70,24 @@ pub const QUIETEST: f64 = 0.5;
 /// in dB under full scale: a tail faded to nothing is no rest to read noise on.
 pub const DIGITAL_SILENCE_DB: f64 = -150.0;
 
-/// A one-note file rests where its level stays within this of its quietest frame that
-/// is not digital silence, in dB.
-pub const REST_DB: f64 = 6.0;
+/// A one-note file rests over [`QUIETEST`] seconds whose halves' median levels differ by
+/// no more than this, in dB: level, where a note still dying 6 dB a second falls 1.5 dB
+/// between them. Chosen, not measured.
+pub const LEVEL_DB: f64 = 1.0;
 
-/// A one-note file's rest lies at least this far under its loudest frame, in dB: a
-/// stretch nearer is taken for the note, held or dying, whose noise cannot be told
-/// from it by level. Chosen, not measured.
-pub const REST_UNDER_DB: f64 = 40.0;
+/// A one-note file's rest lies at least this far under its loudest frame, in dB, so its
+/// note has died: a held note is as level as a rest. A file of noise alone is as level
+/// as a held note, so it has no rest either, and is taken for one. Chosen, not measured.
+pub const FALL_DB: f64 = 10.0;
+
+/// No half of [`QUIETEST`] seconds after a one-note file's rest lies this far under it,
+/// in dB: a level stretch the note still falls from, a plateau of its release, is not
+/// its rest. Chosen, not measured.
+pub const LATER_FALL_DB: f64 = 6.0;
+
+/// The least share of a rest's frames that are not digital silence: a tail faded or
+/// padded to nothing is no rest to read noise on.
+const HEARD_SHARE: f64 = 0.9;
 
 impl Envelope {
     pub fn of(x: &[f64], rate: u32) -> Envelope {
@@ -104,7 +115,7 @@ impl Envelope {
         match self.floor {
             Floor::Take => percentile(&self.db, 10.0),
             Floor::OneNote => match self.rest() {
-                Some(rest) => quietest_mean(&self.db[rest], frames(QUIETEST).max(1)),
+                Some(rest) => median(&self.heard(rest)),
                 None => self.quietest_heard().unwrap_or(SILENT_DB),
             },
         }
@@ -125,40 +136,67 @@ impl Envelope {
             .reduce(f64::min)
     }
 
-    /// The longest run of frames within [`REST_DB`] of its quietest heard frame, none
-    /// digital silence, where it lasts at least [`QUIETEST`] seconds and lies
-    /// [`REST_UNDER_DB`] under its loudest frame.
+    /// The levels of the frames over `frames` that are not digital silence.
+    fn heard(&self, frames: std::ops::Range<usize>) -> Vec<f64> {
+        (self.db[frames].iter().copied())
+            .filter(|&d| d > DIGITAL_SILENCE_DB)
+            .collect()
+    }
+
+    /// Its rest: of the [`QUIETEST`] seconds after its loudest frame, the quietest by
+    /// median that stay level, as [`LEVEL_DB`] says, lie [`FALL_DB`] under the loudest,
+    /// are mostly not digital silence, and are not fallen from later, as
+    /// [`LATER_FALL_DB`] says. Medians, so a fade, a click or the filter's ringing into
+    /// zero padding moves none of it.
     fn rest(&self) -> Option<std::ops::Range<usize>> {
-        let loudest = self.db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let under = (self.quietest_heard()? + REST_DB).min(loudest - REST_UNDER_DB);
-        let mut best = 0..0;
-        let mut from = None;
-        for (i, &d) in self.db.iter().chain([f64::INFINITY].iter()).enumerate() {
-            match (d > DIGITAL_SILENCE_DB && d < under, from) {
-                (true, None) => from = Some(i),
-                (false, Some(start)) => {
-                    if i - start > best.len() {
-                        best = start..i;
-                    }
-                    from = None;
+        let span = frames(QUIETEST).max(2);
+        let (loudest_at, loudest) =
+            (self.db.iter().copied().enumerate()).fold((0, f64::NEG_INFINITY), |most, (i, d)| {
+                match d > most.1 {
+                    true => (i, d),
+                    false => most,
                 }
-                _ => {}
+            });
+        let step = (span / 5).max(1);
+        // The median of each half span from each step after the loudest frame, so how far
+        // the file falls after a window is read once.
+        let halves: Vec<(usize, f64)> = (loudest_at..self.db.len().saturating_sub(span / 2))
+            .step_by(step)
+            .filter_map(|at| {
+                let heard = self.heard(at..at + span / 2);
+                (!heard.is_empty()).then(|| (at, median(&heard)))
+            })
+            .collect();
+        let falls_after = |window: &std::ops::Range<usize>, level: f64| {
+            (halves.iter()).any(|&(at, half)| at >= window.end && half < level - LATER_FALL_DB)
+        };
+        let mut best: Option<(f64, std::ops::Range<usize>)> = None;
+        let mut from = loudest_at;
+        while from + span <= self.db.len() {
+            let window = from..from + span;
+            from += step;
+            let (first, second) = (
+                self.heard(window.start..window.start + span / 2),
+                self.heard(window.start + span / 2..window.end),
+            );
+            if ((first.len() + second.len()) as f64) < HEARD_SHARE * span as f64
+                || first.is_empty()
+                || second.is_empty()
+            {
+                continue;
+            }
+            let level = median(&self.heard(window.clone()));
+            let flat = (median(&first) - median(&second)).abs() <= LEVEL_DB;
+            if flat
+                && level <= loudest - FALL_DB
+                && best.as_ref().is_none_or(|(b, _)| level < *b)
+                && !falls_after(&window, level)
+            {
+                best = Some((level, window));
             }
         }
-        (best.len() >= frames(QUIETEST).max(1)).then_some(best)
+        best.map(|(_, window)| window)
     }
-}
-
-/// The lowest mean power of any `span` frames running of `db`, in dB, or of all of
-/// them when there are fewer.
-fn quietest_mean(db: &[f64], span: usize) -> f64 {
-    let power: Vec<f64> = db.iter().map(|&d| 10f64.powf(d / 10.0)).collect();
-    let span = span.min(power.len());
-    let lowest = power
-        .windows(span)
-        .map(|w| w.iter().sum::<f64>() / span as f64)
-        .fold(f64::INFINITY, f64::min);
-    10.0 * lowest.log10()
 }
 
 /// The `p`th percentile of `values`, interpolated between the nearest two.
@@ -193,7 +231,9 @@ pub fn highpassed(x: &[f64], rate: u32) -> Vec<f64> {
 ///
 /// A one-note file whose level comes within [`RISE_DB`] of its loudest in its first
 /// [`LOOKBACK`] starts with a hit there: a sample set's files are cut at or just before
-/// the strike, with too little before it to rise from. A take of many notes does not.
+/// the strike, with too little before it to rise from. Where it rests, that start
+/// stands [`RISE_DB`] over its rest too, so a file of noise alone has none. A take of
+/// many notes does not.
 pub fn onsets(env: &Envelope) -> Vec<usize> {
     let db = &env.db;
     let floor = env.floor();
@@ -201,9 +241,13 @@ pub fn onsets(env: &Envelope) -> Vec<usize> {
     let mut found: Vec<(usize, f64)> = Vec::new();
     if env.floor == Floor::OneNote {
         let loudest = db.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let over = match env.rests() {
+            true => floor + RISE_DB,
+            false => DIGITAL_SILENCE_DB,
+        };
         let start = db[..back.min(db.len())]
             .iter()
-            .position(|&d| d > DIGITAL_SILENCE_DB && d >= loudest - RISE_DB);
+            .position(|&d| d > over && d >= loudest - RISE_DB);
         if let Some(start) = start {
             let to = (start + hold).min(db.len());
             let level = db[start..to]
