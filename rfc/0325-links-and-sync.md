@@ -214,6 +214,9 @@ bundle unpacked into the library exports again with what its programs play.
 - History is eight checksums and no bytes. A slot holding a version older than those
   reads as changed on the keyboard. Turning a `↓` row to `↑`, or picking the file on a
   both-changed row, discards the keyboard's version.
+- A file older than its link reads as newer than its slot. That is right for a file
+  put back by undo, and wrong for one a sync client has not delivered yet when the
+  link another drawbar wrote for it arrives first.
 - A change made at the panel while drawbar is attached shows at the next Sync press,
   or as a refused write.
 - Every press reads every list. That is quick on an Electro 5 and unmeasured on
@@ -271,6 +274,8 @@ come back because its file still exists.
 - A bounded store of version bytes, which would give Restore and an undo for a write
   to the keyboard.
 - Noticing panel changes while attached, by a read when idle.
+- Telling an undelivered file from an edit, by whether the file holds what the
+  library last recorded for it.
 - Bundle export resolving a set list's programs through links; it uses the slot in
   each program's header.
 - Bringing a piano or sample in from the keyboard.
