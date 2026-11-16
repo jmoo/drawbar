@@ -543,17 +543,22 @@ fn a_tag_whose_history_leaves_the_folder_is_said_to_be_no_drawbars_change() {
     here.refresh();
     let said = here.said("Another drawbar");
     let away = Temp::new();
-    for (n, path) in entries(&root).difference(&before).enumerate() {
+    let after = entries(&root);
+    let made: Vec<_> = after.difference(&before).collect();
+    assert!(!made.is_empty(), "the tag is in a log of its own");
+    for (n, path) in made.into_iter().enumerate() {
         fs::rename(path, away.at(&n.to_string())).unwrap();
     }
     here.refocus();
     let transcript = here.bench.log.transcript();
+    let file = here.named("Strings.ne5p");
+    assert!(here.worn(file).is_empty(), "{transcript}");
     assert_eq!(here.said("Another drawbar"), said, "{transcript}");
 }
 
 /// The entries of the writers of the library at `root`.
 fn entries(root: &Temp) -> std::collections::BTreeSet<std::path::PathBuf> {
-    let writers = fs::read_dir(root.at(".drawbar/writers.2"))
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2"))
         .into_iter()
         .flatten();
     let entries = writers
