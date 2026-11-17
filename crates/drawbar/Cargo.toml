@@ -25,7 +25,6 @@ path = "src/main.rs"
 # and every browser with WebUSB has WebGL2.
 eframe = { version = "0.32", default-features = false, features = [
   "glow",
-  "persistence",
   "wayland",
   "x11",
 ] }
@@ -39,7 +38,7 @@ nord-format = { path = "../nord-format", version = "0.9.0", features = [
 rfd = { version = "0.15", features = ["file-handle-inner"] }
 # The list drawbar 0.10 kept in eframe's store, read once. ron already builds it.
 base64 = "0.22"
-# Drafts of edits, and the recent libraries. eframe's `persistence` already builds both.
+# Drafts of edits, and the recent libraries. eframe's `persistence` builds it on the desktop.
 ron = "0.10"
 serde = { version = "1", features = ["derive", "rc"] }
 # Unsaved edits' headers, and the messages between the page and the browser library's
@@ -70,6 +69,11 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 wasm-bindgen-test = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `persistence` keeps eframe's store in `app.ron`. In a browser the store is local storage
+# without it, and the feature would add only saving egui's own memory.
+eframe = { version = "0.32", default-features = false, features = [
+  "persistence",
+] }
 # MIDI input only. drawbar opens no output port.
 midir = "0.11"
 nord-usb = { path = "../nord-usb", version = "0.9.0", features = [
