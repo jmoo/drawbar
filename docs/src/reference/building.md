@@ -66,6 +66,10 @@ drawbar suite fails until the matching script is re-run.
   in the script's table and re-run it, or add one when the text uses a character
   no face draws.
 
+`scripts/fonts.py` writes the Ubuntu and Hack faces drawbar bundles, keeping
+only what egui reads. It takes the released font files as arguments and refuses
+any whose SHA-256 differs from the release's.
+
 ## Build by hand
 
 Cargo needs stable Rust, and on Linux the ALSA headers and `pkg-config`.

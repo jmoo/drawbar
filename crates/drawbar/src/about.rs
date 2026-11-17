@@ -111,7 +111,7 @@ const NOTICES: &[Notice] = &[
         text: include_str!("../assets/icons/LICENSE"),
     },
     Notice {
-        covers: "Ubuntu Regular and Bold",
+        covers: "Ubuntu derivative drawbar Regular and Bold",
         holder: "Copyright 2011 Canonical Ltd.",
         page: "https://design.ubuntu.com/font",
         source: Some("Ubuntu font family 0.83"),
