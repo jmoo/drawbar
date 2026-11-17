@@ -3598,7 +3598,7 @@ mod tests {
             "C4 v22",
             "G4 v00",
             take::WHOLE,
-            "2 samples · 3 regions · 0 loops",
+            "2 hits · 3 regions · 0 loops",
         ] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
@@ -3617,7 +3617,7 @@ mod tests {
             Some(2 * 35_002 * 20),
             "Play plays the picked hit: G4 v00, 20 s of stereo"
         );
-        for shown in ["SAMPLE", hit::WHOLE, wav::PLAY_HIT] {
+        for shown in ["HIT", hit::WHOLE, wav::PLAY_ORIGINAL] {
             assert!(said.iter().any(|word| word == shown), "{shown}: {said:?}");
         }
         assert_eq!(
@@ -3749,9 +3749,9 @@ mod tests {
         assert!(open.words().iter().any(|word| word == "Reed piano"));
         let said = open.painted(Vec::new());
         for shown in [
-            wav::PLAY_HIT,
+            wav::PLAY_ORIGINAL,
             audition::CLEAN_AUDIO,
-            audition::PLAY_SAMPLE,
+            audition::PLAY_HIT,
             audition::LOOP_WRAP,
             audition::RELEASE_ALONE,
         ] {

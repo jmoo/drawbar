@@ -35,7 +35,7 @@ const WRAP: usize = 2;
 const RELEASE: usize = 3;
 
 /// The labels of the card's controls.
-pub const PLAY_SAMPLE: &str = "Play sample";
+pub const PLAY_HIT: &str = "Play hit";
 pub const LOOP_WRAP: &str = "Loop wrap";
 pub const RELEASE_ALONE: &str = "Release";
 
@@ -65,7 +65,7 @@ const WRAP_MOST: f64 = 30.0;
 /// nothing played twice, which would be heard as a click.
 const SPLICE_LEAD: f64 = 0.02;
 
-/// The longest press of Play sample that is a click, in seconds: let go sooner, the
+/// The longest press of Play hit that is a click, in seconds: let go sooner, the
 /// key is held on through the whole sample, as [`Sounding::tapped`] says.
 const TAP_MOST: f64 = 0.3;
 
@@ -275,7 +275,7 @@ impl Sounding {
         out
     }
 
-    /// Where a click of Play sample lets the key go, in frames: once the loop has gone
+    /// Where a click of Play hit lets the key go, in frames: once the loop has gone
     /// round once after the attack's end, so the whole sample, its loop and its key-off
     /// are heard; at the end of an attack without a loop.
     pub fn tapped(&self) -> usize {
@@ -319,7 +319,7 @@ impl Sounding {
 pub struct Audition {
     /// The sample sounding while its key is down, and what it plays.
     held: Option<(Sounding, Vec<f32>)>,
-    /// Whether Play sample is held down.
+    /// Whether Play hit is held down.
     pressed: bool,
     /// Whether a control was pressed while the take's noise is still being found, so
     /// the wait is said.
@@ -430,12 +430,12 @@ impl Audition {
 /// What the card asks the player to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
-    /// Play sample went down: the key is held.
+    /// Play hit went down: the key is held.
     Hold,
-    /// Play sample came up: the key is let go, or, after a click, held on through the
+    /// Play hit came up: the key is let go, or, after a click, held on through the
     /// whole sample.
     LetGo,
-    /// Stop the sample a click of Play sample is playing.
+    /// Stop the hit a click of Play hit is playing.
     Stop,
     /// Start or stop the loop's wrap.
     Wrap,
@@ -490,12 +490,12 @@ pub fn controls(
     let audition = &mut state.audition;
     audition.waiting &= finding;
     let accent = app::accent(ui.visuals());
-    // Sounding with the key up: a click's whole sample, or a key-off. Play sample stops
+    // Sounding with the key up: a click's whole hit, or a release. Play hit stops
     // it, as Play original and Loop wrap stop theirs.
     let sounding = !audition.pressed && played(HELD).is_some();
     let (label, glyph) = match sounding {
         true => ("Stop", Glyph::X),
-        false => (PLAY_SAMPLE, Glyph::Piano),
+        false => (PLAY_HIT, Glyph::Piano),
     };
     let play = super::sample::action_response(ui, label, glyph, accent);
     // ⚠️ The press and let-go are the pointer's own, not the button's: egui stops
@@ -517,7 +517,7 @@ pub fn controls(
         ui.ctx().request_repaint();
     }
     let rect = play.rect;
-    play.on_hover_text(PLAY_SAMPLE_HINT);
+    play.on_hover_text(PLAY_HIT_HINT);
     let mut toggle = |label: &str, glyph: Glyph, zone: usize, there: bool| {
         let (label, glyph) = match played(zone).is_some() {
             true => ("Stop", Glyph::X),
@@ -589,8 +589,8 @@ pub fn not_cleaned(why: &str) -> String {
 /// What a control pressed while the take's noise is being found says.
 pub const NOISE_WAIT: &str = "Generating the noise profile, please wait…";
 
-/// What Play sample does, on hover.
-pub const PLAY_SAMPLE_HINT: &str = "As the instrument plays it";
+/// What Play hit does, on hover.
+pub const PLAY_HIT_HINT: &str = "As the instrument plays it";
 
 /// The clock `sounding` plays at on the player, against the codec's rate.
 fn clock(sounding: &Sounding) -> f32 {

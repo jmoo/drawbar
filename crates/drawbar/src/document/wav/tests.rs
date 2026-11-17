@@ -467,7 +467,7 @@ fn pieces_are_added_and_deleted_in_the_marks() {
     assert!(outside.is_err(), "a loop outside its attack");
 
     let delete = |piece: &str| set(format!("{DELETED}069-b0-v22/{piece}"), "");
-    let (keyless, _) = apply(&out, &out, &[delete("key-off")]).unwrap();
+    let (keyless, _) = apply(&out, &out, &[delete("release")]).unwrap();
     let marks = wav::read_marks(&keyless).unwrap();
     assert!(!marks
         .regions
@@ -476,7 +476,7 @@ fn pieces_are_added_and_deleted_in_the_marks() {
     assert_eq!(marks.loops.len(), 2);
     let (loopless, _) = apply(&out, &out, &[delete("loop")]).unwrap();
     assert_eq!(wav::read_marks(&loopless).unwrap().loops.len(), 1);
-    let (gone, _) = apply(&out, &out, &[delete("note")]).unwrap();
+    let (gone, _) = apply(&out, &out, &[delete("hit")]).unwrap();
     let marks = wav::read_marks(&gone).unwrap();
     assert!(marks
         .regions

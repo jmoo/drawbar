@@ -50,10 +50,10 @@ pub(super) fn renamed(
 ) -> Result<wav::Marks, String> {
     let from = take::mark(label, 0..0)
         .hit
-        .ok_or_else(|| format!("{path}: names no sample"))?;
+        .ok_or_else(|| format!("{path}: names no hit"))?;
     let to = take::mark(to, 0..0)
         .hit
-        .ok_or_else(|| format!("{path}: {to} names no sample"))?;
+        .ok_or_else(|| format!("{path}: {to} names no hit"))?;
     let mut out = marks.clone();
     if from == to {
         return Ok(out);
@@ -94,9 +94,9 @@ pub(super) fn renamed(
 /// The word a [`DELETED`] path names `piece` by.
 pub(super) fn piece_slug(piece: hit::Piece) -> &'static str {
     match piece {
-        hit::Piece::Note => "note",
+        hit::Piece::Hit => "hit",
         hit::Piece::Loop => "loop",
-        hit::Piece::KeyOff => "key-off",
+        hit::Piece::Release => "release",
     }
 }
 
@@ -174,10 +174,10 @@ pub(super) fn pieced(
     let mut deleted = || {
         let (label, piece) = rest
             .rsplit_once('/')
-            .ok_or_else(|| format!("{path}: names no piece of a sample"))?;
+            .ok_or_else(|| format!("{path}: names no piece of a hit"))?;
         let hit = take::mark(label, 0..0)
             .hit
-            .ok_or_else(|| format!("{path}: names no sample"))?;
+            .ok_or_else(|| format!("{path}: names no hit"))?;
         let cuts = hit::Cuts::of(&take::Marked::from_marks(marks), hit);
         // The sample's own loop, as the lanes pair it: never a neighbor's its attack has
         // grown over.
@@ -190,19 +190,15 @@ pub(super) fn pieced(
             mark.hit == Some(hit) && part.is_none_or(|part| mark.part == part)
         };
         match piece {
-            "note" => {
+            "hit" => {
                 out.regions.retain(|region| !of(region, None));
                 out.loops.retain(|found| !inside(found));
             }
             "loop" => out.loops.retain(|found| !inside(found)),
-            "key-off" => out
+            "release" => out
                 .regions
                 .retain(|region| !of(region, Some(take::Part::Release))),
-            _ => {
-                return Err(format!(
-                    "{path}: {piece} is not a note, a loop or a key-off"
-                ))
-            }
+            _ => return Err(format!("{path}: {piece} is not a hit, a loop or a release")),
         }
         Ok(out.clone())
     };
