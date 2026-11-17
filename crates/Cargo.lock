@@ -2186,6 +2186,7 @@ name = "nord-format"
 version = "0.9.0"
 dependencies = [
  "crcxx",
+ "flate2",
  "libtest-mimic",
  "nord-bits-derive",
  "serde_json",
