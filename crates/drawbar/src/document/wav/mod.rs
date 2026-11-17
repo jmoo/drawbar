@@ -413,6 +413,8 @@ struct Read {
     /// or why they do not read.
     marks: Result<wav::Marks, String>,
     marked: Result<take::Marked, String>,
+    /// The hits `marked` marks, in take order, for the arrows that step through them.
+    order: Vec<take::Hit>,
     /// What the take states about its build, nothing where it states nothing or its
     /// settings do not read.
     settings: wav::Settings,
@@ -431,6 +433,7 @@ impl Default for Read {
             too_large: false,
             marks: Err(String::new()),
             marked: Err(String::new()),
+            order: Vec::new(),
             settings: wav::Settings::default(),
             summary: take::Summary::default(),
             drawn: take::Drawn::default(),
@@ -444,12 +447,14 @@ impl Read {
     /// the audio, its summary and the lanes drawn of it kept.
     fn again(entity: &LocalEntity, old: Read) -> Read {
         let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
+        let marked = marks
+            .as_ref()
+            .map(take::Marked::from_marks)
+            .map_err(Clone::clone);
         Read {
             stamp: entity.stamp,
-            marked: marks
-                .as_ref()
-                .map(take::Marked::from_marks)
-                .map_err(Clone::clone),
+            order: marked.as_ref().map(take::Marked::order).unwrap_or_default(),
+            marked,
             marks,
             settings: wav::read_settings(&entity.bytes).unwrap_or_default(),
             ..old
@@ -466,15 +471,17 @@ impl Read {
                 .and_then(heard_rate),
         };
         let marks = wav::read_marks(&entity.bytes).map_err(|e| e.to_string());
+        let marked = marks
+            .as_ref()
+            .map(take::Marked::from_marks)
+            .map_err(Clone::clone);
         Read {
             stamp: entity.stamp,
             too_large,
+            order: marked.as_ref().map(take::Marked::order).unwrap_or_default(),
             summary: source.as_ref().map(take::Summary::of).unwrap_or_default(),
             source,
-            marked: marks
-                .as_ref()
-                .map(take::Marked::from_marks)
-                .map_err(Clone::clone),
+            marked,
             marks,
             settings: wav::read_settings(&entity.bytes).unwrap_or_default(),
             drawn: take::Drawn::default(),
@@ -1024,7 +1031,7 @@ fn steps(ui: &mut egui::Ui, state: &mut State) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // ⚠️ Right to left: the later arrow is added first.
         for (word, hint, forward) in [("→", AFTER, true), ("←", BEFORE, false)] {
-            let next = state.view.beside(marked, forward);
+            let next = state.view.beside(&state.read.order, forward);
             if ui
                 .add_enabled(next.is_some(), egui::Button::new(word).small())
                 .on_hover_text(hint)

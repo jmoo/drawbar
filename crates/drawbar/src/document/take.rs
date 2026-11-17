@@ -179,6 +179,11 @@ impl Marked {
         )
     }
 
+    /// Its hits in take order, as the lane boxes them.
+    pub fn order(&self) -> Vec<Hit> {
+        self.boxes().iter().filter_map(|boxed| boxed.hit).collect()
+    }
+
     /// What the lane draws: a box around each hit's regions, named by its attack, and
     /// one around each region that names no stroke, in take order.
     pub fn boxes(&self) -> Vec<Boxed> {
@@ -343,15 +348,11 @@ impl View {
         self.span = (span.end - span.start < total).then_some(span);
     }
 
-    /// The sample after the one picked in `marked`, in take order, or before it where
-    /// not `forward`: the first or the last where none is picked, and none past either
-    /// end.
-    pub fn beside(&self, marked: &Marked, forward: bool) -> Option<Hit> {
-        let mut hits: Vec<Hit> = marked
-            .boxes()
-            .iter()
-            .filter_map(|boxed| boxed.hit)
-            .collect();
+    /// The hit after the one picked among `hits`, in take order as [`Marked::order`]
+    /// gives them, or before it where not `forward`: the first or the last where none
+    /// is picked, and none past either end.
+    pub fn beside(&self, hits: &[Hit], forward: bool) -> Option<Hit> {
+        let mut hits: Vec<Hit> = hits.to_vec();
         if !forward {
             hits.reverse();
         }
@@ -1081,25 +1082,29 @@ mod tests {
         };
         let (total, rate) = (400_000.0, 44_100.0);
         let mut view = View::default();
-        let first = view.beside(&marked, true).unwrap();
-        let last = view.beside(&marked, false).unwrap();
+        let first = view.beside(&marked.order(), true).unwrap();
+        let last = view.beside(&marked.order(), false).unwrap();
         assert_ne!(first, last, "none picked: → the first, ← the last");
         view.show(0.0, 150_000.0, total, rate);
         view.pick(first, &marked, total, rate);
         assert_eq!(view.span, Some(0.0..150_000.0), "in view: the lane stays");
         assert_eq!(
-            view.beside(&marked, false),
+            view.beside(&marked.order(), false),
             None,
             "nothing before the first"
         );
-        let second = view.beside(&marked, true).unwrap();
+        let second = view.beside(&marked.order(), true).unwrap();
         view.pick(second, &marked, total, rate);
         let shown = view.shown(total);
         assert!(
             shown.start <= 300_000.0 && 301_000.0 <= shown.end,
             "{shown:?}"
         );
-        assert_eq!(view.beside(&marked, true), None, "nothing after the last");
+        assert_eq!(
+            view.beside(&marked.order(), true),
+            None,
+            "nothing after the last"
+        );
     }
 
     #[test]
