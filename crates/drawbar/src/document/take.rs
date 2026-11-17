@@ -339,14 +339,8 @@ impl View {
     /// Show `from` to `to`, held to the take and to the narrowest span, of a take of
     /// `total` frames at `rate`.
     fn show(&mut self, from: f64, to: f64, total: f64, rate: f64) {
-        let span = (to - from).clamp((NARROWEST * rate).min(total), total);
-        self.span = match span >= total {
-            true => None,
-            false => {
-                let from = from.clamp(0.0, total - span);
-                Some(from..from + span)
-            }
-        };
+        let span = held(from, to, total, rate, NARROWEST);
+        self.span = (span.end - span.start < total).then_some(span);
     }
 
     /// The sample after the one picked in `marked`, in take order, or before it where
@@ -388,11 +382,30 @@ impl View {
 
     /// Show `factor` times the span in view, about its middle.
     fn zoom(&mut self, factor: f64, total: f64, rate: f64) {
-        let shown = self.shown(total);
-        let middle = (shown.start + shown.end) / 2.0;
-        let half = (shown.end - shown.start) * factor / 2.0;
-        self.show(middle - half, middle + half, total, rate);
+        let zoomed = zoomed(&self.shown(total), factor);
+        self.show(zoomed.start, zoomed.end, total, rate);
     }
+}
+
+/// `from` to `to` held to a take of `total` frames at `rate`: inside it, and no
+/// narrower than `narrowest` seconds. Both lanes show their spans so.
+pub(super) fn held(from: f64, to: f64, total: f64, rate: f64, narrowest: f64) -> Range<f64> {
+    let span = (to - from).clamp((narrowest * rate).min(total), total);
+    let from = from.clamp(0.0, total - span);
+    from..from + span
+}
+
+/// `shown` made `factor` times as wide about its middle.
+pub(super) fn zoomed(shown: &Range<f64>, factor: f64) -> Range<f64> {
+    let middle = (shown.start + shown.end) / 2.0;
+    let half = (shown.end - shown.start) * factor / 2.0;
+    middle - half..middle + half
+}
+
+/// `shown` moved as a drag of `dx` points across a lane `width` points wide moves it.
+pub(super) fn panned(shown: &Range<f64>, dx: f32, width: f32) -> Range<f64> {
+    let shift = -f64::from(dx / width) * (shown.end - shown.start);
+    shown.start + shift..shown.end + shift
 }
 
 /// `m:ss`, or `m:ss.s` to `decimals`.
@@ -531,8 +544,8 @@ pub fn ui(
         })
     };
     if response.dragged() && response.drag_delta().x != 0.0 {
-        let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
-        view.show(shown.start + shift, shown.end + shift, total, rate);
+        let moved = panned(&shown, response.drag_delta().x, rect.width());
+        view.show(moved.start, moved.end, total, rate);
     }
     if response.clicked() {
         if let Some(at) = response.interact_pointer_pos() {
@@ -849,6 +862,19 @@ fn scroll(ui: &mut egui::Ui, view: &mut View, total: f64, rate: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lane's span stays inside the take and no narrower than its least, zooms about
+    /// its middle, and moves with a drag.
+    #[test]
+    fn a_lane_s_span_is_held_zoomed_and_panned() {
+        let rate = 1000.0;
+        assert_eq!(held(-50.0, 1000.0, 10_000.0, rate, 3.0), 0.0..3000.0);
+        assert_eq!(held(9000.0, 9500.0, 10_000.0, rate, 3.0), 7000.0..10_000.0);
+        assert_eq!(held(0.0, 20.0, 10_000.0, rate, 0.05), 0.0..50.0);
+        assert_eq!(held(0.0, 20_000.0, 10_000.0, rate, 3.0), 0.0..10_000.0);
+        assert_eq!(zoomed(&(1000.0..2000.0), 0.5), 1250.0..1750.0);
+        assert_eq!(panned(&(1000.0..2000.0), -50.0, 100.0), 1500.0..2500.0);
+    }
 
     fn frames(mark: &Mark) -> (Part, Option<Hit>, &str) {
         (mark.part, mark.hit, mark.text.as_str())

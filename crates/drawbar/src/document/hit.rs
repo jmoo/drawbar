@@ -401,9 +401,7 @@ impl Close {
 
     /// Show `from` to `to`, held to the take and to the narrowest span.
     fn show(&mut self, from: f64, to: f64, total: f64, rate: f64) {
-        let span = (to - from).clamp((NARROWEST * rate).min(total), total);
-        let from = from.clamp(0.0, total - span);
-        self.span = Some(from..from + span);
+        self.span = Some(take::held(from, to, total, rate, NARROWEST));
     }
 
     /// What the lane shows about `place`, clicked where no sample is: the frames in
@@ -421,9 +419,8 @@ impl Close {
     }
 
     fn zoom_shown(&mut self, factor: f64, shown: Range<f64>, total: f64, rate: f64) {
-        let middle = (shown.start + shown.end) / 2.0;
-        let half = (shown.end - shown.start) * factor / 2.0;
-        self.show(middle - half, middle + half, total, rate);
+        let zoomed = take::zoomed(&shown, factor);
+        self.show(zoomed.start, zoomed.end, total, rate);
     }
 
     /// Show the loop, with half its length each side, and at least 20 ms.
@@ -638,9 +635,8 @@ fn placed(
         ui.allocate_exact_size(egui::vec2(width, HEIGHT), egui::Sense::click_and_drag());
     let shown = close.about(place, total, rate);
     if response.dragged() && response.drag_delta().x != 0.0 {
-        let span = shown.end - shown.start;
-        let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
-        close.show(shown.start + shift, shown.end + shift, total, rate);
+        let moved = take::panned(&shown, response.drag_delta().x, rect.width());
+        close.show(moved.start, moved.end, total, rate);
     }
     let shown = close.about(place, total, rate);
     let painter = ui.painter_at(rect);
@@ -855,8 +851,8 @@ pub fn ui(
                 }
             }
             (None, _) if response.drag_delta().x != 0.0 => {
-                let shift = -f64::from(response.drag_delta().x / rect.width()) * span;
-                close.show(shown.start + shift, shown.end + shift, total, rate);
+                let moved = take::panned(&shown, response.drag_delta().x, rect.width());
+                close.show(moved.start, moved.end, total, rate);
             }
             _ => {}
         }
