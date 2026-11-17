@@ -30,9 +30,6 @@ eframe = { version = "0.32", default-features = false, features = [
   "x11",
 ] }
 egui_extras = { version = "0.32", default-features = false, features = ["svg"] }
-# Hack alone, for the monospace family. eframe's `default_fonts` would add it with
-# Ubuntu Light and two emoji faces; `app::fonts` names the faces it wants instead.
-epaint_default_fonts = "0.32"
 nord-format = { path = "../nord-format", version = "0.9.0", features = [
   "bundle",
 ] }

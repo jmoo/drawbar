@@ -251,12 +251,6 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
-                notice: "Copyright (c) 2014 John Slegers",
-                crates: &[
-                    "epaint_default_fonts 0.32.3",
-                ],
-            },
-            Holder {
                 notice: "Copyright (c) 2014 Mathijs van de Nes",
                 crates: &[
                     "zip 9.0.5",
@@ -1310,7 +1304,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("enumflags2_derive", "0.7.12"),
     ("enumn", "0.1.14"),
     ("epaint", "0.32.3"),
-    ("epaint_default_fonts", "0.32.3"),
     ("equivalent", "1.0.2"),
     ("errno", "0.3.14"),
     ("error-code", "3.3.2"),
