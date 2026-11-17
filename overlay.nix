@@ -426,13 +426,14 @@ let
           wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
             target/wasm32-unknown-unknown/web/drawbar.wasm
 
-          # ⚠️ `-O1`, not `-Oz`: Pages serves this gzipped, and every level above `-O1`
-          # trades away the repetition gzip lives on, so what the browser downloads grows
-          # even as the file shrinks. rustc emits no `target_features` section, so the two
-          # features its output uses are named here.
+          # ⚠️ Pages serves this gzipped, and inlining a function into its only caller
+          # shrinks the file but grows the gzip. Data starts at 1 MiB and the stack grows
+          # down from it, so only an overflowing stack reaches the low KiB that
+          # `--low-memory-unused` assumes is unused. rustc emits no `target_features`
+          # section, so the two features its output uses are named here.
           wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int \
-            -O1 --converge --strip-producers \
-            -o optimized.wasm "$out/pkg/drawbar_bg.wasm"
+            --one-caller-inline-max-function-size=0 -Oz --converge --low-memory-unused \
+            --strip-producers -o optimized.wasm "$out/pkg/drawbar_bg.wasm"
           mv optimized.wasm "$out/pkg/drawbar_bg.wasm"
 
           # Pages caches for ten minutes, so a cached glue file can meet a freshly
