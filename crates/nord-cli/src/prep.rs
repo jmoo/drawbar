@@ -1,11 +1,12 @@
 //! `nord piano prep`: a recorded take's hits as the regions `piano build` reads.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
-use nord_format::take::layers::{Choice, Order};
+use nord_format::take::detect::{self, Floor};
+use nord_format::take::layers::{self, Choice, Order, Placed};
 use nord_format::take::plan::{self, Fate, PlanOptions, SetLayer};
 use nord_format::take::sustain::Sustain;
 use nord_format::wav;
@@ -17,14 +18,17 @@ use crate::ui::Ui;
 pub struct PrepArgs {
     /// The take: one WAV of every note played, 16 to 32-bit PCM or float, mono or
     /// stereo, at any rate. Or several, one per velocity layer, the loudest first, each
-    /// holding every note once: a note played again keeps its last hit.
+    /// holding every note once: a note played again keeps its last hit. Or a folder of
+    /// one-note files, a sample set, its subfolders too: each file's note is found from
+    /// its pitch and its layer from its level, and each is written into the -o folder.
     #[arg(value_name = "TAKE", required = true, num_args = 1..)]
     pub takes: Vec<PathBuf>,
 
     /// The notes played, in playing order, as names or numbers: `B1,D2,F#2`. In a
     /// single take each note may be hit several times in a row; the hits of one note
-    /// become its layers.
-    #[arg(long, value_name = "NOTES", value_delimiter = ',', required = true)]
+    /// become its layers. Without it, each hit is named by its pitch, and the notes
+    /// found are listed.
+    #[arg(long, value_name = "NOTES", value_delimiter = ',')]
     pub notes: Vec<String>,
 
     /// The layers each note of a single take gets: 4 unless given. Takes of one layer
@@ -43,8 +47,14 @@ pub struct PrepArgs {
     pub skip: Vec<String>,
 
     /// Hits of one note closer than this in level are one layer, in decibels.
-    #[arg(long, value_name = "DB", default_value_t = 2.0)]
+    #[arg(long, value_name = "DB", default_value_t = 1.0)]
     pub min_layer_gap: f64,
+
+    /// A hit less than this many decibels over the take's floor, its hum taken out, is
+    /// left out as too quiet: the build raises every layer to one level, and a quiet
+    /// hit's hiss rises with it.
+    #[arg(long, value_name = "DB", default_value_t = plan::MIN_SNR_DB)]
+    pub min_snr: f64,
 
     /// The longest attack, in seconds.
     #[arg(long, value_name = "SECONDS", default_value_t = 6.0)]
@@ -102,6 +112,17 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
             args.min_layer_gap
         ));
     }
+    if !(args.min_snr.is_finite() && args.min_snr >= 0.0) {
+        return Err(format!(
+            "--min-snr {} is no level; give decibels of 0 or more",
+            args.min_snr
+        ));
+    }
+    if let [dir] = args.takes.as_slice() {
+        if dir.is_dir() {
+            return prep_set(ui, dir, &args, layers);
+        }
+    }
     let skips = skips(&args.skip, args.takes.len())?;
     let outs: Vec<PathBuf> = match set {
         false => vec![args.out.clone()],
@@ -132,15 +153,8 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
                 args.takes.len()
             ));
         }
-        let mut options = PlanOptions::new(notes.clone(), layers);
-        options.order = match args.order {
-            Some(OrderName::Played) => Order::Played,
-            Some(OrderName::Loudness) | None => Order::Loudness,
-        };
+        let mut options = plan_options(&args, notes.clone(), layers);
         options.skip = skips[index].clone();
-        options.min_layer_gap_db = args.min_layer_gap;
-        options.cut.max_seconds = args.max_seconds;
-        options.cut.release_seconds = args.release_seconds;
         options.set = set.then_some(SetLayer {
             layer: index,
             of: args.takes.len(),
@@ -166,13 +180,281 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
     let mut written = Vec::new();
     for (out, bytes) in planned {
         write_file(ui, out, &bytes)?;
-        written.push(out.display().to_string());
+        written.push(quoted(&out.display().to_string()));
     }
     ui.note(format!(
         "build a library from them with `nord piano build {}`",
         written.join(" ")
     ));
     Ok(())
+}
+
+/// Preps a folder of one-note files, a sample set, as one library: each file's loudest
+/// hit, its floor read on its quietest stretch, named and layered across the set as
+/// [`layers::place`] says. Each file placed is written into `args.out` with its
+/// regions, at its path under `dir`.
+fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), String> {
+    for (given, flag) in [
+        (!args.notes.is_empty(), "--notes"),
+        (args.order.is_some(), "--order"),
+        (!args.skip.is_empty(), "--skip"),
+    ] {
+        if given {
+            return Err(format!(
+                "{flag} does not apply to a folder of one-note files: each file's note is \
+                 found from its pitch, and its layer from its level; leave a file out by \
+                 moving it out of the folder"
+            ));
+        }
+    }
+    if same_file(dir, &args.out) {
+        return Err(format!(
+            "{}: -o is the folder itself; give another, where each file is written at its own \
+             path",
+            dir.display()
+        ));
+    }
+    let files = wavs_in(dir, &args.out)?;
+    if files.is_empty() {
+        return Err(format!("{}: no WAV files in it", dir.display()));
+    }
+    let outs: Vec<PathBuf> = files
+        .iter()
+        .map(|file| args.out.join(file.strip_prefix(dir).unwrap_or(file)))
+        .collect();
+    ui.note(format!(
+        "{} one-note file(s) in {}; each file's loudest hit is its note, its floor read on \
+         a rest of at least {} s after it, and a file with none is built as recorded",
+        files.len(),
+        dir.display(),
+        nord_format::take::detect::QUIETEST
+    ));
+
+    // Each file on its own: its hit, its pitch, and how far it stands over its floor.
+    #[derive(Default)]
+    struct Found {
+        hit: Option<plan::Planned>,
+        floor_db: f64,
+        rests: bool,
+        /// Why it could not be read, which leaves it out.
+        unread: Option<String>,
+    }
+    let mut found = Vec::new();
+    for (file, out) in files.iter().zip(&outs) {
+        let loaded = match load(file, out) {
+            Ok(loaded) => loaded,
+            Err(why) => {
+                found.push(Found {
+                    unread: Some(why),
+                    ..Found::default()
+                });
+                continue;
+            }
+        };
+        let mut options = plan_options(args, Vec::new(), layers);
+        options.one_note = true;
+        let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
+        found.push(Found {
+            // The loudest hit is the file's note, a hit with no pitch included.
+            hit: plan.hits.into_iter().reduce(|a, b| {
+                if b.hit.level_db > a.hit.level_db {
+                    b
+                } else {
+                    a
+                }
+            }),
+            floor_db: plan.floor_db,
+            rests: plan.rests,
+            unread: None,
+        });
+    }
+    let struck: Vec<_> = found
+        .iter()
+        .map(|f| match &f.hit {
+            Some(planned) if !matches!(planned.fate, Fate::TooQuiet { .. }) => {
+                Some(planned.hit.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let placed = layers::place(&struck, layers, args.min_layer_gap);
+
+    // Then each placed file again, as its note and layer.
+    let mut rows = Vec::new();
+    let mut planned = Vec::new();
+    for (i, (file, out)) in files.iter().zip(&outs).enumerate() {
+        let shown = file.strip_prefix(dir).unwrap_or(file).display().to_string();
+        let (note, what, sustain) = match (&placed[i], &found[i].hit) {
+            (Some(Placed::Layer { note, layer, of }), _) => {
+                let loaded = load(file, out)?;
+                let mut options = plan_options(args, vec![*note], layers);
+                options.one_note = true;
+                options.set = Some(SetLayer {
+                    layer: *layer,
+                    of: *of,
+                });
+                let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
+                let rate = f64::from(plan.rate);
+                let kept = plan.hits.iter().find_map(|p| match &p.fate {
+                    Fate::Kept { value, .. } => Some((*value, sustain_of(&p.fate, rate))),
+                    _ => None,
+                });
+                match kept.map(|kept| (kept, marked(file, loaded, &plan, true))) {
+                    Some(((value, sustain), Ok((bytes, _)))) => {
+                        planned.push((out, bytes));
+                        (
+                            Some(*note),
+                            format!("layer {layer} of {of}, value {value}"),
+                            sustain,
+                        )
+                    }
+                    // A file whose own settings this version refuses is left out, as one
+                    // that does not read is, and the rest of the folder goes on.
+                    Some((_, Err(why))) => (Some(*note), format!("not read: {why}"), String::new()),
+                    None => (Some(*note), "no hit kept".into(), String::new()),
+                }
+            }
+            (Some(Placed::Duplicate { note, of }), _) => (
+                Some(*note),
+                format!(
+                    "within the layer gap of {}",
+                    files[*of]
+                        .strip_prefix(dir)
+                        .unwrap_or(&files[*of])
+                        .display()
+                ),
+                String::new(),
+            ),
+            (Some(Placed::Extra { note }), _) => {
+                (Some(*note), "more files than layers".into(), String::new())
+            }
+            (Some(Placed::NoPitch), _) => (None, "no pitch found".into(), String::new()),
+            (None, Some(hit)) => match hit.fate {
+                Fate::TooQuiet { over_db } => (
+                    None,
+                    format!("too quiet, {over_db:.0} dB over the floor"),
+                    String::new(),
+                ),
+                _ => (None, "not placed".into(), String::new()),
+            },
+            (None, None) => match &found[i].unread {
+                Some(why) => (None, format!("not read: {why}"), String::new()),
+                None => (None, "no hit found".into(), String::new()),
+            },
+        };
+        let hit = found[i].hit.as_ref().map(|p| &p.hit);
+        let floor = (found[i].rests && found[i].unread.is_none()).then_some(found[i].floor_db);
+        rows.push((note, shown, hit.cloned(), floor, what, sustain));
+    }
+
+    rows.sort_by_key(|row| (row.0.map_or(u16::MAX, u16::from), row.4.clone()));
+    ui.out(ui.dim(format!(
+        "  {:<28} {:>6} {:>6} {:>6} {:>4}  {:<30} {}",
+        "file", "pitch", "level", "floor", "note", "", "sustain"
+    )));
+    for (note, shown, hit, floor_db, what, sustain) in &rows {
+        ui.out(format!(
+            "  {:<28} {:>6} {:>6} {:>6} {:>4}  {:<30} {}",
+            shown,
+            hit.as_ref()
+                .and_then(|h| h.pitch)
+                .map_or("-".into(), |p| format!("{p:.2}")),
+            hit.as_ref()
+                .map_or("-".into(), |h| format!("{:.1}", h.level_db)),
+            floor_db.map_or("-".into(), |f| format!("{f:.1}")),
+            note.map_or("-".into(), note::name),
+            what,
+            sustain
+        ));
+    }
+    if found
+        .iter()
+        .any(|f| !f.rests && f.unread.is_none() && f.hit.is_some())
+    {
+        ui.note(format!(
+            "a floor of - rests under {} s, too little to read its noise on, so it is not \
+             held to --min-snr",
+            detect::QUIETEST
+        ));
+    }
+    if planned.is_empty() {
+        return Err(format!(
+            "{}: no file was placed, so there are no regions to write",
+            dir.display()
+        ));
+    }
+    let mut written = Vec::new();
+    for (out, bytes) in planned {
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        write_file(ui, out, &bytes)?;
+        written.push(quoted(&out.display().to_string()));
+    }
+    ui.note(format!(
+        "build a library from them with `nord piano build {}`",
+        written.join(" ")
+    ));
+    Ok(())
+}
+
+/// `path` as a shell reads it back: in single quotes where it holds anything but
+/// letters, digits and `/\._-:`, so the shell expands nothing in it, each `'` written
+/// as `'\''`.
+fn quoted(path: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:".contains(c);
+    match path.chars().all(plain) {
+        true => path.to_string(),
+        false => format!("'{}'", path.replace('\'', r"'\''")),
+    }
+}
+
+/// The WAV files under `dir`, in its subfolders too, in path order, leaving out any
+/// under `out`.
+fn wavs_in(dir: &Path, out: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        if same_file(&folder, out) {
+            continue;
+        }
+        let entries =
+            std::fs::read_dir(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", folder.display()))?;
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            // A linked folder is not followed: a link back up would walk forever.
+            if kind.is_dir() {
+                folders.push(path);
+            } else if kind.is_symlink() && path.is_dir() {
+                continue;
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// What `args` tell [`plan::plan`], for `notes` as `layers` layers.
+fn plan_options(args: &PrepArgs, notes: Vec<u8>, layers: usize) -> PlanOptions {
+    let mut options = PlanOptions::new(notes, layers);
+    options.order = match args.order {
+        Some(OrderName::Played) => Order::Played,
+        Some(OrderName::Loudness) | None => Order::Loudness,
+    };
+    options.min_layer_gap_db = args.min_layer_gap;
+    options.min_snr_db = args.min_snr;
+    options.cut.max_seconds = args.max_seconds;
+    options.cut.release_seconds = args.release_seconds;
+    options
 }
 
 /// The hits `--skip` leaves out of each of `takes` takes: `12` in a single take, and
@@ -207,6 +489,45 @@ fn prep_take(
     out: &std::path::Path,
     options: &PlanOptions,
 ) -> Result<(Vec<u8>, Vec<usize>), String> {
+    let loaded = load(path, out)?;
+    let resampled = loaded.resampled;
+    let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, options);
+
+    if options.notes.is_empty() {
+        let found: Vec<String> = plan.notes.iter().map(|&n| note::name(n)).collect();
+        ui.note(format!(
+            "notes found from the hits' pitches: {}",
+            found.join(",")
+        ));
+    }
+    list(ui, &plan);
+    let (written, marks) = marked(path, loaded, &plan, false)?;
+    if resampled {
+        ui.note(format!(
+            "resampled to the {} Hz the instrument plays at, so the regions lie where the \
+             build reads them",
+            codec::RATE
+        ));
+    }
+    ui.note(format!(
+        "{} region(s), {} loop(s)",
+        marks.regions.len(),
+        marks.loops.len()
+    ));
+    let hits = plan.hits.iter().map(|planned| planned.hit.number).collect();
+    Ok((written, hits))
+}
+
+/// A take as read, and as brought to the rate the instrument plays at.
+struct Loaded {
+    bytes: Vec<u8>,
+    encoding: wav::Encoding,
+    take: wav::Audio,
+    resampled: bool,
+}
+
+/// Reads the take at `path`, to be written to `out`.
+fn load(path: &std::path::Path, out: &std::path::Path) -> Result<Loaded, String> {
     let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     let layout = wav::layout(&bytes).map_err(|e| named(&e))?;
@@ -224,9 +545,24 @@ fn prep_take(
         true => nord_format::take::resample::resample(&take, codec::RATE).map_err(|e| named(&e))?,
         false => take,
     };
-    let plan = plan::plan(&plan::mono(&take), take.rate, options);
+    Ok(Loaded {
+        bytes,
+        encoding: layout.format.encoding,
+        take,
+        resampled,
+    })
+}
 
-    list(ui, &plan);
+/// The take read from `path` with `plan`'s regions, and those regions. It states how its
+/// floor was read, a `one_note` file's as one note's and a take's as a take's, whatever
+/// an earlier prep wrote, so the build reads it as this prep did.
+fn marked(
+    path: &std::path::Path,
+    loaded: Loaded,
+    plan: &plan::Plan,
+    one_note: bool,
+) -> Result<(Vec<u8>, wav::Marks), String> {
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let regions = plan.regions();
     if regions.is_empty() {
         return Err(named(&"no hit was kept, so there are no regions to write"));
@@ -235,25 +571,20 @@ fn prep_take(
         regions,
         loops: plan.loops(),
     };
-    let audio = match resampled {
-        true => wav::with_audio(&bytes, &take, layout.format.encoding).map_err(|e| named(&e))?,
-        false => bytes,
+    let audio = match loaded.resampled {
+        true => {
+            wav::with_audio(&loaded.bytes, &loaded.take, loaded.encoding).map_err(|e| named(&e))?
+        }
+        false => loaded.bytes,
     };
-    let written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
-    if resampled {
-        ui.note(format!(
-            "resampled to the {} Hz the instrument plays at, so the regions lie where the \
-             build reads them",
-            codec::RATE
-        ));
+    let mut written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
+    let mut settings = wav::read_settings(&written).map_err(|e| named(&e))?;
+    let floor = one_note.then_some(Floor::OneNote);
+    if settings.floor != floor {
+        settings.floor = floor;
+        written = wav::with_settings(&written, &settings).map_err(|e| named(&e))?;
     }
-    ui.note(format!(
-        "{} region(s), {} loop(s)",
-        marks.regions.len(),
-        marks.loops.len()
-    ));
-    let hits = plan.hits.iter().map(|planned| planned.hit.number).collect();
-    Ok((written, hits))
+    Ok((written, marks))
 }
 
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -265,6 +596,25 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
 
 /// A loop whose end matches its start less than this is warned about.
 const LOOP_MATCH_WARNING: f64 = 0.5;
+
+/// How a kept hit's attack sustains, or nothing for a hit not kept.
+fn sustain_of(fate: &Fate, rate: f64) -> String {
+    match fate {
+        Fate::Kept {
+            sustain: Sustain::Loop { start, len, score },
+            ..
+        } => format!(
+            "loops {:.2} s from {:.2} s, match {score:.2}",
+            *len as f64 / rate,
+            *start as f64 / rate
+        ),
+        Fate::Kept {
+            sustain: Sustain::Dies { fade, .. },
+            ..
+        } => format!("fades from {:.2} s", *fade as f64 / rate),
+        _ => String::new(),
+    }
+}
 
 /// Every hit, what became of it and where its strokes lie.
 fn list(ui: &Ui, plan: &plan::Plan) {
@@ -293,21 +643,7 @@ fn list(ui: &Ui, plan: &plan::Plan) {
     let rate = f64::from(plan.rate);
     for planned in &plan.hits {
         let hit = &planned.hit;
-        let sustain = match &planned.fate {
-            Fate::Kept {
-                sustain: Sustain::Loop { start, len, score },
-                ..
-            } => format!(
-                "loops {:.2} s from {:.2} s, match {score:.2}",
-                *len as f64 / rate,
-                *start as f64 / rate
-            ),
-            Fate::Kept {
-                sustain: Sustain::Dies { fade, .. },
-                ..
-            } => format!("fades from {:.2} s", *fade as f64 / rate),
-            _ => String::new(),
-        };
+        let sustain = sustain_of(&planned.fate, rate);
         let (what, attack, release) = match &planned.fate {
             Fate::Kept {
                 layer,
@@ -479,6 +815,14 @@ mod tests {
         let (take, out_s) = (path.to_str().unwrap(), out.to_str().unwrap());
         let args = prep_args(&[take, "--notes", "C4,E4", "--layers", "2", "-o", out_s]);
         prep(&Ui::piped(), args).unwrap();
+
+        let unnamed = dir.join("unnamed.wav");
+        let args = prep_args(&[take, "--layers", "2", "-o", unnamed.to_str().unwrap()]);
+        prep(&Ui::piped(), args).unwrap();
+        assert!(
+            std::fs::read(&unnamed).unwrap() == std::fs::read(&out).unwrap(),
+            "with no note list, the notes the hits' pitches name"
+        );
 
         let bytes = std::fs::read(&out).unwrap();
         let layout = wav::layout(&bytes).unwrap();
@@ -742,6 +1086,119 @@ mod tests {
     }
 
     #[test]
+    fn a_printed_path_is_quoted_where_a_shell_would_split_it() {
+        assert_eq!(quoted("out/C4.wav"), "out/C4.wav");
+        assert_eq!(
+            quoted("out/Upright Piano/C4.wav"),
+            "'out/Upright Piano/C4.wav'"
+        );
+        assert_eq!(
+            quoted("Rhodes $5.wav"),
+            "'Rhodes $5.wav'",
+            "nothing expands"
+        );
+        assert_eq!(quoted("it's.wav"), r"'it'\''s.wav'");
+    }
+
+    /// A folder of one-note files, named for nothing they hold: each is placed by its
+    /// pitch and level, written under the -o folder at its own path, and they build one
+    /// library. A file with no hit, or one that does not read, is left out, linked
+    /// folders are not followed, and a note list and -o as the folder are refused.
+    #[test]
+    fn a_folder_of_one_note_files_preps_into_one_library() {
+        let dir = crate::edit::tests::scratch("piano-prep-folder");
+        let set = dir.join("set");
+        std::fs::create_dir_all(set.join("high")).unwrap();
+        for (name, note, peak) in [
+            ("1.wav", 60.0, -12.0),
+            ("2.wav", 60.0, -24.0),
+            ("high/3.wav", 64.0, -12.0),
+        ] {
+            let audio = take(44_100, 4.0, &[(0.5, note, peak, 3.0)]);
+            let bytes = wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap();
+            std::fs::write(set.join(name), bytes).unwrap();
+        }
+        let silent = wav::Audio {
+            rate: 44_100,
+            channels: 1,
+            samples: vec![0.0; 44_100],
+        };
+        let bytes = wav::write(&silent, wav::Encoding::Int { bits: 24 }).unwrap();
+        std::fs::write(set.join("silent.wav"), bytes).unwrap();
+        // A note whose npno chunk this version refuses: listed as not read, and the rest of
+        // the folder still written.
+        let audio = take(44_100, 4.0, &[(0.5, 67.0, -12.0, 3.0)]);
+        let mut bytes = wav::write(&audio, wav::Encoding::Int { bits: 24 }).unwrap();
+        let body = b"not a setting\n";
+        bytes.extend_from_slice(b"npno");
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(body);
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(wav::read_settings(&bytes).is_err(), "refused");
+        std::fs::write(set.join("odd.wav"), bytes).unwrap();
+        // A stub such as macOS leaves in a zipped set: not a WAV, listed and left out.
+        std::fs::write(set.join("._1.wav"), b"Mac OS X attributes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("..", set.join("high/up")).unwrap();
+
+        let (set_s, out) = (set.to_str().unwrap(), dir.join("out"));
+        let out_s = out.to_str().unwrap();
+        let err = prep(&Ui::piped(), prep_args(&[set_s, "-o", set_s])).unwrap_err();
+        assert!(err.contains("-o is the folder itself"), "{err}");
+        for (flag, value) in [("--notes", "C4"), ("--order", "played"), ("--skip", "1")] {
+            let err =
+                prep(&Ui::piped(), prep_args(&[set_s, flag, value, "-o", out_s])).unwrap_err();
+            assert!(err.contains(&format!("{flag} does not apply")), "{err}");
+        }
+        prep(&Ui::piped(), prep_args(&[set_s, "-o", out_s])).unwrap();
+
+        let labels = |name: &str| -> Vec<String> {
+            let bytes = std::fs::read(out.join(name)).unwrap();
+            let marks = wav::read_marks(&bytes).unwrap();
+            marks.regions.into_iter().map(|r| r.label).collect()
+        };
+        assert_eq!(labels("1.wav"), ["060-b0-v00", "060-b2-v00"]);
+        assert_eq!(labels("2.wav"), ["060-b0-v40", "060-b2-v40"]);
+        assert_eq!(labels("high/3.wav"), ["064-b0-v00", "064-b2-v00"]);
+        assert!(!out.join("silent.wav").exists(), "no hit, not written");
+        assert!(
+            !out.join("odd.wav").exists(),
+            "its settings refused, not written"
+        );
+        let floor = wav::read_settings(&std::fs::read(out.join("1.wav")).unwrap())
+            .unwrap()
+            .floor;
+        assert_eq!(
+            floor,
+            Some(Floor::OneNote),
+            "the build reads its floor so too"
+        );
+
+        // The same file prepped again as a take of its own reads its floor as a take's,
+        // and says so.
+        let again = dir.join("again.wav");
+        let one = out.join("1.wav");
+        prep(
+            &Ui::piped(),
+            prep_args(&[one.to_str().unwrap(), "-o", again.to_str().unwrap()]),
+        )
+        .unwrap();
+        let floor = wav::read_settings(&std::fs::read(&again).unwrap())
+            .unwrap()
+            .floor;
+        assert_eq!(floor, None, "a take's floor, not the folder's");
+
+        let written = ["1.wav", "2.wav", "high/3.wav"].map(|n| out.join(n));
+        let written: Vec<&str> = written.iter().map(|p| p.to_str().unwrap()).collect();
+        let npno = dir.join("set.npno");
+        let args = [written.as_slice(), &["-o", npno.to_str().unwrap()]].concat();
+        crate::piano::build(&Ui::piped(), build_args(&args)).unwrap();
+        assert!(npno.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_take_to_resample_is_not_written_over() {
         let dir = crate::edit::tests::scratch("piano-prep-over");
         let audio = take(44_100, 4.0, &[(1.0, 60.0, -12.0, 3.0)]);
@@ -768,6 +1225,8 @@ mod tests {
             ("--release-seconds", "-1"),
             ("--min-layer-gap", "NaN"),
             ("--min-layer-gap", "-2"),
+            ("--min-snr", "NaN"),
+            ("--min-snr", "-1"),
         ] {
             let given = format!("{flag}={value}");
             let args = prep_args(&["take.wav", "--notes", "C4", &given, "-o", "out.wav"]);

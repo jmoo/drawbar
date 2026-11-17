@@ -13,7 +13,8 @@ use crate::wav::{Audio, Loop, Region};
 /// What [`plan`] is told about a take.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlanOptions {
-    /// The notes played, as MIDI notes, in playing order.
+    /// The notes played, as MIDI notes, in playing order. Empty, they are found from the
+    /// hits' pitches: see [`layers::notes_of`].
     pub notes: Vec<u8>,
     /// The layers each note gets.
     pub layers: usize,
@@ -31,6 +32,10 @@ pub struct PlanOptions {
     /// one velocity. Each note's last hit is then that layer, and [`PlanOptions::layers`]
     /// and [`PlanOptions::order`] are not read.
     pub set: Option<SetLayer>,
+    /// Set for a one-note file, one of a sample set's: its floor is read on its
+    /// quietest stretch ([`detect::Floor::OneNote`]), and only its loudest hit is
+    /// planned, the others skipped.
+    pub one_note: bool,
 }
 
 /// A take's place in a set of takes, one per layer.
@@ -42,6 +47,10 @@ pub struct SetLayer {
     pub of: usize,
 }
 
+/// The [`PlanOptions::min_snr_db`] unless a caller says otherwise. Chosen by ear: a hit
+/// leveled from nearer the floor loops with its hiss heard.
+pub const MIN_SNR_DB: f64 = 54.0;
+
 impl PlanOptions {
     pub fn new(notes: Vec<u8>, layers: usize) -> PlanOptions {
         PlanOptions {
@@ -49,11 +58,12 @@ impl PlanOptions {
             layers,
             order: Order::Loudness,
             skip: Vec::new(),
-            min_layer_gap_db: 2.0,
-            min_snr_db: 54.0,
+            min_layer_gap_db: 1.0,
+            min_snr_db: MIN_SNR_DB,
             cut: CutOptions::default(),
             sustain: SustainOptions::default(),
             set: None,
+            one_note: false,
         }
     }
 }
@@ -95,6 +105,12 @@ pub struct Plan {
     pub hum: Result<Hum, NoHum>,
     /// The take's floor with its hum taken out, in dB under full scale.
     pub floor_db: f64,
+    /// Whether the floor was read on a rest. A one-note file that rests too little has
+    /// none to read, and its hits are not held to [`PlanOptions::min_snr_db`].
+    pub rests: bool,
+    /// The notes the hits were assigned to, in playing order: the list given, or the one
+    /// found from their pitches.
+    pub notes: Vec<u8>,
     /// Notes of the list no hit was found for.
     pub missing: Vec<u8>,
 }
@@ -109,40 +125,68 @@ pub fn mono(audio: &Audio) -> Vec<f64> {
         .collect()
 }
 
-/// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, chooses
-/// each note's layers and cuts their strokes.
+/// Finds the hits of `mono`, a take at `rate`, assigns them to `options.notes`, or to the
+/// notes their pitches name where none are given, chooses each note's layers and cuts
+/// their strokes.
 ///
 /// Hits, pitch and key-ups are found on the take as recorded, and levels against the
 /// floor on the take with its hum taken out, whose floor is lower. Each attack's loop or
 /// fade is found on the attack as the build cleans it.
 pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
+    let floor_rule = match options.one_note {
+        true => detect::Floor::OneNote,
+        false => detect::Floor::Take,
+    };
     let x = detect::highpassed(mono, rate);
-    let env = Envelope::of(&x, rate);
+    let env = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&x, rate)
+    };
     let hits = detect::hits(&x, rate, &env);
     let hum = hum::find(&x, rate, &env);
     let cleaned = match &hum {
         Ok(found) => found.removed(&x, rate),
         Err(_) => x.clone(),
     };
-    let quiet = Envelope::of(&cleaned, rate);
+    let quiet = Envelope {
+        floor: floor_rule,
+        ..Envelope::of(&cleaned, rate)
+    };
     let floor = quiet.floor();
     let noise = Noise::measured(rate, hum.as_ref().ok().cloned(), &cleaned, &quiet);
 
-    let assigned = layers::assign(&hits, &options.notes, |hit| {
-        options.skip.contains(&hit.number)
-    });
+    let loudest = hits
+        .iter()
+        .reduce(|a, b| if b.level_db > a.level_db { b } else { a })
+        .map(|hit| hit.number);
+    let skipped = |hit: &Hit| {
+        options.skip.contains(&hit.number) || (options.one_note && Some(hit.number) != loudest)
+    };
+    let (notes, assigned): (Vec<u8>, Vec<layers::Named>) = match options.notes.is_empty() {
+        true => (
+            layers::notes_of(&hits, skipped),
+            layers::self_named(&hits, skipped),
+        ),
+        false => (
+            options.notes.clone(),
+            layers::assign(&hits, &options.notes, skipped)
+                .into_iter()
+                .map(|a| a.map(|(j, warning)| (options.notes[j], warning)))
+                .collect(),
+        ),
+    };
     let mut planned: Vec<Planned> = hits
         .iter()
         .zip(assigned)
         .map(|(hit, assigned)| {
             let (note, warning) = match assigned {
-                Some((j, warning)) => (Some(options.notes[j]), warning),
+                Some((note, warning)) => (Some(note), warning),
                 None => (None, None),
             };
             let over_db = hit.level_db - floor;
             let fate = if note.is_none() {
                 Fate::Skipped
-            } else if over_db < options.min_snr_db {
+            } else if quiet.rests() && over_db < options.min_snr_db {
                 Fate::TooQuiet { over_db }
             } else {
                 Fate::Chosen(Choice::Extra)
@@ -164,7 +208,7 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
     };
     let mut missing = Vec::new();
     let mut seen = Vec::new();
-    for &note in &options.notes {
+    for &note in &notes {
         if seen.contains(&note) {
             continue;
         }
@@ -231,6 +275,8 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
         hits: planned,
         hum,
         floor_db: floor,
+        rests: quiet.rests(),
+        notes,
         missing,
     }
 }
@@ -337,6 +383,162 @@ mod tests {
             ]
         );
         assert!(plan.missing.is_empty());
+
+        let lenient = PlanOptions {
+            min_snr_db: 25.0,
+            ..PlanOptions::new(vec![48, 55], 2)
+        };
+        let fates: Vec<Fate> = super::plan(&x, rate, &lenient)
+            .hits
+            .into_iter()
+            .map(|p| p.fate)
+            .collect();
+        assert!(
+            matches!(fates[4], Fate::Kept { .. }),
+            "a lower limit keeps it: {fates:?}"
+        );
+    }
+
+    #[test]
+    fn a_one_note_file_cut_at_its_strike_is_a_hit_with_its_release() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
+        let options = PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        };
+        let plan = plan(&x, rate, &options);
+        assert_eq!(plan.hits.len(), 1, "{:?}", plan.hits);
+        assert!(plan.rests);
+        assert_eq!(plan.hits[0].hit.onset, 0);
+        assert_eq!(plan.notes, [60]);
+        match &plan.hits[0].fate {
+            Fate::Kept { cuts, .. } => assert!(cuts.release.is_some(), "{:?}", cuts.no_release),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A one-note file with less than half a second of rest, or a tail faded to digital
+    /// silence, has no floor to read: it is still a hit, and is not held to the limit.
+    #[test]
+    fn a_one_note_file_with_little_rest_is_still_a_hit() {
+        let rate = 35_002;
+        let options = PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        };
+        for (what, seconds, up, floor_db) in [
+            ("0.4 s", 0.4, 10.0, -80.0),
+            ("no tail", 3.0, 10.0, -80.0),
+            ("a 0.3 s tail", 3.3, 3.0, -80.0),
+            ("faded to silence", 4.0, 3.0, -200.0),
+        ] {
+            let x = take(rate, seconds, &[(0.0, 60.0, -12.0, up)], floor_db);
+            let plan = plan(&x, rate, &options);
+            assert!(!plan.rests, "{what}");
+            let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+            assert!(
+                matches!(fates.as_slice(), [Fate::Kept { .. }]),
+                "{what}: {fates:?}"
+            );
+        }
+    }
+
+    fn one_note() -> PlanOptions {
+        PlanOptions {
+            one_note: true,
+            ..PlanOptions::new(Vec::new(), 1)
+        }
+    }
+
+    /// A one-note file's floor is read on its rest however quiet the note: a C4 peaking
+    /// at -56 dB over -80 dB hiss, with 3 s of rest, stands 24 dB over it and is too
+    /// quiet.
+    #[test]
+    fn a_quiet_one_note_file_is_held_to_the_limit() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -56.0, 3.0)], -80.0);
+        let plan = plan(&x, rate, &one_note());
+        assert!(plan.rests);
+        assert!((plan.floor_db + 80.0).abs() < 2.0, "{}", plan.floor_db);
+        let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+        assert!(
+            matches!(fates.as_slice(), [Fate::TooQuiet { .. }]),
+            "{fates:?}"
+        );
+    }
+
+    /// A fade or zero padding after the rest does not move the floor read on it.
+    #[test]
+    fn a_fade_or_padding_after_the_rest_leaves_its_floor() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 3.0)], -80.0);
+        let faded = |seconds: f64| {
+            let mut y = x.clone();
+            let n = (seconds * f64::from(rate)) as usize;
+            let len = y.len();
+            for (i, v) in y[len - n..].iter_mut().enumerate() {
+                *v *= 1.0 - (i + 1) as f64 / n as f64;
+            }
+            y
+        };
+        let padded = [x.clone(), vec![0.0; rate as usize]].concat();
+        for (what, y) in [
+            ("as recorded", x.clone()),
+            ("a 30 ms fade", faded(0.03)),
+            ("a 200 ms fade", faded(0.2)),
+            ("zero padding", padded),
+        ] {
+            let plan = plan(&y, rate, &one_note());
+            assert!(plan.rests, "{what}");
+            assert!(
+                (plan.floor_db + 80.0).abs() < 2.0,
+                "{what}: {}",
+                plan.floor_db
+            );
+        }
+    }
+
+    /// A note dying 6 dB a second is no rest: over -110 dB hiss for 9 s, it never rests,
+    /// and is kept, not taken for too quiet over its own tail.
+    #[test]
+    fn a_slow_decay_is_no_rest() {
+        let rate = 35_002;
+        let x = take(rate, 9.0, &[(0.0, 60.0, -12.0, 9.0)], -110.0);
+        let plan = plan(&x, rate, &one_note());
+        assert!(!plan.rests, "a floor of {}", plan.floor_db);
+        let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+        assert!(matches!(fates.as_slice(), [Fate::Kept { .. }]), "{fates:?}");
+    }
+
+    /// Only a one-note file starts with a hit: a take that starts mid-note does not.
+    #[test]
+    fn a_take_that_starts_mid_note_has_no_hit_at_its_start() {
+        let rate = 35_002;
+        let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
+        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        assert!(plan.hits.is_empty(), "{:?}", plan.hits);
+    }
+
+    #[test]
+    fn a_take_with_no_note_list_is_planned_as_with_the_notes_its_pitches_name() {
+        let rate = 35_002;
+        let notes = [
+            (1.0, 48.0, -12.0, 3.0),
+            (4.0, 48.0, -24.0, 6.0),
+            (7.0, 48.0, -24.5, 9.0),
+            (10.0, 55.0, -14.0, 12.0),
+            (13.0, 55.0, -75.0, 15.0),
+        ];
+        let x = take(rate, 16.5, &notes, -110.0);
+        let given = plan(&x, rate, &PlanOptions::new(vec![48, 55], 2));
+        let found = plan(&x, rate, &PlanOptions::new(Vec::new(), 2));
+        assert_eq!(found.notes, [48, 55]);
+        assert_eq!(given.notes, [48, 55]);
+        let fates = |plan: &Plan| plan.hits.iter().map(|p| p.fate.clone()).collect::<Vec<_>>();
+        assert_eq!(fates(&found), fates(&given));
+        assert_eq!(found.regions(), given.regions());
+        assert_eq!(found.loops(), given.loops());
     }
 
     /// The second of a set of three takes names every note's last hit with the second
@@ -371,7 +573,7 @@ mod tests {
             assert!(plan.hits.is_empty(), "{len} samples");
             assert_eq!(plan.missing, [48]);
             assert_eq!(plan.hum, Err(NoHum::NoQuiet));
-            let noise = Noise::of(&x, rate);
+            let noise = Noise::of(&x, rate, detect::Floor::Take);
             assert_eq!((noise.hum, noise.hiss), (None, None));
         }
     }
