@@ -696,7 +696,7 @@ mod tests {
     fn the_tab_in_front_marks_its_glyph_with_the_accent_only_while_followed() {
         let (mut tabs, ws) = (Tabs::default(), workspace());
         let ctx = testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         let mut accented = |followed: bool| {
             let mut output = None;
             for _ in 0..3 {

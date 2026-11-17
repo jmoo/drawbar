@@ -66,6 +66,10 @@ drawbar suite fails until the matching script is re-run.
   in the script's table and re-run it, or add one when the text uses a character
   no face draws.
 
+`scripts/icons.py` regenerates `drawbar-icons.ttf`, the Lucide icons in
+`assets/icons` as outlines. Re-run it after adding an icon to the list in
+`icon.rs`; the drawbar suite fails while the font and the list differ.
+
 `scripts/fonts.py` writes the Ubuntu and Hack faces drawbar bundles, keeping
 only what egui reads. It takes the released font files as arguments and refuses
 any whose SHA-256 differs from the release's.
