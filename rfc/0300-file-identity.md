@@ -23,22 +23,36 @@ Under RFC-0271, toshokan knows a tagged file by its entity's binding, derived fr
 the scan, and a file nothing is said about only by its path. drawbar kept a second
 record of which file is which: a key per asset, `Key::Entity` or `Key::File(path)`,
 the path of each asset's file, and a copy of the view. It kept that record in step
-by replaying what toshokan reported: its own moves, and other writers' `path`,
-`tree` and `pin` ops. Where no report covered a change, it guessed by path.
+with its own commits by replaying the moves each reported, and with every other
+change by comparing keys and paths from one view to the next.
 
-That replay was behind most of the bugs this pull request fixes, and it cannot be
-made sound while sync lags. A writer's log and the files it moved reach another
-computer in either order:
+That comparison cannot tell another drawbar's change from an outside one, or a file
+in transit from a file deleted:
 
-- **Log first.** drawbar renamed the asset at once and listed a name the folder did
-  not hold yet.
-- **File first.** The scan found the old name gone and a new file, and drawbar
-  reported a deletion and a new file.
+- **Another drawbar's change reads as an outside one.** Its new file "appeared in
+  the library folder", and a file with no tags that it renamed "was deleted outside
+  drawbar".
+- **A file with tags or unsaved work that another drawbar deleted or moved stays, as
+  missing.** drawbar offers to save it back, which writes a second copy of a file
+  that was only moved.
+- **A tagged file in transit shows at its old path**, where a fresh open of the same
+  folder shows it at its new one.
 
-The author measured this on the earlier version of this pull request, which kept
-the replay: it failed 772 of 800 seeded synced walks of two drawbars, with these
-two cases as the failures. Two drawbars on one folder, on one computer or on two
-that sync, need to follow each other's changes without those false reports.
+This pull request's seeded walk measures it. Ported to master at 12f99e80, with
+master's own rule for which files may show missing, it ran 200 seeds, each walked
+five ways, on one shared folder and on synced copies.
+
+- 949 of the 1,000 walks logged another drawbar's change as an outside one.
+- With that wording counted and not failed, 345 walks failed another check, 64 of
+  them among the 200 on one shared folder, where nothing syncs.
+- Every failure was of what a drawbar shows or of an undo. None was of the check that
+  no unsaved edit is lost. A walk stops at its first failure, so that covers each
+  walk only up to there.
+
+At the head of this pull request the same seeds pass every check, the wording
+included. An earlier version of it also replayed other writers' logged moves, and
+failed most synced walks: a writer's log and the files it moved reach another
+computer in either order.
 
 ## Guide-level explanation
 
@@ -323,12 +337,12 @@ tests. `Library` grows from 34 fields to 45.
 
 | Option | Why not |
 |---|---|
-| drawbar replays other writers' logged moves to keep its own record | Unsound under sync lag: a log arriving before its files lists a name the folder lacks, and files arriving first read as a deletion and a new file. Failed 772 of 800 seeded synced walks |
+| drawbar replays other writers' logged moves to keep its own record | Unsound under sync lag: a log arriving before its files lists a name the folder lacks, and files arriving first read as a deletion and a new file. An earlier version of this pull request did this and failed most seeded synced walks |
 | Continue an untagged file onto another file with its identity while drawbar holds work for it | Each fix needed more machinery: an order between instances' claims, arbitration, holds re-sent with every command. It could still move a document onto an old identical copy |
 | A `FileId` written to the folder | Opening or scanning would write, which RFC-0271 rules out; it is a second identity beside the binding, and it grows with every untagged file |
 | Keep path as drawbar's key and fix each case | Each case of sync lag, outside rename and coarse clock needed its own rule, and those rules were where the bugs were |
 | Land the four parts as separate pull requests | Easier to review, and still possible. They were found and fixed together under one walk and were not separated afterward; whether each part passes the walk alone was not measured |
-| Do nothing | Two drawbars on one folder misreport each other's changes, and a synced folder makes it worse |
+| Do nothing | Two drawbars on one folder misreport each other's changes in about a third of seeded walks, with sync or without; Motivation has the measurement |
 
 Within the design:
 
