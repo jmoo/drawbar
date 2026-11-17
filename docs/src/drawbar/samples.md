@@ -104,7 +104,10 @@ build applies that category's defaults, and levels and fades can be changed
 afterwards in the piano editor. **Clean audio**, on unless you turn it off,
 cleans each sample of the take's hum and hiss as `nord piano build` cleans it;
 the take's noise is found once, from when the take opens, which takes a few
-seconds on a long take, and a control pressed before then says to wait. Both
+seconds on a long take, and a control pressed before then says to wait. Where
+no hum or hiss is found, as in a one-note file with no quiet stretch after its
+note, the caption under Clean audio says why and the sample is heard as
+recorded. Both
 are edits like a gain, kept in the WAV on **Save**, and the build follows them:
 a take with Clean audio off is built as recorded. Click **Play sample** to hear
 the whole sample, and click it again, as **Stop**, to stop it: the attack, once round its loop, then the key-off. Hold it

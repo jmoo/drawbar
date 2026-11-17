@@ -339,8 +339,8 @@ pub(super) type Made = (u64, super::take::Hit, Kind, bool);
 enum Search {
     Running(work::Job<work::FoundNoise>),
     Done(Noise),
-    /// The finding died; the take is heard as recorded.
-    Lost,
+    /// The finding died, for the reason held; the take is heard as recorded.
+    Lost(String),
 }
 
 /// Where cleaning a take has got to.
@@ -381,7 +381,9 @@ impl Audition {
                 work::Answer::Answered(work::FoundNoise(noise)) => {
                     self.noise = Some((at, Search::Done(noise)))
                 }
-                work::Answer::Died => self.noise = Some((at, Search::Lost)),
+                work::Answer::Died => {
+                    self.noise = Some((at, Search::Lost(job.died("the noise search"))))
+                }
             },
             Some((held, _)) if *held == at => {}
             _ => {
@@ -401,9 +403,26 @@ impl Audition {
             Some((at, found)) if *at == (print(audio), floor) => match found {
                 Search::Running(_) => Cleaning::Finding,
                 Search::Done(noise) => Cleaning::Ready(Some(noise)),
-                Search::Lost => Cleaning::Ready(None),
+                Search::Lost(_) => Cleaning::Ready(None),
             },
             _ => Cleaning::Finding,
+        }
+    }
+
+    /// Why `audio`, set to be cleaned by the `clean` floor, is heard as recorded: its
+    /// noise search died, or found no quiet stretch to measure. None where it is
+    /// cleaned, not set to be, or its noise is still being found.
+    pub fn uncleaned(&self, audio: &Audio, clean: Option<Floor>) -> Option<String> {
+        let floor = clean?;
+        match &self.noise {
+            Some((at, found)) if *at == (print(audio), floor) => match found {
+                Search::Running(_) => None,
+                Search::Done(noise) => {
+                    (noise.hum.is_none() && noise.hiss.is_none()).then(|| NO_QUIET.to_string())
+                }
+                Search::Lost(why) => Some(why.clone()),
+            },
+            _ => None,
         }
     }
 }
@@ -466,6 +485,8 @@ pub fn controls(
             Cleaning::Finding
         )
     });
+    let uncleaned =
+        (state.audio()).and_then(|audio| state.audition.uncleaned(audio, state.cleaned()));
     let audition = &mut state.audition;
     audition.waiting &= finding;
     let accent = app::accent(ui.visuals());
@@ -541,14 +562,28 @@ pub fn controls(
     if ui.checkbox(&mut cleaned, CLEAN_AUDIO).changed() {
         asked = Some(Ask::Clean(cleaned));
     }
-    if finding {
+    let caption = match (finding, uncleaned) {
+        (true, _) => Some("finding the take's hum and hiss…".to_string()),
+        (false, Some(why)) => Some(not_cleaned(&why)),
+        (false, None) => None,
+    };
+    if let Some(caption) = caption {
         ui.label(
-            egui::RichText::new("finding the take's hum and hiss…")
+            egui::RichText::new(caption)
                 .small()
                 .color(app::caption(ui.visuals())),
         );
     }
     asked
+}
+
+/// Why a take found no hum or hiss where its noise search found nothing to measure.
+pub const NO_QUIET: &str = "no quiet stretch to measure";
+
+/// What the card says under Clean audio where the take is set to be cleaned but is
+/// heard as recorded, for the reason `why`.
+pub fn not_cleaned(why: &str) -> String {
+    format!("hum and hiss not found: {why}; heard as recorded")
 }
 
 /// What a control pressed while the take's noise is being found says.
@@ -703,6 +738,42 @@ mod tests {
 
     fn db(v: f32) -> f64 {
         20.0 * f64::from(v).log10()
+    }
+
+    #[test]
+    fn a_take_heard_as_recorded_though_set_to_be_cleaned_says_why() {
+        let (audio, _) = take();
+        let at = (print(&audio), Floor::OneNote);
+        let found = |hiss: Option<Vec<f64>>| {
+            Search::Done(Noise {
+                rate: RATE,
+                hum: None,
+                hiss,
+            })
+        };
+        let mut audition = Audition::default();
+        audition.noise = Some((at, found(None)));
+        let why = audition.uncleaned(&audio, Some(Floor::OneNote));
+        assert_eq!(why.as_deref(), Some(NO_QUIET), "nothing quiet to measure");
+        assert_eq!(
+            audition.uncleaned(&audio, None),
+            None,
+            "not set to be cleaned"
+        );
+        assert_eq!(
+            audition.uncleaned(&audio, Some(Floor::Take)),
+            None,
+            "another floor's search is not this one's"
+        );
+        audition.noise = Some((at, found(Some(vec![1e-9; 4]))));
+        assert_eq!(audition.uncleaned(&audio, Some(Floor::OneNote)), None);
+        let died = "the noise search stopped: out of memory".to_string();
+        audition.noise = Some((at, Search::Lost(died.clone())));
+        assert_eq!(audition.uncleaned(&audio, Some(Floor::OneNote)), Some(died));
+        assert_eq!(
+            not_cleaned(NO_QUIET),
+            "hum and hiss not found: no quiet stretch to measure; heard as recorded"
+        );
     }
 
     #[test]
