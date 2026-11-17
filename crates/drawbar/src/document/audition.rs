@@ -751,8 +751,10 @@ mod tests {
                 hiss,
             })
         };
-        let mut audition = Audition::default();
-        audition.noise = Some((at, found(None)));
+        let mut audition = Audition {
+            noise: Some((at, found(None))),
+            ..Default::default()
+        };
         let why = audition.uncleaned(&audio, Some(Floor::OneNote));
         assert_eq!(why.as_deref(), Some(NO_QUIET), "nothing quiet to measure");
         assert_eq!(
