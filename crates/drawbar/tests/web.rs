@@ -15,6 +15,7 @@ use drawbar::store::{
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use nord_format::formats::nsmp;
+use nord_format::take::detect::Floor;
 use toshokan::web::{private_dir, Folder, Hint, Hints};
 use toshokan::{Expect, RelPath};
 use wasm_bindgen::JsCast as _;
@@ -1048,10 +1049,13 @@ async fn answered<T>(job: &drawbar::work::Job<T>) -> drawbar::work::Answer<T> {
 async fn a_take_s_noise_found_in_a_worker_is_the_noise_found_on_the_page() {
     use drawbar::work::{self, FindNoise, FoundNoise};
     let audio = take(12);
-    let here =
-        nord_format::take::clean::Noise::of(&nord_format::take::plan::mono(&audio), audio.rate);
+    let here = nord_format::take::clean::Noise::of(
+        &nord_format::take::plan::mono(&audio),
+        audio.rate,
+        Floor::Take,
+    );
     let ctx = egui::Context::default();
-    let job = work::hand(&ctx, FindNoise::of(&audio));
+    let job = work::hand(&ctx, FindNoise::of(&audio, Floor::Take));
     // The page is free while the worker works: the job is still running on return.
     assert_eq!(job.poll(), work::Answer::Running);
     let work::Answer::Answered(FoundNoise(there)) = answered(&job).await else {
@@ -1069,8 +1073,8 @@ async fn a_dropped_job_s_worker_ends_and_the_next_job_runs() {
     use drawbar::work::{self, FindNoise, FoundNoise};
     let ctx = egui::Context::default();
     let audio = take(12);
-    drop(work::hand(&ctx, FindNoise::of(&audio)));
-    let job = work::hand(&ctx, FindNoise::of(&take(4)));
+    drop(work::hand(&ctx, FindNoise::of(&audio, Floor::Take)));
+    let job = work::hand(&ctx, FindNoise::of(&take(4), Floor::Take));
     assert!(matches!(
         answered(&job).await,
         work::Answer::Answered(FoundNoise(_))
