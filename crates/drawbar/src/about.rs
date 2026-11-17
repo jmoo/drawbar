@@ -406,7 +406,7 @@ mod tests {
 
     fn headless() -> egui::Context {
         let ctx = crate::testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         ctx
     }
 

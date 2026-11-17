@@ -1750,7 +1750,7 @@ mod tests {
     #[test]
     fn a_confirmation_runs_its_acts_only_on_its_verb() {
         let ctx = testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         let at = Location { bank: 6, slot: 3 };
         let delete = || Act::DeleteSlot {
             class: ObjectClass::Program,

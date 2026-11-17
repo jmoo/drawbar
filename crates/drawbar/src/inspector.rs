@@ -1542,7 +1542,7 @@ mod tests {
     /// and 8, where only 7 wears Loud and nothing wears Sunday.
     fn added_from_the_card(item: &str) -> (Vec<Act>, u64) {
         let ctx = context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         let mut labels = Tags::default();
         let (sunday, loud) = (labels.make("Sunday").unwrap(), labels.make("Loud").unwrap());
         labels.set(7, loud, true);

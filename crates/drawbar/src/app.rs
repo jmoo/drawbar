@@ -261,7 +261,7 @@ impl DrawbarApp {
         store: Option<Store>,
     ) -> DrawbarApp {
         // Without this every `Glyph` draws as egui's broken-image warning.
-        egui_extras::install_image_loaders(&cc.egui_ctx);
+        crate::icon::install(&cc.egui_ctx);
         cc.egui_ctx.set_fonts(fonts());
         // Both themes are set up front, so a system switch between light and dark
         // mid-session uses this app's colors, not egui's defaults.

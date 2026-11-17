@@ -122,7 +122,11 @@
                 mdbook
                 mdbook-mermaid
                 nodejs
-                (python3.withPackages (python: [ python.fonttools ]))
+                (python3.withPackages (python: [
+                  python.fonttools
+                  python.picosvg
+                  python.skia-pathops
+                ]))
                 rust-analyzer
                 wasm-bindgen-cli
                 wrangler
