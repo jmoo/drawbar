@@ -85,7 +85,7 @@ macro_rules! impl_packed_uint {
 impl_packed_uint!(u8, u16, u32, u64);
 
 /// Read bits `lo..=hi` of `raw`, MSB-first, shifted down to bit 0.
-const fn extract(raw: &[u8], lo: u32, hi: u32) -> u64 {
+pub(crate) const fn extract(raw: &[u8], lo: u32, hi: u32) -> u64 {
     let mut bits = 0;
     let mut i = lo;
     while i <= hi {

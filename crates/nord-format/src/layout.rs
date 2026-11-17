@@ -54,7 +54,7 @@ impl std::fmt::Debug for LayoutField {
 mod tests {
     use super::*;
     use crate::cbin::{self, Cbin, Header};
-    use crate::fields::{ControlKind, Unit};
+    use crate::fields::{ControlKind, FieldError, FieldValue, Unit};
     use nord_bits_derive::bitbody;
     use std::io::Cursor;
 
@@ -206,6 +206,87 @@ mod tests {
         assert_eq!(
             rendered,
             ["flag bits 0..=0 (bool)", "level bits 4..=11 (u8)"]
+        );
+    }
+
+    /// Each registered field reports its path, placement, the bits it was read with, the
+    /// bits its value writes, and its value, in declaration order through the nested body.
+    #[test]
+    fn a_field_value_reports_what_was_read_and_what_would_be_written() {
+        let value = |name: &str, placement, raw, bits, value: &str| FieldValue {
+            name: name.to_string(),
+            placement,
+            raw,
+            bits,
+            value: value.to_string(),
+        };
+        // `inner` was read from 0x0f 0xf0: flag clear, level 0xff. `level` was read as 0.
+        assert_eq!(
+            body().field_values(),
+            [
+                value("inner.flag", "0..=0", 0, 0, "false"),
+                value("inner.level", "4..=11", 0xff, 0x55, "85"),
+                value("level", "40..=47", 0, 7, "7"),
+            ],
+        );
+        let listed: Vec<_> = body()
+            .fields()
+            .into_iter()
+            .map(|f| (f.path, f.value, f.display))
+            .collect();
+        assert_eq!(listed[1], ("inner.level".into(), "85".into(), "85".into()));
+    }
+
+    #[test]
+    fn a_field_spec_carries_its_width_and_legal_values() {
+        let specs = Outer::field_specs();
+        let summary: Vec<_> = specs
+            .iter()
+            .map(|s| (s.name.as_str(), s.placement, s.width, s.control))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("inner.flag", "0..=0", 1, ControlKind::Toggle),
+                ("inner.level", "4..=11", 8, ControlKind::Number),
+                ("level", "40..=47", 8, ControlKind::Number),
+            ],
+        );
+        assert_eq!((specs[0].legal)(), ["false", "true"]);
+        let levels = (specs[2].legal)();
+        assert_eq!(
+            (levels.len(), levels[0].as_str(), levels[255].as_str()),
+            (256, "0", "255")
+        );
+    }
+
+    /// A refusal names the body that lacks the path, or the field and the values it takes.
+    #[test]
+    fn a_refused_set_names_the_body_or_the_field() {
+        let mut b = body();
+        let unknown = |panel, name: &str| FieldError::UnknownField {
+            panel,
+            name: name.to_string(),
+        };
+        assert_eq!(
+            b.set_field("nonesuch", "1"),
+            Err(unknown("Outer", "nonesuch"))
+        );
+        assert_eq!(
+            b.set_field("level.x", "1"),
+            Err(unknown("Outer", "level.x"))
+        );
+        assert_eq!(
+            b.set_field("inner.nonesuch", "1"),
+            Err(unknown("Inner", "nonesuch"))
+        );
+        assert_eq!(
+            b.set_field("inner.flag", "maybe"),
+            Err(FieldError::BadValue {
+                field: "flag",
+                given: "maybe".to_string(),
+                legal: vec!["false".to_string(), "true".to_string()],
+            }),
         );
     }
 }
