@@ -34,7 +34,6 @@ pub(super) const GROUPS: &[Group] = &[
             "ring 0.17.14",
             "winapi-x86_64-pc-windows-gnu 0.4.0",
             "winit 0.30.13",
-            "zopfli 0.8.3",
         ],
         variants: &[],
     },
