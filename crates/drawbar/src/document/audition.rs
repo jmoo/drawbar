@@ -1,4 +1,4 @@
-//! A sample heard as the instrument will play it.
+//! A sample heard as the instrument plays it.
 //!
 //! Its regions are cleaned of the take's hum and hiss as the build cleans them, unless
 //! the take is set to build as recorded, shaped from their marks as the build shapes
@@ -555,8 +555,7 @@ pub fn controls(
 pub const NOISE_WAIT: &str = "Generating the noise profile, please wait…";
 
 /// What Play sample does, on hover.
-pub const PLAY_SAMPLE_HINT: &str =
-    "Click to play the whole sample, its loop and its key-off; hold to keep the key down, and let go for the key-off";
+pub const PLAY_SAMPLE_HINT: &str = "As the instrument plays it";
 
 /// The clock `sounding` plays at on the player, against the codec's rate.
 fn clock(sounding: &Sounding) -> f32 {
