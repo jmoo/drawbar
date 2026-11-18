@@ -43,8 +43,9 @@
 //! Generates: the `[u8; LEN]` conversions both ways, the `cbin::Body` impl, a
 //! `Debug` over the decoded fields, a `layout::BodyLayout` impl publishing every
 //! placement as data (nested bodies chain to their own layouts), and, for `pub`
-//! fields, the registry: `fields()`, `set_field()`, `field_values()`,
-//! `field_specs()`. Private fields decode and encode but stay unregistered.
+//! fields, the registry: a table with one `fields::Registered` entry per field,
+//! and `fields()`, `set_field()`, `field_values()` and `field_specs()`, which walk
+//! it. Private fields decode and encode but stay unregistered.
 //!
 //! **Paths.** A nested field registers its children under its own name:
 //! `center_panel.transpose`. A leaf registers under its own name alone.
@@ -425,10 +426,7 @@ struct GeneratedFields {
     decode: Vec<TokenStream2>,
     encode: Vec<TokenStream2>,
     debug: Vec<TokenStream2>,
-    values: Vec<TokenStream2>,
-    specs: Vec<TokenStream2>,
-    setters: Vec<TokenStream2>,
-    routes: Vec<TokenStream2>,
+    registry: Vec<TokenStream2>,
     layout: Vec<TokenStream2>,
 }
 
@@ -506,21 +504,14 @@ fn nested_field(
     });
 
     if matches!(field.vis, syn::Visibility::Public(_)) {
-        let prefix = format!("{ident}.");
-        generated.values.push(quote! {
-            out.extend(self.#ident.field_values().into_iter().map(|mut v| {
-                v.name.insert_str(0, #prefix);
-                v
-            }));
-        });
-        generated.specs.push(quote! {
-            out.extend(<#ty>::field_specs().into_iter().map(|mut s| {
-                s.name.insert_str(0, #prefix);
-                s
-            }));
-        });
-        generated.routes.push(quote! {
-            stringify!(#ident) => return self.#ident.set_field(rest, value),
+        let path = ident.to_string();
+        generated.registry.push(quote! {
+            crate::fields::Registered::Nested {
+                name: #path,
+                values: |body| body.#ident.field_values(),
+                specs: <#ty>::field_specs,
+                set: |body, path, value| body.#ident.set_field(path, value),
+            }
         });
     }
 }
@@ -560,15 +551,6 @@ fn leaf_field(
 
     let placement = format!("{lo}..={hi}");
     let width = hi - lo + 1;
-    generated.values.push(quote! {
-        out.push(crate::fields::FieldValue {
-            name: #path.to_string(),
-            placement: #placement,
-            raw: crate::bits::Field::<u64, #lo, #hi>::read(&self.raw),
-            bits: <#ty as crate::bits::Packed>::to_bits(&self.#ident),
-            value: ::std::format!("{:?}", &self.#ident),
-        });
-    });
     // What the type cannot know, taken from the declaration or else the field's name.
     // Kinds with no use for a refinement ignore it.
     let mut control = quote! { <#ty as crate::bits::Packed>::CONTROL };
@@ -582,20 +564,18 @@ fn leaf_field(
     if let Some(rank) = trailing_ordinal(&path) {
         control = quote! { #control.ranked(#rank) };
     }
-    generated.specs.push(quote! {
-        out.push(crate::fields::FieldSpec {
-            name: #path.to_string(),
+    generated.registry.push(quote! {
+        crate::fields::Registered::Leaf {
+            name: #path,
             placement: #placement,
-            width: #width,
-            legal: || crate::fields::legal_values::<#ty>(#width),
+            lo: #lo,
+            hi: #hi,
             control: #control,
-        });
-    });
-    // The type rejects values it cannot hold instead of clamping them into the slot.
-    generated.setters.push(quote! {
-        #path => {
-            self.#ident = crate::fields::parse_field::<#ty>(#path, #width, value)?;
-            return Ok(());
+            legal: crate::fields::legal_of::<#ty, #width>,
+            value: |body| crate::fields::value_of(&body.#ident),
+            set: |body, name, width, value| {
+                crate::fields::parse_into(&mut body.#ident, name, width, value)
+            },
         }
     });
 }
@@ -692,10 +672,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         decode,
         encode,
         debug,
-        values,
-        specs,
-        setters,
-        routes,
+        registry,
         layout,
     } = generate_fields(named, span_bits, bytes)?;
 
@@ -790,34 +767,23 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
         }
 
         impl #name {
+            const REGISTRY: &'static [crate::fields::Registered<Self>] = &[#(#registry,)*];
+
             /// Every registered field's current value, under its full path, in
             /// declaration order, with nested bodies inline where their field sits.
             /// Describes the same fields as [`Self::field_specs`], so callers may
             /// zip the two positionally.
             pub fn field_values(&self) -> ::std::vec::Vec<crate::fields::FieldValue> {
-                let mut out = ::std::vec::Vec::new();
-                #(#values)*
-                out
+                crate::fields::field_values(self, &self.raw, Self::REGISTRY)
             }
 
             pub fn field_specs() -> ::std::vec::Vec<crate::fields::FieldSpec> {
-                let mut out = ::std::vec::Vec::new();
-                #(#specs)*
-                out
+                crate::fields::field_specs(Self::REGISTRY)
             }
 
             /// Every settable field, described under its full path.
             pub fn fields(&self) -> ::std::vec::Vec<crate::fields::Field> {
-                Self::field_specs()
-                    .into_iter()
-                    .zip(self.field_values())
-                    .map(|(spec, value)| crate::fields::Field {
-                        path: spec.name.clone(),
-                        value: crate::fields::settable_form(spec.width, &value.value, value.bits),
-                        display: value.value,
-                        spec,
-                    })
-                    .collect()
+                crate::fields::fields(Self::field_specs(), self.field_values())
             }
 
             /// Set one field by its full path.
@@ -826,20 +792,7 @@ fn expand(attr: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
                 path: &str,
                 value: &str,
             ) -> ::core::result::Result<(), crate::fields::FieldError> {
-                match path {
-                    #(#setters)*
-                    _ => {}
-                }
-                if let ::core::option::Option::Some((head, rest)) = path.split_once('.') {
-                    match head {
-                        #(#routes)*
-                        _ => {}
-                    }
-                }
-                Err(crate::fields::FieldError::UnknownField {
-                    panel: stringify!(#name),
-                    name: path.to_string(),
-                })
+                crate::fields::set_field(self, Self::REGISTRY, stringify!(#name), path, value)
             }
         }
 

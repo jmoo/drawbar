@@ -498,6 +498,155 @@ pub fn settable_form(width: u32, debug: &str, raw: u64) -> String {
     }
 }
 
+/// One registered field of a `#[bitbody]`, as the derive declares it in the body's
+/// registry table: a leaf, or a nested body whose fields register under `name`.
+pub(crate) enum Registered<B: 'static> {
+    Leaf {
+        name: &'static str,
+        placement: &'static str,
+        lo: u32,
+        hi: u32,
+        control: ControlKind,
+        legal: fn() -> Vec<String>,
+        value: fn(&B) -> (u64, String),
+        set: fn(&mut B, &'static str, u32, &str) -> Result<(), FieldError>,
+    },
+    Nested {
+        name: &'static str,
+        values: fn(&B) -> Vec<FieldValue>,
+        specs: fn() -> Vec<FieldSpec>,
+        set: fn(&mut B, &str, &str) -> Result<(), FieldError>,
+    },
+}
+
+pub(crate) fn legal_of<T: Packed + Debug, const WIDTH: u32>() -> Vec<String> {
+    legal_values::<T>(WIDTH)
+}
+
+/// The bits `value` writes, and its `Debug` rendering.
+pub(crate) fn value_of<T: Packed + Debug>(value: &T) -> (u64, String) {
+    (value.to_bits(), format!("{value:?}"))
+}
+
+pub(crate) fn parse_into<T: Packed + Debug>(
+    slot: &mut T,
+    field: &'static str,
+    width: u32,
+    given: &str,
+) -> Result<(), FieldError> {
+    *slot = parse_field::<T>(field, width, given)?;
+    Ok(())
+}
+
+pub(crate) fn field_values<B>(body: &B, raw: &[u8], table: &[Registered<B>]) -> Vec<FieldValue> {
+    let mut out = Vec::new();
+    for entry in table {
+        match entry {
+            Registered::Leaf {
+                name,
+                placement,
+                lo,
+                hi,
+                value,
+                ..
+            } => {
+                let (bits, value) = value(body);
+                out.push(FieldValue {
+                    name: name.to_string(),
+                    placement,
+                    raw: crate::bits::extract(raw, *lo, *hi),
+                    bits,
+                    value,
+                });
+            }
+            Registered::Nested { name, values, .. } => {
+                out.extend(values(body).into_iter().map(|mut v| {
+                    v.name.insert(0, '.');
+                    v.name.insert_str(0, name);
+                    v
+                }));
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn field_specs<B>(table: &[Registered<B>]) -> Vec<FieldSpec> {
+    let mut out = Vec::new();
+    for entry in table {
+        match entry {
+            Registered::Leaf {
+                name,
+                placement,
+                lo,
+                hi,
+                control,
+                legal,
+                ..
+            } => out.push(FieldSpec {
+                name: name.to_string(),
+                placement,
+                width: hi - lo + 1,
+                legal: *legal,
+                control: *control,
+            }),
+            Registered::Nested { name, specs, .. } => {
+                out.extend(specs().into_iter().map(|mut s| {
+                    s.name.insert(0, '.');
+                    s.name.insert_str(0, name);
+                    s
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// A leaf matches the whole path and a nested body its first segment. Names hold no
+/// dot, so at most one entry matches.
+pub(crate) fn set_field<B>(
+    body: &mut B,
+    table: &[Registered<B>],
+    panel: &'static str,
+    path: &str,
+    value: &str,
+) -> Result<(), FieldError> {
+    let split = path.split_once('.');
+    for entry in table {
+        match (entry, split) {
+            (
+                Registered::Leaf {
+                    name, lo, hi, set, ..
+                },
+                None,
+            ) if *name == path => {
+                return set(body, name, hi - lo + 1, value);
+            }
+            (Registered::Nested { name, set, .. }, Some((head, rest))) if *name == head => {
+                return set(body, rest, value);
+            }
+            _ => {}
+        }
+    }
+    Err(FieldError::UnknownField {
+        panel,
+        name: path.to_string(),
+    })
+}
+
+pub(crate) fn fields(specs: Vec<FieldSpec>, values: Vec<FieldValue>) -> Vec<Field> {
+    specs
+        .into_iter()
+        .zip(values)
+        .map(|(spec, value)| Field {
+            path: spec.name.clone(),
+            value: settable_form(spec.width, &value.value, value.bits),
+            display: value.value,
+            spec,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,10 +1,19 @@
 //! The vendored Lucide glyphs and how they are drawn.
 //!
-//! The art in `assets/icons` is Lucide 0.469.0 under the ISC license beside it, with
-//! `currentColor` replaced by white so a tint multiplies to the requested color. Sizes in
-//! use are 10-15 px; a row uses one size throughout.
+//! The art in `assets/icons` is Lucide 0.469.0 under the ISC license beside it.
+//! `scripts/icons.py` outlines its strokes into `drawbar-icons.ttf`, one glyph per entry
+//! of the `glyphs!` list at U+E000 plus its position, and [`install`] teaches egui to
+//! rasterize them white so a tint multiplies to the requested color. Sizes in use are
+//! 10-15 px; a row uses one size throughout.
 
+use std::sync::Arc;
+
+use ab_glyph::{Font as _, FontRef, PxScale};
 use eframe::egui;
+use egui::load::{ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint};
+
+/// The outlined art, written by `scripts/icons.py`.
+const FONT: &[u8] = include_bytes!("../assets/fonts/drawbar-icons.ttf");
 
 /// The vendored art: one line per glyph, naming the variant and its file.
 ///
@@ -22,11 +31,11 @@ macro_rules! glyphs {
             /// Every variant, so a test can prove each one still has art.
             pub const ALL: &'static [Glyph] = &[$(Glyph::$name,)*];
 
-            fn source(self) -> egui::ImageSource<'static> {
+            /// ⚠️ egui's texture loader caches a texture per size only for a URI ending in
+            /// `.svg`; any other URI keeps its first raster at every size.
+            fn uri(self) -> &'static str {
                 match self {
-                    $(Glyph::$name => {
-                        egui::include_image!(concat!("../assets/icons/", $file))
-                    })*
+                    $(Glyph::$name => concat!("drawbar-icon://", $file),)*
                 }
             }
         }
@@ -120,7 +129,88 @@ glyphs! {
 impl Glyph {
     /// This glyph as an image, for the widgets and the painters that take one.
     pub fn image(self) -> egui::Image<'static> {
-        egui::Image::new(self.source())
+        egui::Image::new(egui::ImageSource::Uri(self.uri().into()))
+    }
+
+    fn codepoint(self) -> char {
+        char::from_u32(0xE000 + self as u32).expect("the glyph list fits the private use area")
+    }
+}
+
+/// Lucide's view box, the size a glyph has before a size hint scales it.
+const ART: f32 = 24.0;
+
+/// Rasterizes `drawbar-icon://` URIs from `drawbar-icons.ttf`.
+///
+/// It keeps nothing: egui's texture loader asks only for a size it does not hold, and of
+/// a glyph's sizes it keeps the ones drawn in the last pass, or the last one drawn.
+struct Loader;
+
+/// Teach `ctx` to draw [`Glyph`]s.
+pub fn install(ctx: &egui::Context) {
+    if !ctx.is_loader_installed(Loader::ID) {
+        ctx.add_image_loader(Arc::new(Loader));
+    }
+}
+
+impl Loader {
+    const ID: &'static str = egui::generate_loader_id!(Loader);
+}
+
+/// The side in device pixels: egui's hints already include the pixels per point.
+fn side(hint: SizeHint) -> u32 {
+    let side = match hint {
+        SizeHint::Scale(scale) => ART * scale.into_inner(),
+        SizeHint::Width(side) | SizeHint::Height(side) => side as f32,
+        SizeHint::Size { width, height, .. } => width.min(height) as f32,
+    };
+    side.round().max(1.0) as u32
+}
+
+fn rasterize(glyph: Glyph, side: u32) -> egui::ColorImage {
+    let font = FontRef::try_from_slice(FONT).expect("scripts/icons.py writes a valid font");
+    let mut image = egui::ColorImage::filled([side as usize; 2], egui::Color32::TRANSPARENT);
+    let scaled = font.glyph_id(glyph.codepoint()).with_scale_and_position(
+        PxScale::from(side as f32),
+        ab_glyph::point(0.0, side as f32),
+    );
+    if let Some(outline) = font.outline_glyph(scaled) {
+        let bounds = outline.px_bounds();
+        outline.draw(|x, y, coverage| {
+            let (x, y) = (
+                x as i64 + bounds.min.x as i64,
+                y as i64 + bounds.min.y as i64,
+            );
+            if (0..side as i64).contains(&x) && (0..side as i64).contains(&y) {
+                let alpha = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
+                image.pixels[y as usize * side as usize + x as usize] =
+                    egui::Color32::from_white_alpha(alpha);
+            }
+        });
+    }
+    image
+}
+
+impl ImageLoader for Loader {
+    fn id(&self) -> &str {
+        Self::ID
+    }
+
+    fn load(&self, _: &egui::Context, uri: &str, hint: SizeHint) -> ImageLoadResult {
+        let Some(glyph) = Glyph::ALL.iter().copied().find(|glyph| glyph.uri() == uri) else {
+            return Err(LoadError::NotSupported);
+        };
+        Ok(ImagePoll::Ready {
+            image: Arc::new(rasterize(glyph, side(hint))),
+        })
+    }
+
+    fn forget(&self, _: &str) {}
+
+    fn forget_all(&self) {}
+
+    fn byte_size(&self) -> usize {
+        0
     }
 }
 
@@ -155,7 +245,7 @@ mod tests {
 
     fn headless() -> (egui::Context, egui::RawInput) {
         let ctx = testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        install(&ctx);
         (ctx, testing::screen(egui::vec2(900.0, 540.0), Vec::new()))
     }
 
@@ -164,14 +254,9 @@ mod tests {
         let (ctx, input) = headless();
         testing::run(&ctx, input, |ctx| {
             for glyph in Glyph::ALL.iter().copied() {
-                let source = glyph.source();
-                let egui::ImageSource::Bytes { uri, bytes } = source else {
-                    panic!("{glyph:?} is not vendored bytes");
-                };
-                ctx.include_bytes(uri.clone(), bytes);
                 let poll = ctx
                     .try_load_image(
-                        &uri,
+                        glyph.uri(),
                         SizeHint::Size {
                             width: RASTER,
                             height: RASTER,
@@ -186,8 +271,7 @@ mod tests {
                     image.pixels.iter().any(|pixel| pixel.a() > 0),
                     "{glyph:?} rasterized to nothing"
                 );
-                // Premultiplied white is (a, a, a, a). Lucide ships `currentColor`,
-                // which resvg rasterizes as black, and no tint can lighten black.
+                // Premultiplied white is (a, a, a, a); no tint can lighten anything darker.
                 assert!(
                     image.pixels.iter().all(|pixel| pixel.r() == pixel.a()
                         && pixel.g() == pixel.a()
@@ -196,6 +280,45 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn the_icon_font_holds_exactly_one_outline_per_glyph() {
+        let font = FontRef::try_from_slice(FONT).expect("drawbar-icons.ttf parses");
+        assert_eq!(
+            font.glyph_count(),
+            Glyph::ALL.len() + 1,
+            "drawbar-icons.ttf holds {} outlines and .notdef for {} glyphs; rerun scripts/icons.py",
+            font.glyph_count() - 1,
+            Glyph::ALL.len()
+        );
+        for glyph in Glyph::ALL.iter().copied() {
+            assert_ne!(
+                font.glyph_id(glyph.codepoint()).0,
+                0,
+                "{glyph:?} has no outline"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raster_has_the_device_pixels_the_hint_asks_for() {
+        for (hint, side) in [
+            (SizeHint::Scale(1.5.into()), 36),
+            (SizeHint::Width(23), 23),
+            (SizeHint::Height(15), 15),
+            (
+                SizeHint::Size {
+                    width: 30,
+                    height: 30,
+                    maintain_aspect_ratio: true,
+                },
+                30,
+            ),
+        ] {
+            let image = rasterize(Glyph::Check, super::side(hint));
+            assert_eq!(image.size, [side; 2], "{hint:?}");
+        }
     }
 
     /// A row of glyphs lines up whatever their art.

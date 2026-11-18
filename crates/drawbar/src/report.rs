@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn switching_kind_takes_its_attachments_until_one_is_changed() {
         let ctx = testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         let log = Log::default();
         let mut report = report(State::Drafting);
         report.text = "Thanks.".to_string();
@@ -768,7 +768,7 @@ mod tests {
         ] {
             let mut report = report(state);
             let ctx = testing::context();
-            egui_extras::install_image_loaders(&ctx);
+            crate::icon::install(&ctx);
             let log = Log::default();
             let mut said = Vec::new();
             // Twice, because a scroll area sizes itself from the previous frame's content.

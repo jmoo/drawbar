@@ -21,11 +21,8 @@ pub(super) const GROUPS: &[Group] = &[
             "eframe 0.32.3",
             "egui 0.32.3",
             "egui-winit 0.32.3",
-            "egui_extras 0.32.3",
             "egui_glow 0.32.3",
             "emath 0.32.3",
-            "enum-map 2.7.3",
-            "enum-map-derive 0.17.0",
             "epaint 0.32.3",
             "gethostname 1.1.0",
             "glutin 0.32.3",
@@ -35,25 +32,9 @@ pub(super) const GROUPS: &[Group] = &[
             "owned_ttf_parser 0.25.1",
             "profiling 1.0.18",
             "ring 0.17.14",
-            "siphasher 1.0.3",
             "winapi-x86_64-pc-windows-gnu 0.4.0",
             "winit 0.30.13",
-            "zopfli 0.8.3",
         ],
-        variants: &[],
-    },
-    Group {
-        license: "BSD-2-Clause",
-        text: include_str!("../../licenses/BSD-2-Clause.txt"),
-        holders: &[
-            Holder {
-                notice: "Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>\nAll rights reserved.",
-                crates: &[
-                    "arrayref 0.3.9",
-                ],
-            },
-        ],
-        unattributed: &[],
         variants: &[],
     },
     Group {
@@ -75,45 +56,7 @@ pub(super) const GROUPS: &[Group] = &[
             },
         ],
         unattributed: &[],
-        variants: &[
-            Text {
-                crates: &[
-                    "tiny-skia 0.11.4",
-                    "tiny-skia-path 0.11.4",
-                ],
-                text: r#"Copyright (c) 2011 Google Inc. All rights reserved.
-Copyright (c) 2020 Yevhenii Reizner All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-  * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-
-  * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-
-  * Neither the name of the copyright holder nor the names of its
-    contributors may be used to endorse or promote products derived
-    from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-"#,
-            },
-        ],
+        variants: &[],
     },
     Group {
         license: "ISC",
@@ -223,7 +166,6 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2013-2025 The rust-url developers",
                 crates: &[
-                    "data-url 0.3.2",
                     "idna 1.1.0",
                     "percent-encoding 2.3.2",
                     "url 2.5.8",
@@ -251,12 +193,6 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
-                notice: "Copyright (c) 2014 John Slegers",
-                crates: &[
-                    "epaint_default_fonts 0.32.3",
-                ],
-            },
-            Holder {
                 notice: "Copyright (c) 2014 Mathijs van de Nes",
                 crates: &[
                     "zip 9.0.5",
@@ -278,12 +214,6 @@ third-party/chromium/LICENSE.
                 notice: "Copyright (c) 2014 The Rust Project Developers\nCopyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon",
                 crates: &[
                     "uuid 1.24.0",
-                ],
-            },
-            Holder {
-                notice: "Copyright (c) 2014-2020 Optimal Computing (NZ) Ltd",
-                crates: &[
-                    "float-cmp 0.9.0",
                 ],
             },
             Holder {
@@ -372,7 +302,6 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2015 nwin",
                 crates: &[
-                    "png 0.17.16",
                     "png 0.18.1",
                 ],
             },
@@ -475,12 +404,6 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
-                notice: "Copyright (c) 2017 Maiddog",
-                crates: &[
-                    "imagesize 0.13.0",
-                ],
-            },
-            Holder {
                 notice: "Copyright (c) 2017 Maik Klein",
                 crates: &[
                     "enumflags2_derive 0.7.12",
@@ -561,18 +484,6 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
-                notice: "Copyright (c) 2018 Raph Levien",
-                crates: &[
-                    "kurbo 0.11.3",
-                ],
-            },
-            Holder {
-                notice: "Copyright (c) 2018 Reizner Evgeniy",
-                crates: &[
-                    "simplecss 0.2.2",
-                ],
-            },
-            Holder {
                 notice: "Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors",
                 crates: &[
                     "crc32fast 1.5.0",
@@ -602,8 +513,6 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2018 Yevhenii Reizner",
                 crates: &[
-                    "roxmltree 0.20.0",
-                    "svgtypes 0.15.3",
                     "ttf-parser 0.25.1",
                 ],
             },
@@ -644,12 +553,6 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
-                notice: "Copyright (c) 2019 Kornel",
-                crates: &[
-                    "rgb 0.8.53",
-                ],
-            },
-            Holder {
                 notice: "Copyright (c) 2019 Martin Algesten",
                 crates: &[
                     "ureq 3.4.2",
@@ -666,12 +569,6 @@ third-party/chromium/LICENSE.
                 crates: &[
                     "mach2 0.4.3",
                     "mach2 0.5.0",
-                ],
-            },
-            Holder {
-                notice: "Copyright (c) 2019 Reizner Evgeniy",
-                crates: &[
-                    "xmlwriter 0.1.0",
                 ],
             },
             Holder {
@@ -693,12 +590,6 @@ third-party/chromium/LICENSE.
                     "tracing 0.1.44",
                     "tracing-attributes 0.1.31",
                     "tracing-core 0.1.36",
-                ],
-            },
-            Holder {
-                notice: "Copyright (c) 2019 Yevhenii Reizner",
-                crates: &[
-                    "pico-args 0.5.0",
                 ],
             },
             Holder {
@@ -765,12 +656,6 @@ third-party/chromium/LICENSE.
                 notice: "Copyright (c) 2022 The Arboard contributors",
                 crates: &[
                     "arboard 3.6.1",
-                ],
-            },
-            Holder {
-                notice: "Copyright (c) 2022 Yevhenii Reizner",
-                crates: &[
-                    "strict-num 0.1.1",
                 ],
             },
             Holder {
@@ -915,13 +800,6 @@ third-party/chromium/LICENSE.
                 notice: "Copyright 2016 Nika Layzell",
                 crates: &[
                     "synstructure 0.13.2",
-                ],
-            },
-            Holder {
-                notice: "Copyright 2017 the Resvg Authors",
-                crates: &[
-                    "resvg 0.45.1",
-                    "usvg 0.45.1",
                 ],
             },
             Holder {
@@ -1216,7 +1094,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("anstyle-query", "1.1.5"),
     ("anstyle-wincon", "3.0.11"),
     ("arboard", "3.6.1"),
-    ("arrayref", "0.3.9"),
     ("arrayvec", "0.7.8"),
     ("as-raw-xcb-connection", "1.0.1"),
     ("ashpd", "0.11.1"),
@@ -1286,7 +1163,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("crunchy", "0.2.4"),
     ("cursor-icon", "1.2.0"),
     ("dasp_sample", "0.11.0"),
-    ("data-url", "0.3.2"),
     ("dispatch", "0.2.0"),
     ("dispatch2", "0.3.1"),
     ("displaydoc", "0.2.7"),
@@ -1300,22 +1176,17 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("egui", "0.32.3"),
     ("egui-wgpu", "0.32.3"),
     ("egui-winit", "0.32.3"),
-    ("egui_extras", "0.32.3"),
     ("egui_glow", "0.32.3"),
     ("emath", "0.32.3"),
     ("endi", "1.1.1"),
-    ("enum-map", "2.7.3"),
-    ("enum-map-derive", "0.17.0"),
     ("enumflags2", "0.7.12"),
     ("enumflags2_derive", "0.7.12"),
     ("enumn", "0.1.14"),
     ("epaint", "0.32.3"),
-    ("epaint_default_fonts", "0.32.3"),
     ("equivalent", "1.0.2"),
     ("errno", "0.3.14"),
     ("error-code", "3.3.2"),
     ("escape8259", "0.5.3"),
-    ("euclid", "0.22.14"),
     ("event-listener", "5.4.2"),
     ("event-listener-strategy", "0.5.4"),
     ("fastrand", "2.5.0"),
@@ -1323,7 +1194,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("fdeflate", "0.3.7"),
     ("find-msvc-tools", "0.1.10"),
     ("flate2", "1.1.9"),
-    ("float-cmp", "0.9.0"),
     ("foldhash", "0.1.5"),
     ("foreign-types", "0.5.0"),
     ("foreign-types-macros", "0.2.4"),
@@ -1368,7 +1238,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("idna", "1.1.0"),
     ("idna_adapter", "1.2.2"),
     ("image", "0.25.10"),
-    ("imagesize", "0.13.0"),
     ("indexmap", "2.14.0"),
     ("io-kit-sys", "0.4.1"),
     ("is_terminal_polyfill", "1.70.2"),
@@ -1385,7 +1254,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("js-sys", "0.3.98"),
     ("keyboard-types", "0.8.3"),
     ("khronos_api", "3.1.0"),
-    ("kurbo", "0.11.3"),
     ("libc", "0.2.189"),
     ("libloading", "0.7.4"),
     ("libloading", "0.8.9"),
@@ -1461,14 +1329,12 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("parking_lot", "0.12.5"),
     ("parking_lot_core", "0.9.12"),
     ("percent-encoding", "2.3.2"),
-    ("pico-args", "0.5.0"),
     ("pin-project", "1.1.13"),
     ("pin-project-internal", "1.1.13"),
     ("pin-project-lite", "0.2.17"),
     ("piper", "0.2.5"),
     ("pkg-config", "0.3.33"),
     ("plain", "0.2.3"),
-    ("png", "0.17.16"),
     ("png", "0.18.1"),
     ("polling", "3.11.0"),
     ("pollster", "0.4.0"),
@@ -1493,13 +1359,10 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("redox_syscall", "0.5.18"),
     ("redox_syscall", "0.9.2"),
     ("renderdoc-sys", "1.1.0"),
-    ("resvg", "0.45.1"),
     ("rfd", "0.15.4"),
-    ("rgb", "0.8.53"),
     ("ring", "0.17.14"),
     ("rodio", "0.22.2"),
     ("ron", "0.10.1"),
-    ("roxmltree", "0.20.0"),
     ("rustc-hash", "1.1.0"),
     ("rustc-hash", "2.1.3"),
     ("rustc_version", "0.4.1"),
@@ -1527,8 +1390,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("simd-adler32", "0.3.10"),
     ("simd_cesu8", "1.2.0"),
     ("simdutf8", "0.1.5"),
-    ("simplecss", "0.2.2"),
-    ("siphasher", "1.0.3"),
     ("slab", "0.4.12"),
     ("slotmap", "1.1.1"),
     ("smallvec", "1.15.2"),
@@ -1538,12 +1399,10 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("smol_str", "0.2.2"),
     ("stable_deref_trait", "1.2.1"),
     ("static_assertions", "1.1.0"),
-    ("strict-num", "0.1.1"),
     ("strsim", "0.11.1"),
     ("strum", "0.26.3"),
     ("strum_macros", "0.26.4"),
     ("subtle", "2.6.1"),
-    ("svgtypes", "0.15.3"),
     ("syn", "2.0.119"),
     ("syn", "3.0.3"),
     ("synstructure", "0.13.2"),
@@ -1554,8 +1413,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("thiserror-impl", "1.0.69"),
     ("thiserror-impl", "2.0.20"),
     ("tiff", "0.11.3"),
-    ("tiny-skia", "0.11.4"),
-    ("tiny-skia-path", "0.11.4"),
     ("tinystr", "0.8.3"),
     ("tinyvec", "1.13.3"),
     ("toml_datetime", "1.1.1+spec-1.1.0"),
@@ -1577,7 +1434,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("ureq-proto", "0.6.4"),
     ("url", "2.5.8"),
     ("urlencoding", "2.1.3"),
-    ("usvg", "0.45.1"),
     ("utf8-zero", "0.8.1"),
     ("utf8_iter", "1.0.4"),
     ("utf8parse", "0.2.2"),
@@ -1670,7 +1526,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("xkbcommon-dl", "0.4.2"),
     ("xkeysym", "0.2.1"),
     ("xml-rs", "0.8.29"),
-    ("xmlwriter", "0.1.0"),
     ("yoke", "0.8.3"),
     ("yoke-derive", "0.8.2"),
     ("zbus", "5.19.0"),

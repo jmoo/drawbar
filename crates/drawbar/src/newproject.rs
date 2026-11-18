@@ -22,15 +22,18 @@ use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
 use nord_format::note;
-use nord_format::wav::{Loop, Pcm16};
+use nord_format::take::build as take_build;
+use nord_format::take::detect::Floor;
+use nord_format::wav::{Loop, Marks, Pcm16, Play};
 use nord_format::Entity;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::document::controls::fits;
 use crate::document::note_picker;
 use crate::folders::Folders;
 use crate::log::Log;
-use crate::store::{names, LibPath};
-use crate::work::{self, Job, Progress};
+use crate::store::{names, wire, LibPath};
+use crate::work::{self, Job, Progress, Task, Work};
 use crate::workspace::{Origin, Workspace};
 
 /// The most zones one draft can hold: one per key the dialog can set a root on.
@@ -102,16 +105,103 @@ impl Making {
 }
 
 /// A picked WAV's audio, or why it did not read.
-pub type Source = Result<Pcm16, String>;
+pub type Source = Result<Heard, String>;
 
-fn read(bytes: &[u8]) -> Source {
-    nord_format::wav::read_pcm16(bytes).map_err(|e| e.to_string())
+/// What a picked WAV holds.
+pub enum Heard {
+    /// One stroke, or one zone.
+    Pcm(Pcm16),
+    /// A take whose regions are its strokes, as the take editor or `nord piano prep`
+    /// marked them. Only a piano library reads one so.
+    Take(Prepped),
+}
+
+/// A take marked with its strokes' regions: its file, which the build decodes, and what
+/// the dialog shows of it, read without decoding its samples.
+pub struct Prepped {
+    /// The file, which only the build decodes.
+    bytes: Vec<u8>,
+    marks: Marks,
+    /// Its rate and length in frames, as its container declares them.
+    rate: u32,
+    frames: u64,
+    /// Whether its strokes are cleaned of its hum and hiss: unless its editor set it raw.
+    clean: bool,
+    /// How its noise floor is read before cleaning, as prep read it.
+    floor: Floor,
+    /// The category its editor saved.
+    kind: Option<Kind>,
+}
+
+impl Prepped {
+    /// The take in `bytes`, if a region of it is labeled as a stroke, its file left for
+    /// the caller to hand over. Refused where its settings do not read or state no kind
+    /// of instrument, as `nord piano build` refuses them, and on the web where it is too
+    /// large for the browser.
+    fn of(bytes: &[u8]) -> Option<Result<Prepped, String>> {
+        let marks = nord_format::wav::read_marks(bytes).ok()?;
+        if !crate::document::wav::marks_a_stroke(&marks) {
+            return None;
+        }
+        let read = || {
+            if let Some(why) = crate::document::wav::web_refusal(bytes.len()) {
+                return Err(why);
+            }
+            let layout = nord_format::wav::layout(bytes).map_err(|e| e.to_string())?;
+            let settings = nord_format::wav::read_settings(bytes).map_err(|e| e.to_string())?;
+            let kind = match settings.kind.as_deref() {
+                Some(word) => Some(Kind::from_word(word).ok_or_else(|| {
+                    format!("states kind {word:?}, which is no kind of instrument")
+                })?),
+                None => None,
+            };
+            Ok(Prepped {
+                bytes: Vec::new(),
+                marks,
+                rate: layout.format.rate,
+                frames: layout.frames() as u64,
+                clean: settings.clean != Some(false),
+                floor: settings.floor.unwrap_or_default(),
+                kind,
+            })
+        };
+        Some(read())
+    }
+
+    /// Its strokes and the notes they play, fades left out.
+    fn counts(&self) -> (usize, usize) {
+        let strokes: Vec<(u8, Bank, LayerTag)> = self
+            .marks
+            .regions
+            .iter()
+            .filter_map(|region| parse_stroke_name(&region.label, Stem::None))
+            .collect();
+        let mut notes: Vec<u8> = strokes.iter().map(|(root, _, _)| *root).collect();
+        notes.sort_unstable();
+        notes.dedup();
+        (strokes.len(), notes.len())
+    }
+}
+
+fn read(making: Making, bytes: &[u8]) -> Source {
+    if making == Making::Piano {
+        if let Some(prepped) = Prepped::of(bytes) {
+            return prepped.map(Heard::Take);
+        }
+    }
+    nord_format::wav::read_pcm16(bytes)
+        .map(Heard::Pcm)
+        .map_err(|e| e.to_string())
 }
 
 /// The audio an instrument can be encoded from, or which of the encoder's limits it hit:
 /// one rate, one or two channels, and at least [`encode::MIN_FRAMES`] frames.
 fn encodable(source: &Source) -> Result<&Pcm16, String> {
-    let pcm = source.as_ref().map_err(String::clone)?;
+    let pcm = match source {
+        Ok(Heard::Pcm(pcm)) => pcm,
+        Ok(Heard::Take(_)) => return Err("a take marked with regions".to_string()),
+        Err(why) => return Err(why.clone()),
+    };
     if pcm.rate != SOURCE_RATE {
         return Err(format!("{} Hz: needs {SOURCE_RATE} Hz", pcm.rate));
     }
@@ -155,12 +245,23 @@ impl Take {
             Making::Piano => stroke_defaults(&path),
             Making::Project | Making::Instrument => (root, Bank::Attack, LayerTag::Index(0)),
         };
-        let source = read(&bytes);
+        let source = read(making, &bytes);
         let frames = match &source {
-            Ok(pcm) => project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default(),
+            Ok(Heard::Pcm(pcm)) => {
+                project_frames(pcm.frames() as u64, pcm.rate).unwrap_or_default()
+            }
+            Ok(Heard::Take(take)) => project_frames(take.frames, take.rate).unwrap_or_default(),
             Err(_) => 0,
         };
-        let file = (making == Making::Project).then_some(bytes);
+        let mut source = source;
+        let file = match &mut source {
+            // A take's file goes to the build whole, so it is kept, not copied.
+            Ok(Heard::Take(take)) => {
+                take.bytes = bytes;
+                None
+            }
+            _ => (making == Making::Project).then_some(bytes),
+        };
         Take {
             path,
             file,
@@ -173,7 +274,18 @@ impl Take {
     }
 
     fn pcm(&self) -> Option<&Pcm16> {
-        self.source.as_ref().ok()
+        match &self.source {
+            Ok(Heard::Pcm(pcm)) => Some(pcm),
+            _ => None,
+        }
+    }
+
+    /// The take, where the file is one marked with its strokes.
+    fn prepped(&self) -> Option<&Prepped> {
+        match &self.source {
+            Ok(Heard::Take(take)) => Some(take),
+            _ => None,
+        }
     }
 
     /// Why this file cannot be part of what is being made.
@@ -202,6 +314,12 @@ pub struct Draft {
     pub template: Option<u64>,
     /// The format a piano library is written in: the template's, once one is chosen.
     pub version: Version,
+    /// The category a piano library without a template is built as, whose rules it
+    /// follows: the one a picked take states, until another is chosen.
+    pub kind: Kind,
+    /// Whether a piano library's held notes decay from note-on, as its category's do;
+    /// off, each keeps its recording's own decay and its loop holds its level.
+    pub decays: bool,
     /// The build in flight, once Create has been pressed.
     job: Option<Job<Result<Built, String>>>,
     /// Why the last build failed, kept with the takes so they can be fixed.
@@ -311,15 +429,34 @@ impl Draft {
             .zip(default_roots(&paths))
             .map(|((path, bytes), root)| Take::new(making, path, bytes, root))
             .collect();
-        Some(Draft {
-            making,
-            name: draft_name(making, &paths),
-            takes,
-            template: None,
-            version: Version::default(),
-            job: None,
-            refused: None,
-        })
+        Some(
+            Draft {
+                making,
+                name: draft_name(making, &paths),
+                takes,
+                template: None,
+                version: Version::default(),
+                kind: Kind::Grand,
+                decays: true,
+                job: None,
+                refused: None,
+            }
+            .stated(),
+        )
+    }
+
+    /// The draft with the category its takes state, where they agree on one. The
+    /// category picked is the build's, as `nord piano build --kind` is, so takes that
+    /// disagree leave it as it was for the user to pick.
+    fn stated(mut self) -> Draft {
+        let mut kinds = (self.takes.iter())
+            .filter_map(|take| take.prepped()?.kind)
+            .collect::<Vec<_>>();
+        kinds.dedup();
+        if let [kind] = kinds[..] {
+            self.kind = kind;
+        }
+        self
     }
 
     /// Add more files, as a drop onto the open dialog does.
@@ -351,7 +488,16 @@ impl Draft {
         // ⚠️ The library encoder checks every other rule about its strokes when it
         // builds, and reports it with the takes still here to be fixed.
         if self.making == Making::Piano {
-            return layer_values(&self.takes, self.version).err();
+            let marked = self.takes.iter().filter(|take| take.prepped().is_some());
+            return match marked.count() {
+                0 => layer_values(&self.takes, self.version).err(),
+                n if n == self.takes.len() => None,
+                _ => Some(
+                    "a take's regions are its strokes, so takes build on their own, not with \
+                     WAVs of one stroke each"
+                        .to_string(),
+                ),
+            };
         }
         if self.making == Making::Instrument && self.name.len() > MAX_NAME_LEN {
             return Some(format!(
@@ -407,10 +553,31 @@ impl Draft {
     }
 
     /// Everything a build needs, owned, so it can run apart from the dialog.
-    fn coding(&self, donor: Option<Library<'static>>) -> Result<Coding, String> {
-        let version = donor.as_ref().map_or(self.version, Library::version);
-        let values = layer_values(&self.takes, version)?;
-        let mut takes = Vec::with_capacity(self.takes.len());
+    fn coding(&self, donor: Option<(Version, Skeleton)>) -> Result<Coding, String> {
+        let version = donor.as_ref().map_or(self.version, |(version, _)| *version);
+        let donor = donor.map(|(_, template)| template);
+        let mut takes = Vec::new();
+        let mut marked = Vec::new();
+        if self.takes.iter().any(|take| take.prepped().is_some()) {
+            for take in &self.takes {
+                let prepped = take.prepped().ok_or_else(|| {
+                    format!(
+                        "{}: takes build on their own, not with stroke WAVs",
+                        take.path
+                    )
+                })?;
+                marked.push(Marked {
+                    path: take.path.clone(),
+                    bytes: wire::Handed::new(prepped.bytes.clone()),
+                    clean: prepped.clean,
+                    floor: prepped.floor,
+                });
+            }
+        }
+        let values = match marked.is_empty() {
+            true => layer_values(&self.takes, version)?,
+            false => Vec::new(),
+        };
         for (take, layer) in self.takes.iter().zip(values) {
             let pcm = take
                 .pcm()
@@ -430,7 +597,10 @@ impl Draft {
             name: self.name.clone(),
             version,
             donor,
+            kind: self.kind,
+            decays: self.decays,
             takes,
+            marked,
         })
     }
 
@@ -438,21 +608,22 @@ impl Draft {
     fn begin(
         &mut self,
         ctx: &egui::Context,
-        donor: Option<Library<'static>>,
+        donor: Option<(Version, Skeleton)>,
     ) -> Result<(), String> {
         let coding = self.coding(donor)?;
         self.refused = None;
-        self.job = Some(work::run(ctx, move |progress| coding.run(progress)));
+        self.job = Some(work::hand(ctx, coding));
         Ok(())
     }
 
     /// The build's result once it is ready, returned once. A failure is also kept for
     /// the dialog to show.
     fn settle(&mut self) -> Option<Result<Built, String>> {
-        let answer = match self.job.as_ref()?.poll() {
+        let job = self.job.as_ref()?;
+        let answer = match job.poll() {
             work::Answer::Running => return None,
             work::Answer::Answered(answer) => answer,
-            work::Answer::Died => Err("building the library stopped without a result".to_string()),
+            work::Answer::Died => Err(job.died("building the library")),
         };
         self.job = None;
         if let Err(why) = &answer {
@@ -596,29 +767,269 @@ fn leaves(takes: &[Take]) -> Vec<String> {
 }
 
 /// One take as a build reads it: the file's audio, and the stroke it becomes.
+#[derive(Serialize, Deserialize)]
 struct Recorded {
     path: String,
+    #[serde(with = "pcm")]
     samples: Vec<i16>,
     channels: u16,
     rate: u32,
+    #[serde(with = "sample_loop")]
     sample_loop: Option<Loop>,
     root: u8,
+    #[serde(with = "bank")]
     bank: Bank,
     layer: u8,
 }
 
-/// A piano library build, detached from the dialog that set it up.
-struct Coding {
+/// A take marked with its strokes' regions, as a build reads it: its file, decoded by
+/// the build.
+#[derive(Serialize, Deserialize)]
+struct Marked {
+    path: String,
+    bytes: wire::Handed,
+    clean: bool,
+    #[serde(with = "floor")]
+    floor: Floor,
+}
+
+/// A piano library build, detached from the dialog that set it up, which
+/// [`work::hand`] runs off the page.
+#[derive(Serialize, Deserialize)]
+pub struct Coding {
     name: String,
     /// The format written where no template donates one.
+    #[serde(with = "version")]
     version: Version,
-    donor: Option<Library<'static>>,
+    donor: Option<Skeleton>,
+    /// The category whose rules a library without a template follows.
+    #[serde(with = "kind")]
+    kind: Kind,
+    /// Whether held notes decay from note-on, without a template.
+    decays: bool,
+    /// The WAVs of one stroke each, or none where takes are built.
     takes: Vec<Recorded>,
+    /// The takes, each region a stroke, or none.
+    marked: Vec<Marked>,
+}
+
+/// A template's prefix and stroke records, as a build takes them.
+pub enum Skeleton {
+    /// Read already, where the build runs beside the page: the desktop.
+    Parsed(Library<'static>),
+    /// The template's file, which the build's worker reads: the browser. A file crosses
+    /// to the worker without a copy in the page's memory.
+    #[cfg(target_arch = "wasm32")]
+    File(crate::store::Outside),
+}
+
+impl Skeleton {
+    fn read(self) -> Result<Library<'static>, String> {
+        match self {
+            Skeleton::Parsed(library) => Ok(library),
+            #[cfg(target_arch = "wasm32")]
+            Skeleton::File(file) => {
+                let js = |e: wasm_bindgen::JsValue| crate::js::describe(&e);
+                let reader = web_sys::FileReaderSync::new().map_err(js)?;
+                let buffer = reader.read_as_array_buffer(&file).map_err(js)?;
+                let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                Library::borrow(&bytes)
+                    .map(|library| library.without_audio())
+                    .map_err(|e| format!("{}: {e}", file.name()))
+            }
+        }
+    }
+}
+
+impl Serialize for Skeleton {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        match self {
+            Skeleton::Parsed(_) => {
+                let _ = serializer;
+                Err(S::Error::custom("a template read on the page stays there"))
+            }
+            #[cfg(target_arch = "wasm32")]
+            Skeleton::File(file) => wire::outside::serialize(file, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Skeleton {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Skeleton, D::Error> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            wire::outside::deserialize(deserializer).map(Skeleton::File)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use serde::de::Error as _;
+            let _ = deserializer;
+            Err(D::Error::custom(
+                "a template's file is handed over only in the browser",
+            ))
+        }
+    }
+}
+
+/// A take's samples, as their little-endian bytes beside a message's text.
+mod pcm {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(samples: &[i16], serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        wire::Handed::new(bytes).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<i16>, D::Error> {
+        let bytes = wire::bytes::deserialize(deserializer)?;
+        let whole = bytes.chunks_exact(2);
+        if !whole.remainder().is_empty() {
+            return Err(serde::de::Error::custom("samples cut short"));
+        }
+        Ok(whole.map(|b| i16::from_le_bytes([b[0], b[1]])).collect())
+    }
+}
+
+/// A take's loop, field by field.
+mod sample_loop {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    enum Played {
+        Forward,
+        Alternating,
+        Backward,
+        Other(u32),
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub(super) struct Wire {
+        start: u32,
+        end: u32,
+        play: Played,
+        fraction: u32,
+        plays: u32,
+    }
+
+    pub fn serialize<S: Serializer>(held: &Option<Loop>, serializer: S) -> Result<S::Ok, S::Error> {
+        held.map(wire).serialize(serializer)
+    }
+
+    pub(super) fn wire(held: Loop) -> Wire {
+        Wire {
+            start: held.start,
+            end: held.end,
+            play: match held.play {
+                Play::Forward => Played::Forward,
+                Play::Alternating => Played::Alternating,
+                Play::Backward => Played::Backward,
+                Play::Other(code) => Played::Other(code),
+            },
+            fraction: held.fraction,
+            plays: held.plays,
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Loop>, D::Error> {
+        Ok(Option::<Wire>::deserialize(deserializer)?.map(held))
+    }
+
+    pub(super) fn held(held: Wire) -> Loop {
+        Loop {
+            start: held.start,
+            end: held.end,
+            play: match held.play {
+                Played::Forward => Play::Forward,
+                Played::Alternating => Play::Alternating,
+                Played::Backward => Play::Backward,
+                Played::Other(code) => Play::Other(code),
+            },
+            fraction: held.fraction,
+            plays: held.plays,
+        }
+    }
+}
+
+/// A category, as the word `nord piano build --kind` takes.
+mod kind {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(kind: &Kind, serializer: S) -> Result<S::Ok, S::Error> {
+        kind.word().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Kind, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        Kind::from_word(&word).ok_or_else(|| serde::de::Error::custom(format!("no kind {word}")))
+    }
+}
+
+/// How a take's noise floor is read, as whether it is a one-note file's.
+mod floor {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(floor: &Floor, serializer: S) -> Result<S::Ok, S::Error> {
+        (*floor == Floor::OneNote).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Floor, D::Error> {
+        Ok(match bool::deserialize(deserializer)? {
+            true => Floor::OneNote,
+            false => Floor::Take,
+        })
+    }
+}
+
+/// A bank, as its record code.
+mod bank {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(bank: &Bank, serializer: S) -> Result<S::Ok, S::Error> {
+        bank.code().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bank, D::Error> {
+        let code = u8::deserialize(deserializer)?;
+        Bank::from_code(code).ok_or_else(|| serde::de::Error::custom(format!("no bank {code}")))
+    }
+}
+
+/// A format, as its stream version.
+mod version {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(version: &Version, serializer: S) -> Result<S::Ok, S::Error> {
+        version.stream().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Version, D::Error> {
+        let stream = u16::deserialize(deserializer)?;
+        Version::from_stream(stream)
+            .ok_or_else(|| serde::de::Error::custom(format!("no format {stream:#x}")))
+    }
+}
+
+impl From<Coding> for Task {
+    fn from(coding: Coding) -> Task {
+        Task::Piano(Box::new(coding))
+    }
+}
+
+impl Work for Coding {
+    type Answer = Result<Built, String>;
+
+    fn run(self, progress: &Progress) -> Result<Built, String> {
+        self.code(progress)
+    }
 }
 
 /// A built library, and what the build reports about it.
-#[derive(Debug)]
-struct Built {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Built {
+    #[serde(with = "wire::bytes")]
     bytes: Vec<u8>,
     strokes: usize,
     roots: usize,
@@ -627,35 +1038,25 @@ struct Built {
 }
 
 impl Coding {
-    fn run(self, progress: &Progress) -> Result<Built, String> {
-        let count = self.takes.len();
-        let mut recordings = Vec::with_capacity(count);
-        let mut clipped = 0usize;
-        for (done, take) in self.takes.iter().enumerate() {
-            progress.say(format!("resampling {} of {count}", done + 1));
-            let audio = resample(&take.samples, usize::from(take.channels), take.rate)
-                .map_err(|e| format!("{}: {e}", take.path))?;
-            clipped += audio.clipped;
-            let sustain = take
-                .sample_loop
-                .map(|found| sustain(found, take.rate))
-                .transpose()
-                .map_err(|e| format!("{}: {e}", take.path))?;
-            recordings.push(Recording {
-                root: take.root,
-                bank: take.bank,
-                layer: take.layer,
-                channels: audio.channels,
-                sustain,
-                under_attack: None,
-            });
-        }
-
-        progress.say(format!("coding {count} strokes…"));
-        let donor = match &self.donor {
-            Some(template) => Donor::Template(template),
-            None => Donor::Rules(Rules::new(self.version, Kind::Grand)),
+    fn code(self, progress: &Progress) -> Result<Built, String> {
+        let template = self.donor.map(Skeleton::read).transpose()?;
+        let rules = Rules {
+            decays: self.decays,
+            loop_fade: match self.decays {
+                true => self.kind.loop_fade(),
+                false => 0,
+            },
+            ..Rules::new(self.version, self.kind)
         };
+        let donor = match &template {
+            Some(template) => Donor::Template(template),
+            None => Donor::Rules(rules),
+        };
+        let (recordings, clipped) = match self.marked.is_empty() {
+            true => recorded(&self.takes, progress)?,
+            false => marked(self.marked, &donor, progress)?,
+        };
+        progress.say(format!("coding {} strokes…", recordings.len()));
         let library =
             build(&donor, &Options::new(&self.name), &recordings).map_err(|e| e.to_string())?;
         let (strokes, roots) = (library.strokes().len(), library.roots().len());
@@ -669,6 +1070,81 @@ impl Coding {
     }
 }
 
+/// The strokes of `takes`, one WAV each, as the encoder takes them, and the samples
+/// that saturated resampling them.
+fn recorded(takes: &[Recorded], progress: &Progress) -> Result<(Vec<Recording>, usize), String> {
+    let count = takes.len();
+    let mut recordings = Vec::with_capacity(count);
+    let mut clipped = 0usize;
+    for (done, take) in takes.iter().enumerate() {
+        progress.say(format!("resampling {} of {count}", done + 1));
+        let audio = resample(&take.samples, usize::from(take.channels), take.rate)
+            .map_err(|e| format!("{}: {e}", take.path))?;
+        clipped += audio.clipped;
+        let sustain = take
+            .sample_loop
+            .map(|found| sustain(found, take.rate))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", take.path))?;
+        recordings.push(Recording {
+            root: take.root,
+            bank: take.bank,
+            layer: take.layer,
+            channels: audio.channels,
+            sustain,
+            under_attack: None,
+        });
+    }
+    Ok((recordings, clipped))
+}
+
+/// The strokes of `takes`, each region one, as `nord piano build` makes them for
+/// `donor`: cleaned unless a take is raw, and for a format 6 library from rules,
+/// leveled, pitched out to every key, and each release at its balance under its attack.
+/// With the samples that saturated resampling them.
+fn marked(
+    takes: Vec<Marked>,
+    donor: &Donor,
+    progress: &Progress,
+) -> Result<(Vec<Recording>, usize), String> {
+    let version = match donor {
+        Donor::Template(template) => template.version(),
+        Donor::Rules(rules) => rules.version,
+    };
+    let leveled = matches!((donor, version), (Donor::Rules(_), Version::V6));
+    progress.say(format!("reading {} take(s)…", takes.len()));
+    let mut read = Vec::with_capacity(takes.len());
+    for take in takes {
+        let bytes = take.bytes.into_inner().unwrap_or_default();
+        let named = |e: nord_format::error::Error| format!("{}: {e}", take.path);
+        let audio = nord_format::wav::read(&bytes).map_err(named)?;
+        let marks = nord_format::wav::read_marks(&bytes).map_err(named)?;
+        read.push((take.path, audio, marks, take.clean, take.floor));
+    }
+    let inputs: Vec<take_build::Take> = read
+        .iter()
+        .map(|(path, audio, marks, clean, floor)| take_build::Take {
+            file: path,
+            audio,
+            marks,
+            clean: *clean,
+            floor: *floor,
+        })
+        .collect();
+    progress.say(format!("cleaning {} take(s)…", inputs.len()));
+    let prepared = take_build::prepared(&inputs, version, leveled).map_err(|e| e.to_string())?;
+    let count = prepared.len();
+    let mut recordings = Vec::with_capacity(count);
+    let mut clipped = 0usize;
+    for (done, stroke) in prepared.iter().enumerate() {
+        progress.say(format!("cutting {} of {count}", done + 1));
+        let (recording, cut) = stroke.recording().map_err(|e| e.to_string())?;
+        clipped += cut;
+        recordings.push(recording);
+    }
+    Ok((recordings, clipped))
+}
+
 /// The layer value of each take's stroke in a `version` library, in list order, as
 /// [`nord_format::formats::npno::encode::layer_values`] computes it. A value no velocity
 /// selects is refused by the take that names it.
@@ -677,8 +1153,19 @@ fn layer_values(takes: &[Take], version: Version) -> Result<Vec<u8>, String> {
         .iter()
         .map(|take| (take.root_key, take.bank, take.layer))
         .collect();
+    stated_values(&named, version, |i| takes[i].path.clone())
+}
+
+/// The layer value of each `named` stroke in a `version` library, as
+/// [`nord_format::formats::npno::encode::layer_values`] computes it, a value no velocity
+/// selects refused by the stroke `whose` names by its place.
+fn stated_values(
+    named: &[(u8, Bank, LayerTag)],
+    version: Version,
+    whose: impl Fn(usize) -> String,
+) -> Result<Vec<u8>, String> {
     let values =
-        nord_format::formats::npno::encode::layer_values(&named, version).map_err(|clash| {
+        nord_format::formats::npno::encode::layer_values(named, version).map_err(|clash| {
             let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
             match clash.how {
                 Clash::BothForms => format!(
@@ -689,15 +1176,12 @@ fn layer_values(takes: &[Take], version: Version) -> Result<Vec<u8>, String> {
             }
         })?;
     let highest = version.highest_played_layer();
-    match takes
-        .iter()
-        .zip(&values)
-        .find(|(_, &value)| value > highest)
-    {
-        Some((take, value)) => Err(format!(
-            "{}: no velocity selects layer value {value}; {highest} is the largest a key of \
+    match values.iter().position(|&value| value > highest) {
+        Some(i) => Err(format!(
+            "{}: no velocity selects layer value {}; {highest} is the largest a key of \
              a {version} library sounds",
-            take.path
+            whose(i),
+            values[i]
         )),
         None => Ok(values),
     }
@@ -737,6 +1221,22 @@ pub fn dialog(
         ui.horizontal(|ui| {
             ui.label("Name");
             ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(240.0));
+            if making == Making::Piano {
+                ui.add_space(12.0);
+                ui.add_enabled_ui(draft.template.is_none(), |ui| {
+                    ui.label(crate::document::audition::CATEGORY);
+                    egui::ComboBox::from_id_salt("draft_category")
+                        .selected_text(crate::document::piano::kind_name(draft.kind.code()))
+                        .show_ui(ui, |ui| {
+                            for kind in Kind::ALL {
+                                let name = crate::document::piano::kind_name(kind.code());
+                                ui.selectable_value(&mut draft.kind, kind, name);
+                            }
+                        })
+                        .response
+                        .on_disabled_hover_text("the template decides");
+                });
+            }
         });
         ui.add_space(4.0);
         let column = match making {
@@ -754,6 +1254,17 @@ pub fn dialog(
                                 .halign(egui::Align::LEFT)
                                 .truncate(),
                         );
+                        if let Some(prepped) = take.prepped() {
+                            let (strokes, notes) = prepped.counts();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "take, {strokes} strokes, {notes} notes"
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                            return;
+                        }
                         ui.label(match making {
                             Making::Piano => "root",
                             Making::Project | Making::Instrument => "root key",
@@ -797,6 +1308,16 @@ pub fn dialog(
             egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
                 template_picker(ui, draft, &templates);
                 format_picker(ui, draft);
+                ui.add_enabled_ui(draft.template.is_none(), |ui| {
+                    let mut held = !draft.decays;
+                    ui.checkbox(&mut held, "Don't decay long notes")
+                        .on_hover_text(
+                            "Held notes keep their recording's own decay, and loops hold \
+                             their level: for organs and other steady sounds.",
+                        )
+                        .on_disabled_hover_text("the template decides");
+                    draft.decays = !held;
+                });
             });
         }
         let refusal = draft.refusal();
@@ -830,7 +1351,7 @@ pub fn dialog(
     }
     if making == Making::Piano {
         start(ctx, workspace, log);
-        // ⚠️ wasm runs the build on the spot, so the result is already here.
+        // A build that answered at once is taken now; a later frame takes any other.
         return answered(workspace, log);
     }
     let draft = workspace.take_draft()?;
@@ -966,18 +1487,38 @@ fn templates(workspace: &Workspace) -> Vec<Template> {
     open
 }
 
-/// A template's prefix and stroke records, read here because a build cannot borrow the
-/// document's bytes.
-fn skeleton(workspace: &Workspace, id: u64) -> Result<Library<'static>, String> {
+/// A template's format, and its prefix and stroke records as a build takes them: read
+/// here because a build cannot borrow the document's bytes, or in the browser, its file,
+/// read here only far enough to refuse one that does not read.
+fn skeleton(workspace: &Workspace, id: u64) -> Result<(Version, Skeleton), String> {
     let entity = workspace
         .get(id)
         .ok_or_else(|| "the template is no longer open".to_string())?;
-    if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
-        return Ok(index.library().clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let library = match entity.indexed() {
+            Some(crate::ondisk::Index::Piano(index)) => index.library().clone(),
+            _ => Library::borrow(&entity.bytes)
+                .map(|library| library.without_audio())
+                .map_err(|e| format!("{}: {e}", entity.name))?,
+        };
+        Ok((library.version(), Skeleton::Parsed(library)))
     }
-    Library::borrow(&entity.bytes)
-        .map(|library| library.without_audio())
-        .map_err(|e| format!("{}: {e}", entity.name))
+    #[cfg(target_arch = "wasm32")]
+    {
+        let js = |e: wasm_bindgen::JsValue| crate::js::describe(&e);
+        if let Some(crate::ondisk::Index::Piano(index)) = entity.indexed() {
+            let file = entity.saved.file().and_then(|file| file.snapshot());
+            let file = file.ok_or_else(|| format!("{}: its file is gone", entity.name))?;
+            return Ok((index.library().version(), Skeleton::File(file)));
+        }
+        let version = Library::borrow(&entity.bytes)
+            .map(|library| library.version())
+            .map_err(|e| format!("{}: {e}", entity.name))?;
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(&entity.bytes[..]));
+        let file = web_sys::File::new_with_u8_array_sequence(&parts, &entity.name).map_err(js)?;
+        Ok((version, Skeleton::File(file)))
+    }
 }
 
 /// Start the build with the template chosen under Advanced, if any.
@@ -1026,11 +1567,13 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 mod tests {
     use super::*;
     use nord_format::formats::npno::Loop;
+    use nord_format::wav::{Audio, Region};
 
     #[test]
     fn every_refusal_says_which_limit_it_hit() {
         let refused = |samples: &[i16], rate, channels| {
             encodable(&read(
+                Making::Instrument,
                 &nord_format::wav::pcm16(samples, rate, channels).unwrap(),
             ))
             .err()
@@ -1051,7 +1594,8 @@ mod tests {
             format!("{} frames: needs at least {least}", least - 1)
         );
 
-        let unreadable = encodable(&read(b"RIFF\0\0\0\0WAVE")).expect_err("not readable");
+        let unreadable =
+            encodable(&read(Making::Instrument, b"RIFF\0\0\0\0WAVE")).expect_err("not readable");
         assert!(!unreadable.is_empty());
     }
 
@@ -1296,6 +1840,50 @@ mod tests {
         Draft::plan(Making::Piano, files).expect("files were picked")
     }
 
+    #[test]
+    fn a_library_built_through_a_message_is_the_library_built_in_place() {
+        let draft = piano_draft(&[
+            "Grand-060-b0-l00",
+            "Grand-060-b0-l01",
+            "Grand-072-b0-l00",
+            "Grand-072-b2-l00",
+        ]);
+        let coding = || {
+            let mut coding = draft.coding(None).expect("the takes state a library");
+            coding.takes[0].sample_loop = Some(nord_format::wav::Loop::forward(400, 2_400));
+            coding
+        };
+        let here = coding().code(&Progress::default()).expect("a library");
+
+        let sent = wire::encode(&Task::from(coding())).unwrap();
+        let task: Task = wire::decode(sent).unwrap();
+        let answered = crate::work::answer(task, &Progress::default()).unwrap();
+        let there: Result<Built, String> = wire::decode(answered).unwrap();
+        let there = there.expect("a library");
+
+        assert_eq!(there.bytes, here.bytes, "the same file, to the byte");
+        assert_eq!(
+            (there.strokes, there.roots, there.clipped),
+            (here.strokes, here.roots, here.clipped)
+        );
+    }
+
+    #[test]
+    fn a_template_read_on_the_page_is_not_sent() {
+        let draft = piano_draft(&["Grand-060-b0-l00"]);
+        let rules = {
+            let mut plain = piano_draft(&["Grand-060-b0-l00"]);
+            plain.begin(&egui::Context::default(), None).unwrap();
+            finish(&mut plain).expect("a library").bytes
+        };
+        let donor = Library::borrow(&rules).unwrap().without_audio();
+        let coding = draft
+            .coding(Some((donor.version(), Skeleton::Parsed(donor))))
+            .unwrap();
+        let refused = wire::encode(&Task::from(coding)).expect_err("refused");
+        assert!(refused.contains("stays there"), "{refused}");
+    }
+
     fn finish(draft: &mut Draft) -> Result<Built, String> {
         loop {
             if let Some(answer) = draft.settle() {
@@ -1502,6 +2090,7 @@ mod tests {
 
         let mut again = piano_draft(&["Grand-060-b0-l00"]);
         let donor = Library::borrow(&template).unwrap().without_audio();
+        let donor = (donor.version(), Skeleton::Parsed(donor));
         again.begin(&egui::Context::default(), Some(donor)).unwrap();
         let built = finish(&mut again).expect("a library");
         assert_eq!(Library::borrow(&built.bytes).unwrap().damper_top(), 100);
@@ -1554,5 +2143,134 @@ mod tests {
         let why = clashing.refusal().expect("two zones on one key");
         assert!(why.contains("C4"), "{why}");
         assert!(clashing.bytes().is_err());
+    }
+
+    /// A take 1.8 s of a tone at the rate the piano section plays, marked with an attack
+    /// that loops and its key-off, stating it is an upright built raw.
+    fn marked_take() -> Vec<u8> {
+        let rate = nord_format::formats::npno::codec::RATE;
+        let samples: Vec<f32> = (0..63_000)
+            .map(|n| ((n as f64 * 0.05).sin() * 0.3 * (-(n as f64) / 60_000.0).exp()) as f32)
+            .collect();
+        let audio = Audio {
+            rate,
+            channels: 1,
+            samples,
+        };
+        let bytes =
+            nord_format::wav::write(&audio, nord_format::wav::Encoding::Int { bits: 24 }).unwrap();
+        let marks = Marks {
+            regions: vec![
+                Region {
+                    start: 0,
+                    frames: 50_000,
+                    label: "060-b0-v00".into(),
+                },
+                Region {
+                    start: 50_000,
+                    frames: 12_000,
+                    label: "060-b2-v00".into(),
+                },
+            ],
+            loops: vec![nord_format::wav::Loop::forward(20_000, 29_999)],
+        };
+        let bytes = nord_format::wav::with_marks(&bytes, &marks).unwrap();
+        let settings = nord_format::wav::Settings {
+            kind: Some("upright".into()),
+            clean: Some(false),
+            ..Default::default()
+        };
+        nord_format::wav::with_settings(&bytes, &settings).unwrap()
+    }
+
+    #[test]
+    fn a_marked_take_is_one_row_states_its_category_and_builds_through_a_message() {
+        let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), marked_take())]).unwrap();
+        let prepped = draft.takes[0].prepped().expect("read as a take");
+        assert_eq!(prepped.counts(), (2, 1), "two strokes of one note");
+        assert_eq!(draft.kind, Kind::Upright, "the category the take states");
+        assert_eq!(draft.refusal(), None);
+
+        let here = draft
+            .coding(None)
+            .unwrap()
+            .code(&Progress::default())
+            .unwrap();
+        let sent = wire::encode(&Task::from(draft.coding(None).unwrap())).unwrap();
+        let task: Task = wire::decode(sent).unwrap();
+        let answered = crate::work::answer(task, &Progress::default()).unwrap();
+        let there: Result<Built, String> = wire::decode(answered).unwrap();
+        let there = there.expect("a library");
+        assert_eq!(there.bytes, here.bytes, "the same file, to the byte");
+        // the attack and its key-off, each also pitched down and up to reach the keys
+        assert_eq!((here.strokes, here.roots), (6, 3));
+    }
+
+    /// The dialog builds a take as `nord piano build` does: nord-format's own steps, to
+    /// the byte.
+    #[test]
+    fn a_take_builds_as_nord_format_s_own_steps_build_it() {
+        let bytes = marked_take();
+        let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), bytes.clone())]).unwrap();
+        let built = draft
+            .coding(None)
+            .unwrap()
+            .code(&Progress::default())
+            .unwrap();
+
+        let audio = nord_format::wav::read(&bytes).unwrap();
+        let marks = nord_format::wav::read_marks(&bytes).unwrap();
+        let settings = nord_format::wav::read_settings(&bytes).unwrap();
+        let take = take_build::Take::stated("take.wav", &audio, &marks, &settings);
+        let kind = take_build::stated_kind([("take.wav", &settings)])
+            .unwrap()
+            .unwrap();
+        let rules = Rules {
+            loop_fade: kind.loop_fade(),
+            ..Rules::new(draft.version, kind)
+        };
+        let leveled = draft.version == Version::V6;
+        let recordings: Vec<Recording> = take_build::prepared(&[take], draft.version, leveled)
+            .unwrap()
+            .iter()
+            .map(|stroke| stroke.recording().unwrap().0)
+            .collect();
+        let library = build(
+            &Donor::Rules(rules),
+            &Options::new(&draft.name),
+            &recordings,
+        )
+        .unwrap();
+        let expected = nord_format::to_bytes(&Entity::Piano(library.to_piano().unwrap())).unwrap();
+        assert!(built.bytes == expected, "the same file, to the byte");
+    }
+
+    /// A take whose settings state no kind of instrument is refused, as the CLI refuses
+    /// it, not built as a grand.
+    #[test]
+    fn a_take_stating_no_known_kind_is_refused() {
+        let bytes = marked_take();
+        let settings = nord_format::wav::Settings {
+            kind: Some("theremin".into()),
+            ..Default::default()
+        };
+        let bytes = nord_format::wav::with_settings(&bytes, &settings).unwrap();
+        let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), bytes)]).unwrap();
+        let refused = draft.refusal().expect("refused");
+        assert!(refused.contains("no kind of instrument"), "{refused}");
+    }
+
+    #[test]
+    fn a_take_and_wavs_of_one_stroke_are_not_built_together() {
+        let draft = Draft::plan(
+            Making::Piano,
+            vec![
+                ("take.wav".into(), marked_take()),
+                ("Grand-060-b0-l00.wav".into(), stroke_wav(3_000)),
+            ],
+        )
+        .unwrap();
+        let refused = draft.refusal().expect("refused");
+        assert!(refused.contains("takes build on their own"), "{refused}");
     }
 }
