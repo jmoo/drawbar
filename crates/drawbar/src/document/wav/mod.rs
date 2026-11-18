@@ -179,7 +179,7 @@ pub fn apply(
         };
         let (Some(hit), Some(cut)) = (take::mark(label, 0..0).hit, hit::Cut::from_slug(slug))
         else {
-            return Err(format!("{path}: names no cut of a sample"));
+            return Err(format!("{path}: names no cut of a hit"));
         };
         let frame: u32 = value
             .trim()
@@ -279,8 +279,7 @@ pub fn stated(entity: &LocalEntity) -> Vec<Cell> {
         Cell {
             label: "Take",
             body: Body::Read(take),
-            hint:
-                "the samples, regions and loops the file marks; a raw take, as recorded, has none",
+            hint: "the hits, regions and loops the file marks; a raw take, as recorded, has none",
         },
     ]
 }
@@ -936,7 +935,7 @@ pub fn ui(
             let shown = state.view.picked.is_some() || state.view.place.is_some();
             let (label, glyph) = match (playing, shown) {
                 (true, _) => ("Stop", Glyph::X),
-                (false, true) => (PLAY_HIT, Glyph::AudioLines),
+                (false, true) => (PLAY_ORIGINAL, Glyph::AudioLines),
                 (false, false) => ("Play", Glyph::AudioLines),
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
@@ -962,7 +961,7 @@ fn pieces(
     sets: &mut Sets,
 ) {
     use hit::{Piece, Wanted};
-    if let (Wanted::Add(Piece::Note), Some(place)) = (wanted, view.place) {
+    if let (Wanted::Add(Piece::Hit), Some(place)) = (wanted, view.place) {
         let added = adding::sample(audio, marked, place);
         sets.push((format!("{ADDED}{}", added.label), span_value(&added.attack)));
         if let Some(release) = &added.release {
@@ -982,7 +981,7 @@ fn pieces(
         return;
     };
     match wanted {
-        Wanted::Add(Piece::KeyOff) => {
+        Wanted::Add(Piece::Release) => {
             if let Some(release) = adding::key_off(audio, attack.start, attack.end) {
                 sets.push((
                     format!("{ADDED}{}", adding::release_label(hit)),
@@ -994,13 +993,13 @@ fn pieces(
             format!("{LOOPED}{}", cuts.label),
             span_value(&adding::default_loop(&attack, audio.rate)),
         )),
-        Wanted::Add(Piece::Note) | Wanted::Rename(_) => {}
+        Wanted::Add(Piece::Hit) | Wanted::Rename(_) => {}
         Wanted::Delete(piece) => {
             sets.push((
                 format!("{DELETED}{}/{}", cuts.label, piece_slug(piece)),
                 String::new(),
             ));
-            if piece == Piece::Note {
+            if piece == Piece::Hit {
                 (view.picked, view.place) = (None, Some(attack.start));
             }
         }
@@ -1008,10 +1007,10 @@ fn pieces(
 }
 
 /// What the arrow that picks the sample before the picked one says, on hover.
-pub const BEFORE: &str = "Previous sample";
+pub const BEFORE: &str = "Previous hit";
 
 /// What the arrow that picks the sample after the picked one says, on hover.
-pub const AFTER: &str = "Next sample";
+pub const AFTER: &str = "Next hit";
 
 /// The small arrows at the far right of the row under the picked sample, which pick the
 /// sample before and after it in the take.
@@ -1047,7 +1046,7 @@ fn steps(ui: &mut egui::Ui, state: &mut State) {
 
 /// The label of Play while a sample is picked: it plays that sample as the take holds it,
 /// from its first cut to its last, unshaped.
-pub const PLAY_HIT: &str = "Play original";
+pub const PLAY_ORIGINAL: &str = "Play original";
 
 /// The label of the button that applies the gain.
 pub const APPLY_GAIN: &str = "Apply gain";

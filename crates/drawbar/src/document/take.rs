@@ -173,7 +173,7 @@ impl Marked {
         };
         format!(
             "{} · {} · {}",
-            counted(hits.len(), "sample"),
+            counted(hits.len(), "hit"),
             counted(self.regions.len(), "region"),
             counted(self.loops.len(), "loop")
         )

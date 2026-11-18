@@ -127,7 +127,7 @@ impl Detect {
                 found.too_quiet
             ),
             Ok((found, limit)) => format!(
-                "Detect marked {} sample(s) of {} note(s){}",
+                "Detect marked {} hit(s) of {} note(s){}",
                 found.kept,
                 found.notes,
                 match found.too_quiet {

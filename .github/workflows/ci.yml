@@ -43,9 +43,16 @@ jobs:
           store-size: 8G
       - if: runner.os != 'Windows'
         run: nix build .#nord.tests .#nord.packages --print-build-logs
-      # The executables scripts/release.bash attaches to each release.
+      # What scripts/assets.bash attaches to each release from Linux.
       - if: runner.os == 'Linux'
-        run: nix build .#drawbar-windows .#nord-cli-windows --print-build-logs
+        run: >-
+          nix build .#drawbar-windows .#nord-cli-windows
+          .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
+          .#drawbar-appimage
+          --print-build-logs
+      # And from macOS: drawbar's disk image, around the binary `nord.packages` built.
+      - if: runner.os == 'macOS'
+        run: scripts/dmg.bash
       # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
       - if: runner.os == 'Windows'
         shell: bash
@@ -141,6 +148,31 @@ jobs:
       - run: nix develop -c scripts/release.bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+
+  # A release tagged in this run is this run's commit, whose builds `native`'s store
+  # already holds. Pages does not wait on this.
+  assets:
+    if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: write # release uploads
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # each crate's newest tag
+      - uses: ./.github/actions/nix
+        with:
+          cache: native
+          save: "false"
+      - run: nix develop -c scripts/assets.bash
+        env:
           GH_TOKEN: ${{ github.token }}
 
   # After release, so a tag created in the same run is the one published.
