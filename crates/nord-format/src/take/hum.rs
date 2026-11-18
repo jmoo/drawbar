@@ -384,12 +384,14 @@ mod tests {
             width: 350,
             db,
             floor: detect::Floor::Take,
+            rest: None,
         };
         assert_eq!(quietest(&env), 100..100 + detect::frames(QUIET_MOST));
         let short = Envelope {
             width: 350,
             db: [vec![-20.0; 10], vec![-90.0; 300], vec![-20.0; 10]].concat(),
             floor: detect::Floor::Take,
+            rest: None,
         };
         assert_eq!(quietest(&short), 10..310);
     }

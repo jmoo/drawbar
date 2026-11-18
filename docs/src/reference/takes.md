@@ -19,13 +19,15 @@ a folder holds its note for most of its length, so its floor is read on its rest
 instead: of the half seconds after its loudest frame, the quietest by median whose
 halves lie within 1 dB of each other, at least 10 dB under the loudest, mostly not
 digital silence, and with nothing 6 dB quieter after it, so a fade, zero padding, a
-slow decay or a plateau of the release is not taken for it. Only its loudest hit
-counts, and it starts with a hit where it is cut at the strike, standing 15 dB over
-its rest where it has one. A file with no rest has no floor to read: it is not held
-to the too-quiet limit, and the build finds no noise in it and builds it as recorded.
-A file of noise alone is as level as a held note, so it is taken for one. `prep`
-notes in each file it writes that its floor is read this way, and the build reads its
-noise the same way before cleaning it.
+slow decay or a plateau of the release is not taken for it. Nor is a half second that
+still sounds the note: most of the note's first four harmonics peaking 6 dB over the
+bands beside them, as a slow tail cut before it reaches the hiss does and hiss does
+not. Only its loudest hit counts, and it starts with a hit where it is cut at the
+strike, standing 15 dB over its rest where it has one. A file with no rest has no
+floor to read: it is not held to the too-quiet limit, and the build finds no noise in
+it and builds it as recorded. A file of noise alone is as level as a held note, so it
+is taken for one. `prep` notes in each file it writes that its floor is read this
+way, and the build reads its noise the same way before cleaning it.
 
 A folder's hits are sorted by pitch before their notes are named, so a stretched
 note has its neighbors to go by. Each keeps the octave its pitch was read in.
