@@ -168,18 +168,49 @@ impl Prepped {
         Some(read())
     }
 
-    /// Its strokes and the notes they play, fades left out.
-    fn counts(&self) -> (usize, usize) {
-        let strokes: Vec<(u8, Bank, LayerTag)> = self
-            .marks
-            .regions
-            .iter()
+    /// Its hits, the notes they play, and the most layers a note has: a hit is a note
+    /// at one layer, its attack or resonance, release and fade counted once.
+    fn counts(&self) -> Counts {
+        let hits: std::collections::BTreeSet<(u8, LayerTag)> = (self.marks.regions.iter())
             .filter_map(|region| parse_stroke_name(&region.label, Stem::None))
+            .filter(|(_, bank, _)| *bank != Bank::Release)
+            .map(|(root, _, layer)| (root, layer))
             .collect();
-        let mut notes: Vec<u8> = strokes.iter().map(|(root, _, _)| *root).collect();
-        notes.sort_unstable();
-        notes.dedup();
-        (strokes.len(), notes.len())
+        let mut per_note: std::collections::BTreeMap<u8, usize> = Default::default();
+        for (root, _) in &hits {
+            *per_note.entry(*root).or_default() += 1;
+        }
+        Counts {
+            hits: hits.len(),
+            notes: per_note.len(),
+            layers: per_note.values().copied().max().unwrap_or(0),
+        }
+    }
+}
+
+/// What a take marks, as its row in the dialog counts it.
+#[derive(Debug, PartialEq, Eq)]
+struct Counts {
+    hits: usize,
+    notes: usize,
+    /// The most layers any one note has.
+    layers: usize,
+}
+
+impl Counts {
+    /// The row's words: "take, 23 notes, up to 3 layers each (66 hits)".
+    fn said(&self) -> String {
+        let notes = match self.notes {
+            1 => "1 note".to_string(),
+            n => format!("{n} notes"),
+        };
+        match self.layers {
+            0 | 1 => format!("take, {notes}, one layer each"),
+            layers => format!(
+                "take, {notes}, up to {layers} layers each ({} hits)",
+                self.hits
+            ),
+        }
     }
 }
 
@@ -562,7 +593,7 @@ impl Draft {
             for take in &self.takes {
                 let prepped = take.prepped().ok_or_else(|| {
                     format!(
-                        "{}: takes build on their own, not with stroke WAVs",
+                        "{}: takes build on their own, not with WAVs of one hit each",
                         take.path
                     )
                 })?;
@@ -1255,14 +1286,7 @@ pub fn dialog(
                                 .truncate(),
                         );
                         if let Some(prepped) = take.prepped() {
-                            let (strokes, notes) = prepped.counts();
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "take, {strokes} strokes, {notes} notes"
-                                ))
-                                .small()
-                                .weak(),
-                            );
+                            ui.label(egui::RichText::new(prepped.counts().said()).small().weak());
                             return;
                         }
                         ui.label(match making {
@@ -2187,7 +2211,22 @@ mod tests {
     fn a_marked_take_is_one_row_states_its_category_and_builds_through_a_message() {
         let draft = Draft::plan(Making::Piano, vec![("take.wav".into(), marked_take())]).unwrap();
         let prepped = draft.takes[0].prepped().expect("read as a take");
-        assert_eq!(prepped.counts(), (2, 1), "two strokes of one note");
+        let counts = prepped.counts();
+        assert_eq!(
+            (counts.hits, counts.notes, counts.layers),
+            (1, 1, 1),
+            "an attack and its release are one hit of one note"
+        );
+        assert_eq!(counts.said(), "take, 1 note, one layer each");
+        let three = Counts {
+            hits: 66,
+            notes: 23,
+            layers: 3,
+        };
+        assert_eq!(
+            three.said(),
+            "take, 23 notes, up to 3 layers each (66 hits)"
+        );
         assert_eq!(draft.kind, Kind::Upright, "the category the take states");
         assert_eq!(draft.refusal(), None);
 

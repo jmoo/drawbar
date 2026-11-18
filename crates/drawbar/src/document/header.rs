@@ -592,7 +592,7 @@ fn right(
 /// The label of a take's button that starts a piano library from it.
 pub const BUILD_PIANO: &str = "Build piano library…";
 
-/// A take's row under the strip, left to right: Detect, "Skip notes [54 dB] or less
+/// A take's row under the strip, left to right: Detect, "Skip hits [54 dB] or less
 /// over noise", and Build piano library….
 fn take_row(
     ui: &mut egui::Ui,
@@ -609,7 +609,7 @@ fn take_row(
         let hint = "Detect skips a note standing this little over the take's noise: the \
                     build raises every layer to one level, and a quiet note's hiss rises \
                     with it";
-        ui.label(egui::RichText::new("Skip notes").color(quiet))
+        ui.label(egui::RichText::new("Skip hits").color(quiet))
             .on_hover_text(hint);
         let changed = ui
             .add(
@@ -630,7 +630,7 @@ fn take_row(
     if let Some(marks) = facts.extras.piano {
         let why = match marks {
             true => "opens New ▸ Piano library with this take in it, as it is now",
-            false => "Detect first, or mark the take's samples by hand",
+            false => "Detect first, or mark the take's hits by hand",
         };
         act.piano = pill(
             ui,

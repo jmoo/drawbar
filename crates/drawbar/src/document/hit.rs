@@ -435,7 +435,7 @@ impl Close {
 
 /// The label of the button that shows the loop, and of the one that shows the whole hit.
 pub const LOOP: &str = "Loop";
-pub const WHOLE: &str = "Whole sample";
+pub const WHOLE: &str = "Whole hit";
 
 /// How far a dragged loop cut looks for a zero crossing to snap to, in seconds: a
 /// period of the lowest piano note.
@@ -473,9 +473,9 @@ pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piece {
     /// A whole sample: its attack, and on adding, a key-off.
-    Note,
+    Hit,
     Loop,
-    KeyOff,
+    Release,
 }
 
 /// What the close lane's Add and Delete menus asked.
@@ -488,7 +488,7 @@ pub enum Wanted {
 }
 
 /// What the name box says, on hover.
-pub const RENAME_HINT: &str = "Rename the sample: its note and layer, such as C4 v22";
+pub const RENAME_HINT: &str = "Rename the hit: its note and layer, such as C4 v22";
 
 /// The sample `text` names, as the name box reads it: a note and a layer, `C4 v22` or
 /// `C4 l01`.
@@ -514,12 +514,12 @@ pub fn named(text: &str) -> Result<Hit, String> {
 /// The labels of the close lane's menus and their items.
 pub const ADD: &str = "Add";
 pub const DELETE: &str = "Delete";
-pub const NOTE: &str = "Note";
+pub const HIT: &str = "Hit";
 pub const LOOP_ITEM: &str = "Loop";
-pub const KEY_OFF: &str = "Key-off";
+pub const RELEASE: &str = "Release";
 
 /// What Add ▸ Note says, on hover, while a sample is picked.
-const NOTE_WHERE: &str = "Click where the take marks no sample to add one there";
+const HIT_WHERE: &str = "Click where the take marks no hit to add one there";
 
 /// How much of the take the close lane shows about a place: from before it to after,
 /// in seconds.
@@ -546,7 +546,7 @@ fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, total: f64, wanted: &mut Option
         for (word, piece, there) in items {
             let item = ui.add_enabled(there, egui::Button::new(word));
             let item = match (piece, picked, made(piece)) {
-                (Piece::Note, true, Wanted::Add(_)) => item.on_disabled_hover_text(NOTE_WHERE),
+                (Piece::Hit, true, Wanted::Add(_)) => item.on_disabled_hover_text(HIT_WHERE),
                 _ => item,
             };
             if item.clicked() {
@@ -559,9 +559,9 @@ fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, total: f64, wanted: &mut Option
         items(
             ui,
             [
-                (NOTE, Piece::Note, !picked),
+                (HIT, Piece::Hit, !picked),
                 (LOOP_ITEM, Piece::Loop, attack && !looped && !faded),
-                (KEY_OFF, Piece::KeyOff, attack && !release && room_after),
+                (RELEASE, Piece::Release, attack && !release && room_after),
             ],
             Wanted::Add,
             wanted,
@@ -572,9 +572,9 @@ fn menus(ui: &mut egui::Ui, cuts: Option<&Cuts>, total: f64, wanted: &mut Option
             items(
                 ui,
                 [
-                    (NOTE, Piece::Note, attack),
+                    (HIT, Piece::Hit, attack),
                     (LOOP_ITEM, Piece::Loop, looped),
-                    (KEY_OFF, Piece::KeyOff, release),
+                    (RELEASE, Piece::Release, release),
                 ],
                 Wanted::Delete,
                 wanted,
@@ -601,10 +601,10 @@ fn placed(
     let total = (audio.samples.len() / channels) as f64;
     let at = f64::from(place);
     ui.horizontal_wrapped(|ui| {
-        ui.label(crate::panel::caps("Sample"));
+        ui.label(crate::panel::caps("Hit"));
         ui.label(
             egui::RichText::new(format!(
-                "none at {}: Add ▸ Note marks one",
+                "none at {}: Add ▸ Hit marks one",
                 take::clock(at / rate, 2)
             ))
             .size(take::LEGEND_TEXT)
@@ -703,7 +703,7 @@ pub fn ui(
             None if marks.regions.is_empty() => {}
             None => {
                 ui.horizontal(|ui| {
-                    ui.label(crate::panel::caps("Sample"));
+                    ui.label(crate::panel::caps("Hit"));
                     ui.label(
                         egui::RichText::new("(select from the WAV, above)")
                             .size(take::LEGEND_TEXT)
@@ -721,7 +721,7 @@ pub fn ui(
     let shown = close.shown(&cuts, total, rate);
 
     ui.horizontal_wrapped(|ui| {
-        ui.label(crate::panel::caps("Sample"));
+        ui.label(crate::panel::caps("Hit"));
         // The name box: the sample is renamed when it is left, unless by Escape.
         let mut text = close.naming.clone().unwrap_or_else(|| cuts.name.clone());
         let read = named(&text).and_then(|to| {
