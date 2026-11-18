@@ -963,10 +963,9 @@ fn an_edit_kept_with_no_path_under_an_entity_a_join_deletes_goes_back_over_its_f
     }
 }
 
-/// An unsaved edit of a tagged file that went comes back under the file's name once
-/// another drawbar forgot the file while this one was closed.
-#[test]
-fn an_edit_kept_under_an_entity_another_drawbar_forgot_comes_back_under_its_files_name() {
+/// A tagged file this drawbar holds an unsaved edit of goes, and another drawbar forgets
+/// the file while this one is closed. Returns the library and the bytes of the edit.
+fn forgotten_while_closed() -> (Temp, Vec<u8>) {
     let theirs = Temp::new();
     let (root, mut here, mut there) = strings(&theirs);
     let file = here.named("Strings.ne5p");
@@ -991,7 +990,14 @@ fn an_edit_kept_under_an_entity_another_drawbar_forgot_comes_back_under_its_file
     };
     there.bench.act(vec![Act::Forget(lost)]);
     there.decided();
+    (root, edited)
+}
 
+/// An unsaved edit of a tagged file that went comes back under the file's name once
+/// another drawbar forgot the file while this one was closed.
+#[test]
+fn an_edit_kept_under_an_entity_another_drawbar_forgot_comes_back_under_its_files_name() {
+    let (root, edited) = forgotten_while_closed();
     let again = Session::open(&root);
     let transcript = again.bench.log.transcript();
     let listed = again.bench.workspace.listed();
@@ -999,6 +1005,24 @@ fn an_edit_kept_under_an_entity_another_drawbar_forgot_comes_back_under_its_file
         .map(|entity| (entity.name.as_str(), &entity.bytes[..]))
         .collect();
     assert_eq!(listed, [("Strings.ne5p", &edited[..])], "{transcript}");
+}
+
+/// Where another file then arrives at the path the edit recorded, the edit stays apart from
+/// it, as nothing says that file is the one the edit was made over.
+#[test]
+fn an_edit_kept_under_an_entity_another_drawbar_forgot_stays_apart_from_a_file_at_its_path() {
+    let (root, edited) = forgotten_while_closed();
+    let other = with_gain(&Fresh::Program.bytes().unwrap(), "12");
+    fs::write(root.at("Strings.ne5p"), &other).unwrap();
+    let mut again = Session::open(&root);
+    again.read_all();
+    let transcript = again.bench.log.transcript();
+    let listed = again.bench.workspace.listed();
+    let listed: Vec<(&[u8], bool)> = listed
+        .map(|entity| (&entity.bytes[..], entity.is_unsaved()))
+        .collect();
+    assert!(listed.contains(&(&other[..], false)), "{transcript}");
+    assert!(listed.contains(&(&edited[..], true)), "{transcript}");
 }
 
 /// The library at `from` and this install's own state for it, copied to `to`.
