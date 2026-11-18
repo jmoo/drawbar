@@ -57,7 +57,8 @@ On Linux, download `nord-<version>-x86_64-linux.tar.gz`, or
 `nord-<version>-aarch64-linux.tar.gz` on ARM, from the newest
 [nord-cli release](https://github.com/jmoo/drawbar/releases), unpack it, and put
 `nord` in a folder on your `PATH`. It is statically linked, so it needs no other
-libraries.
+libraries. To reach an instrument, Linux also needs
+[a udev rule](#connecting-on-linux).
 
 On Windows, download `nord-<version>-x86_64-windows.exe` from the same release,
 rename it to `nord.exe`, and put it in a folder on your `PATH`.
