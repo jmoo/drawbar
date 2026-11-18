@@ -683,6 +683,7 @@ let
   # Mesa among them, and the AppImage runtime.
   drawbarAppImage = final.callPackage ./crates/drawbar/appimage {
     inherit (crates) drawbar;
+    inherit (workspaceManifest.package) repository;
     inherit guiLibs;
   };
 

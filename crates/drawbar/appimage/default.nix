@@ -39,8 +39,11 @@
   libxxf86vm,
   lm_sensors,
   mesa,
+  path,
   patchelf,
   procps,
+  python3,
+  repository,
   runCommand,
   squashfsTools,
   stdenv,
@@ -54,7 +57,20 @@
   zstd,
 }:
 let
-  inherit (lib) concatMapStrings getLib;
+  inherit (lib)
+    concatMapStrings
+    concatStringsSep
+    elem
+    getLib
+    hasPrefix
+    head
+    optional
+    optionalString
+    removePrefix
+    splitString
+    tail
+    unique
+    ;
 
   runtime = callPackage ./runtime.nix { };
 
@@ -114,13 +130,16 @@ let
   # Sources that keep their license text in a file named otherwise.
   noticeFiles.libglvnd = [ "README.md" ];
 
+  # Sources whose notices are only in the comment at the top of each C file.
+  headerNotices = [ "libdrm" ];
+
   # A package's license files, verbatim, from the top two levels of its source.
   licenseFiles =
     pkg:
     runCommand "${pkg.name}-license-files"
       {
         inherit (pkg) src;
-        nativeBuildInputs = [ zstd ];
+        nativeBuildInputs = [ zstd ] ++ optional (elem pkg.pname headerNotices) python3;
       }
       ''
         if [ -d "$src" ]; then
@@ -134,6 +153,10 @@ let
         for file in ${toString (noticeFiles.${pkg.pname} or [ ])}; do
           install -Dm644 "$file" "$out/$file"
         done
+        ${optionalString (elem pkg.pname headerNotices) ''
+          mkdir -p "$out"
+          python3 ${./header-notices.py} . "$out/file-headers.txt"
+        ''}
         if [ ! -d "$out" ]; then
           echo "${pkg.name}'s source holds no license file in its top two levels" >&2
           exit 1
@@ -141,6 +164,33 @@ let
       '';
 
   noticesOf = pkgs: concatMapStrings (pkg: ''["${pkg}"]="${licenseFiles pkg}" '') pkgs;
+
+  mirrors = import "${path}/pkgs/build-support/fetchurl/mirrors.nix";
+
+  # A `mirror://site/file` URL at the site's first mirror.
+  resolve =
+    url:
+    let
+      parts = splitString "/" (removePrefix "mirror://" url);
+    in
+    if hasPrefix "mirror://" url then
+      head mirrors.${head parts} + concatStringsSep "/" (tail parts)
+    else
+      url;
+
+  sourceLine =
+    pkg:
+    let
+      urls = pkg.src.urls or (optional (pkg.src ? url) pkg.src.url);
+    in
+    "${pkg.pname}\t${pkg.version}\t${concatStringsSep " " (map resolve urls)}";
+
+  sources = writeText "sources.tsv" (
+    concatMapStrings (line: line + "\n") (
+      [ "drawbar\t${drawbar.version}\t${repository}" ]
+      ++ unique (map sourceLine (bundled ++ [ runtime ] ++ runtime.linked))
+    )
+  );
 
   # glvnd loads the vendor by this name, from the bundle's libraries.
   mesaVendor = writeText "50_mesa.json" (
@@ -175,10 +225,10 @@ stdenvNoCC.mkDerivation {
 
     declare -A bundled=(${noticesOf bundled})
     declare -A used=()
-    while IFS=$'\t' read -r name path; do
+    while IFS=$'\t' read -r library path; do
       store=$(cut -d/ -f1-4 <<<"$path")
       if [[ ! -v bundled[$store] ]]; then
-        echo "usr/lib/$name comes from $store, which crates/drawbar/appimage/default.nix does not list in bundled" >&2
+        echo "usr/lib/$library comes from $store, which crates/drawbar/appimage/default.nix does not list in bundled" >&2
         exit 1
       fi
       used[$store]=1
@@ -198,6 +248,18 @@ stdenvNoCC.mkDerivation {
       cp -r "''${runtime[$store]}" "$licenses/''${store#/nix/store/*-}"
     done
     install -Dm644 ${../../LICENSE} "$licenses/drawbar/LICENSE"
+
+    while IFS=$'\t' read -r package release urls; do
+      if [[ -z $urls ]]; then
+        echo "$package $release names no source URL in its src" >&2
+        exit 1
+      fi
+    done <${sources}
+    {
+      echo "Where the source of each part of this AppImage comes from: name, version, URL."
+      tr '\t' ' ' <${sources}
+      echo
+    } >"$licenses/SOURCES.txt"
 
     cp ${mesaVendor} "$appdir/usr/share/glvnd/egl_vendor.d/50_mesa.json"
     cp -r ${alsa-lib}/share/alsa/{alsa.conf,cards,ctl,pcm} "$appdir/usr/share/alsa/"
