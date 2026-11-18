@@ -25,7 +25,8 @@ drawbar to Applications. It is not signed, so macOS refuses to open it the first
 time. Choose **Open Anyway** in System Settings ▸ Privacy & Security, then open
 drawbar again.
 
-On Linux, download `drawbar-<version>-x86_64-linux.AppImage` from the newest
+On Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13 or Fedora 40,
+download `drawbar-<version>-x86_64-linux.AppImage` from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases), make it executable,
 and run it:
 
@@ -35,9 +36,7 @@ chmod +x drawbar-*-x86_64-linux.AppImage
 ```
 
 If it says FUSE is missing, add `--appimage-extract-and-run` to the second line.
-drawbar brings its own graphics library. With NVIDIA's own driver it draws without
-the graphics card, which works but uses more of the processor. To reach an
-instrument, Linux also needs [a udev rule](#connecting-on-linux).
+To reach an instrument, Linux also needs [a udev rule](#connecting-on-linux).
 
 Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
 

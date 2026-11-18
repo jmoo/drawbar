@@ -679,8 +679,8 @@ let
       );
   };
 
-  # drawbar as one Linux executable: the tested binary, every library it loads with
-  # Mesa among them, and the AppImage runtime.
+  # drawbar as one Linux executable: the tested binary, set to run on the host's
+  # libraries, and the AppImage runtime.
   drawbarAppImage = final.callPackage ./crates/drawbar/appimage {
     inherit (crates) drawbar;
     inherit (workspaceManifest.package) repository;
