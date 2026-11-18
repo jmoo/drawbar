@@ -275,12 +275,12 @@ moved it and the file has not arrived. Of an asset holding an unsaved edit whose
 file is gone, it says that drawbar still holds the edit. Tagged files gone with
 no word of why are counted in one line.
 
-An unsaved edit is kept by the entity of its file, else by its path. At open the
-backend gives it the row of that entity, following a join, or of the file at that
-path where the file holds what the edit was made over, and it is put back over that
-row's asset. Any other, and the older of
-two that meet on one asset, comes back as an unsaved copy at its last path, or
-beside it where another file holds that name.
+An unsaved edit is kept by the entity of its file, with the file's path, else by its
+path. At open the backend gives it the row of that entity, following a join. Where
+the edit has no entity, or its entity has no row, it gives the row at the path, if
+the file there holds what the edit was made over. The edit is put back over that
+row's asset. Any other, and the older of two that meet on one asset, comes back as
+an unsaved copy at its last path, or beside it where another file holds that name.
 
 Each answer that writes a file names the file's row. Where the app loses an answer,
 the next view names the row of each file that answer wrote, and the asset takes that

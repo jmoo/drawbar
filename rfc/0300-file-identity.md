@@ -192,8 +192,9 @@ evidence:
   staged file, read before it moves, and reports it in `Committed::wrote`. drawbar
   reads such a file again only where it holds another identity for it.
 - **Refused preconditions.** A precondition on an identity reads the file at the
-  check. When it refuses, the view takes the length, time and identity the check
-  read (`Mismatch::listed`), and the next report says that file was rewritten.
+  check. When it refuses, a view that lists the path takes the length, time and
+  identity the check read (`Mismatch::listed`), and the next report says that file
+  was rewritten.
 
 The limit, as protocol.md states it: another writer's rewrite at the same length
 and time whose file arrives after the scan of the refresh that read its entry
