@@ -48,6 +48,7 @@ jobs:
         run: >-
           nix build .#drawbar-windows .#nord-cli-windows
           .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
+          .#drawbar-appimage
           --print-build-logs
       # And from macOS: drawbar's disk image, around the binary `nord.packages` built.
       - if: runner.os == 'macOS'

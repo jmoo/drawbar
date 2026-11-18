@@ -679,6 +679,14 @@ let
       );
   };
 
+  # drawbar as one Linux executable: the tested binary, set to run on the host's
+  # libraries, and the AppImage runtime.
+  drawbarAppImage = final.callPackage ./crates/drawbar/appimage {
+    inherit (crates) drawbar;
+    inherit (workspaceManifest.package) repository;
+    inherit guiLibs;
+  };
+
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
   docs = final.stdenvNoCC.mkDerivation {
@@ -977,6 +985,7 @@ in
     # Not in `all`: they start browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
       browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
+      drawbar-appimage = drawbarAppImage;
       toshokan-browser-crash = toshokanBrowserCrash;
     }
     // optionalAttrs final.stdenv.hostPlatform.isDarwin { drawbar-app = drawbarApp; }

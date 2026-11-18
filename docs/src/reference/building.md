@@ -35,10 +35,13 @@ for nord-cli also runs the installed binary. `nix build .#nord.all` adds every
 cross target, the browser bundle and this guide. A crate's Windows cross build,
 `nix build .#<crate>-windows`, only compiles it. On Linux,
 `nix build .#nord-cli-linux-<arch>-tarball` builds the static `nord` download for
-`x86_64` or `aarch64`. On macOS, `nix build .#drawbar-app` builds `drawbar.app`
-and fails if it links a library outside the system, and `scripts/dmg.bash` packs
-it into `drawbar-<version>-aarch64-macos.dmg` and checks that the app copied out
-of the image verifies and launches. `nix fmt` formats everything.
+`x86_64` or `aarch64`, and `nix build .#drawbar-appimage` builds drawbar's
+AppImage, fails if it asks the host for a library or a glibc beyond those it
+declares, and runs it without a display or a graphics card. On macOS,
+`nix build .#drawbar-app` builds `drawbar.app` and fails if it links a library
+outside the system, and `scripts/dmg.bash` packs it into
+`drawbar-<version>-aarch64-macos.dmg` and checks that the app copied out of the
+image verifies and launches. `nix fmt` formats everything.
 [Testing](testing.md) describes the suites, and [Contributing](contributing.md)
 the house rules.
 
