@@ -157,11 +157,13 @@ fn cue_points(cue: &[u8]) -> Result<Vec<(u32, u32)>, Error> {
         .collect()
 }
 
-/// The `labl` text and `ltxt` length the adtl list gives each cue id.
+/// The `labl` text, `ltxt` length and `note` text the adtl list gives each cue id.
 #[derive(Default)]
 struct Adtl {
     labels: BTreeMap<u32, String>,
     lengths: BTreeMap<u32, u32>,
+    /// Each `note` entry's bytes after its cue id, as the file holds them.
+    notes: BTreeMap<u32, Vec<u8>>,
 }
 
 fn read_adtl(list: &[u8]) -> Result<Adtl, Error> {
@@ -195,6 +197,10 @@ fn read_adtl(list: &[u8]) -> Result<Adtl, Error> {
             b"ltxt" => adtl
                 .lengths
                 .insert(u32_at(body, 0), u32_at(body, 4))
+                .is_some(),
+            b"note" if body.len() >= 4 => adtl
+                .notes
+                .insert(u32_at(body, 0), body[4..].to_vec())
                 .is_some(),
             _ => false,
         };
@@ -350,9 +356,15 @@ fn cue_chunk(regions: &[Region]) -> Vec<u8> {
     body
 }
 
-fn adtl_list(regions: &[Region]) -> Vec<u8> {
+/// The adtl list of `regions`, each region's `note` text where `notes` holds one.
+fn adtl_list(regions: &[Region], notes: &[Option<Vec<u8>>]) -> Vec<u8> {
     let mut body = b"adtl".to_vec();
-    for (id, region) in (1u32..).zip(regions) {
+    for (i, (id, region)) in (1u32..).zip(regions).enumerate() {
+        if let Some(Some(note)) = notes.get(i) {
+            let mut entry = id.to_le_bytes().to_vec();
+            entry.extend_from_slice(note);
+            push_chunk(&mut body, b"note", &entry);
+        }
         let mut labl = id.to_le_bytes().to_vec();
         labl.extend_from_slice(region.label.as_bytes());
         labl.push(0);
@@ -445,6 +457,29 @@ fn sample_period(rate: u32) -> u32 {
 /// `cue ` or `adtl`; a `smpl` chunk is kept, with `marks.loops` and the old one's header
 /// and sampler data, if the file had one or `marks` has loops. Each loop is tied to the
 /// region holding it by the region's cue id.
+/// The `note` text `bytes` gives each of `regions`, by the label of the cue it was on:
+/// a comment a recorder left on a marker survives an edit of the other marks. None
+/// where the old list does not read.
+fn kept_notes(bytes: &[u8], chunks: &[Chunk], regions: &[Region]) -> Vec<Option<Vec<u8>>> {
+    let adtl = chunks
+        .iter()
+        .find(|c| is_adtl(bytes, c))
+        .and_then(|list| read_adtl(&bytes[list.body.clone()]).ok())
+        .unwrap_or_default();
+    let mut by_label: Vec<(String, Vec<u8>)> = (adtl.notes.into_iter())
+        .filter_map(|(id, note)| Some((adtl.labels.get(&id)?.clone(), note)))
+        .collect();
+    regions
+        .iter()
+        .map(|region| {
+            let at = by_label
+                .iter()
+                .position(|(label, _)| *label == region.label)?;
+            Some(by_label.remove(at).1)
+        })
+        .collect()
+}
+
 pub fn with_marks(bytes: &[u8], marks: &Marks) -> Result<Vec<u8>, Error> {
     let layout = layout(bytes)?;
     let frames = layout.frames();
@@ -471,7 +506,8 @@ pub fn with_marks(bytes: &[u8], marks: &Marks) -> Result<Vec<u8>, Error> {
     }
     if !marks.regions.is_empty() {
         push_chunk(&mut out, b"cue ", &cue_chunk(&marks.regions));
-        push_chunk(&mut out, b"LIST", &adtl_list(&marks.regions));
+        let notes = kept_notes(bytes, &chunks, &marks.regions);
+        push_chunk(&mut out, b"LIST", &adtl_list(&marks.regions, &notes));
     }
     if old_smpl.is_some() || !marks.loops.is_empty() {
         let old = old_smpl.map(|smpl| &bytes[smpl.body.clone()]);
@@ -739,9 +775,45 @@ mod tests {
             assert!(err.contains(reason), "want {reason:?}, got {err}");
         }
 
-        let orphan = append(&wav, b"LIST", &adtl_list(&marks().regions));
+        let orphan = append(&wav, b"LIST", &adtl_list(&marks().regions, &[]));
         let err = read_marks(&orphan).unwrap_err().to_string();
         assert!(err.contains("names cue 1, which no cue point has"), "{err}");
+    }
+
+    /// A marker's note, a comment its recorder left, survives an edit of the other marks.
+    #[test]
+    fn a_marker_s_note_survives_an_edit() {
+        let marker = Region {
+            start: 42,
+            frames: 0,
+            label: "Marker 1".into(),
+        };
+        let markers = std::slice::from_ref(&marker);
+        let wav = append(&take(1000), b"cue ", &cue_chunk(markers));
+        let wav = append(
+            &wav,
+            b"LIST",
+            &adtl_list(markers, &[Some(b"take 3, good ".to_vec())]),
+        );
+        let stroke = Region {
+            start: 100,
+            frames: 500,
+            label: "060-b0-v00".into(),
+        };
+        let edited = Marks {
+            regions: vec![stroke, marker.clone()],
+            loops: Vec::new(),
+        };
+        let out = with_marks(&wav, &edited).unwrap();
+        let chunks = chunks(&out).unwrap();
+        let list = chunks.iter().find(|c| is_adtl(&out, c)).unwrap();
+        let adtl = read_adtl(&out[list.body.clone()]).unwrap();
+        assert_eq!(adtl.notes.len(), 1);
+        assert_eq!(adtl.labels[&2], "Marker 1", "the marker is cue 2 now");
+        assert_eq!(
+            adtl.notes[&2], b"take 3, good ",
+            "and its note goes with it"
+        );
     }
 
     #[test]

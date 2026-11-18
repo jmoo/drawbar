@@ -961,7 +961,7 @@ fn bank_word(code: u8) -> String {
 
 /// What the panel calls the kind a library files itself under, including a code the
 /// format does not name.
-fn kind_name(code: u8) -> String {
+pub(crate) fn kind_name(code: u8) -> String {
     let word = match Kind::from_code(code) {
         Some(Kind::ElectricGrand) => "Electric grand",
         Some(Kind::ElectricPiano) => "Electric piano",
@@ -972,7 +972,7 @@ fn kind_name(code: u8) -> String {
         Some(Kind::Harpsichord) => "Harpsichord",
         Some(Kind::DigitalPiano) => "Digital piano",
         Some(Kind::Hybrid) => "Hybrid",
-        Some(Kind::Mallet) => "Mallet",
+        Some(Kind::Mallet) => "Misc/Mallet",
         None => return format!("kind {code}"),
     };
     word.to_string()

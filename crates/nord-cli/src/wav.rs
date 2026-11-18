@@ -6,9 +6,7 @@
 
 use std::path::Path;
 
-use nord_format::formats::npno::Bank;
-use nord_format::take::sustain;
-use nord_format::wav::{self, Audio, Loop, Marks, Pcm16, Settings};
+use nord_format::wav::{self, Audio, Marks, Pcm16, Settings};
 
 /// ⚠️ A stereo file becomes a stereo stroke, with both channels under one header.
 /// Neither format has a stroke that holds more than two channels.
@@ -40,43 +38,6 @@ pub fn take(path: &Path) -> Result<(Audio, Marks, Settings), String> {
     let marks = wav::read_marks(&bytes).map_err(|e| named(&e))?;
     let settings = wav::read_settings(&bytes).map_err(|e| named(&e))?;
     Ok((audio, marks, settings))
-}
-
-/// `frames`, a region of `take` holding a stroke of `bank`, shaped, raised by `gain`
-/// and dithered to 16-bit PCM with the noise `seed` picks, with `sample_loop` counted
-/// from its start.
-///
-/// An attack fades in over 0.3 ms, and a release over 5 ms, fading out over at most
-/// 40 ms. A looped region's loop is evened out and crossfaded so its end meets its
-/// start. A region that fades from frame `fade` fades to silence at its end and loops
-/// on silence after it.
-pub fn cut(
-    take: &Audio,
-    frames: &[f32],
-    bank: Bank,
-    sample_loop: Option<Loop>,
-    fade: Option<u32>,
-    gain: f32,
-    seed: u64,
-) -> Pcm16 {
-    let channels = usize::from(take.channels.max(1));
-    let (mut shaped, sample_loop) = sustain::shaped(
-        frames,
-        channels,
-        take.rate,
-        bank == Bank::Release,
-        sample_loop,
-        fade,
-    );
-    for v in &mut shaped {
-        *v *= gain;
-    }
-    Pcm16 {
-        rate: take.rate,
-        channels: take.channels,
-        samples: wav::dithered(&shaped, seed),
-        sample_loop,
-    }
 }
 
 #[cfg(test)]

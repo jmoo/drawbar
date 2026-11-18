@@ -166,6 +166,7 @@ web-sys = { version = "0.3", features = [
   "Event",
   "EventTarget",
   "File",
+  "FileReaderSync",
   "FileList",
   "FileSystemDirectoryHandle",
   "FileSystemFileHandle",

@@ -164,9 +164,14 @@ pub fn cut(take: &Take<'_>, hit: &Hit, options: &CutOptions) -> Cuts {
     let mut r1 = stop
         .saturating_sub(samples(0.05, rate))
         .min(r0 + samples(options.release_seconds, rate));
-    let before = &env.db
-        [hit.onset.saturating_sub(frames(1.0))..hit.onset.saturating_sub(frames(0.1)).max(1)];
-    let gap = detect::median(before);
+    // The quiet before the hit, or where the take starts with it, as a sample set's
+    // one-note files do, the take's floor.
+    let gap = match hit.onset > frames(0.1) {
+        true => {
+            detect::median(&env.db[hit.onset.saturating_sub(frames(1.0))..hit.onset - frames(0.1)])
+        }
+        false => env.floor(),
+    };
     let db = &env.db;
     let opening = &db[ku..(ku + frames(0.2)).min(r1 / w).max(ku + 1).min(db.len())];
     let k0 = ku
