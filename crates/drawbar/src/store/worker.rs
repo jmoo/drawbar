@@ -44,8 +44,9 @@ use super::wire::{self, Attachment, Message};
 use super::{storage, Cmd, Event};
 use crate::js::{describe, field};
 
-/// The worker's whole script: it loads the page's bundle and hands over to it.
-const BOOTSTRAP: &str = r#"
+/// The worker's whole script: it loads the page's bundle and hands over to it. A
+/// task's worker ([`crate::work::hand`]) starts from it too.
+pub(crate) const BOOTSTRAP: &str = r#"
 const stopped = (why) => self.postMessage({ failed: String(why?.message ?? why) });
 self.addEventListener("error", (event) => stopped(event.message));
 self.addEventListener("unhandledrejection", (event) => stopped(event.reason));
@@ -71,6 +72,11 @@ extern "C" {
     /// The URL of the glue this code was bound by, which the worker imports.
     #[wasm_bindgen(thread_local_v2, js_namespace = ["import", "meta"], js_name = url)]
     static GLUE: String;
+}
+
+/// The URL of the glue this code was bound by.
+pub(crate) fn glue() -> String {
+    GLUE.with(String::clone)
 }
 
 /// What a worker is started for, as its failures name it.
@@ -398,6 +404,13 @@ impl Drop for Worker {
 /// with the page's first message, once the bundle is instantiated.
 #[wasm_bindgen(js_name = drawbarWorker)]
 pub async fn serve(start: JsValue) {
+    if field(&start, "kind")
+        .and_then(|kind| kind.as_string())
+        .as_deref()
+        == Some("job")
+    {
+        return crate::work::worker::serve(&start);
+    }
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let signs = Arc::new(Signs::default());
     let served = match field(&start, "kind")
@@ -704,7 +717,7 @@ impl Queue {
 }
 
 /// `message` as the worker posts it, with the buffers its bytes are in handed over.
-fn to_js(message: Message) -> (JsValue, Array) {
+pub(crate) fn to_js(message: Message) -> (JsValue, Array) {
     let (attached, transfer) = (Array::new(), Array::new());
     for attachment in message.attached {
         match attachment {
@@ -723,7 +736,7 @@ fn to_js(message: Message) -> (JsValue, Array) {
 }
 
 /// The message a posted `value` holds.
-fn from_js(value: &JsValue) -> Result<Message, String> {
+pub(crate) fn from_js(value: &JsValue) -> Result<Message, String> {
     let text = field(value, "text").and_then(|text| text.as_string());
     let text = text.ok_or("no text")?;
     let attached = field(value, "attached").ok_or("no attachments")?;
@@ -745,7 +758,7 @@ fn from_js(value: &JsValue) -> Result<Message, String> {
     })
 }
 
-fn object(fields: &[(&str, JsValue)]) -> JsValue {
+pub(crate) fn object(fields: &[(&str, JsValue)]) -> JsValue {
     let object = Object::new();
     for (name, value) in fields {
         let _ = Reflect::set(&object, &JsValue::from_str(name), value);

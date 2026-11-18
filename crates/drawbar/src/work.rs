@@ -1,23 +1,36 @@
 //! Work that outlives the frame that started it: encoding a piano library, or laying one
 //! out again from a plan.
 //!
-//! ⚠️ wasm has one thread, so there the work runs inline and the frame waits for it,
-//! except work that waits on the browser, which runs as a task of its own. The caller gets
-//! the same [`Job`] either way and polls it the same way.
+//! ⚠️ wasm has one thread, so there [`run`] runs the work inline and the frame waits for
+//! it, and `spawn` runs work that waits on the browser as a task of its own. Work
+//! [`hand`]ed off by name runs in a worker of its own instead, and the page stays live.
+//! The caller gets the same [`Job`] every way and polls it the same way.
 
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+mod tasks;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod worker;
+
+#[cfg(test)]
+pub(crate) use tasks::answer;
+pub use tasks::{hand, Detected, FindHits, FindNoise, FoundNoise, Task, Work};
+
 /// The latest progress message from a job.
 #[derive(Clone, Default)]
 pub struct Progress(Arc<Mutex<String>>);
 
 impl Progress {
+    /// Say `words`, and in a task's worker, tell the page.
     pub fn say(&self, words: impl Into<String>) {
+        let words = words.into();
+        #[cfg(target_arch = "wasm32")]
+        worker::tell(&words);
         if let Ok(mut held) = self.0.lock() {
-            *held = words.into();
+            *held = words;
         }
     }
 
@@ -25,6 +38,10 @@ impl Progress {
         self.0.lock().map(|held| held.clone()).unwrap_or_default()
     }
 }
+
+/// How a job's progress starts once it has stopped without an answer, followed by why:
+/// "the work stopped: …", "the work could not start: …".
+pub(crate) const STOPPED: &str = "the work";
 
 /// A job's state when polled.
 #[derive(Debug, PartialEq, Eq)]
@@ -40,6 +57,9 @@ pub enum Answer<T> {
 pub struct Job<T> {
     rx: Receiver<T>,
     progress: Progress,
+    /// The worker running the job, which ends when the job is dropped.
+    #[cfg(target_arch = "wasm32")]
+    _worker: Option<worker::Running>,
 }
 
 impl<T> Job<T> {
@@ -58,6 +78,16 @@ impl<T> Job<T> {
 
     pub fn progress(&self) -> String {
         self.progress.said()
+    }
+
+    /// Why a job that [`Answer::Died`] gave no answer, in words naming `what` stopped:
+    /// the reason its worker or thread gave, where it gave one.
+    pub fn died(&self, what: &str) -> String {
+        let said = self.progress();
+        match said.strip_prefix(STOPPED) {
+            Some(why) => format!("{what}{why}"),
+            None => format!("{what} stopped without a result"),
+        }
     }
 
     /// [`Self::poll`], blocking until the worker answers or exits, so never
@@ -82,7 +112,18 @@ pub fn run<T: Send + 'static>(
     let reported = progress.clone();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(work(&reported));
+        let worked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&reported)));
+        match worked {
+            Ok(answer) => {
+                let _ = tx.send(answer);
+            }
+            Err(panic) => {
+                let why = (panic.downcast_ref::<&str>().map(|why| why.to_string()))
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "it panicked".to_string());
+                reported.say(format!("{STOPPED} stopped: {why}"));
+            }
+        }
         ctx.request_repaint();
     });
     Job { rx, progress }
@@ -96,7 +137,11 @@ pub fn run<T: Send + 'static>(
     let (tx, rx) = channel();
     let progress = Progress::default();
     let _ = tx.send(work(&progress));
-    Job { rx, progress }
+    Job {
+        rx,
+        progress,
+        _worker: None,
+    }
 }
 
 /// Start `work`, a future the browser answers whenever it answers, and request a repaint
@@ -114,7 +159,11 @@ pub fn spawn<T: 'static, F: std::future::Future<Output = T> + 'static>(
         let _ = tx.send(working.await);
         ctx.request_repaint();
     });
-    Job { rx, progress }
+    Job {
+        rx,
+        progress,
+        _worker: None,
+    }
 }
 
 /// Seconds since the Unix epoch, or `None` when the clock reads before it or past what a
@@ -167,5 +216,13 @@ mod tests {
     fn a_worker_that_panics_is_reported_as_dead() {
         let job: Job<u32> = run(&egui::Context::default(), |_| panic!("the work gave up"));
         assert_eq!(settled(&job), Answer::Died);
+        assert_eq!(
+            job.died("Detect"),
+            "Detect stopped: the work gave up",
+            "and says why"
+        );
+        let formatted: Job<u32> = run(&egui::Context::default(), |_| panic!("at {}", 3));
+        assert_eq!(settled(&formatted), Answer::Died);
+        assert_eq!(formatted.died("Detect"), "Detect stopped: at 3");
     }
 }

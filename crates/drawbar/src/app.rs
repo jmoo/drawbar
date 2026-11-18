@@ -1074,6 +1074,7 @@ impl eframe::App for DrawbarApp {
         for id in self.tabs.documents() {
             self.workspace.hurry(id);
         }
+        self.document.keep_wavs(self.tabs.documents());
         let picked = self.browser.picked();
         if self.picked != Some(picked.revision()) {
             self.picked = Some(picked.revision());
