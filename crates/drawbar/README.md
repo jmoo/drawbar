@@ -16,6 +16,10 @@ cargo install drawbar
 On Windows, download it from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases).
 
+On a Mac with Apple silicon, download the disk image from the same release; see
+[Install](../../docs/src/getting-started/install.md#on-the-desktop) for the first
+open.
+
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
   table.

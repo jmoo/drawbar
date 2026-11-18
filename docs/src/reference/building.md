@@ -35,7 +35,10 @@ for nord-cli also runs the installed binary. `nix build .#nord.all` adds every
 cross target, the browser bundle and this guide. A crate's Windows cross build,
 `nix build .#<crate>-windows`, only compiles it. On Linux,
 `nix build .#nord-cli-linux-<arch>-tarball` builds the static `nord` download for
-`x86_64` or `aarch64`. `nix fmt` formats everything.
+`x86_64` or `aarch64`. On macOS, `nix build .#drawbar-app` builds `drawbar.app`
+and fails if it links a library outside the system, and `scripts/dmg.bash` packs
+it into `drawbar-<version>-aarch64-macos.dmg` and checks that the app copied out
+of the image verifies and launches. `nix fmt` formats everything.
 [Testing](testing.md) describes the suites, and [Contributing](contributing.md)
 the house rules.
 
@@ -44,7 +47,7 @@ the house rules.
 | Job | Runs |
 |---|---|
 | `check` | `nix flake check` |
-| `native` | `nix build .#nord.tests .#nord.packages` on Linux and macOS, and `scripts/test.bash` on Windows; on Linux also the files releases attach |
+| `native` | `nix build .#nord.tests .#nord.packages` on Linux and macOS, and `scripts/test.bash` on Windows; on Linux and macOS also the files releases attach |
 | `web` | `nix build .#site .#nord.browser-tests`: the production browser bundle, this guide and the browser suites |
 | `corpus` | `nix build .#nord.all-corpus`, on `master` and in-repository pull requests |
 | `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
