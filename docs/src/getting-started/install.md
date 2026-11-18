@@ -18,6 +18,13 @@ On Windows, download `drawbar-<version>-x86_64-windows.exe` from the newest
 and run it. It is not signed, so Windows may ask before running it the first
 time.
 
+On a Mac with Apple silicon and macOS 14 or later, download
+`drawbar-<version>-aarch64-macos.dmg` from the newest
+[drawbar release](https://github.com/jmoo/drawbar/releases), open it, and drag
+drawbar to Applications. It is not signed, so macOS refuses to open it the first
+time. Choose **Open Anyway** in System Settings ▸ Privacy & Security, then open
+drawbar again.
+
 Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
 
 ```sh
