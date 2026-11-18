@@ -56,6 +56,19 @@
 
             # Rust tests run in the package builds: `nix build .#nord.all`.
             checks = {
+              assets =
+                pkgs.runCommand "check-assets"
+                  {
+                    nativeBuildInputs = with pkgs; [
+                      cargo
+                      git
+                      jq
+                    ];
+                  }
+                  ''
+                    bash ${./scripts}/check-assets.bash
+                    touch "$out"
+                  '';
               bump =
                 pkgs.runCommand "check-bump"
                   {

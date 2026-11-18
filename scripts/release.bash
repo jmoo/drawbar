@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# nix-deps: cargo coreutils curl gh git jq nix
-# Publish untagged manifest versions in dependency order, then create releases
-# and attach their Windows builds.
+# nix-deps: cargo coreutils curl gh git jq
+# Publish untagged manifest versions in dependency order and create their releases.
+# scripts/assets.bash attaches the files each release carries.
 
 usage() {
   echo "usage: $0 [--dry-run]" >&2
@@ -92,50 +92,3 @@ for crate in "${publish_order[@]}"; do
     gh release create "$tag" --repo "$repo_url" --target "$sha" --title "$tag" --notes-file "$tmp/notes.md"
   fi
 done
-
-# The Windows build a crate's release carries: a cross package and its executable.
-declare -A windows_build=(["drawbar"]=drawbar-windows/drawbar.exe ["nord-cli"]=nord-cli-windows/nord.exe)
-
-# A failed lookup is an error, not a release without the file.
-carries() {
-  local tag=$1 name=$2
-  git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null || return 1
-  if ! gh release view "$tag" --repo "$repo_url" --json assets >"$tmp/assets"; then
-    echo "$tag: could not list the release's files" >&2
-    exit 1
-  fi
-  jq -e --arg name "$name" 'any(.assets[]; .name == $name)' "$tmp/assets" >/dev/null
-}
-
-# Built from the tag's own flake, so a backfilled release gets the code it names.
-attach() {
-  local tag=$1 build=$2 name=$3 out
-  out="$(nix build --no-link --print-out-paths "git+file://$repo?ref=refs/tags/$tag#${build%%/*}")" &&
-    cp "$out/${build#*/}" "$tmp/$name" &&
-    gh release upload "$tag" "$tmp/$name" --repo "$repo_url"
-}
-
-# After publishing, which must finish within the crates.io token's 30 minutes.
-# A release left without its build gets it on the next run.
-git -C "$repo" fetch --quiet --tags origin
-missing=()
-for crate in "${publish_order[@]}"; do
-  [[ -v "windows_build[$crate]" ]] || continue
-  version="$(crate_version "$crate")"
-  tag="$crate-v$version"
-  build=${windows_build[$crate]}
-  name="$(basename "$build" .exe)-$version-x86_64-windows.exe"
-  if carries "$tag" "$name"; then
-    echo "$tag: already carries $name"
-  elif ((dry_run)); then
-    echo "$tag: would build ${build%%/*} and attach $name"
-  elif ! attach "$tag" "$build" "$name"; then
-    missing+=("$tag: $name")
-  fi
-done
-
-if ((${#missing[@]})); then
-  echo "released, but without these Windows builds; a rerun attaches them:" >&2
-  printf '  %s\n' "${missing[@]}" >&2
-  exit 1
-fi
