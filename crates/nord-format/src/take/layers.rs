@@ -145,7 +145,8 @@ pub(crate) type Named = Option<(u8, Option<String>)>;
 /// The note and any warning of each of `hits` in a take with no note list: the note
 /// [`notes_by_hit`] names, a hit with no pitch taking the note of the named hit before
 /// it, and none for a hit `skipped` leaves out. A hit named an octave or more from its
-/// pitch, to fit the notes either side, is warned about.
+/// pitch, to fit the notes around it, is warned about, before any warning that its pitch
+/// is off its note's.
 pub(crate) fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) -> Vec<Named> {
     let mut last: Option<u8> = None;
     hits.iter()
@@ -161,11 +162,13 @@ pub(crate) fn self_named(hits: &[Hit], skipped: impl Fn(&Hit) -> bool + Copy) ->
                     let moved = (octaves != 0.0).then(|| {
                         format!(
                             "named {}, {octaves:+} octave(s) from its pitch, to fit the notes \
-                             either side",
+                             around it",
                             crate::note::name(note)
                         )
                     });
-                    Some((note, off_warning(pitch, note).or(moved)))
+                    let warnings: Vec<String> =
+                        moved.into_iter().chain(off_warning(pitch, note)).collect();
+                    Some((note, (!warnings.is_empty()).then(|| warnings.join("; "))))
                 }
                 _ => last.map(|note| (note, Some("no pitch found".to_string()))),
             }
@@ -313,9 +316,9 @@ pub enum Placed {
 /// sorted by pitch and named as [`notes_by_hit`] names a take's, whose stretch check then
 /// has each note's neighbors to go by. Sorted by pitch they make no playing line, so no
 /// octave is moved: each file keeps the octave its pitch was read in. A note's files are
-/// its hits, and its layers are chosen from them by level as [`pick`] chooses a take's: `layers` at most, files within
-/// `min_gap_db` of a louder one kept being duplicates, as round-robins of one dynamic
-/// often are.
+/// its hits, and its layers are chosen from them by level as [`pick`] chooses a take's:
+/// `layers` at most, files within `min_gap_db` of a louder one kept being duplicates, as
+/// round-robins of one dynamic often are.
 pub fn place(struck: &[Option<Hit>], layers: usize, min_gap_db: f64) -> Vec<Option<Placed>> {
     let mut placed: Vec<Option<Placed>> = vec![None; struck.len()];
     let mut sorted: Vec<Hit> = Vec::new();
@@ -473,11 +476,31 @@ mod tests {
         let (note, warning) = named[0].clone().unwrap();
         assert_eq!(note, 36);
         let warning = warning.expect("a warning");
-        assert!(warning.contains("+1 octave(s) from its pitch"), "{warning}");
+        assert_eq!(
+            warning,
+            "named C2, +1 octave(s) from its pitch, to fit the notes around it"
+        );
         assert_eq!(
             named[1],
             Some((36, None)),
             "a hit at its pitch says nothing"
+        );
+    }
+
+    /// A hit moved an octave and off its pitch class says both, the move first: played
+    /// C2, D2, E2 a little flat, G2 read an octave low and sharp, the G2 is moved up by
+    /// the stretch check a semitone and by the line an octave.
+    #[test]
+    fn a_hit_moved_an_octave_and_off_its_note_says_both() {
+        let hits = played(&[36.0, 38.0, 39.7, 30.48], 1);
+        let (note, warning) = self_named(&hits, |_| false)[3].clone().unwrap();
+        assert_eq!(note, 43);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "named G2, +1 octave(s) from its pitch, to fit the notes around it; \
+                 its pitch is -0.5 semitones off its note's"
+            )
         );
     }
 

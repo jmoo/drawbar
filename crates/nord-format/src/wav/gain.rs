@@ -4,6 +4,7 @@
 use std::ops::{Range, RangeInclusive};
 
 use super::Encoding;
+use crate::error::Error;
 
 /// The values an integer sample of `bits` holds. 8-bit samples are stored unsigned, and
 /// are counted here from their midpoint, as the wider ones are.
@@ -42,17 +43,24 @@ fn put_int(at: &mut [u8], sample: i32, bits: u16) {
 }
 
 /// Each integer sample of `bits` in `data`, a file's data chunk in `bytes`, in file order.
-pub fn int_samples(bytes: &[u8], data: Range<usize>, bits: u16) -> impl Iterator<Item = i32> + '_ {
-    bytes[data]
+/// Refused unless [`super::write`] writes integers of `bits`.
+pub fn int_samples(
+    bytes: &[u8],
+    data: Range<usize>,
+    bits: u16,
+) -> Result<impl Iterator<Item = i32> + '_, Error> {
+    Encoding::Int { bits }.readable()?;
+    Ok(bytes[data]
         .chunks_exact(usize::from(bits / 8))
-        .map(move |at| int(at, bits))
+        .map(move |at| int(at, bits)))
 }
 
 /// Scale every sample of `data`, a data chunk's body, by `factor` in `encoding`, and
-/// count the samples clipped. Float holds any level, so nothing clips there.
-pub fn scale(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
+/// count the samples clipped. Float holds any level, so nothing clips there. Refused
+/// unless [`super::write`] writes `encoding`.
+pub fn scale(data: &mut [u8], encoding: Encoding, factor: f64) -> Result<usize, Error> {
     let mut clipped = 0;
-    match encoding {
+    match encoding.readable()? {
         Encoding::Int { bits } => {
             for at in data.chunks_exact_mut(usize::from(bits / 8)) {
                 let (held, clips) = scaled(int(at, bits), factor, bits);
@@ -72,7 +80,7 @@ pub fn scale(data: &mut [u8], encoding: Encoding, factor: f64) -> usize {
             }
         }
     }
-    clipped
+    Ok(clipped)
 }
 
 #[cfg(test)]
@@ -89,10 +97,10 @@ mod tests {
             for (i, sample) in [top / 4, low / 4, top / 2 + 1].into_iter().enumerate() {
                 put_int(&mut data[i * width..(i + 1) * width], sample, bits);
             }
-            let read: Vec<i32> = int_samples(&data, 0..data.len(), bits).collect();
+            let read: Vec<i32> = int_samples(&data, 0..data.len(), bits).unwrap().collect();
             assert_eq!(read, [top / 4, low / 4, top / 2 + 1], "{bits} bits");
-            let clipped = scale(&mut data, Encoding::Int { bits }, 2.0);
-            let doubled: Vec<i32> = int_samples(&data, 0..data.len(), bits).collect();
+            let clipped = scale(&mut data, Encoding::Int { bits }, 2.0).unwrap();
+            let doubled: Vec<i32> = int_samples(&data, 0..data.len(), bits).unwrap().collect();
             assert_eq!(clipped, 1, "{bits} bits: only the one past half clips");
             assert_eq!(doubled[2], top, "{bits} bits");
         }
@@ -104,10 +112,27 @@ mod tests {
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        assert_eq!(scale(&mut data, Encoding::Float { bits: 32 }, 2.0), 0);
+        assert_eq!(
+            scale(&mut data, Encoding::Float { bits: 32 }, 2.0).unwrap(),
+            0
+        );
         let back: Vec<f32> = (data.as_chunks::<4>().0.iter())
             .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert_eq!(back, [1.5, -1.0]);
+    }
+
+    #[test]
+    fn an_encoding_write_refuses_is_refused_here_too() {
+        let mut data = vec![0u8; 16];
+        for encoding in [Encoding::Int { bits: 12 }, Encoding::Float { bits: 16 }] {
+            let err = scale(&mut data, encoding, 2.0).expect_err("refused");
+            assert!(
+                err.to_string().contains("an encoding this crate reads"),
+                "{err}"
+            );
+        }
+        assert!(int_samples(&data, 0..16, 12).is_err());
+        assert_eq!(data, [0; 16], "nothing is written");
     }
 }

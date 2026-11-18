@@ -39,7 +39,9 @@ fn ints_of(bytes: &[u8]) -> Vec<i32> {
     let Encoding::Int { bits } = layout.format.encoding else {
         panic!("not PCM");
     };
-    wav::int_samples(bytes, layout.data, bits).collect()
+    wav::int_samples(bytes, layout.data, bits)
+        .unwrap()
+        .collect()
 }
 
 fn gained(bytes: &[u8], db: &str) -> Result<Vec<u8>, String> {
@@ -50,7 +52,7 @@ fn gained(bytes: &[u8], db: &str) -> Result<Vec<u8>, String> {
 fn clipped_samples(bytes: &[u8], db: f64) -> usize {
     let layout = wav::layout(bytes).unwrap();
     let mut data = bytes[layout.data].to_vec();
-    wav::scale(&mut data, layout.format.encoding, factor(db).unwrap())
+    wav::scale(&mut data, layout.format.encoding, factor(db).unwrap()).unwrap()
 }
 
 /// A library holding `bytes` as a saved WAV, and its id.
@@ -256,7 +258,8 @@ fn a_note_clips_exactly_where_one_of_its_samples_does() {
             let from = layout.data.start + 2 * (rate / 2 + 2 * rate * k);
             let mut note = bytes[from..from + 2 * rate].to_vec();
             let encoding = layout.format.encoding;
-            clipped += usize::from(wav::scale(&mut note, encoding, factor(db).unwrap()) > 0);
+            clipped +=
+                usize::from(wav::scale(&mut note, encoding, factor(db).unwrap()).unwrap() > 0);
         }
         assert_eq!(state.notes.clipped(factor(db).unwrap()), clipped, "{db} dB");
     }

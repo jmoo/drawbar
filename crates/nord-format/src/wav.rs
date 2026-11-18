@@ -25,6 +25,18 @@ pub enum Encoding {
 }
 
 impl Encoding {
+    /// `self`, refused unless it is one this crate reads and writes: integer PCM of 8,
+    /// 16, 24 or 32 bits, or float of 32 or 64.
+    fn readable(self) -> Result<Self, Error> {
+        match self {
+            Encoding::Int {
+                bits: 8 | 16 | 24 | 32,
+            }
+            | Encoding::Float { bits: 32 | 64 } => Ok(self),
+            _ => out_of_bounds(format!("{self:?}"), "an encoding this crate reads"),
+        }
+    }
+
     fn bytes(self) -> usize {
         match self {
             Encoding::Int { bits } | Encoding::Float { bits } => usize::from(bits / 8),
@@ -377,13 +389,7 @@ pub(crate) fn riff<T: Copy>(
         rate,
         encoding,
     } = format;
-    match encoding {
-        Encoding::Int {
-            bits: 8 | 16 | 24 | 32,
-        }
-        | Encoding::Float { bits: 32 | 64 } => {}
-        _ => return out_of_bounds(format!("{encoding:?}"), "an encoding this crate reads"),
-    }
+    let encoding = encoding.readable()?;
     if channels == 0 {
         return out_of_bounds("0 channels", "a positive channel count");
     }
