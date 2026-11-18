@@ -501,8 +501,8 @@ pub enum Source {
 pub struct Kept {
     /// The file it is of.
     pub of: Key,
-    /// The row of its file: its entity's, as joins carried it, or for a file kept by its
-    /// path, the row there where the file holds what the edit was made over.
+    /// The row of its file: its entity's, as joins carried it, else the row at the path
+    /// it is kept by or recorded, where the file there holds what the edit was made over.
     pub row: Option<FileId>,
     /// The clock it was kept at: of two kept of one asset, the later is the newer.
     pub at: u64,
@@ -510,7 +510,7 @@ pub struct Kept {
     pub holds: bool,
     /// The identity of the file it was made over.
     pub base: toshokan::Identity,
-    /// Where its file was, as the library last said.
+    /// Where its file was, as the library last said or the edit recorded.
     pub path: Option<LibPath>,
     #[serde(with = "wire::bytes")]
     pub bytes: Vec<u8>,

@@ -963,6 +963,44 @@ fn an_edit_kept_with_no_path_under_an_entity_a_join_deletes_goes_back_over_its_f
     }
 }
 
+/// An unsaved edit of a tagged file that went comes back under the file's name once
+/// another drawbar forgot the file while this one was closed.
+#[test]
+fn an_edit_kept_under_an_entity_another_drawbar_forgot_comes_back_under_its_files_name() {
+    let theirs = Temp::new();
+    let (root, mut here, mut there) = strings(&theirs);
+    let file = here.named("Strings.ne5p");
+    here.tag(&[file], "Live");
+    here.read_all();
+    let edited = here.edit(file, "74");
+    here.autosave();
+    fs::remove_file(root.at("Strings.ne5p")).unwrap();
+    here.refocus();
+    here.close();
+    there.refocus();
+    let lost: Vec<u64> = there
+        .bench
+        .browser
+        .folders
+        .lost()
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    let [lost] = lost[..] else {
+        panic!("one row is lost: {lost:?}");
+    };
+    there.bench.act(vec![Act::Forget(lost)]);
+    there.decided();
+
+    let again = Session::open(&root);
+    let transcript = again.bench.log.transcript();
+    let listed = again.bench.workspace.listed();
+    let listed: Vec<(&str, &[u8])> = listed
+        .map(|entity| (entity.name.as_str(), &entity.bytes[..]))
+        .collect();
+    assert_eq!(listed, [("Strings.ne5p", &edited[..])], "{transcript}");
+}
+
 /// The library at `from` and this install's own state for it, copied to `to`.
 fn copy_library(from: &Temp, to: &Temp) {
     copy_tree(&from.0, &to.0);

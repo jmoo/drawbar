@@ -502,9 +502,9 @@ impl<F: Fs> Keeper<F> {
                                 .filter(|_| holds || followed.is_some())
                                 .map(|row| row.file),
                             path: match &of {
-                                Key::Entity(_) => {
-                                    row.and_then(|row| LibPath::parse(row.path.as_str()))
-                                }
+                                Key::Entity(_) => row
+                                    .and_then(|row| LibPath::parse(row.path.as_str()))
+                                    .or(kept_at),
                                 Key::File(path) | Key::Copy(path, _) => Some(path.clone()),
                             },
                             of,
