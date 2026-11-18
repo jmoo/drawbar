@@ -46,8 +46,8 @@ pub use worker::{RescueIo, Unrun, Worker};
 /// occupants a write to the instrument leaves while the library is open.
 pub const RESCUED: &str = "rescued";
 
-/// Why a worker could not start: the page's bundle is no longer where the page loaded it
-/// from, as once drawbar.app is updated.
+/// Why a worker could not start: its bundle is no longer where the page found it, as once
+/// drawbar.app is updated.
 #[derive(Debug)]
 pub struct Outdated;
 

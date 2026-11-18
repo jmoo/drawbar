@@ -398,6 +398,8 @@ let
 
   # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
   # ⚠️ Its CLI must match the crate pin; move the Cargo pin when they diverge.
+  # The page's module and the library worker's are the one crate built twice, each
+  # with only its own entry point, so link-time optimization drops the other's code.
   drawbar-web =
     let
       args = commonArgs // {
@@ -421,59 +423,85 @@ let
       // {
         cargoArtifacts = crane.buildDepsOnly args;
 
+        # The install binds the two modules this builds; there are no binaries.
+        doNotPostBuildInstallCargoBinaries = true;
+        buildPhaseCargoCommand = ''
+          for module in page worker; do
+            cargoWithProfile build ${args.cargoExtraArgs} --no-default-features --features "$module"
+            mv target/wasm32-unknown-unknown/web/drawbar.wasm "$module.wasm"
+          done
+        '';
+
         installPhaseCommand = ''
-          mkdir -p "$out"
-          wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
-            target/wasm32-unknown-unknown/web/drawbar.wasm
+          mkdir -p "$out/pkg"
 
-          # ⚠️ Pages serves this gzipped, and inlining a function into its only caller
-          # shrinks the file but grows the gzip. Data starts at 1 MiB and the stack grows
-          # down from it, so only an overflowing stack reaches the low KiB that
-          # `--low-memory-unused` assumes is unused. rustc emits no `target_features`
-          # section, so the two features its output uses are named here.
-          wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int \
-            --one-caller-inline-max-function-size=0 -Oz --converge --low-memory-unused \
-            --strip-producers -o optimized.wasm "$out/pkg/drawbar_bg.wasm"
-          mv optimized.wasm "$out/pkg/drawbar_bg.wasm"
+          # Binds the module at $2 as $1 and names its files by their content, in
+          # $wasm and $js.
+          bind() {
+            wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" --out-name "$1" "$2"
 
-          # Pages caches for ten minutes, so a cached glue file can meet a freshly
-          # fetched module; the content hash in each name keeps that pair unreachable.
-          wasm="drawbar_bg-$(sha256sum "$out/pkg/drawbar_bg.wasm" | cut -c-16).wasm"
-          mv "$out/pkg/drawbar_bg.wasm" "$out/pkg/$wasm"
-          substituteInPlace "$out/pkg/drawbar.js" --replace-fail drawbar_bg.wasm "$wasm"
+            # ⚠️ Pages serves this gzipped, and inlining a function into its only caller
+            # shrinks the file but grows the gzip. Data starts at 1 MiB and the stack grows
+            # down from it, so only an overflowing stack reaches the low KiB that
+            # `--low-memory-unused` assumes is unused. rustc emits no `target_features`
+            # section, so the two features its output uses are named here.
+            wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int \
+              --one-caller-inline-max-function-size=0 -Oz --converge --low-memory-unused \
+              --strip-producers -o optimized.wasm "$out/pkg/$1_bg.wasm"
+            mv optimized.wasm "$out/pkg/$1_bg.wasm"
 
-          js="drawbar-$(sha256sum "$out/pkg/drawbar.js" | cut -c-16).js"
-          mv "$out/pkg/drawbar.js" "$out/pkg/$js"
+            # Pages caches for ten minutes, so a cached glue file can meet a freshly
+            # fetched module; the content hash in each name keeps that pair unreachable.
+            wasm="$1_bg-$(sha256sum "$out/pkg/$1_bg.wasm" | cut -c-16).wasm"
+            mv "$out/pkg/$1_bg.wasm" "$out/pkg/$wasm"
+            substituteInPlace "$out/pkg/$1.js" --replace-fail "$1_bg.wasm" "$wasm"
 
-          # The page fetches the module itself to report progress, so it needs the
+            js="$1-$(sha256sum "$out/pkg/$1.js" | cut -c-16).js"
+            mv "$out/pkg/$1.js" "$out/pkg/$js"
+
+            if grep -qF "$1_bg.wasm" "$out/pkg/$js"; then
+              echo "an unhashed asset name survived the rewrite of $js" >&2
+              exit 1
+            fi
+          }
+
+          bind drawbar_worker worker.wasm
+          worker=$js
+          bind drawbar page.wasm
+
+          # The page fetches its module itself to report progress, so it needs the
           # hashed name and the byte count the renamed file actually has.
           substitute ${./crates/drawbar/index.html} "$out/index.html" \
             --replace-fail pkg/drawbar.js "pkg/$js" \
             --replace-fail pkg/drawbar_bg.wasm "pkg/$wasm" \
+            --replace-fail pkg/drawbar_worker.js "pkg/$worker" \
             --replace-fail @version@ "${manifests.drawbar.version}" \
             --replace-fail @wasmBytes@ "$(stat -c %s "$out/pkg/$wasm")"
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
           # The demo sounds the welcome sheet fetches, beside the app that reads them.
           cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
 
-          if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
-            echo "an unhashed asset name survived the rewrite" >&2
-            exit 1
-          fi
-
-          for stale in pkg/drawbar.js pkg/drawbar_bg.wasm @version@ @wasmBytes@; do
+          for stale in pkg/drawbar.js pkg/drawbar_bg.wasm pkg/drawbar_worker.js @version@ @wasmBytes@; do
             if grep -qF "$stale" "$out/index.html"; then
               echo "index.html still holds $stale after the rewrite" >&2
               exit 1
             fi
           done
 
-          # The page imports `start` from the module; a bundle without it loads
-          # and does nothing.
-          grep -q 'function start' "$out/pkg/$js" || {
-            echo "wasm-bindgen output lacks the page's entry point" >&2
-            exit 1
+          # The page imports `start` from its module, and the worker `drawbarWorker` from
+          # its own. A module with the other's entry point too holds all of its code.
+          entry() {
+            grep -q "export function $2(" "$out/pkg/$1" || {
+              echo "$1 lacks its entry point $2" >&2
+              exit 1
+            }
+            if grep -q "export function $3(" "$out/pkg/$1"; then
+              echo "$1 also exports $3" >&2
+              exit 1
+            fi
           }
+          entry "$js" start drawbarWorker
+          entry "$worker" drawbarWorker start
         '';
 
         meta.description = "drawbar built for the browser";

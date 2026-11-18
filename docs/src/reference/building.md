@@ -107,15 +107,18 @@ nixpkgs#wasm-bindgen-cli --` in place of `wasm-bindgen` takes the matching
 version from the flake's pinned nixpkgs.
 
 Serve over `http://localhost`, which counts as a secure context. WebUSB, the
-module import and the library's storage all fail from `file://`. The worker that
-keeps the library runs the page's own module, so nothing else is served for it.
-This plain server has no guide beside the app, so Help ▸ User guide finds
-nothing there. `nix run .#drawbar-web` serves both.
+module import and the library's storage all fail from `file://`. Built this way
+the one module holds both the page and the worker that keeps the library, so
+nothing else is served for the worker. This plain server has no guide beside the
+app, so Help ▸ User guide finds nothing there. `nix run .#drawbar-web` serves
+both.
 
-`nix build .#drawbar-web` also writes the version and the module's byte count
-into the page. Built by hand it has neither, so the loading screen shows no
-version and measures the download against the server's `Content-Length`, or not
-at all when the server compresses it.
+`nix build .#drawbar-web` builds the page's module and the worker's apart, with
+`--no-default-features` and the `page` or `worker` feature, so the page downloads
+no more than it runs before it starts. It also writes the version and the page
+module's byte count into the page. Built by hand it has neither, so the loading
+screen shows no version and measures the download against the server's
+`Content-Length`, or not at all when the server compresses it.
 
 ## Checks by hand
 
