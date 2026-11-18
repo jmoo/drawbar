@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
 # nix-deps: cargo cargo-about git jq nix
-# Regenerate the license notices drawbar's About box shows for the Rust crates in it.
+# Regenerate the license notices that travel with drawbar and nord: drawbar's About box
+# table and nord's notices file.
 set -euo pipefail
 
 repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 drawbar="$repo/crates/drawbar"
+nord="$repo/crates/nord-cli"
 licenses="$drawbar/licenses"
 out="$drawbar/src/about/crates.rs"
+notices_out="$nord/THIRD-PARTY-NOTICES.txt"
 
-about="$(cargo about generate --format json --fail --locked \
-  --manifest-path "$drawbar/Cargo.toml" --config "$drawbar/about.toml")"
+defs='
+  # Licenses that ask nothing of a binary copy.
+  def unconditional: [
+    "0BSD",      # grants use "for any purpose with or without fee" and sets no condition
+    "BSL-1.0",   # its notice may be left out of "machine-executable object code"
+    "CC0-1.0",   # section 2 waives copyright and related rights outright
+    "Unlicense", # dedicates the work to the public domain
+    "Zlib"       # clause 1: acknowledgment "is not required"; clause 3 binds source only
+  ];
+'
+
+# cargo-about's report on one binary's crates, for the triples that binary ships on.
+about() {
+  local manifest=$1 targets=() target
+  shift
+  for target in "$@"; do targets+=(--target "$target"); done
+  cargo about generate --format json --fail --locked \
+    --manifest-path "$manifest" --config "$drawbar/about.toml" "${targets[@]}"
+}
+
+drawbar_about="$(about "$drawbar/Cargo.toml")"
+nord_about="$(about "$nord/Cargo.toml" x86_64-unknown-linux-musl aarch64-unknown-linux-musl)"
 
 # licenses.tsv supplies the text of a crate whose package carries none, fetched from
 # the upstream file its `source` column names.
@@ -20,15 +43,8 @@ vendored="$(tail -n +2 "$repo/scripts/licenses.tsv" |
   done | jq -s 'INDEX(.crate)')"
 
 # Apache-2.0.txt is https://www.apache.org/licenses/LICENSE-2.0.txt verbatim.
-entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-2.0.txt" '
-  # Licenses that ask nothing of a binary copy.
-  def unconditional: [
-    "0BSD",      # grants use "for any purpose with or without fee" and sets no condition
-    "BSL-1.0",   # its notice may be left out of "machine-executable object code"
-    "CC0-1.0",   # section 2 waives copyright and related rights outright
-    "Unlicense", # dedicates the work to the public domain
-    "Zlib"       # clause 1: acknowledgment "is not required"; clause 3 binds source only
-  ];
+entries() {
+  jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-2.0.txt" "$defs"'
   # The SPDX template of a notice, whose copyright line names no one.
   def unfilled: ascii_downcase | test("<year>|<owner>|<copyright holder");
   def offers_apache: [splits("\\s+OR\\s+|/") | gsub("^[(\\s]+|[)\\s]+$"; "")] | index("Apache-2.0");
@@ -36,7 +52,7 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-
   [
     .licenses[] as $license
     | $license.used_by[].crate
-    # Path crates are the workspace, which the drawbar row covers.
+    # Path crates are the workspace, which the project row covers.
     | select(.source != null)
     | select($license.id | IN(unconditional[]) | not)
     | {
@@ -49,9 +65,6 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-
         text: $license.text
       }
   ]
-  | (map(.crate) | unique) as $shipped
-  | ($vendored | keys - $shipped) as $stale
-  | if $stale != [] then error("licenses.tsv names crates drawbar does not ship: \($stale)") end
   | map(
       if $vendored[.crate] == null then .
       elif $vendored[.crate].license == .license then .text = $vendored[.crate].text
@@ -66,57 +79,38 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-
   | (map(select(.text | unfilled) | .crate) | unique) as $unfilled
   | if $unfilled != [] then error("these crates have only a license template: \($unfilled)") end
   | if any(.[].text; test("\r|\"#")) then error("a license text holds a CR or \"#") end
-' <<<"$about")"
+'
+}
+
+drawbar_entries="$(entries <<<"$drawbar_about")"
+nord_entries="$(entries <<<"$nord_about")"
+
+jq -n --argjson vendored "$vendored" --argjson drawbar "$drawbar_entries" --argjson nord "$nord_entries" '
+  ($vendored | keys - ($drawbar + $nord | map(.crate) | unique)) as $stale
+  | if $stale != [] then error("licenses.tsv names crates neither drawbar nor nord ships: \($stale)") end
+' >/dev/null
 
 # Apache-2.0 §4(d) requires a NOTICE file's contents to travel with the binary.
-notices="$(jq -r '.[] | select(.license == "Apache-2.0") | .dir' <<<"$entries" | sort -u |
-  xargs -I{} find {} -maxdepth 1 -iname 'NOTICE*')"
+notices="$(jq -r '.[] | select(.license == "Apache-2.0") | .dir' <<<"$drawbar_entries $nord_entries" |
+  sort -u | xargs -I{} find {} -maxdepth 1 -iname 'NOTICE*')"
 if [[ -n $notices ]]; then
-  printf 'the About box does not carry these NOTICE files:\n%s\n' "$notices" >&2
+  printf 'neither notices file carries these NOTICE files:\n%s\n' "$notices" >&2
   exit 1
 fi
 
-# licenses/<id>.txt holds the one text the About box shows for a license id. A new id
-# needs a new file, and reading it here is what says so.
-canon="$(jq -r '[.[].license] | unique[]' <<<"$entries" |
+# licenses/<id>.txt holds the one text shown for a license id. A new id needs a new
+# file, and reading it here is what says so.
+canon="$(jq -rn --argjson drawbar "$drawbar_entries" --argjson nord "$nord_entries" \
+  '$drawbar + $nord | map(.license) | unique[]' |
   while read -r id; do
     jq -n --arg id "$id" --rawfile text "$licenses/$id.txt" '{($id): $text}'
   done | jq -s 'add')"
 
-# The registry packages drawbar reaches in Cargo.lock, so a lock change that only
-# another crate sees does not ask for this script.
-locked="$(awk -F' = ' '
-  $0 == "[[package]]" { n++; listing = 0; next }
-  listing && $0 == "]" { listing = 0; next }
-  listing { gsub(/^ *"|",?$/, ""); deps[n] = deps[n] "\n" $0; next }
-  $1 == "name" { name[n] = $2; gsub(/"/, "", $2); bare[n] = $2 }
-  $1 == "version" { version[n] = $2; gsub(/"/, "", $2); plain[n] = $2 }
-  $1 == "source" && $2 ~ /^"registry\+/ { registry[n] = 1 }
-  $0 == "dependencies = [" { listing = 1 }
-  END {
-    for (i = 1; i <= n; i++) if (bare[i] == "drawbar") queue[++tail] = i
-    for (head = 1; head <= tail; head++) {
-      at = queue[head]
-      if (seen[at]++) continue
-      count = split(substr(deps[at], 2), wanted, "\n")
-      for (d = 1; d <= count; d++) {
-        split(wanted[d], word, " ")
-        for (i = 1; i <= n; i++)
-          if (bare[i] == word[1] && (word[2] == "" || plain[i] == word[2])) queue[++tail] = i
-      }
-    }
-    for (i = 1; i <= n; i++) if (seen[i] && registry[i]) print "(" name[i] ", " version[i] "),"
-  }
-' "$repo/crates/Cargo.lock")"
-
-rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
+# Each license with its text once, the copyright notices under it and the crates that
+# carry each, and the crates whose own text says more.
+groups() {
+  jq --argjson canon "$canon" '
   def version_key: split(".") | map(tonumber? // .);
-  def list($name; $indent; $items):
-    if $items == [] then "\($indent)\($name): &[],"
-    else "\($indent)\($name): &[",
-      ($items[] | "\($indent)    \(tojson),"),
-      "\($indent)],"
-    end;
   def crates: map([.name, .version]) | unique | sort_by(.[0], (.[1] | version_key))
     | map("\(.[0]) \(.[1])");
 
@@ -190,7 +184,44 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
         }
     )
   | sort_by(.license)
-  | "// Generated by scripts/licenses.bash; do not edit by hand.",
+'
+}
+
+# The registry packages drawbar reaches in Cargo.lock, so a lock change that only
+# another crate sees does not ask for this script.
+locked="$(awk -F' = ' '
+  $0 == "[[package]]" { n++; listing = 0; next }
+  listing && $0 == "]" { listing = 0; next }
+  listing { gsub(/^ *"|",?$/, ""); deps[n] = deps[n] "\n" $0; next }
+  $1 == "name" { name[n] = $2; gsub(/"/, "", $2); bare[n] = $2 }
+  $1 == "version" { version[n] = $2; gsub(/"/, "", $2); plain[n] = $2 }
+  $1 == "source" && $2 ~ /^"registry\+/ { registry[n] = 1 }
+  $0 == "dependencies = [" { listing = 1 }
+  END {
+    for (i = 1; i <= n; i++) if (bare[i] == "drawbar") queue[++tail] = i
+    for (head = 1; head <= tail; head++) {
+      at = queue[head]
+      if (seen[at]++) continue
+      count = split(substr(deps[at], 2), wanted, "\n")
+      for (d = 1; d <= count; d++) {
+        split(wanted[d], word, " ")
+        for (i = 1; i <= n; i++)
+          if (bare[i] == word[1] && (word[2] == "" || plain[i] == word[2])) queue[++tail] = i
+      }
+    }
+    for (i = 1; i <= n; i++) if (seen[i] && registry[i]) print "(" name[i] ", " version[i] "),"
+  }
+' "$repo/crates/Cargo.lock")"
+
+rust="$(groups <<<"$drawbar_entries" | jq -r --arg locked "$locked" '
+  def list($name; $indent; $items):
+    if $items == [] then "\($indent)\($name): &[],"
+    else "\($indent)\($name): &[",
+      ($items[] | "\($indent)    \(tojson),"),
+      "\($indent)],"
+    end;
+
+  "// Generated by scripts/licenses.bash; do not edit by hand.",
     "",
     "use super::{Group, Holder, Text};",
     "",
@@ -228,7 +259,43 @@ rust="$(jq -r --argjson canon "$canon" --arg locked "$locked" '
     "pub(super) const LOCKED: &[(&str, &str)] = &[",
     $locked,
     "];"
-' <<<"$entries")"
+')"
 
 printf '%s\n' "$rust" >"$out"
 nix fmt -- "$out"
+
+# The published field maps nord-format's Stage decoding is derived from, as drawbar's
+# About box credits them.
+derived="$(jq -n \
+  --rawfile florentz "$licenses/nord-documentation.txt" \
+  --rawfile randy "$licenses/ns4decode.txt" '[
+  {covers: "Stage 2 and 3 field maps", page: "https://github.com/Chris55/nord-documentation", license: "BSD-3-Clause", text: $florentz},
+  {covers: "Stage 4 field tables", page: "https://ns4decode.netlify.app", license: "MIT", text: $randy}
+]')"
+
+# A crate is listed as `- name version` on a line of its own; the tarball's build finds
+# every crate it links that way.
+groups <<<"$nord_entries" | jq -r --argjson derived "$derived" --argjson canon "$canon" \
+  --argjson free "$(jq "$defs"'
+    [.licenses[] | select(.id | IN(unconditional[])) | .used_by[].crate | select(.source != null)
+      | "\(.name) \(.version)"] | unique' <<<"$nord_about")" '
+  def rule: "", ("=" * 78), "";
+  def listed: .[] | "- \(.)";
+
+  "Generated by scripts/licenses.bash; do not edit by hand.",
+  "",
+  "nord is under the BSD 3-Clause License in LICENSE. It carries the work below,",
+  "under the licenses that follow it.",
+  ($derived[] | rule, "\(.covers) (\(.license))", .page, "", .text),
+  (.[] |
+    rule,
+    "Rust crates under \(.license)",
+    (.holders[] | "", .notice, (.crates | listed)),
+    (if .unattributed == [] then empty else "", "No copyright line in the license file:", (.unattributed | listed) end),
+    "", $canon[.license],
+    (.variants[] | "", "These carry their own text:", (.crates | listed), "", .text)),
+  rule,
+  "Rust crates under licenses that ask for no notice in a binary",
+  "",
+  ($free | listed)
+' >"$notices_out"

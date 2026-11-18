@@ -236,16 +236,32 @@ let
       };
     };
   }
+  # ⚠️ A musl cross set links against the store's `ld-musl` unless told otherwise;
+  # `static` links musl in, and mkCross refuses a binary that still names a loader.
   // optionalAttrs final.stdenv.hostPlatform.isLinux {
-    linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
-  };
-
-  emulators = optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
     linux-aarch64 = {
-      cmd = "qemu-aarch64";
-      package = final.qemu;
+      crossPkgs = final.pkgsCross.aarch64-multiplatform-musl;
+      static = true;
+    };
+    linux-x86_64 = {
+      crossPkgs = final.pkgsCross.musl64;
+      static = true;
     };
   };
+
+  # How this host runs a target's executables: an emulator, or null where it runs them
+  # itself. A target missing here is built and never run.
+  emulators =
+    optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+      linux-aarch64 = {
+        cmd = "qemu-aarch64";
+        package = final.qemu;
+      };
+      linux-x86_64 = null;
+    }
+    // optionalAttrs (final.stdenv.hostPlatform.system == "aarch64-linux") {
+      linux-aarch64 = null;
+    };
 
   # Where cargo puts the artifacts, and what BUILD_INFO records.
   tripleOf = spec: spec.triple or spec.crossPkgs.stdenv.hostPlatform.rust.rustcTarget;
@@ -275,14 +291,18 @@ let
         "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
       }
     )
-    // optionalAttrs (spec ? libs) (
+    // optionalAttrs (spec ? libs || spec.static or false) (
       let
-        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs;
+        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs or [ ];
       in
       {
         # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
         # `-l:` requests.
-        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = paths;
+        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatStringsSep " " (
+          optional (spec.static or false) "-C target-feature=+crt-static" ++ optional (spec ? libs) paths
+        );
+      }
+      // optionalAttrs (spec ? libs) {
         # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
         # doctests are all the target's.
         RUSTDOCFLAGS = paths;
@@ -318,7 +338,9 @@ let
           # something that can run it.
           doCheck = spec ? testRunner;
           nativeBuildInputs =
-            optional (needsLinker spec) spec.crossPkgs.stdenv.cc ++ spec.testRunner.packages or [ ];
+            optional (needsLinker spec) spec.crossPkgs.stdenv.cc
+            ++ optional (spec.static or false) final.file
+            ++ spec.testRunner.packages or [ ];
           pname = "${crate}-${name}";
           inherit (manifests.${crate}) version;
         }
@@ -360,6 +382,23 @@ let
               exit 1
             fi
 
+            ${optionalString (spec.static or false) ''
+              # `file` calls a static position-independent executable `static-pie linked`.
+              for bin in $(find "$out" -maxdepth 1 -type f -perm -u+x); do
+                linkage="$(file -b "$bin")"
+                case $linkage in
+                *interpreter* | *dynamically\ linked*)
+                  echo "$bin is not static: $linkage" >&2
+                  exit 1
+                  ;;
+                *statically\ linked* | *static-pie\ linked*) ;;
+                *)
+                  echo "$bin: no linkage in $linkage" >&2
+                  exit 1
+                  ;;
+                esac
+              done
+            ''}
             echo "${crate} ${manifests.${crate}.version} built for ${tripleOf spec}" > "$out/BUILD_INFO"
             echo "installed:" >&2
             ls -la "$out" >&2
@@ -738,16 +777,63 @@ let
         touch "$out"
       '';
 
+  crossBuilds = concatMapAttrs (
+    crate: names:
+    listToAttrs (map (n: nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
+  ) crateTargets;
+
+  # What a release attaches for each static target: `nord`, the project's license, and
+  # the notices of what is compiled into it.
+  tarballs = mapAttrs' (
+    name: spec:
+    let
+      inherit (manifests.nord-cli) version;
+      inherit (spec.crossPkgs.stdenv.hostPlatform) parsed;
+      stem = "nord-${version}-${parsed.cpu.name}-${parsed.kernel.name}";
+      notices = ./crates/nord-cli/THIRD-PARTY-NOTICES.txt;
+    in
+    nameValuePair "nord-cli-${name}-tarball" (
+      crane.mkCargoDerivation (
+        commonArgs
+        // {
+          pname = "nord-cli-${name}-tarball";
+          inherit version;
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          # Every registry crate linked into the binary must be named in the notices.
+          buildPhaseCargoCommand = ''
+            cargo tree --locked --offline -p nord-cli --edges normal,no-proc-macro \
+              --target ${tripleOf spec} --prefix none --format '{p}' |
+              sed -e 's/ (\*)$//' | grep -v ' (/' | sed -e 's/ v/ /' | sort -u >linked
+            [ -s linked ] || {
+              echo "cargo tree listed no crates" >&2
+              exit 1
+            }
+            while read -r crate; do
+              grep -qxF -- "- $crate" ${notices} || unlisted="''${unlisted:+$unlisted, }$crate"
+            done <linked
+            if [ -n "''${unlisted-}" ]; then
+              echo "THIRD-PARTY-NOTICES.txt lacks $unlisted; run scripts/licenses.bash" >&2
+              exit 1
+            fi
+          '';
+          installPhaseCommand = ''
+            mkdir -p "${stem}" "$out"
+            cp ${crossBuilds."nord-cli-${name}"}/nord "${stem}/nord"
+            cp ${./crates/LICENSE} "${stem}/LICENSE"
+            cp ${notices} "${stem}/THIRD-PARTY-NOTICES.txt"
+            chmod -R u+w,go-w "${stem}"
+            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -c "${stem}" |
+              gzip -9n >"$out/${stem}.tar.gz"
+          '';
+        }
+      )
+    )
+  ) (filterAttrs (_: spec: spec.static or false) targets);
+
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
-  # the host-independent web bundle.
-  crossed =
-    concatMapAttrs (
-      crate: names:
-      listToAttrs (map (n: nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
-    ) crateTargets
-    // {
-      inherit drawbar-web;
-    };
+  # the host-independent web bundle and the release tarballs.
+  crossed = crossBuilds // tarballs // { inherit drawbar-web; };
 
   # The read-only inventory sweep, replayed. Exercises transport → wire → session
   # → op → CLI without a device, so the same proof runs on every target.
