@@ -358,10 +358,14 @@ After the check, build, and corpus jobs pass on `master`, the release job runs
 version understates its commits since the last release; run `scripts/bump.bash`
 on `master` to catch up. It publishes each crate whose version has no matching
 `<crate>-v<version>` tag, then creates the tag and GitHub release. Dependencies
-publish before dependents. Then it builds the Windows executable of drawbar and
-nord-cli from each one's current tag when that release lacks it, and attaches it;
-a failed build fails the job, and the next run retries it. Both release scripts
-accept `--dry-run` and are idempotent.
+publish before dependents.
+
+The assets job then runs `scripts/assets.bash`, which attaches to each crate's
+newest release the files `scripts/assets.tsv` lists for the host's Nix system,
+built from the tag's own flake. It skips a file the release already carries, and a
+package the tag's flake predates. A failed build fails the job, and the next run
+retries it. Any host can run it with `--tag` to backfill a release; it needs no
+crates.io credentials. Every release script accepts `--dry-run` and is idempotent.
 
 Trusted Publishing cannot bootstrap a crate that has never been published.
 Publish a new crate locally once; subsequent releases need no extra script

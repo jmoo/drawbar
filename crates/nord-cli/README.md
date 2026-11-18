@@ -22,7 +22,7 @@ cargo install nord-cli
 nix run github:jmoo/drawbar#nord-cli -- --help
 ```
 
-On Windows, download `nord` from the newest
+On Linux and Windows, download `nord` from the newest
 [nord-cli release](https://github.com/jmoo/drawbar/releases).
 
 The [guide](../../docs/src/nord-cli/overview.md) covers every command, and

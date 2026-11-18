@@ -1,0 +1,5 @@
+crate	system	package	file	make	asset
+drawbar	x86_64-linux	drawbar-windows	drawbar.exe	-	drawbar-@version@-x86_64-windows.exe
+nord-cli	x86_64-linux	nord-cli-windows	nord.exe	-	nord-@version@-x86_64-windows.exe
+nord-cli	x86_64-linux	nord-cli-linux-x86_64-tarball	nord-@version@-x86_64-linux.tar.gz	-	nord-@version@-x86_64-linux.tar.gz
+nord-cli	x86_64-linux	nord-cli-linux-aarch64-tarball	nord-@version@-aarch64-linux.tar.gz	-	nord-@version@-aarch64-linux.tar.gz
