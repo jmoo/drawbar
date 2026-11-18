@@ -35,10 +35,9 @@ chmod +x drawbar-*-x86_64-linux.AppImage
 ```
 
 If it says FUSE is missing, add `--appimage-extract-and-run` to the second line.
-drawbar brings its own graphics driver, Mesa, which runs Intel and AMD graphics.
-On other graphics, NVIDIA's driver among them, it draws without the graphics card,
-which works but uses more of the processor. To reach an instrument, Linux also
-needs [a udev rule](#connecting-on-linux).
+drawbar brings its own graphics library. With NVIDIA's own driver it draws without
+the graphics card, which works but uses more of the processor. To reach an
+instrument, Linux also needs [a udev rule](#connecting-on-linux).
 
 Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
 
