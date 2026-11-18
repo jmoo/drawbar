@@ -14,7 +14,7 @@ use crate::log::Log;
 use crate::midi::{Midi, Played};
 use crate::platform::Platform;
 use crate::queue::Queue;
-use crate::shell::{Dock, Shell};
+use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
@@ -261,7 +261,7 @@ impl DrawbarApp {
         store: Option<Store>,
     ) -> DrawbarApp {
         // Without this every `Glyph` draws as egui's broken-image warning.
-        egui_extras::install_image_loaders(&cc.egui_ctx);
+        crate::icon::install(&cc.egui_ctx);
         cc.egui_ctx.set_fonts(fonts());
         // Both themes are set up front, so a system switch between light and dark
         // mid-session uses this app's colors, not egui's defaults.
@@ -1232,7 +1232,7 @@ impl eframe::App for DrawbarApp {
         self.top_bar(ctx, frame, &mut acts);
         self.status_line(ctx, &mut acts);
         self.browser_card(ctx, &mut acts);
-        self.inspector_card(ctx, &mut acts);
+        self.inspector_cards(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
         // An instrument that goes away takes its queue's review with it.
         self.shell.review_open &= self.attached();
@@ -1315,6 +1315,18 @@ impl DrawbarApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.inner_margin(margin))
             .show(ctx, |ui| {
+                let front = self.tabs.active();
+                let empty = self.browser.picked().items().next().is_none();
+                if self
+                    .shell
+                    .browsing
+                    .is_some_and(|over| Some(over) != front || empty || pressed_inside(ui))
+                {
+                    self.shell.browsing = None;
+                    // ⚠️ The inspector is drawn before the center, so it follows a press
+                    // here only in a frame of its own.
+                    ui.ctx().request_repaint();
+                }
                 self.tab_row(ui, acts);
                 let rect = ui.available_rect_before_wrap();
                 let mut inside = crate::shell::card(ui, rect);
@@ -1371,7 +1383,8 @@ impl DrawbarApp {
                 .max_rect(strip)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        self.tabs.ui(&mut tabs, &self.workspace, acts);
+        let followed = self.described() == self.tabs.active();
+        self.tabs.ui(&mut tabs, &self.workspace, followed, acts);
         ui.advance_cursor_after_rect(row);
     }
 
@@ -1570,8 +1583,9 @@ pub fn bold() -> egui::FontFamily {
 /// Ubuntu Regular for the body and Ubuntu Bold beside it, Hack for the monospace runs,
 /// and drawbar's own glyphs under every family.
 ///
-/// The Ubuntu files in `assets/fonts` are the Ubuntu font family 0.83 under the Ubuntu
-/// Font Licence 1.0 beside them. Hack comes from egui's `epaint_default_fonts`.
+/// The Ubuntu faces in `assets/fonts` derive from the Ubuntu font family 0.83, under the
+/// Ubuntu Font Licence 1.0 beside them; Hack in `assets/fonts/egui` is egui's copy.
+/// `scripts/fonts.py` writes all three with only the tables egui reads.
 /// `drawbar-glyphs.ttf` draws the characters drawbar's text uses that no other face has;
 /// `scripts/glyphs.py` generates it.
 ///
@@ -1579,21 +1593,24 @@ pub fn bold() -> egui::FontFamily {
 /// and two emoji faces, a megabyte of glyphs, so a character none of these covers draws
 /// as Hack's `◻`, emoji included.
 pub(crate) fn fonts() -> egui::FontDefinitions {
-    const UBUNTU: &str = "Ubuntu";
-    const UBUNTU_BOLD: &str = "Ubuntu-Bold";
+    const UBUNTU: &str = "Ubuntu derivative drawbar";
+    const UBUNTU_BOLD: &str = "Ubuntu derivative drawbar Bold";
     const HACK: &str = "Hack";
     const GLYPHS: &str = "drawbar-glyphs";
     let mut fonts = egui::FontDefinitions::empty();
     for (face, ttf) in [
         (
             UBUNTU,
-            include_bytes!("../assets/fonts/Ubuntu-R.ttf").as_slice(),
+            include_bytes!("../assets/fonts/Ubuntu-derivative-drawbar-R.ttf").as_slice(),
         ),
         (
             UBUNTU_BOLD,
-            include_bytes!("../assets/fonts/Ubuntu-B.ttf").as_slice(),
+            include_bytes!("../assets/fonts/Ubuntu-derivative-drawbar-B.ttf").as_slice(),
         ),
-        (HACK, epaint_default_fonts::HACK_REGULAR),
+        (
+            HACK,
+            include_bytes!("../assets/fonts/egui/Hack-Regular.ttf").as_slice(),
+        ),
         (
             GLYPHS,
             include_bytes!("../assets/fonts/drawbar-glyphs.ttf").as_slice(),

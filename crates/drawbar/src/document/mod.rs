@@ -403,6 +403,14 @@ impl Document {
             (Some(decoded), Some(fields)) => Some(field::of(decoded, fields)),
             _ => None,
         };
+        if let Some(open) = self.open.as_mut() {
+            let basic = shape == Shape::Fields && face == Face::Basic;
+            // ⚠️ The document's cards are drawn before the document, so they show a change
+            // only in a frame of its own.
+            if open.fields.publish(doc.as_ref().filter(|_| basic)) {
+                ui.ctx().request_repaint();
+            }
+        }
         let pending = match (doc.is_some(), self.open.as_ref()) {
             (true, Some(open)) => open.fields.pending().len(),
             _ => 0,
@@ -611,6 +619,11 @@ impl Document {
         // The take's cards in the dock ran earlier this frame.
         sets.append(&mut self.docked);
         if !sets.is_empty() {
+            // The table writes exactly the cell typed; the panel picks a piano.
+            if face == Face::Basic {
+                let fields = registry.as_deref().unwrap_or_default();
+                sets.extend(piano_follows(&sets, fields, device));
+            }
             let outcome = self.apply(id, sets, workspace, log);
             if typed {
                 // The table keeps a refused cell open with what was typed in it.
@@ -900,6 +913,20 @@ impl Document {
             .filter(|(id, _)| Some(*id) == opened)
             .filter_map(|(_, root)| u8::try_from(root).ok())
             .collect()
+    }
+
+    /// Draw the inspector cards of document `id`, from what it last drew, and say whether
+    /// there were any: a program's Morph card while its Basic face has morph slots.
+    pub fn cards(&mut self, ui: &mut egui::Ui, id: u64) -> bool {
+        let Some(open) = self.open.as_mut().filter(|open| open.id == id) else {
+            return false;
+        };
+        if !open.fields.morphed() {
+            return false;
+        }
+        let head = crate::inspector::Head::fixed(crate::icon::Glyph::Waves, "Morph");
+        crate::inspector::card(ui, head, |ui| field::lens(ui, &mut open.fields));
+        true
     }
 
     /// Close the document.
@@ -1606,11 +1633,10 @@ fn piano_lookup(
     registry: Option<&[Field]>,
     device: &Device,
 ) -> panel::PianoLookup {
-    let id = registry
-        .and_then(|fields| fields.iter().find(|field| field.path == "piano_panel.id"))
-        .and_then(|field| library_id(&field.value))
-        // Zero means the program references no piano.
-        .filter(|id| *id != 0);
+    let stored = registry
+        .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
+        .and_then(|field| library_id(&field.value));
+    let id = stored.filter(|id| *id != 0);
     let slot = entity.origin.slot();
     let name = id
         .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
@@ -1618,6 +1644,14 @@ fn piano_lookup(
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
+    let dialed = registry
+        .filter(|_| stored == Some(0))
+        .and_then(current_model)
+        .and_then(|n| models.iter().find(|(i, _)| *i == n))
+        .map(|(_, piano)| piano.trim().to_string());
+    let dialed_unnamed = dialed
+        .as_deref()
+        .is_some_and(|piano| device.state.library_id(ObjectClass::Piano, piano).is_none());
     // Dependency ids are authoritative; disagreement means the scanned position mapping
     // is wrong.
     let scan_disagrees = match (&name, registry) {
@@ -1631,6 +1665,8 @@ fn piano_lookup(
     panel::PianoLookup {
         id,
         name,
+        dialed,
+        dialed_unnamed,
         can_ask: slot.is_some_and(|(class, _)| class.reports_dependencies())
             && device.state.connected(),
         refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
@@ -1643,27 +1679,19 @@ fn piano_lookup(
 /// The Pianos folder's names for the document's current category, by Model dial
 /// position, which turns the Model dial into a list of pianos.
 ///
-/// Banks map to categories and slot order to dial position. Confirmed on hardware. The
-/// instrument's bank list names the piano banks after the panel's categories, in panel
-/// order, and a program's stored category and model match the bank and slot the
+/// The instrument's bank list names the piano banks after the panel's categories, in
+/// panel order, and a program's stored category and model match the bank and slot the
 /// instrument reports for the piano it depends on. The dependency name remains the
 /// check; see `scan_disagrees` in [`piano_lookup`].
 fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
     let Some(category) = fields
         .iter()
-        .find(|field| field.path == "piano_panel.category")
+        .find(|field| field.path == panel::PIANO_CATEGORY)
+        .and_then(|category| stored_category(category, &category.value))
     else {
         return Vec::new();
     };
-    // The category's stored bits are its position in the legal list, because
-    // `legal_values` walks the bit patterns in stored order.
-    let Some(raw) = (category.spec.legal)()
-        .iter()
-        .position(|value| *value == category.value)
-    else {
-        return Vec::new();
-    };
-    let Some(slots) = device.state.bank(ObjectClass::Piano, raw as u32 + 1) else {
+    let Some(slots) = device.state.pianos_of(category) else {
         return Vec::new();
     };
     slots
@@ -1674,6 +1702,48 @@ fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
                 .map(|piano| (position as u32, piano.name.trim().to_string()))
         })
         .collect()
+}
+
+/// The value the category field stores when it holds `value`.
+fn stored_category(category: &Field, value: &str) -> Option<u8> {
+    // The category's stored bits are its position in the legal list, because
+    // `legal_values` walks the bit patterns in stored order.
+    let raw = (category.spec.legal)()
+        .iter()
+        .position(|legal| legal == value)?;
+    u8::try_from(raw).ok()
+}
+
+/// The id an edit that moves the Type or Model dial also writes, unless it sets the id
+/// itself: the id the instrument has given the piano now at that position, or 0.
+///
+/// ⚠️ The Electro 5 plays the piano the id names, whatever the dials say, and plays the
+/// piano at the dials' position only where the id is 0. Confirmed on hardware.
+fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(String, String)> {
+    let set = |path: &str| {
+        sets.iter()
+            .rev()
+            .find(|(at, _)| at == path)
+            .map(|(_, value)| value.as_str())
+    };
+    let field = |path: &str| fields.iter().find(|field| field.path == path);
+    let moved = set(panel::PIANO_CATEGORY).is_some() || set(panel::PIANO_MODEL).is_some();
+    if !moved || set(panel::PIANO_ID).is_some() {
+        return None;
+    }
+    field(panel::PIANO_ID)?;
+    let category = field(panel::PIANO_CATEGORY)?;
+    let model = set(panel::PIANO_MODEL).or_else(|| Some(&field(panel::PIANO_MODEL)?.value))?;
+    let at = stored_category(
+        category,
+        set(panel::PIANO_CATEGORY).unwrap_or(&category.value),
+    )
+    .zip(model.trim().parse::<usize>().ok());
+    let id = at
+        .and_then(|(category, model)| device.state.piano_at(category, model))
+        .and_then(|name| device.state.library_id(ObjectClass::Piano, name))
+        .unwrap_or(0);
+    Some((panel::PIANO_ID.to_string(), id.to_string()))
 }
 
 /// The Model dial's current position, as the registry spells it.
@@ -1958,9 +2028,8 @@ mod tests {
         assert!(workspace.saving_edit(id));
 
         let (from, edit) = workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
@@ -2018,9 +2087,8 @@ mod tests {
         assert!(open.workspace.saving_edit(id));
 
         let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
         open.workspace.edit_saved(id, saved.clone());
         open.workspace.settle_files(&mut open.log);
@@ -2790,7 +2858,7 @@ mod tests {
                         ui.make_persistent_id(egui::Id::new(PAGE))
                             .with(egui::Id::new(SCROLL)),
                     ));
-                    tabs.ui(ui, &workspace, &mut Vec::new());
+                    tabs.ui(ui, &workspace, true, &mut Vec::new());
                     ui.separator();
                     document.ui(
                         ui,
@@ -2851,7 +2919,7 @@ mod tests {
         );
         let copied = piano_lookup(workspace.get(from_device).unwrap(), Some(&fields), &device);
         assert!(copied.name.is_none(), "still nothing has been asked");
-        // A fresh program references no piano, and zero is not an id.
+        // A fresh program stores 0, so its dials pick its piano.
         assert_eq!(copied.id, None);
     }
 
@@ -3000,6 +3068,142 @@ mod tests {
         other.pretend_scanned(ObjectClass::Piano, 3, &["Clav D6"]);
         let elsewhere = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &other);
         assert!(elsewhere.models.is_empty());
+    }
+
+    /// The instrument plays the piano at the dials where the id is 0, and its
+    /// dependency reply gives that piano's id, which a bundle names it by.
+    #[test]
+    fn a_zero_id_shows_the_dialed_piano_and_asks_for_its_id() {
+        use nord_usb::wire::Dependency;
+
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let at = Location { bank: 6, slot: 3 };
+        let bytes = Fresh::Program.bytes().unwrap();
+        let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0".into())])
+            .unwrap()
+            .0;
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let id = workspace.ingest("Dialed.ne5p".into(), origin, bytes, &mut log);
+        let stored = fields
+            .iter()
+            .find(|field| field.path == panel::PIANO_ID)
+            .unwrap();
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
+
+        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        assert_eq!(lookup.names(stored), Some("Royal Grand"));
+        assert!(
+            lookup.wants_a_name(),
+            "the instrument has not given it an id"
+        );
+
+        let royal = Dependency {
+            flag: 1,
+            class: ObjectClass::Piano,
+            id: 0x0102_0304,
+            name: "Royal Grand".into(),
+            location: None,
+        };
+        device.pretend_deps(ObjectClass::Program, at, vec![royal]);
+        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        assert_eq!(lookup.names(stored), Some("Royal Grand"));
+        assert!(!lookup.wants_a_name());
+    }
+
+    /// The Electro 5 plays the piano the id names, so a dial moved under an old id would
+    /// keep playing the old piano.
+    #[test]
+    fn moving_the_piano_dials_points_the_id_at_the_piano_now_there() {
+        use nord_usb::wire::Dependency;
+
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let bytes = workspace.get(id).unwrap().bytes.to_vec();
+        let plays_royal = [(panel::PIANO_ID.to_string(), "0x01020304".to_string())];
+        let fields = fields::apply(&bytes, &plays_royal).unwrap().0;
+
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
+        device.pretend_deps(
+            ObjectClass::Program,
+            Location { bank: 6, slot: 3 },
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id: 0x0a0b_0c0d,
+                name: "White Grand".into(),
+                location: None,
+            }],
+        );
+        let follows = |device: &Device, sets: &[(&str, &str)]| {
+            let sets: Sets = sets
+                .iter()
+                .map(|(path, value)| (path.to_string(), value.to_string()))
+                .collect();
+            piano_follows(&sets, &fields, device).map(|(_, id)| id)
+        };
+        let names = |device: &mut Device, slot, id, name: &str| {
+            let dep = Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id,
+                name: name.into(),
+                location: None,
+            };
+            device.pretend_deps(ObjectClass::Program, Location { bank: 6, slot }, vec![dep]);
+        };
+
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_MODEL, "2")]),
+            Some(0x0a0b_0c0d.to_string()),
+            "a piano the instrument has named"
+        );
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_MODEL, "0")]),
+            Some("0".to_string()),
+            "a piano with no id in hand is left for the instrument to find by position"
+        );
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
+            Some("0".to_string()),
+            "a bank nobody scanned"
+        );
+        assert_eq!(
+            follows(
+                &device,
+                &[(panel::PIANO_MODEL, "2"), (panel::PIANO_ID, "5")]
+            ),
+            None,
+            "an edit that sets the id keeps it"
+        );
+        assert_eq!(follows(&device, &[("piano_panel.touch", "2")]), None);
+
+        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1"]);
+        names(&mut device, 4, 0x0b0c_0d0e, "Upright U1");
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
+            Some(0x0b0c_0d0e.to_string()),
+            "the Type dial counts in its own bank"
+        );
+
+        names(&mut device, 5, 0x0c0d_0e0f, "White Grand");
+        assert_eq!(
+            follows(&device, &[(panel::PIANO_MODEL, "2")]),
+            Some("0".to_string()),
+            "two pianos the instrument calls White Grand"
+        );
     }
 
     /// ⚠️ A cell being edited belongs to the document it was opened in. One table serves
@@ -4211,9 +4415,8 @@ mod tests {
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
         let (from, edit) = workspace.send_edit(id).expect("the store takes it");
-        let mut out = std::fs::File::create(dir.at("Saved.npno")).unwrap();
-        edit.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.npno"), out.unwrap()).unwrap();
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));

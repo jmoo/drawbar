@@ -21,7 +21,7 @@ testFeatures = ["bundle"]
 [features]
 default = []
 # Reads ZIP archives as entities: bundles, backups and Drum banks. Pulls in `zip`.
-bundle = ["dep:zip"]
+bundle = ["dep:flate2", "dep:zip"]
 # Test-only: the suites that read the private corpus (NORD_CORPUS_ROOT). Implies
 # `bundle`, because the corpus holds ZIP banks and backups.
 corpus = ["bundle"]
@@ -37,8 +37,13 @@ synthetic = []
 nord-bits-derive = { path = "../nord-bits-derive", version = "=0.6.0" }
 crcxx = "0.3.1"
 thiserror = "2"
+# zip's inflater for deflated entries: miniz_oxide. nord-format writes only stored entries,
+# so no compressor is built.
+flate2 = { version = "1.1", optional = true, default-features = false, features = [
+  "rust_backend",
+] }
 zip = { version = "9", optional = true, default-features = false, features = [
-  "deflate",
+  "deflate-flate2",
 ] }
 
 [dev-dependencies]

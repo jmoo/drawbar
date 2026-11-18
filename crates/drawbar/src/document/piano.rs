@@ -2145,14 +2145,7 @@ impl State {
             .selected
             .and_then(|root| of_root.iter().position(|held| *held == root));
         let cell_lit = answering.and_then(|root| of_root.iter().position(|held| *held == root));
-        let acted = keys::size_cells(
-            &mut inner,
-            SPAN,
-            &summary.cells,
-            picked,
-            cell_lit,
-            keys::Edges::Both,
-        );
+        let acted = keys::size_cells(&mut inner, SPAN, &summary.cells, picked, cell_lit);
         let keyboard = egui::Rect::from_min_size(
             inner.next_widget_position(),
             egui::vec2(inner.available_width().max(1.0), keys::KEYBOARD_H),
@@ -2185,7 +2178,7 @@ impl State {
                 let root = of_root[index];
                 view.rows.pick(root, true);
             }
-            Some(keys::BandAct::Drag { bounds, .. }) => {
+            Some(keys::BandAct::Drag { bounds }) => {
                 let was: Vec<(u8, u8)> = summary
                     .cells
                     .iter()
@@ -3667,7 +3660,7 @@ const CAPABILITIES: Stands = [
     (Cap::ReadOnly, "per file"),
     (
         Cap::Editable,
-        "File › New › Piano library… builds one from WAVs; a template is optional",
+        "File › New › Piano library (.npno)… builds one from WAVs; a template is optional",
     ),
     (Cap::Editable, "strokes are self-contained"),
     (Cap::Editable, "one stroke at a time, on request"),
@@ -5513,9 +5506,8 @@ mod tests {
             panic!("a piano library's index")
         };
         let edit = rewrite_over(index, &plan).unwrap().expect("a plan to save");
-        let mut out = std::io::Cursor::new(Vec::new());
-        edit.write(&file, &mut out).unwrap();
-        assert_eq!(out.into_inner(), rebuild(&saved, &plan).unwrap());
+        let (out, _) = testing::streamed(&edit.pieces(&file).unwrap(), &saved);
+        assert_eq!(out.unwrap(), rebuild(&saved, &plan).unwrap());
         let save = Act::SaveDoc(editor.id);
         let held = editor.state.hold(&editor.ctx, save, &editor.workspace);
         assert!(

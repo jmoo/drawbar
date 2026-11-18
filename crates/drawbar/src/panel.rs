@@ -26,9 +26,6 @@ pub const GUTTER: f32 = 8.0;
 /// The rounding of a card on the canvas: a side panel, or the document under the tabs.
 pub const CARD_RADIUS: u8 = 12;
 
-/// The rounding of a card inside a card: an inspector section, a note, a diff.
-pub const INNER_RADIUS: u8 = 10;
-
 /// The rounding of a [`group_frame`].
 const GROUP_RADIUS: u8 = 8;
 
@@ -197,6 +194,12 @@ pub fn list_width(ui: &egui::Ui, rows: usize, row: f32, head: f32) -> f32 {
         false => 0.0,
     };
     (ui.available_width() - bar).max(0.0)
+}
+
+/// Draws a selection in the gray of a pressed widget, as one the inspector does not follow.
+pub fn unfollowed(visuals: &mut egui::Visuals) {
+    visuals.selection.bg_fill = visuals.widgets.active.weak_bg_fill;
+    visuals.selection.stroke.color = visuals.widgets.active.fg_stroke.color;
 }
 
 /// Paint a list row's fill for its selection and hover, and return the row's text inks:

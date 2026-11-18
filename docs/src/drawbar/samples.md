@@ -125,11 +125,11 @@ the release alone. The fades are the ones a library built from rules states: the
 key-up fade is confirmed on the instrument, and each category's rates are fitted
 to vendor libraries, so take them as close, not exact.
 
-**New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
-for each. **New ▸ Sample Editor project…** makes a project from them instead, in
-a new folder named after it. Its WAVs are copied beside it, so Build and the
-Sample Editor find them. Two WAVs with the same name are numbered apart, as
-`c3 2.wav`.
+**New ▸ Sample instrument (.nsmp)…** takes several WAVs, one zone each, with a
+root key for each. **New ▸ Sample Editor project (.nsmpproj)…** makes a project
+from them instead, in a new folder named after it. Its WAVs are copied beside
+it, so Build and the Sample Editor find them. Two WAVs with the same name are
+numbered apart, as `c3 2.wav`.
 
 The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,

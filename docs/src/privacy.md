@@ -26,7 +26,7 @@ Every row carries `version`, the drawbar version. The rows are:
 | Row | Sent when | Fields |
 |---|---|---|
 | `visit` | drawbar opens | `navigation` (a new page or a reload), `first_day` and `first_month` (whether this browser has visited today or this month), `webusb` (whether the browser can connect an instrument), `fits` (whether the window is large enough), `referrer` (the website that linked here, without the page), `language` (the browser's language, such as `de`) |
-| `start_failed` | drawbar could not load | `step` (downloading or starting, or the browser lacking what drawbar needs), `error` (the kind of error) |
+| `start_failed` | drawbar could not load | `step` (downloading or starting, or the browser lacking what drawbar needs), `error` (the kind of error, such as `TypeError`, or `WebGL` when the browser cannot provide it) |
 | `panic` | drawbar crashed | `location` (the line of drawbar's code that crashed), `model` and `firmware` of the connected instrument |
 | `error` | something went wrong outside an instrument operation | `domain` (such as `usb`, `audio` or `library`), `kind` (such as `lost`), `model`, `firmware` |
 | `op` | an instrument operation failed, or one you asked for finished | `op` (such as `put`), `class` (programs, samples and so on, by name), `outcome` (`ok` or the kind of failure), `took` (under one second, ten seconds, a minute, or longer), `model`, `firmware` |
@@ -64,7 +64,7 @@ says what can delete it.
 **Help ▸ Report a problem** and **Help ▸ Send feedback** send what you write, and
 an email address if you give one. You choose what to attach: the recent errors, what
 build and instrument you are running, and the activity log, which names your files.
-The form shows exactly what will be sent before you send it. These are sent even when
+A problem report starts with all three checked, and feedback with none. The form shows exactly what will be sent before you send it. These are sent even when
 sharing is off, because you asked.
 
 Reports are emailed to drawbar's developer and are never published. They are deleted

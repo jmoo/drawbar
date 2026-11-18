@@ -1717,7 +1717,7 @@ fn failure(e: Error, filled: Option<io::Error>) -> Failure {
 fn fill_failure(e: io::Error) -> Failure {
     match rewrite::is_changed(&e) {
         true => Failure::Moved,
-        false => Failure::Io(e.to_string()),
+        false => Failure::Io(storage::said(&e)),
     }
 }
 

@@ -536,11 +536,7 @@ pub enum BandAct {
     Pick(usize),
     /// A handle moved. `bounds` is every band's `(low, top)` after the clamp, in the
     /// order the bands were given. With `Edges::TopOnly`, the band above has moved too.
-    Drag {
-        zone: usize,
-        edge: Edge,
-        bounds: Vec<(u8, u8)>,
-    },
+    Drag { bounds: Vec<(u8, u8)> },
 }
 
 const BANDS_H: f32 = 19.0;
@@ -908,11 +904,7 @@ fn drag_edges(
                 app::accent(&visuals),
             );
             if next != bounds {
-                act = Some(BandAct::Drag {
-                    zone: index,
-                    edge,
-                    bounds: next,
-                });
+                act = Some(BandAct::Drag { bounds: next });
             }
         }
     }
@@ -1032,7 +1024,6 @@ pub fn size_cells(
     cells: &[SizeCell],
     selected: Option<usize>,
     lit: Option<usize>,
-    edges: Edges,
 ) -> Option<BandAct> {
     let width = ui.available_width().max(1.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, CELLS_H), egui::Sense::click());
@@ -1136,7 +1127,7 @@ pub fn size_cells(
         egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + BAR_AREA)),
         span,
         &bounds,
-        edges,
+        Edges::Both,
         |index, edge| {
             let subject = format!("root {}", cells[index].name);
             edge_hint(&subject, "key", bounds[index], edge, "")
@@ -1184,11 +1175,7 @@ pub enum VelocityAct {
     /// A block was clicked.
     Pick(usize),
     /// A handle moved. `window` is that zone's window after the clamp.
-    Drag {
-        zone: usize,
-        edge: VelEdge,
-        window: (u8, u8),
-    },
+    Drag { zone: usize, window: (u8, u8) },
 }
 
 /// The lowest and highest velocity a key can be struck at.
@@ -1394,7 +1381,6 @@ pub fn velocity(
                 if window != ordered(block.window) {
                     act = Some(VelocityAct::Drag {
                         zone: index,
-                        edge,
                         window,
                     });
                 }
@@ -2145,7 +2131,7 @@ mod tests {
         for (keys, shown) in [(3u8, false), (4, true)] {
             let cells = [size_cell(60, 60 + keys - 1, 1.0, 1.0)];
             let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
-                size_cells(ui, span, &cells, None, None, Edges::Fixed)
+                size_cells(ui, span, &cells, None, None)
             });
             let said: Vec<String> = words(&output);
             assert_eq!(
@@ -2166,7 +2152,7 @@ mod tests {
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(60, 71, 0.5, 2.0), size_cell(72, 83, 2.0, 2.0)];
         let (output, _, _) = frame(&ctx, Vec::new(), CELLS_H, |ui| {
-            size_cells(ui, span, &cells, None, None, Edges::Fixed)
+            size_cells(ui, span, &cells, None, None)
         });
         let said = testing::painted(&output);
         let ink = |text: &str| {
@@ -2184,7 +2170,7 @@ mod tests {
         let ctx = context();
         let span = Span { low: 48, high: 95 };
         let cells = [size_cell(48, 59, 1.0, 1.0), size_cell(60, 71, 1.0, 1.0)];
-        let lane = |ui: &mut egui::Ui| size_cells(ui, span, &cells, None, None, Edges::Both);
+        let lane = |ui: &mut egui::Ui| size_cells(ui, span, &cells, None, None);
         let (_, rect, _) = frame(&ctx, Vec::new(), CELLS_H, lane);
         let at = egui::pos2(
             (span.x_of(rect, 60) + span.x_after(rect, 71)) / 2.0,

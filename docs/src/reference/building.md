@@ -47,10 +47,11 @@ the house rules.
 | `corpus` | `nix build .#nord.all-corpus`, on `master` and in-repository pull requests |
 | `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
 
-On `master`, `release` publishes the crates, `telemetry` deploys the collector,
-and `pages` deploys drawbar.app. An optional `safari` workflow runs the browser
-suites in Safari when toshokan or drawbar's library changes. Cross targets are
-checked locally only.
+On `master`, `release` publishes the crates and attaches the Windows cross builds
+of drawbar and nord-cli to their GitHub releases, `telemetry` deploys the
+collector, and `pages` deploys drawbar.app. An optional `safari` workflow runs
+the browser suites in Safari when toshokan or drawbar's library changes. Other
+cross targets are checked locally only.
 
 ## Generated files
 
@@ -64,6 +65,14 @@ drawbar suite fails until the matching script is re-run.
   characters drawbar's text uses that no other bundled font has. Change a glyph
   in the script's table and re-run it, or add one when the text uses a character
   no face draws.
+
+`scripts/icons.py` regenerates `drawbar-icons.ttf`, the Lucide icons in
+`assets/icons` as outlines. Re-run it after adding an icon to the list in
+`icon.rs`; the drawbar suite fails while the font and the list differ.
+
+`scripts/fonts.py` writes the Ubuntu and Hack faces drawbar bundles, keeping
+only what egui reads. It takes the released font files as arguments and refuses
+any whose SHA-256 differs from the release's.
 
 ## Build by hand
 

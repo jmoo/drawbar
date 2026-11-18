@@ -447,6 +447,14 @@ impl Store {
         }
     }
 
+    /// What a message calls the library: by its folder's name where one was picked.
+    fn called(&self) -> String {
+        match &self.name {
+            Some(name) => format!("The library “{name}”"),
+            None => "This computer's library".to_string(),
+        }
+    }
+
     /// The folder the library is.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn root(&self) -> &std::path::Path {
@@ -1543,8 +1551,8 @@ impl Store {
             Event::Opened(Err(why)) => {
                 log.error(format!("opening the library: {why}"));
                 log.trouble(format!(
-                    "This computer's library could not be opened ({why}). Nothing you \
-                     make here is kept."
+                    "{} could not be opened ({why}). Nothing you make here is kept.",
+                    self.called()
                 ));
                 self.phase = Phase::Failed(why);
             }
@@ -1783,8 +1791,8 @@ impl Store {
             }
             Event::ReadOnly(why) if self.open() => {
                 log.trouble(format!(
-                    "This computer's library is read-only now: {why}. Unsaved edits are \
-                     still kept."
+                    "{} is read-only now: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 self.phase = Phase::Unfinished(why);
                 self.turned_read_only = true;
@@ -2074,15 +2082,15 @@ impl Store {
             Ok(()) => Phase::Open,
             Err(Unwritable::ReadOnly(why)) => {
                 log.trouble(format!(
-                    "This computer's library opened read-only: {why}. Unsaved edits are \
-                     still kept."
+                    "{} opened read-only: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 Phase::ReadOnly(why)
             }
             Err(Unwritable::Unfinished(why)) => {
                 log.trouble(format!(
-                    "This computer's library opened read-only: {why}. Unsaved edits are \
-                     still kept."
+                    "{} opened read-only: {why}. Unsaved edits are still kept.",
+                    self.called()
                 ));
                 Phase::Unfinished(why)
             }
@@ -2314,13 +2322,9 @@ impl Store {
         }
         if let Some(unlisted) = unlisted {
             let unlisted: BTreeSet<LibPath> = unlisted.into_iter().collect();
-            const SHOWN: usize = 3;
-            let new: Vec<&LibPath> = unlisted.difference(&browser.folders.unwalked).collect();
-            if !new.is_empty() {
-                log.trouble(format!(
-                    "drawbar could not read {}, so what is in it is not shown.",
-                    crate::strings::quoted_some(&new, SHOWN)
-                ));
+            let new = unlisted.difference(&browser.folders.unwalked);
+            for said in unread_said(new, names::refused_here) {
+                log.trouble(said);
             }
             browser.folders.unwalked = unlisted;
         }
@@ -3320,7 +3324,11 @@ impl Store {
             }
             match (&rescue.broken, self.open()) {
                 (None, true) => self.keep_rescue(rescue, workspace, browser, log),
-                _ => browser.ask_rescue(rescue),
+                (None, false) => browser.ask_rescue(rescue),
+                (Some(why), _) => {
+                    log.error(format!("{}: {why}", rescue.name));
+                    browser.ask_rescue(rescue);
+                }
             }
         }
     }
@@ -4582,7 +4590,10 @@ fn discard_rescue(rescue: Rescue, log: &mut Log) {
     let name = rescue.name;
     match std::fs::remove_file(&rescue.at) {
         Ok(()) => log.say(format!("Discarded “{name}”.")),
-        Err(e) => log.trouble(format!("“{name}” could not be deleted: {e}.")),
+        Err(e) => log.trouble(format!(
+            "“{name}” could not be deleted: {}.",
+            super::storage::said(&e)
+        )),
     }
 }
 
@@ -4714,6 +4725,32 @@ fn shown_path(path: &str) -> String {
         Some((dir, name)) => format!("{dir}/{}", crate::strings::display_name(name)),
         None => shown_name(path),
     }
+}
+
+/// What a scan says of the folders it newly could not read, in their order: why, for each
+/// of the first few whose name `refusal` refuses, then one line that names the rest.
+fn unread_said<'a>(
+    new: impl IntoIterator<Item = &'a LibPath>,
+    refusal: fn(&str) -> Option<&'static str>,
+) -> Vec<String> {
+    const SHOWN: usize = 3;
+    let mut said = Vec::new();
+    let mut unread = Vec::new();
+    for path in new {
+        match refusal(path.leaf()) {
+            Some(why) if said.len() < SHOWN => {
+                said.push(format!("drawbar could not read “{path}”: {why}."));
+            }
+            _ => unread.push(path),
+        }
+    }
+    if !unread.is_empty() {
+        said.push(format!(
+            "drawbar could not read {}, so what is in it is not shown.",
+            crate::strings::quoted_some(&unread, SHOWN)
+        ));
+    }
+    said
 }
 
 /// What one change to an asset kept apart does, to the asset named `name` where the
@@ -4919,6 +4956,23 @@ mod tests {
         assert!(
             history.done.is_empty(),
             "a step that never landed is not undone"
+        );
+    }
+
+    #[test]
+    fn unread_folders_say_why_windows_refuses_the_first_few_and_list_the_rest() {
+        let mut paths = vec!["Live/space ".to_string(), "Locked".to_string()];
+        paths.extend((0..9).map(|n| format!("d{n}.")));
+        let new: BTreeSet<LibPath> = paths.iter().map(|p| LibPath::parse(p).unwrap()).collect();
+        assert_eq!(
+            unread_said(&new, names::windows_refusal),
+            [
+                "drawbar could not read “Live/space ”: it ends with a space, which Windows drops.",
+                "drawbar could not read “d0.”: it ends with a dot, which Windows drops.",
+                "drawbar could not read “d1.”: it ends with a dot, which Windows drops.",
+                "drawbar could not read “Locked”, “d2.”, “d3.” and 5 more, so what is in it is \
+                 not shown.",
+            ]
         );
     }
 }

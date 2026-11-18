@@ -209,8 +209,8 @@ pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
 
 /// [`restore`], holding the window lock `ours`.
 async fn restoring<F: Fs>(fs: &F, from: &Outside, ours: &RelPath) -> Result<usize, String> {
-    let failed = |e: std::io::Error| e.to_string();
-    let mut source = super::outside_source(from).map_err(|e| e.to_string())?;
+    let failed = |e: std::io::Error| storage::said(&e);
+    let mut source = super::outside_source(from).map_err(failed)?;
     let resumed = opening(fs).await.map_err(failed)?;
     if !resumed {
         start_opening(fs).await?;
@@ -269,7 +269,7 @@ async fn ready_to_open<F: Fs>(
     resumed: bool,
     ours: &RelPath,
 ) -> Result<Vec<Restored>, String> {
-    let failed = |e: std::io::Error| e.to_string();
+    let failed = |e: std::io::Error| storage::said(&e);
     match other_window(fs, ours).await {
         Ok(false) => {}
         Ok(true) => {
@@ -428,7 +428,7 @@ async fn read(source: &mut impl FileSource, at: u64, len: u64) -> Result<Vec<u8>
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
             Err(unlike("it ends early".to_string()))
         }
-        Err(e) => Err(format!("reading it: {e}")),
+        Err(e) => Err(format!("reading it: {}", storage::said(&e))),
     }
 }
 
@@ -473,7 +473,7 @@ async fn write<F: Fs>(
         source
             .read_at(data + at, &mut bytes)
             .await
-            .map_err(|e| format!("reading {path} from the copy: {e}"))?;
+            .map_err(|e| format!("reading {path} from the copy: {}", storage::said(&e)))?;
         crc.update(&bytes);
         let (root, to) = (Root::Folder, path.clone());
         let io = match at {
@@ -501,10 +501,10 @@ async fn write<F: Fs>(
     }
     storage::sync(fs, Root::Folder, path)
         .await
-        .map_err(|e| format!("writing {path}: {e}"))?;
+        .map_err(|e| format!("writing {path}: {}", storage::said(&e)))?;
     storage::sync(fs, Root::Folder, &dir)
         .await
-        .map_err(|e| format!("writing {path}: {e}"))
+        .map_err(|e| format!("writing {path}: {}", storage::said(&e)))
 }
 
 /// The copy of the library in `folder` that File ▸ Export library saves, as

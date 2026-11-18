@@ -287,7 +287,7 @@ pub enum IoError {
     #[error("no space is left")]
     NoSpace,
     /// The user or the system does not let the backend in, as a browser whose
-    /// permission to a picked folder was taken back.
+    /// permission to a picked folder was taken back, or a volume mounted read-only.
     #[error("access to it is not allowed")]
     Denied,
     #[error("a directory cannot move inside itself")]

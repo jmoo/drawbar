@@ -11,7 +11,7 @@ use nord_format::bundle::archive::{Tail, TAIL_MAX};
 use nord_format::bundle::{manifest, Class, Item, Key, Plan};
 use nord_format::cbin::Header;
 use nord_format::{Entity, Program};
-use nord_usb::ObjectClass;
+use nord_usb::{Location, ObjectClass};
 
 use crate::browser::Kind;
 use crate::device::DeviceState;
@@ -138,7 +138,10 @@ pub fn lay_out(ids: &[u64], workspace: &Workspace, device: &DeviceState) -> Resu
                 continue;
             }
             match member(entity, device) {
-                Ok(member) => members.push(member),
+                Ok((member, unnamed)) => {
+                    members.push(member);
+                    left_out.extend(unnamed);
+                }
                 Err(why) => left_out.push(why),
             }
         }
@@ -211,8 +214,12 @@ pub fn carries(kind: Kind) -> bool {
     )
 }
 
-/// The member an asset becomes, or why it is left out.
-fn member(entity: &LocalEntity, device: &DeviceState) -> Result<(Item, Body), String> {
+/// The member an asset becomes, with the piano it plays that no member can provide, or
+/// why it is left out.
+fn member(
+    entity: &LocalEntity,
+    device: &DeviceState,
+) -> Result<((Item, Body), Option<String>), String> {
     let carried = || format!("“{}” is not a file a bundle carries", entity.name);
     let (header, body) = match entity.rests() {
         Some(file) => (file.index.header().clone(), Body::Resting(file.clone())),
@@ -236,11 +243,26 @@ fn member(entity: &LocalEntity, device: &DeviceState) -> Result<(Item, Body), St
     let name = stem(entity);
     let mut item = Item::of(&header, &name, decoded).ok_or_else(carried)?;
     // The instrument's own list of what the slot an object came from needs counts over
-    // the file's: it can name a piano or sample the file leaves at zero. Confirmed on
-    // hardware.
-    if let Some((class, at)) = entity.origin.slot() {
-        if let Some(needs) = device.needs_of(class, at) {
-            item.needs = needs.to_vec();
+    // the file's while the slot still holds these bytes: it can name a piano or sample
+    // the file leaves at zero. Confirmed on hardware.
+    // A write to the slot drops its list, so a bank unread since a write elsewhere in it
+    // still holds what the list was read for.
+    let holds = |&(class, at): &(ObjectClass, Location)| {
+        let saved = entity.saved.crc32();
+        let held = device
+            .slot(class, at)
+            .map(|info| info.and_then(|info| info.crc32));
+        !entity.is_unsaved() && held.is_none_or(|held| held.is_some() && held == saved)
+    };
+    let listed = entity.origin.slot().filter(holds);
+    let mut unnamed = None;
+    if let Some(needs) = listed.and_then(|(class, at)| device.needs_of(class, at)) {
+        item.needs = needs.to_vec();
+    } else if let Some((category, model)) = dialed(decoded) {
+        let piano = device.piano_at(category, model);
+        match piano.and_then(|piano| device.library_id(ObjectClass::Piano, piano)) {
+            Some(id) => item.needs.insert(0, Key::Piano(id)),
+            None => unnamed = Some(unnamed_piano(&name, piano)),
         }
     }
     item.provides = item.provides.or_else(|| match item.class {
@@ -250,7 +272,32 @@ fn member(entity: &LocalEntity, device: &DeviceState) -> Result<(Item, Body), St
             .map(Key::Sample),
         Class::Program | Class::SetList => None,
     });
-    Ok((item, body))
+    Ok(((item, body), unnamed))
+}
+
+/// A program's Type and Model dials, where its piano id is 0.
+///
+/// ⚠️ The Electro 5 plays the piano the id names, and the piano at the dials' position
+/// only where the id is 0. Confirmed on hardware.
+fn dialed(decoded: Option<&Entity>) -> Option<(u8, usize)> {
+    let Some(Entity::Program(Program::Electro5(program))) = decoded else {
+        return None;
+    };
+    let panel = &program.piano_panel;
+    let dials = (panel.category.raw(), usize::from(panel.piano_model.as_u8()));
+    (panel.id.id() == 0).then_some(dials)
+}
+
+/// Why a piano a program plays by its dials stays out of a bundle: no id to name it by.
+fn unnamed_piano(program: &str, piano: Option<&str>) -> String {
+    match piano {
+        Some(piano) => {
+            format!(
+                "“{piano}”, the piano “{program}” plays, as the instrument has not given its id"
+            )
+        }
+        None => format!("the piano “{program}” plays, as no scan of the instrument names it"),
+    }
 }
 
 /// What a need names, in words.
@@ -460,5 +507,111 @@ mod tests {
         assert!(is_bundle("foo.NE5PBUNDLE"));
         assert!(!is_bundle("foo.ne5p"));
         assert!(!is_bundle("ne5pbundle"));
+    }
+
+    #[test]
+    fn a_program_copied_from_a_slot_needs_what_the_slot_lists_only_while_the_slot_holds_it() {
+        use crate::device::Device;
+        use crate::log::Log;
+        use crate::workspace::{Fresh, Origin};
+        use nord_usb::wire::Dependency;
+
+        let (class, at) = (ObjectClass::Program, Location { bank: 6, slot: 0 });
+        let (in_file, in_slot) = (0x0a0b_0c0d, 0x0102_0304);
+        let ctx = crate::testing::context();
+        let mut log = Log::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let fresh = Fresh::Program.bytes().unwrap();
+        let (_, bytes) =
+            crate::fields::apply(&fresh, &[("piano_panel.id".into(), in_file.to_string())])
+                .unwrap();
+        let id = workspace.ingest(
+            "Edited.ne5p".into(),
+            Origin::Device { class, at },
+            bytes,
+            &mut log,
+        );
+        let entity = workspace.get(id).unwrap();
+        let saved = entity.saved.crc32().unwrap();
+        let mut device = Device::new(ctx);
+        device.pretend_deps(
+            class,
+            at,
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id: in_slot,
+                name: "EP 1".into(),
+                location: None,
+            }],
+        );
+        let needs = |device: &Device| {
+            let ((item, _), _) = member(entity, &device.state).unwrap();
+            item.needs
+        };
+
+        device.pretend_bodies(class, 7, &[Some(("Edited", saved))]);
+        assert_eq!(
+            needs(&device),
+            [Key::Piano(in_slot)],
+            "the slot holds the file"
+        );
+
+        device.pretend_bodies(class, 7, &[Some(("Edited", saved ^ 1))]);
+        assert_eq!(
+            needs(&device),
+            [Key::Piano(in_file)],
+            "the slot holds another body"
+        );
+    }
+
+    #[test]
+    fn a_program_whose_piano_id_is_zero_needs_the_piano_its_dials_pick() {
+        use crate::device::Device;
+        use crate::log::Log;
+        use crate::workspace::{Fresh, Origin};
+        use nord_usb::wire::Dependency;
+
+        let ctx = crate::testing::context();
+        let mut log = Log::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let dials = [
+            ("piano_panel.id".into(), "0".into()),
+            ("piano_panel.category".into(), "Upright".into()),
+            ("piano_panel.piano_model".into(), "2".into()),
+        ];
+        let bytes = crate::fields::apply(&Fresh::Program.bytes().unwrap(), &dials)
+            .unwrap()
+            .1;
+        let id = workspace.ingest("Dialed.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        let entity = workspace.get(id).unwrap();
+        let mut device = Device::new(ctx);
+        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1", "", "Upright U3"]);
+        let laid = |device: &Device| {
+            let ((item, _), unnamed) = member(entity, &device.state).unwrap();
+            (item.needs, unnamed)
+        };
+
+        let (needs, unnamed) = laid(&device);
+        assert_eq!(needs, []);
+        assert!(
+            unnamed
+                .as_deref()
+                .is_some_and(|why| why.contains("Upright U3")),
+            "{unnamed:?}"
+        );
+
+        device.pretend_deps(
+            ObjectClass::Program,
+            Location { bank: 6, slot: 3 },
+            vec![Dependency {
+                flag: 1,
+                class: ObjectClass::Piano,
+                id: 0x0a0b_0c0d,
+                name: "Upright U3".into(),
+                location: None,
+            }],
+        );
+        assert_eq!(laid(&device), (vec![Key::Piano(0x0a0b_0c0d)], None));
     }
 }

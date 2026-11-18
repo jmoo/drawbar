@@ -22,7 +22,9 @@ kept on this computer, in drawbar's own data, never in the library folder.
 drawbar hides the files in the library it does not open, such as a PDF or a
 photo, and never changes them on its own. **View ▸ Show hidden files** lists
 them, drawn faint, and a hidden file's menu offers **Delete…**. Names that start
-with a dot never show.
+with a dot never show. On Windows, drawbar opens no file or folder whose name
+Windows cannot hold, such as one that ends in a dot or a space, and says why;
+rename it on the computer that made it.
 
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, which no other site or app can see. It keeps your files, tags and
@@ -267,8 +269,8 @@ Nothing kept apart changes your library until you choose to:
 A change marked “only taking it settles this” replaced a value that no computer
 shows any more, so it stays listed until you take it.
 
-When you select a sound with changes kept apart, the inspector says so and
-links to them.
+When the inspector shows a sound with changes kept apart, it says so and links
+to them.
 
 ## Demo sounds
 

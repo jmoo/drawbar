@@ -29,8 +29,6 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-
     "Unlicense", # dedicates the work to the public domain
     "Zlib"       # clause 1: acknowledgment "is not required"; clause 3 binds source only
   ];
-  # The hand-written font rows of the About box carry these for epaint_default_fonts.
-  def fonts: ["OFL-1.1", "Ubuntu-font-1.0"];
   # The SPDX template of a notice, whose copyright line names no one.
   def unfilled: ascii_downcase | test("<year>|<owner>|<copyright holder");
   def offers_apache: [splits("\\s+OR\\s+|/") | gsub("^[(\\s]+|[)\\s]+$"; "")] | index("Apache-2.0");
@@ -41,7 +39,6 @@ entries="$(jq --argjson vendored "$vendored" --rawfile apache "$licenses/Apache-
     # Path crates are the workspace, which the drawbar row covers.
     | select(.source != null)
     | select($license.id | IN(unconditional[]) | not)
-    | select(.name != "epaint_default_fonts" or ($license.id | IN(fonts[]) | not))
     | {
         crate: "\(.name) \(.version)",
         name,

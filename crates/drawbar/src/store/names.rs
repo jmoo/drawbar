@@ -67,6 +67,12 @@ pub fn windows_refusal(name: &str) -> Option<&'static str> {
     None
 }
 
+/// Why this computer cannot open an entry named `name`, or `None` when it can. Only
+/// Windows refuses one.
+pub fn refused_here(name: &str) -> Option<&'static str> {
+    cfg!(windows).then(|| windows_refusal(name)).flatten()
+}
+
 fn is_device(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end();
     DEVICES

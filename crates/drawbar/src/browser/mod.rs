@@ -42,7 +42,7 @@ pub use drag::{
 pub use instrument::about;
 pub use row::{cell_ink, starred, Cells};
 pub use selection::Selection;
-pub use tree::{library_items, offers_libraries};
+pub use tree::{library_items, offers_libraries, tag_items};
 pub(crate) use tree::{offers_recent, recent};
 
 use drag::ghost;
@@ -197,10 +197,7 @@ pub struct Offer {
 
 impl Offer {
     pub fn of(action: Bulk, checked: &[Item], workspace: &Workspace, state: &DeviceState) -> Offer {
-        let wanted = match action {
-            Bulk::Tag => !checked.iter().all(|item| item.local().is_none()),
-            _ => !bulk(action, checked, state).is_empty(),
-        };
+        let wanted = !bulk(action, checked, state).is_empty();
         // ⚠️ Only Queue checks what the instrument accepts. Everything else happens on
         // this computer, where another instrument's file is still a file.
         let fits = (action == Bulk::Queue).then(|| act::fits(checked, workspace, state));
@@ -254,6 +251,9 @@ pub struct Browser {
     /// Where this computer's folders were drawn as places a drop lands, in drawing order:
     /// `None` for the library's own top level.
     targets: Vec<(egui::Rect, Option<u64>)>,
+    /// Whether the inspector describes the selection. While it does not, a plain click
+    /// on a selected row selects it again rather than letting go of it.
+    pub(crate) followed: bool,
 }
 
 impl Default for Browser {
@@ -272,6 +272,7 @@ impl Default for Browser {
             rows: Rows::default(),
             held: Vec::new(),
             targets: Vec::new(),
+            followed: true,
         }
     }
 }
@@ -440,6 +441,7 @@ impl Browser {
     fn clicked(&mut self, ui: &egui::Ui, click: Click) {
         self.rename = None;
         match gesture(&ui.input(|input| input.modifiers)) {
+            Gesture::Plain if !self.followed => self.selection.only(click.item),
             Gesture::Plain => self.selection.plain(click.item),
             Gesture::Toggle => self.selection.toggle(click.item),
             Gesture::Extend => self.selection.extend(click.item, click.list),
@@ -712,6 +714,12 @@ impl Browser {
         let ask = self.ask.as_ref().or(self.later.front())?;
         let answers = ask.answers().into_iter().map(|(_, label)| label).collect();
         Some((ask.title.clone(), answers))
+    }
+
+    /// The note under the question showing or next to show.
+    #[cfg(test)]
+    pub(crate) fn asking_note(&self) -> Option<&str> {
+        self.ask.as_ref().or(self.later.front())?.note.as_deref()
     }
 
     /// The answer that question draws as the one expected.
@@ -997,15 +1005,16 @@ impl Browser {
                 cancel: "Later",
                 strong: Answer::Cancel,
             },
-            Some(why) => Ask {
+            Some(_) => Ask {
                 title: format!(
                     "A write to the instrument left “{}”, which does not read",
                     rescue.name
                 ),
-                note: Some(format!(
-                    "It is not a whole Nord file ({why}), so it is no copy of what that \
-                     slot held, and cannot be sent back."
-                )),
+                note: Some(
+                    "It is not a whole Nord file, so it is no copy of what that slot held, \
+                     and cannot be sent back."
+                        .into(),
+                ),
                 verb: Verb::Discard,
                 acts: act(Rescuing::Discard),
                 others,
@@ -1087,24 +1096,6 @@ impl Browser {
         state: &DeviceState,
         acts: &mut Vec<Act>,
     ) {
-        if action == Bulk::Tag {
-            // ⚠️ Drawn in `ui` itself, not a scope: a scope is a region of its own, and a
-            // button in it cannot move to the next row of a wrapping layout.
-            match offer.live {
-                false => {
-                    ui.add_enabled(false, egui::Button::new(action.label()))
-                        .on_disabled_hover_text(action.nothing());
-                }
-                true => {
-                    crate::menu::button(ui, action.label(), |ui| {
-                        let locals: Vec<u64> =
-                            checked.iter().copied().filter_map(Item::local).collect();
-                        self.tag_items(ui, &locals, acts)
-                    });
-                }
-            }
-            return;
-        }
         let mut button = ui
             .add_enabled(offer.live, egui::Button::new(&offer.label))
             .on_disabled_hover_text(&offer.dead);
@@ -1759,7 +1750,7 @@ mod tests {
     #[test]
     fn a_confirmation_runs_its_acts_only_on_its_verb() {
         let ctx = testing::context();
-        egui_extras::install_image_loaders(&ctx);
+        crate::icon::install(&ctx);
         let at = Location { bank: 6, slot: 3 };
         let delete = || Act::DeleteSlot {
             class: ObjectClass::Program,

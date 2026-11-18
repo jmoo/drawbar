@@ -608,6 +608,7 @@ impl Decoded {
         let (entity, parse_error) = match nord_format::from_stream(&mut std::io::Cursor::new(bytes))
         {
             Ok(entity) => (Some(Box::new(entity)), None),
+            Err(_) if bytes.is_empty() => (None, Some("it is empty".to_string())),
             Err(e) => (None, Some(failed_decode(&e))),
         };
         let verify = match &entity {
@@ -626,8 +627,9 @@ impl Decoded {
     }
 }
 
-/// Why bytes did not decode, in words that read after the file's name: plain words for a
-/// file that ends early or is of no known format, and nord-format's own for anything else.
+/// Why bytes that are not empty did not decode, in words that read after the file's name:
+/// plain words for a file that ends early or is of no known format, and nord-format's own
+/// for anything else.
 fn failed_decode(e: &nord_format::error::Error) -> String {
     use nord_format::error::{Error, ParseError};
     const CUT_OFF: &str = "it is shorter than a Nord file should be, so it may be cut off";
@@ -875,27 +877,9 @@ impl LocalEntity {
         file: Arc<OnDisk>,
         stamp: u64,
     ) -> LocalEntity {
-        let by_name = crate::browser::tagged(&name);
         LocalEntity {
-            id,
-            name,
-            path: None,
-            origin,
-            bytes: Bytes::default(),
-            entity: None,
-            plays: None,
-            parse_error: None,
-            container: None,
-            words: false,
-            verify: VerifyState::Reading,
             saved: Baseline::on_disk(file, stamp),
-            pending: false,
-            kept: true,
-            stamp,
-            link: None,
-            wrote: None,
-            seen: Default::default(),
-            by_name,
+            ..LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp)
         }
     }
 
@@ -1708,8 +1692,8 @@ struct Held {
     edit: Edit,
     /// Moves whenever the edit does.
     stamp: u64,
-    /// The file the edit was last made over, `None` where the asset rests in none.
-    over: Option<Arc<OnDisk>>,
+    /// The file the edit was last made over.
+    over: Arc<OnDisk>,
     /// The rewrite that writes the edit into `over`, or why it does not apply there.
     rewrite: Result<Arc<Rewrite>, String>,
     save: Save,
@@ -3027,8 +3011,8 @@ impl Workspace {
         let Some(held) = self.edits.get(&id) else {
             return Some(CopyOf::Asset(id));
         };
-        let (over, rewrite) = (held.over.as_ref()?, held.rewrite.as_ref().ok()?);
-        let pieces = rewrite.pieces(over).ok()?;
+        let rewrite = held.rewrite.as_ref().ok()?;
+        let pieces = rewrite.pieces(&held.over).ok()?;
         Some(CopyOf::Edited(id, Arc::new(pieces)))
     }
 
@@ -3351,14 +3335,24 @@ impl Workspace {
         });
     }
 
+    /// [`Workspace::drop_edits`], and say so where it changed anything.
+    pub fn revert(&mut self, id: u64, log: &mut Log) {
+        if !self.drop_edits(id) {
+            return;
+        }
+        if let Some(entity) = self.get(id) {
+            log.say(format!("“{}” is back as it was last saved.", entity.name));
+        }
+    }
+
     /// Restore the bytes this asset was last saved as, and drop any pending edit an
-    /// editor held of it.
+    /// editor held of it. Returns whether that changed anything.
     ///
     /// ⚠️ A pending edit has not reached the bytes, so restoring them changes nothing.
     /// Reverting a piano library's plan only clears the flag.
-    pub fn revert(&mut self, id: u64, log: &mut Log) {
+    pub fn drop_edits(&mut self, id: u64) -> bool {
         let Some(entity) = self.get(id) else {
-            return;
+            return false;
         };
         let (resting, file, stamp) = (
             entity.rests().is_some(),
@@ -3379,12 +3373,7 @@ impl Workspace {
             (false, None, Some(saved)) => self.respell(id, saved).is_some(),
             _ => false,
         };
-        if !restored && !dropped {
-            return;
-        }
-        if let Some(entity) = self.get(id) {
-            log.say(format!("“{}” is back as it was last saved.", entity.name));
-        }
+        restored || dropped
     }
 
     /// Record whether an editor holds an edit of this asset that its bytes do not, and
@@ -3422,39 +3411,13 @@ impl Workspace {
             return;
         };
         let stamp = self.stamp();
-        self.make_edit(id, edit, stamp, Some(over), save);
-    }
-
-    /// Hold an edit kept across a quit of an asset just restored, made over the file it
-    /// rests in. One that file already holds is let go.
-    pub fn restore_edit(&mut self, id: u64, edit: Edit) {
-        let Some(entity) = self.get(id) else {
-            return;
-        };
-        let over = entity.rests().cloned();
-        let stamp = self.stamp();
-        self.make_edit(id, edit, stamp, over, Save::No);
+        self.make_edit(id, edit, stamp, over, save);
     }
 
     /// Hold `edit` of an asset made over `over`, the file it rests in, or let it go where
     /// it changes nothing there.
-    fn make_edit(
-        &mut self,
-        id: u64,
-        edit: Edit,
-        stamp: u64,
-        over: Option<Arc<OnDisk>>,
-        save: Save,
-    ) {
-        let made = match &over {
-            Some(file) => edit.over(file),
-            None => Err(
-                "the file is not a piano library or sample instrument resting in \
-                         the library"
-                    .to_string(),
-            ),
-        };
-        let rewrite = match made {
+    fn make_edit(&mut self, id: u64, edit: Edit, stamp: u64, over: Arc<OnDisk>, save: Save) {
+        let rewrite = match edit.over(&over) {
             Ok(None) => {
                 self.let_go_edit(id);
                 return;
@@ -3485,12 +3448,11 @@ impl Workspace {
         let Some(held) = self.edits.get(&id) else {
             return;
         };
-        let over = held.over.as_ref();
-        if over.is_some_and(|over| Arc::ptr_eq(over, &file)) || matches!(held.save, Save::Sent(_)) {
+        if Arc::ptr_eq(&held.over, &file) || matches!(held.save, Save::Sent(_)) {
             return;
         }
         let (edit, stamp) = (held.edit.clone(), held.stamp);
-        self.make_edit(id, edit, stamp, Some(file), Save::No);
+        self.make_edit(id, edit, stamp, file, Save::No);
     }
 
     /// Let go of the edit held of an asset, and return whether there was one.
@@ -3535,7 +3497,7 @@ impl Workspace {
     /// file it is made over, and the rewrite that writes it.
     pub fn edit_of(&self, id: u64) -> Option<(&Arc<OnDisk>, &Arc<Rewrite>)> {
         let held = self.edits.get(&id)?;
-        Some((held.over.as_ref()?, held.rewrite.as_ref().ok()?))
+        Some((&held.over, held.rewrite.as_ref().ok()?))
     }
 
     /// Ask the store to save the edit held of an asset resting in its file into that
@@ -3570,7 +3532,7 @@ impl Workspace {
     /// Take an edit the store is asked to save, as it sends the save.
     pub(crate) fn send_edit(&mut self, id: u64) -> Option<(Arc<OnDisk>, Arc<Rewrite>)> {
         let held = self.edits.get_mut(&id)?;
-        let (over, rewrite) = (held.over.clone()?, held.rewrite.as_ref().ok()?.clone());
+        let (over, rewrite) = (held.over.clone(), held.rewrite.as_ref().ok()?.clone());
         held.save = Save::Sent(held.stamp);
         Some((over, rewrite))
     }
@@ -4197,9 +4159,8 @@ mod tests {
         let (from, rewrite) = workspace.send_edit(id).expect("the store takes it");
         workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])));
 
-        let mut out = std::fs::File::create(dir.at("Saved.nsmp")).unwrap();
-        rewrite.write(&from, &mut out).unwrap();
-        drop(out);
+        let (out, _) = crate::testing::streamed(&rewrite.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
         let saved = crate::testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
         workspace.edit_saved(id, saved.clone());
 
@@ -4966,6 +4927,15 @@ mod tests {
                 whole.len()
             );
         }
+    }
+
+    #[test]
+    fn an_empty_file_is_reported_as_empty() {
+        let said = imported("empty.ne5p", Vec::new());
+        assert!(
+            said.iter().any(|text| text == "empty.ne5p: it is empty"),
+            "{said:?}"
+        );
     }
 
     #[test]

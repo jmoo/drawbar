@@ -26,6 +26,7 @@ use crate::queue::{Queue, Queued};
 use crate::store::LibPath;
 use crate::strings::{place, shown};
 use crate::tabs::Spot;
+use crate::tags::Tags;
 use crate::workspace::{LocalEntity, Workspace};
 
 /// A menu item that runs `act` and closes the menu.
@@ -343,7 +344,8 @@ impl Rows {
 /// The folders inside each folder, and the files drawbar does not open in each, gathered
 /// in one pass for a pass over the library's lines.
 struct Beside<'a> {
-    /// In path order, under the folder they are in, or `None` for the root.
+    /// In [`crate::folders::shown`] order, under the folder they are in, or `None` for the
+    /// root.
     children: BTreeMap<Option<u64>, Vec<&'a Folder>>,
     /// While hidden files are shown, indices into [`Folders::others`], under the folder
     /// they are in.
@@ -369,11 +371,13 @@ impl<'a> Beside<'a> {
             };
             children.entry(holder).or_default().push(folder);
         }
-        let others = folders
+        let mut others: Vec<(usize, &LibPath)> = folders
             .others
             .iter()
             .enumerate()
-            .filter(|_| folders.all_files);
+            .filter(|_| folders.all_files)
+            .collect();
+        others.sort_by_cached_key(|(_, path)| crate::folders::shown(path));
         let mut strangers: BTreeMap<LibPath, Vec<usize>> = BTreeMap::new();
         for (index, path) in others {
             strangers.entry(path.parent()).or_default().push(index);
@@ -1069,9 +1073,11 @@ impl Browser {
                 ..Cells::default()
             },
         );
+        let why = crate::store::names::refused_here(path.leaf())
+            .unwrap_or("drawbar does not open this kind of file");
         drawn
             .response
-            .on_hover_text("Hidden: drawbar does not open this kind of file.")
+            .on_hover_text(format!("Hidden: {why}."))
             .context_menu(|ui| {
                 if ui.button("Delete…").clicked() {
                     self.ask_delete(path.leaf(), Act::DeleteHidden(path.clone()));
@@ -1118,6 +1124,7 @@ impl Browser {
                 name: &name,
                 count: Some(self.folders.count(Some(id), workspace).to_string()),
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );
@@ -1241,6 +1248,7 @@ impl Browser {
                 dot: mark(entity, &device.state, queue, ui.visuals()),
                 tags: wears,
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );
@@ -1300,8 +1308,8 @@ impl Browser {
 
     /// The menu a row offers, in the tree or in the library table.
     ///
-    /// A row inside a checked set of several offers what the Selection card offers,
-    /// because the menu acts on the whole set.
+    /// A row inside a checked set of several offers what the Selection card offers, and
+    /// Tag, because the menu acts on the whole set.
     ///
     /// Folders and tags appear only in the tree, so the rows that draw them build their
     /// menus.
@@ -1317,9 +1325,11 @@ impl Browser {
         self.aim(item);
         let checked: Vec<Item> = self.selection.items().collect();
         if checked.len() > 1 && self.selection.holds(item) {
-            for action in Bulk::ALL {
+            for action in [Bulk::Queue, Bulk::Copy, Bulk::Export, Bulk::Bundle] {
                 self.bulk_item(ui, action, &checked, workspace, &device.state, acts);
             }
+            self.tag_menu(ui, &self.selection.locals(), acts);
+            self.bulk_item(ui, Bulk::Delete, &checked, workspace, &device.state, acts);
             return;
         }
         match item {
@@ -1341,7 +1351,6 @@ impl Browser {
             return;
         };
         let item = Item::Local(id);
-        let picked = self.selection.locals();
         offer(ui, "Open", None, Act::Open(item), acts);
         self.bulk_item(ui, Bulk::Queue, &[item], workspace, &device.state, acts);
         offer(ui, "Export…", None, Act::Export(id), acts);
@@ -1352,7 +1361,7 @@ impl Browser {
         }
         offer(ui, "Duplicate", None, Act::DuplicateLocal(id), acts);
         self.filing_menu(ui, id, self.folders.holding(entity), acts);
-        menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
+        self.tag_menu(ui, &self.selection.locals(), acts);
         ui.separator();
         if ui.button("Delete…").clicked() {
             self.ask_delete(&entity.name, Act::Remove(id));
@@ -1385,25 +1394,15 @@ impl Browser {
         });
     }
 
-    /// Every tag, checked where it is on everything selected, then New tag.
-    ///
-    /// Only the items, so the row's menu and the Selection card can each give them their
-    /// own label.
-    pub fn tag_items(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
-        for tag in self.tags.all() {
-            let on = self.tags.on_all(picked, tag.id);
-            if marked(ui, &tag.name, on) {
-                let ids = picked.to_vec();
-                acts.push(match on {
-                    true => Act::Untag { ids, tag: tag.id },
-                    false => Act::Tag { ids, tag: tag.id },
-                });
-            }
+    /// Tag, opening [`tag_items`] for `picked`, or disabled when nothing picked is
+    /// on this computer.
+    fn tag_menu(&self, ui: &mut egui::Ui, picked: &[u64], acts: &mut Vec<Act>) {
+        if picked.is_empty() {
+            ui.add_enabled(false, egui::Button::new("Tag"))
+                .on_disabled_hover_text("nothing checked is on this computer");
+            return;
         }
-        if !self.tags.all().is_empty() {
-            ui.separator();
-        }
-        offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
+        menu::button(ui, "Tag", |ui| tag_items(ui, &self.tags, picked, acts));
     }
 
     fn instrument_row(
@@ -1633,6 +1632,7 @@ impl Browser {
                 faint: held.is_none(),
                 loaded,
                 child: true,
+                gray: !self.followed,
                 ..Cells::default()
             },
         );
@@ -1940,6 +1940,24 @@ fn destination(held: &Queued) -> String {
     format!("→ {}", place(held.class, held.at))
 }
 
+/// Every tag, checked where it is on everything `picked`, then New tag.
+pub fn tag_items(ui: &mut egui::Ui, tags: &Tags, picked: &[u64], acts: &mut Vec<Act>) {
+    for tag in tags.all() {
+        let on = tags.on_all(picked, tag.id);
+        if marked(ui, &tag.name, on) {
+            let ids = picked.to_vec();
+            acts.push(match on {
+                true => Act::Untag { ids, tag: tag.id },
+                false => Act::Tag { ids, tag: tag.id },
+            });
+        }
+    }
+    if !tags.all().is_empty() {
+        ui.separator();
+    }
+    offer(ui, "New tag…", None, Act::NewTag(picked.to_vec()), acts);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2057,6 +2075,61 @@ mod tests {
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_hidden_file_windows_cannot_open_says_why_on_hover() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        browser.folders.others = vec![LibPath::root().join("tdot.ne5p.")];
+        browser.folders.all_files = true;
+        let run = |browser: &mut Browser, events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 600.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+            testing::painted(&output)
+        };
+
+        let row = testing::where_(&run(&mut browser, Vec::new()), "tdot.ne5p.").center();
+        run(&mut browser, vec![egui::Event::PointerMoved(row)]);
+        for _ in 0..60 {
+            run(&mut browser, Vec::new());
+        }
+        let said: Vec<String> = run(&mut browser, Vec::new())
+            .into_iter()
+            .map(|word| word.text)
+            .collect();
+        let why = "Hidden: it ends with a dot, which Windows drops.";
+        assert!(said.iter().any(|word| word == why), "{said:?}");
+    }
+
+    #[test]
+    fn hidden_files_are_listed_ignoring_case() {
+        let mut folders = crate::folders::Folders::default();
+        folders.all_files = true;
+        folders.others = ["Notes.pdf", "cover.jpg", "Art.png"]
+            .map(|name| LibPath::root().join(name))
+            .to_vec();
+
+        let beside = Beside::of(&folders);
+        let listed: Vec<&str> = beside
+            .strangers(&LibPath::root())
+            .iter()
+            .map(|&index| folders.others[index].leaf())
+            .collect();
+        assert_eq!(listed, ["Art.png", "cover.jpg", "Notes.pdf"]);
     }
 
     #[test]
