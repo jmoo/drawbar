@@ -15,6 +15,8 @@ cargo install drawbar
 
 On Windows, download it from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases).
+On Linux, download the AppImage from the same release; see
+[Install](../../docs/src/getting-started/install.md#on-the-desktop).
 
 On a Mac with Apple silicon, download the disk image from the same release; see
 [Install](../../docs/src/getting-started/install.md#on-the-desktop) for the first
