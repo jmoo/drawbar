@@ -157,6 +157,9 @@
               // pkgs.lib.optionalAttrs (pkgs.nord ? drawbar-app) {
                 inherit (pkgs.nord) drawbar-app;
               }
+              // pkgs.lib.optionalAttrs (pkgs.nord ? drawbar-appimage) {
+                inherit (pkgs.nord) drawbar-appimage;
+              }
               // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-browser-crash) {
                 inherit (pkgs.nord) toshokan-browser-crash;
               };

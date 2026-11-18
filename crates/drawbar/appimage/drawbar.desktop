@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=drawbar
+Comment=Browse, edit and send the sounds on a Nord keyboard
+Exec=drawbar
+Icon=drawbar
+Categories=AudioVideo;Audio;
+StartupWMClass=drawbar
