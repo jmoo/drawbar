@@ -14,13 +14,20 @@ fail() {
 }
 
 stubs="$root/stubs"
+# The build sandbox has no /usr/bin/env, so each stand-in names this bash.
+script() {
+  {
+    echo "#!$BASH"
+    cat
+  } >"$1"
+  chmod +x "$1"
+}
 mkdir -p "$root/bin" "$stubs/releases" "$stubs/flakes" "$stubs/store"
 export STUBS=$stubs PATH="$root/bin:$PATH"
 
 # `packages/<tag>` lists a tag's flake packages; `store/<tag>/<package>` is a build,
 # and `broken` names packages whose build fails.
-cat >"$root/bin/nix" <<'EOF'
-#!/usr/bin/env bash
+script "$root/bin/nix" <<'EOF'
 set -euo pipefail
 tag_of() { sed -E 's/.*refs\/tags\/([^#]+)#.*/\1/' <<<"$1"; }
 case "$1 $2" in
@@ -36,8 +43,7 @@ case "$1 $2" in
 esac
 EOF
 
-cat >"$root/bin/gh" <<'EOF'
-#!/usr/bin/env bash
+script "$root/bin/gh" <<'EOF'
 set -euo pipefail
 case "$1 $2" in
 "release view") cat "$STUBS/releases/$3.json" ;;
@@ -50,7 +56,6 @@ case "$1 $2" in
 *) exit 1 ;;
 esac
 EOF
-chmod +x "$root/bin/nix" "$root/bin/gh"
 
 repo="$root/repo"
 mkdir -p "$repo/scripts" "$repo/crates/app/src"
@@ -78,11 +83,9 @@ printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
   app x86_64-linux app-tarball app-@version@.tar.gz - app-@version@-x86_64-linux.tar.gz \
   app aarch64-darwin app-bundle app.app scripts/pack.bash app-@version@-aarch64-macos.dmg \
   >scripts/assets.tsv
-cat >scripts/pack.bash <<'EOF'
-#!/usr/bin/env bash
+script scripts/pack.bash <<'EOF'
 echo "packed $(cat "$1")" >"$2"
 EOF
-chmod +x scripts/pack.bash
 git add .
 git commit -qm 'feat: initial release'
 git remote add origin "$repo"
