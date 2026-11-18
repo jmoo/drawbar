@@ -154,7 +154,11 @@ jobs:
   assets:
     if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [release]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
       contents: write # release uploads
