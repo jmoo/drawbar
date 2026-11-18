@@ -49,6 +49,9 @@ jobs:
           nix build .#drawbar-windows .#nord-cli-windows
           .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
           --print-build-logs
+      # And from macOS: drawbar's disk image, around the binary `nord.packages` built.
+      - if: runner.os == 'macOS'
+        run: scripts/dmg.bash
       # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
       - if: runner.os == 'Windows'
         shell: bash
