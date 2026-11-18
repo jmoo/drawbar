@@ -99,6 +99,10 @@ Firefox:
 nix build .#nord.browser-tests
 ```
 
+The same build opens the page `nix build .#drawbar-web` makes in headless Chromium
+and checks that it starts the library's worker from the worker's own module, and
+that the worker answers.
+
 Each crate declares its browser suites as `browserTests` in its
 `[package.metadata.nix]`, and CI's web job runs them. When toshokan or drawbar's
 library changes, an optional `safari` job runs them in Safari on macOS too; Safari

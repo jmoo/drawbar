@@ -518,6 +518,26 @@ let
       }
     );
 
+  # The built page in headless Chromium, which must start the library's worker from
+  # the worker's own module and hear it answer.
+  drawbarWebWorker =
+    final.runCommand "drawbar-web-worker"
+      {
+        PLAYWRIGHT_BROWSERS_PATH = final.playwright-driver.browsers.override {
+          withChromium = false;
+          withFfmpeg = false;
+          withFirefox = false;
+          withWebkit = false;
+        };
+        meta.description = "drawbar's built page starting its library worker in a headless browser";
+        nativeBuildInputs = [ (final.python3.withPackages (python: [ python.playwright ])) ];
+      }
+      ''
+        export HOME="$TMPDIR"
+        python3 ${./crates/drawbar/tests/site.py} ${drawbar-web}
+        touch "$out"
+      '';
+
   browserSuites =
     final.lib.mapAttrsToList
       (
@@ -851,7 +871,7 @@ in
     // crossed
     # Not in `all`: they start browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
-      browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
+      browser-tests = final.linkFarmFromDrvs "browser-tests" (browserSuites ++ [ drawbarWebWorker ]);
       toshokan-browser-crash = toshokanBrowserCrash;
     }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
