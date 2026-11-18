@@ -3,7 +3,7 @@
 - Start date: 2026-10-28
 - Authors: mikesprad
 - RFC PR: [jmoo/drawbar#276](https://github.com/jmoo/drawbar/pull/276)
-- Tracking issue: TRACKING
+- Tracking issue: [jmoo/drawbar#347](https://github.com/jmoo/drawbar/issues/347)
 
 ## Summary
 
@@ -415,7 +415,7 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 ### Pull requests
 
 The pull requests that build this RFC, and those that follow it, are listed in its tracking issue,
-TRACKING.
+#347.
 
 ## Drawbacks
 
