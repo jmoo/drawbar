@@ -53,11 +53,11 @@ pub const ADDED: &str = "add/";
 /// `start..end`, to the attack region it names.
 pub const LOOPED: &str = "loop/";
 
-/// The path prefix of a set that deletes, from the sample whose attack it names, the
+/// The path prefix of a set that deletes, from the hit whose attack it names, the
 /// piece after it: `note`, `loop` or `key-off`.
 pub const DELETED: &str = "delete/";
 
-/// The path prefix of a set that renames the sample whose attack it names to the sample
+/// The path prefix of a set that renames the hit whose attack it names to the hit
 /// whose attack label its value is, every region of it.
 pub const RENAMED: &str = "rename/";
 
@@ -332,6 +332,9 @@ pub struct State {
     pub view: take::View,
     /// What the picked hit's lane shows, kept across new bytes.
     pub close: hit::Close,
+    /// Both lanes as they were before this frame's menu edit moved the pick, put back if
+    /// the edit is refused, so the pick never names a hit the take does not mark.
+    before_edit: Option<(take::View, hit::Close)>,
     /// What the take is heard as, kept across new bytes.
     pub audition: audition::Audition,
     /// What Detect asks for and found, kept across new bytes.
@@ -571,6 +574,7 @@ impl State {
             read,
             view: take::View::default(),
             close: hit::Close::default(),
+            before_edit: None,
             audition: audition::Audition::default(),
             detect: Detect::default(),
         }
@@ -622,6 +626,13 @@ impl State {
         self.applied
     }
 
+    /// Put both lanes back as they were before this frame's menu edit, which was refused.
+    pub fn refused(&mut self) {
+        if let Some((view, close)) = self.before_edit.take() {
+            (self.view, self.close) = (view, close);
+        }
+    }
+
     /// Note that the bytes stamped `stamp` hold `total` against the original.
     pub fn made(&mut self, stamp: u64, total: f64) {
         self.made.retain(|(made, _)| *made != stamp);
@@ -629,7 +640,7 @@ impl State {
         self.applied = total;
     }
 
-    /// What Play plays: the picked sample as recorded, from its first cut to its last;
+    /// What Play plays: the picked hit as recorded, from its first cut to its last;
     /// where a place is clicked instead, what the lane under the take shows about it; or
     /// the whole file where neither is.
     pub fn heard(&self) -> Option<&[f32]> {
@@ -657,7 +668,7 @@ impl State {
         })
     }
 
-    /// The picked sample's cuts, where one is picked in marks that read.
+    /// The picked hit's cuts, where one is picked in marks that read.
     pub fn cuts(&self) -> Option<hit::Cuts> {
         let marked = self.read.marked.as_ref().ok()?;
         Some(hit::Cuts::of(marked, self.view.picked?))
@@ -671,7 +682,7 @@ impl State {
         }
     }
 
-    /// Make the picked sample ready to play, again only where the bytes, the pick, the
+    /// Make the picked hit ready to play, again only where the bytes, the pick, the
     /// kind or the cleaning changed, so a key is heard as soon as it goes down. Nothing
     /// while the take's noise is still being found.
     pub fn prepare(&mut self) {
@@ -717,10 +728,10 @@ impl State {
             .then(|| self.read.settings.floor.unwrap_or_default())
     }
 
-    /// The picked sample as the instrument will play it, heard as the take's kind, and
+    /// The picked hit as the instrument will play it, heard as the take's kind, and
     /// cleaned of `noise` where it is given.
     ///
-    /// ⚠️ Shapes the sample's audio: run when it is asked to play, not per frame.
+    /// ⚠️ Shapes the hit's audio: run when it is asked to play, not per frame.
     pub fn sounding(
         &self,
         noise: Option<&nord_format::take::clean::Noise>,
@@ -744,12 +755,12 @@ impl State {
         audition::Sounding::of(audio, &cuts, root, &rules, noise, loudest)
     }
 
-    /// Whether the file marks samples, so the take's cards show.
+    /// Whether the file marks hits, so the take's cards show.
     pub fn marks_samples(&self) -> bool {
         self.read.marks.as_ref().is_ok_and(marks_a_stroke)
     }
 
-    /// Whether a library can be built from the take: it marks samples and its audio
+    /// Whether a library can be built from the take: it marks hits and its audio
     /// reads, which on the web a take too large for the browser does not.
     pub fn builds(&self) -> bool {
         self.marks_samples() && self.read.source.is_ok()
@@ -823,8 +834,8 @@ impl State {
         Ok(match (clipped, notes) {
             (0, _) => None,
             (_, 1) => Some("it clips".to_string()),
-            (1, _) => Some(format!("1 of {notes} notes clips")),
-            _ => Some(format!("{clipped} of {notes} notes clip")),
+            (1, _) => Some(format!("1 of {notes} strikes clips")),
+            _ => Some(format!("{clipped} of {notes} strikes clip")),
         })
     }
 }
@@ -842,6 +853,7 @@ pub fn ui(
 ) -> (bool, Option<audition::Ask>) {
     let mut audition = false;
     let mut asked = None;
+    state.before_edit = None;
     let audio = state.read.source.as_ref().ok();
     state.detect.follow(sets, audio);
     if let Some(said) = state.detect.said() {
@@ -907,6 +919,9 @@ pub fn ui(
                 place,
                 &mut state.close,
             );
+            if wanted.is_some() {
+                state.before_edit = Some((state.view.clone(), state.close.clone()));
+            }
             if let (Some(hit::Wanted::Rename(to)), Some(from), Ok(held)) =
                 (wanted, picked, &read.marked)
             {
@@ -955,8 +970,8 @@ pub fn ui(
     (audition, asked)
 }
 
-/// The sets that do what the close lane's menus asked of the picked sample, or of the
-/// place clicked: a sample added there is picked, and a sample deleted leaves its place.
+/// The sets that do what the close lane's menus asked of the picked hit, or of the
+/// place clicked: a hit added there is picked, and a hit deleted leaves its place.
 fn pieces(
     wanted: hit::Wanted,
     audio: &Audio,
@@ -966,7 +981,7 @@ fn pieces(
 ) {
     use hit::{Piece, Wanted};
     if let (Wanted::Add(Piece::Hit), Some(place)) = (wanted, view.place) {
-        let added = adding::sample(audio, marked, place);
+        let added = adding::hit(audio, marked, place);
         sets.push((format!("{ADDED}{}", added.label), span_value(&added.attack)));
         if let Some(release) = &added.release {
             sets.push((
@@ -986,7 +1001,7 @@ fn pieces(
     };
     match wanted {
         Wanted::Add(Piece::Release) => {
-            if let Some(release) = adding::key_off(audio, attack.start, attack.end) {
+            if let Some(release) = adding::release(audio, attack.start, attack.end) {
                 sets.push((
                     format!("{ADDED}{}", adding::release_label(hit)),
                     span_value(&release),
@@ -1010,14 +1025,14 @@ fn pieces(
     }
 }
 
-/// What the arrow that picks the sample before the picked one says, on hover.
+/// What the arrow that picks the hit before the picked one says, on hover.
 pub const BEFORE: &str = "Previous hit";
 
-/// What the arrow that picks the sample after the picked one says, on hover.
+/// What the arrow that picks the hit after the picked one says, on hover.
 pub const AFTER: &str = "Next hit";
 
-/// The small arrows at the far right of the row under the picked sample, which pick the
-/// sample before and after it in the take.
+/// The small arrows at the far right of the row under the picked hit, which pick the
+/// hit before and after it in the take.
 fn steps(ui: &mut egui::Ui, state: &mut State) {
     let Some((total, rate)) = state.audio().map(|audio| {
         let channels = usize::from(audio.channels.max(1));
@@ -1048,7 +1063,7 @@ fn steps(ui: &mut egui::Ui, state: &mut State) {
     });
 }
 
-/// The label of Play while a sample is picked: it plays that sample as the take holds it,
+/// The label of Play while a hit is picked: it plays that hit as the take holds it,
 /// from its first cut to its last, unshaped.
 pub const PLAY_ORIGINAL: &str = "Play original";
 

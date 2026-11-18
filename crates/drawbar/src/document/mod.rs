@@ -237,8 +237,8 @@ impl Opened {
     /// ⚠️ Reading a WAV copies every sample, so it happens once here and never per
     /// frame.
     ///
-    /// A WAV left for another tab comes back as `parked`, with its history and the
-    /// noise found for it.
+    /// A WAV left for another tab comes back as `parked`, with its view, its pick and
+    /// the noise found for it.
     fn new(
         asset: Asset<'_>,
         view: bool,
@@ -280,8 +280,8 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The WAV documents left for another tab, so their undo and the noise found for
-    /// them outlive the switch. Only those still in a tab are kept; see
+    /// The WAV documents left for another tab, so their view, their pick and the noise
+    /// found for them outlive the switch. Only those still in a tab are kept; see
     /// [`Document::keep_wavs`].
     parked: std::collections::HashMap<u64, wav::State>,
     /// The Advanced table's filter and selected cell. One table serves every tab; see
@@ -1414,6 +1414,10 @@ impl Document {
             Err(why) => {
                 log.error(why.clone());
                 self.refused(Some(why.clone()));
+                let open = self.open.as_mut().filter(|open| open.id == id);
+                if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
+                    state.refused();
+                }
                 return Err(why);
             }
         };

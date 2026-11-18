@@ -1,4 +1,4 @@
-//! A sample, key-off or loop added where the take marks none: placed where the take's
+//! A hit, release or loop added where the take marks none: placed where the take's
 //! level puts it and named by its pitch and loudness, or, where those are not found,
 //! placed at the operator's click with lengths to drag, so an add never fails for want
 //! of a hit.
@@ -13,7 +13,7 @@ use nord_format::wav::Audio;
 use super::take::{Hit, Marked, Part};
 
 /// How far before the place the search for its hit reaches, in seconds: a click may
-/// fall late in a long sample, and the hit's onset is found only with quiet before it.
+/// fall late in a long hit, and the hit's onset is found only with quiet before it.
 const BEFORE: f64 = 8.0;
 
 /// How far after the place the search for its hit, and its key-up, reaches, in seconds.
@@ -26,25 +26,25 @@ const LATE: f64 = 0.2;
 /// How long an attack is where no key-up is found, in seconds.
 const ATTACK: f64 = 3.0;
 
-/// How long a key-off reaches at most, and where it finds no quiet, in seconds.
-const KEY_OFF_MOST: f64 = 2.0;
-const KEY_OFF: f64 = 0.5;
+/// How long a release reaches at most, and where it finds no quiet, in seconds.
+const RELEASE_MOST: f64 = 2.0;
+const RELEASE: f64 = 0.5;
 
-/// How long a key-off found by its fall lasts at least, in seconds.
-const KEY_OFF_LEAST: f64 = 0.1;
+/// How long a release found by its fall lasts at least, in seconds.
+const RELEASE_LEAST: f64 = 0.1;
 
-/// How far over the take's noise a key-off ends, in dB.
-const KEY_OFF_OVER_DB: f64 = 6.0;
+/// How far over the take's noise a release ends, in dB.
+const RELEASE_OVER_DB: f64 = 6.0;
 
-/// The note a sample is named by where no pitch is found and no other sample is near.
+/// The note a hit is named by where no pitch is found and no other hit is near.
 const MIDDLE_C: u8 = 60;
 
 /// How far past the loudest or the softest of its note's layers a new layer's value is
 /// put, where it is louder or softer than all of them.
 const LAYER_BEYOND: f64 = 10.0;
 
-/// A sample to add: the hit it names, the label of its attack, and the frames of its
-/// attack and its key-off, where the take runs on past the attack.
+/// A hit to add: its note and layer, the label of its attack, and the frames of its
+/// attack and its release, where the take runs on past the attack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Added {
     pub hit: Hit,
@@ -95,13 +95,15 @@ fn frames_of(audio: &Audio) -> usize {
     audio.samples.len() / usize::from(audio.channels.max(1))
 }
 
-/// The sample of the hit at `place` in `audio`, whose file marks `marked`: from the hit's
-/// onset to its key-up, with a key-off after, named by its pitch and by its loudness
-/// against its note's other layers. A hit whose onset a sample already marks is passed
-/// over, so a click in the quiet after a sample adds no second one of it. Where no hit
-/// is found, it starts at `place`; where no key-up is, it lasts [`ATTACK`]; where no
-/// pitch is, it is named by the sample nearest it, or as middle C.
-pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
+/// The hit at `place` in `audio`, whose file marks `marked`: from the hit's
+/// onset to its key-up, with a release after, named by its pitch and by its loudness
+/// against its note's other layers. A hit an attack holds the onset of, or starts
+/// within, is passed over, so a click in the quiet after a hit adds no second one of
+/// it, even where its start was trimmed past the onset. Where no hit is found, it starts
+/// at `place`; where no key-up is, it lasts [`ATTACK`]; where no pitch is, it is named
+/// by the hit nearest it, or as middle C. Neither it nor its release runs past the
+/// start of the next stroke the take marks.
+pub fn hit(audio: &Audio, marked: &Marked, place: u32) -> Added {
     let rate = f64::from(audio.rate.max(1));
     let secs = |seconds: f64| (seconds * rate) as usize;
     let total = frames_of(audio).max(1);
@@ -111,15 +113,24 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
     let mut keyup = None;
     let mut pitch = None;
     if let Some(window) = Window::of(audio, place.saturating_sub(secs(BEFORE))..stop) {
-        let marked_at = |frame: usize| {
-            marked.regions.iter().any(|mark| {
-                matches!(mark.part, Part::Attack | Part::Resonance)
-                    && mark.frames.contains(&(frame as u32))
-            })
-        };
         let onsets = detect::onsets(&window.env);
-        let starts: Vec<usize> = (onsets.iter().copied())
-            .filter(|&at| !marked_at(window.frame(at)))
+        // A hit an attack holds the onset of, or starts within, is marked: its start
+        // may have been trimmed past the onset.
+        let marked_over = |hit: Range<usize>| {
+            (marked.regions.iter())
+                .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance))
+                .any(|mark| {
+                    let start = mark.frames.start as usize;
+                    mark.frames.contains(&(hit.start as u32)) || hit.contains(&start)
+                })
+        };
+        let hit_of = |i: usize| {
+            let end = onsets.get(i + 1).map_or(window.env.db.len(), |&next| next);
+            window.frame(onsets[i])..window.frame(end)
+        };
+        let starts: Vec<usize> = (0..onsets.len())
+            .filter(|&i| !marked_over(hit_of(i)))
+            .map(|i| onsets[i])
             .collect();
         // The last hit to start by the click, a moment after it allowed; else the
         // nearest.
@@ -151,10 +162,21 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
             }
         }
     }
+    // The next stroke the take marks, which the new one must not run over.
+    let next = (marked.regions.iter())
+        .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance | Part::Release))
+        .map(|mark| mark.frames.start as usize)
+        .filter(|&start| start > onset)
+        .min()
+        .unwrap_or(total);
     let end = keyup
         .unwrap_or(onset + secs(ATTACK))
         .min(stop.max(onset + 1))
+        .min(next)
         .clamp(onset + 1, total);
+    let release = release(audio, onset as u32, end as u32)
+        .map(|release| release.start..release.end.min(next as u32))
+        .filter(|release| !release.is_empty());
     let root = pitch
         .map(|midi| midi.round())
         .filter(|midi| (21.0..=108.0).contains(midi))
@@ -169,15 +191,15 @@ pub fn sample(audio: &Audio, marked: &Marked, place: u32) -> Added {
         hit,
         label: attack_label(hit),
         attack: onset as u32..end as u32,
-        release: key_off(audio, onset as u32, end as u32),
+        release,
     }
 }
 
-/// The key-off of an attack over `attack_start` to `keyup` in `audio`: from the key-up
-/// to where the take falls to [`KEY_OFF_OVER_DB`] over its noise, at most
-/// [`KEY_OFF_MOST`] on, or [`KEY_OFF`] long where it never does. None where the take
+/// The release of an attack over `attack_start` to `keyup` in `audio`: from the key-up
+/// to where the take falls to [`RELEASE_OVER_DB`] over its noise, at most
+/// [`RELEASE_MOST`] on, or [`RELEASE`] long where it never does. None where the take
 /// ends at the key-up.
-pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Option<Range<u32>> {
+pub fn release(audio: &Audio, attack_start: u32, keyup: u32) -> Option<Range<u32>> {
     let rate = f64::from(audio.rate.max(1));
     let secs = |seconds: f64| (seconds * rate) as usize;
     let total = frames_of(audio);
@@ -185,8 +207,8 @@ pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Option<Range<u32
     if keyup >= total {
         return None;
     }
-    let most = (keyup + secs(KEY_OFF_MOST)).min(total);
-    let fallback = (keyup + secs(KEY_OFF)).min(total).max(keyup + 1);
+    let most = (keyup + secs(RELEASE_MOST)).min(total);
+    let fallback = (keyup + secs(RELEASE)).min(total).max(keyup + 1);
     // From before the attack, so the window's floor is the take's quiet, not the tail's.
     let from = (attack_start as usize).saturating_sub(secs(BEFORE));
     let end = Window::of(audio, from..most)
@@ -194,11 +216,11 @@ pub fn key_off(audio: &Audio, attack_start: u32, keyup: u32) -> Option<Range<u32
             let floor = window.env.floor();
             let first = window.at(keyup) + 1;
             (first..window.env.db.len())
-                .find(|&at| window.env.db[at] <= floor + KEY_OFF_OVER_DB)
+                .find(|&at| window.env.db[at] <= floor + RELEASE_OVER_DB)
                 .map(|at| window.frame(at))
         })
-        // A key-off quiet from its start found no fall to end at.
-        .filter(|&end| end >= keyup + secs(KEY_OFF_LEAST))
+        // A release quiet from its start found no fall to end at.
+        .filter(|&end| end >= keyup + secs(RELEASE_LEAST))
         .unwrap_or(fallback)
         .clamp(keyup + 1, total);
     Some(keyup as u32..end as u32)
@@ -224,7 +246,7 @@ fn peak_db(audio: &Audio, from: usize, len: usize) -> f64 {
     20.0 * (f64::from(peak) + 1e-9).log10()
 }
 
-/// The root of the sample whose attack starts nearest `frame`.
+/// The root of the hit whose attack starts nearest `frame`.
 fn nearest_root(marked: &Marked, frame: u32) -> Option<u8> {
     marked
         .regions
@@ -235,9 +257,9 @@ fn nearest_root(marked: &Marked, frame: u32) -> Option<u8> {
         .map(|(root, _)| root)
 }
 
-/// The layer a new sample of `root` whose peak is `db` takes: a value between the values
+/// The layer a new hit of `root` whose peak is `db` takes: a value between the values
 /// of the note's layers either side of it in loudness, the loudest valued lowest, and
-/// one no other sample of the note has; or, where the note names its layers by index,
+/// one no other hit of the note has; or, where the note names its layers by index,
 /// the next index.
 fn layer(audio: &Audio, marked: &Marked, root: u8, db: f64) -> LayerTag {
     // A note whose layers are named by index takes the next index: the build refuses a
@@ -300,7 +322,7 @@ pub fn attack_label(hit: Hit) -> String {
     encode::stroke_name(hit.0, Bank::Attack, hit.1)
 }
 
-/// The label of `hit`'s key-off.
+/// The label of `hit`'s release.
 pub fn release_label(hit: Hit) -> String {
     encode::stroke_name(hit.0, Bank::Release, hit.1)
 }
@@ -340,20 +362,20 @@ mod tests {
     #[test]
     fn a_clicked_hit_is_found_and_named_by_its_pitch() {
         let audio = take(0.5);
-        let added = sample(&audio, &Marked::default(), RATE * 2);
+        let added = hit(&audio, &Marked::default(), RATE * 2);
         assert_eq!(added.hit, (57, LayerTag::Value(0)), "A3, the only layer");
         assert_eq!(added.label, "057-b0-v00");
         let onset = f64::from(added.attack.start) / f64::from(RATE);
         assert!((onset - 1.0).abs() < 0.05, "onset {onset}");
         let keyup = f64::from(added.attack.end) / f64::from(RATE);
         assert!((keyup - 3.0).abs() < 0.1, "key-up {keyup}");
-        let release = added.release.expect("a key-off");
+        let release = added.release.expect("a release");
         assert_eq!(release.start, added.attack.end);
         let quiet = f64::from(release.end) / f64::from(RATE);
-        assert!(quiet > 3.05 && quiet < 3.5, "key-off end {quiet}");
+        assert!(quiet > 3.05 && quiet < 3.5, "release end {quiet}");
     }
 
-    /// A click in the quiet after a marked sample adds no second one of it: the sample at
+    /// A click in the quiet after a marked hit adds no second one of it: the hit at
     /// the click is placed there, not over the marked one's onset.
     #[test]
     fn a_hit_already_marked_is_not_marked_again() {
@@ -362,7 +384,7 @@ mod tests {
             regions: vec![take::mark("057-b0-v00", RATE..RATE * 3)],
             loops: Vec::new(),
         };
-        let added = sample(&audio, &marked, RATE * 4);
+        let added = hit(&audio, &marked, RATE * 4);
         assert!(
             added.attack.start >= RATE * 3,
             "the attack starts at {}, inside the marked one",
@@ -370,16 +392,55 @@ mod tests {
         );
     }
 
-    /// A note held to the take's end has no key-off: none is made past the audio.
+    /// A hit whose attack starts a little after its onset, trimmed there, is marked all
+    /// the same: a click after it adds no second one of it.
     #[test]
-    fn a_note_held_to_the_take_s_end_has_no_key_off() {
+    fn a_hit_trimmed_past_its_onset_is_not_marked_again() {
+        let audio = take(0.5);
+        let trimmed = RATE + RATE / 50;
+        let marked = Marked {
+            regions: vec![take::mark("057-b0-v00", trimmed..RATE * 3)],
+            loops: Vec::new(),
+        };
+        let added = hit(&audio, &marked, RATE * 4);
+        assert!(
+            added.attack.start >= RATE * 3,
+            "the attack starts at {}, over the marked hit",
+            added.attack.start
+        );
+    }
+
+    /// An attack added in a gap stops where the next marked stroke starts, and has no
+    /// release where it reaches it.
+    #[test]
+    fn an_attack_added_in_a_gap_stops_at_the_next_stroke() {
+        let audio = Audio {
+            rate: RATE,
+            channels: 1,
+            samples: vec![0.0; RATE as usize * 6],
+        };
+        let marked = Marked {
+            regions: vec![
+                take::mark("064-b0-v22", 0..1000),
+                take::mark("064-b0-v40", RATE * 2..RATE * 3),
+            ],
+            loops: Vec::new(),
+        };
+        let added = hit(&audio, &marked, RATE);
+        assert_eq!(added.attack, RATE..RATE * 2);
+        assert_eq!(added.release, None);
+    }
+
+    /// A note held to the take's end has no release: none is made past the audio.
+    #[test]
+    fn a_note_held_to_the_take_s_end_has_no_release() {
         let mut audio = take(0.5);
         audio.samples.truncate(RATE as usize * 2);
-        let added = sample(&audio, &Marked::default(), RATE + RATE / 2);
+        let added = hit(&audio, &Marked::default(), RATE + RATE / 2);
         assert_eq!(added.attack.end, RATE * 2, "the attack runs to the end");
         assert_eq!(added.release, None);
-        assert_eq!(key_off(&audio, RATE, RATE * 2), None);
-        assert!(key_off(&audio, RATE, RATE * 2 - 1).is_some());
+        assert_eq!(release(&audio, RATE, RATE * 2), None);
+        assert!(release(&audio, RATE, RATE * 2 - 1).is_some());
     }
 
     /// A take at a rate whose Nyquist is under the pitch search's top still names its
@@ -401,14 +462,14 @@ mod tests {
             channels: 1,
             samples,
         };
-        let added = sample(&audio, &Marked::default(), rate * 2);
+        let added = hit(&audio, &Marked::default(), rate * 2);
         assert_eq!(added.hit.0, 81, "A5");
     }
 
-    /// Silence has no hit and no pitch: the sample is still added, at the click, named
-    /// by the sample nearest it.
+    /// Silence has no hit and no pitch: the hit is still added, at the click, named
+    /// by the hit nearest it.
     #[test]
-    fn where_nothing_is_found_the_sample_still_goes_at_the_click() {
+    fn where_nothing_is_found_the_hit_still_goes_at_the_click() {
         let audio = Audio {
             rate: RATE,
             channels: 1,
@@ -418,7 +479,7 @@ mod tests {
             regions: vec![take::mark("064-b0-v22", 0..1000)],
             loops: Vec::new(),
         };
-        let added = sample(&audio, &marked, RATE);
+        let added = hit(&audio, &marked, RATE);
         assert_eq!(added.attack.start, RATE);
         assert_eq!(added.attack.end, RATE * 4, "an attack of 3 s");
         assert_eq!(added.hit.0, 64, "named by its neighbor");
@@ -428,7 +489,7 @@ mod tests {
             "a value the note does not have"
         );
         assert_eq!(added.release.map(|r| r.len()), Some(RATE as usize / 2));
-        let alone = sample(&audio, &Marked::default(), RATE);
+        let alone = hit(&audio, &Marked::default(), RATE);
         assert_eq!(alone.hit.0, MIDDLE_C);
     }
 
@@ -441,7 +502,7 @@ mod tests {
             regions: vec![take::mark("057-b0-l00", RATE * 5..RATE * 6)],
             loops: Vec::new(),
         };
-        let added = sample(&audio, &marked, RATE * 2);
+        let added = hit(&audio, &marked, RATE * 2);
         assert_eq!(added.hit, (57, LayerTag::Index(1)));
         assert_eq!(added.label, "057-b0-l01");
     }
@@ -463,7 +524,7 @@ mod tests {
             ],
             loops: Vec::new(),
         };
-        let added = sample(&audio, &marked, RATE * 2);
+        let added = hit(&audio, &marked, RATE * 2);
         let LayerTag::Value(value) = added.hit.1 else {
             panic!("{:?}", added.hit);
         };

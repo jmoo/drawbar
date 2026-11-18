@@ -52,78 +52,66 @@ encoder cannot reproduce stops the build with the reason.
 
 Drop WAVs on the window, or use **File ▸ Import…**, to copy them into your
 library, where they are listed beside your sounds. A WAV opens as a document of
-its own: the whole file's level, with its rate,
-channels, sample format and length in the header. It reads PCM of 8, 16, 24 or
-32 bits and 32- or 64-bit float, and plays at the file's own depth. **Play**
-plays it. **Gain**, over the take, is the file's total gain against the file as last saved:
-**Apply gain** sets it, so 10 dB and then 12 dB is 12 dB in all, and 0 dB
-gives the saved file back. The line beside it first says how many of the
-file's notes that gain would clip. The file keeps its own format: a 24-bit WAV
-stays 24-bit, and a float one never clips. A gain is an edit like any other: a
-WAV closed unsaved opens again on its gain, **Save** writes it into the file,
-which the next gain then starts from, and **Revert** takes it back. A WAV drawbar cannot read, such as a compressed one, says why and
-offers neither.
+its own, with its rate, channels, sample format and length in the header.
+drawbar reads PCM of 8 to 32 bits and 32- or 64-bit float, at 8,000 Hz or more.
+drawbar-web opens WAVs of up to 120 MB; open a larger one in the desktop app. A
+WAV drawbar cannot read, such as a compressed one, says why.
 
-The waveform is the take's lane: its level, the louder channel at each point, rising from a baseline to the take's loudest point, drawn linear at first, so each hit's shape shows as it decays, with lines at levels of full scale every 6 dB where they have room. The small **+** and **−** right of the lane, at the top and foot of its scale, bend the scale step by step toward log, up to five steps, so quiet sound such as a release stands taller, and back toward linear; the strip between them says **lin** or the step. The scale changes, not the gain, and the lines say where each level is. Each note the file marks is one box around its regions, named by its attack, such as `C4 v22` for `060-b0-v22` and `060-b2-v22`, read by their labels as `nord piano build` reads them; a region labeled any other way is boxed under its own label. The header's **Take** says how many hits, regions and loops the file marks, or **raw: no regions** for a WAV as recorded; the list calls a WAV with regions a **WAV (processed)**. Hover over a box for its regions' labels; click one to pick its note, which is outlined in the text color. Click where no box is, such as on a hit the file does not mark, and a line marks the place: the lane under the take shows from half a second before it to six seconds after, for **Add ▸ Hit**, with the same zoom as a picked hit's, and drags as it does; **Play original** plays what that lane shows. **Zoom in** and **Zoom out** halve and double the time shown, down to 3 seconds; drag the lane, or the scroll bar under it, to move along the take; **Whole file** shows the whole file again.
+**Play** plays the file. **Gain**, set with **Apply gain**, is the file's total
+gain against the file as last saved, and the line beside it says how many
+strikes that gain would clip.
+The file keeps its own format. Every change to a WAV is an edit: **Save** writes
+it into the file and **Revert** takes it back.
 
-Under the take, the picked hit is drawn close up, from its first cut to its last
-with a margin: its attack, loop, release and fade, and a marker at each cut
-point (attack start and end, loop start and end, release start and end, and
-where a fade starts). **Play original** plays the picked hit as the take holds it, from its first cut to its last, unshaped. Hover over a marker for its name and time. **Zoom in**
-and **Zoom out** go down to 50 ms, **Loop** shows the loop, and **Whole hit**
-the whole hit again; drag the lane to move along. Its **+** and **−** set its scale as the take's do.
+### The take
 
-**Detect**, on the header's second row for a WAV, finds the take's hits by
-`nord piano prep`'s rules with no note list, at the take's own rate (prep first
-resamples to 35,002 Hz, so on a 44.1 or 48 kHz take the two can cut a few frames
-apart): each hit named by its pitch, a note's
-hits chosen as up to four layers by level, each attack cut from its strike to its
-key-up with a loop or a fade, and a release after it. It marks them in place of
-the take's regions, and the line over the take says
-how many it marked and skipped. **Skip hits … or less over noise**, beside it,
-skips a hit standing that little over the take's noise, 54 dB unless you change
-it: the build raises every layer to one level, and a quiet hit's hiss rises with
-it. Detect runs on its own,
-so the take stays live while it works. **Build piano library…**, right of it,
-opens **New ▸ Piano library** with the take in it as it is now, unsaved edits
-included, once the take marks hits. The build cleans each hit where Clean
-audio is on: the take holds only that choice, and the cleaning is done as the
-library is built.
+A WAV recorded for a piano library is a take: notes played one after another,
+which the file marks as hits. The waveform shows the whole take. Each hit is a
+box around its regions, named by its note and layer, such as `C4 v22`. The
+header's **Take** says how many hits, regions and loops the file marks, or
+**raw: no regions**. The **+** and **−** right of the lane bend its scale toward
+log, so quiet sound such as a release stands taller. **Zoom in**, **Zoom out**
+and **Whole file** change the time shown; drag the lane or its scroll bar to
+move along.
 
-**Add** and **Delete**, in the row over the picked hit, add and delete marks; the audio is never changed, and each is an edit like a moved cut. **Add ▸ Hit**, at a place clicked in the take, marks a new hit: drawbar finds the hit nearest before the place, its key-up and its pitch, and names it by the pitch and by how loud it is against the note's other layers, a louder layer valued lower, as `nord piano build` reads them. The hit gets an attack from the hit to its key-up and a release after it, and is picked, ready to drag. Where drawbar finds no hit it starts at the place, where it finds no key-up the attack lasts 3 seconds, and where it finds no pitch the hit is named by the note of the hit nearest it, or as middle C. To rename a hit, type its note and layer, such as `D4 v30`, in the name box over its lane: it is renamed, every region of it, when you leave the box, and Escape leaves it as it was. A name the take marks already, or one that is not a note and a layer, shows in red and is not taken. **Add ▸ Release** gives the picked hit a release from its key-up to where the take falls to near its noise, up to 2 seconds. **Add ▸ Loop** gives it a quarter-second loop three-fifths of the way into its attack, to drag into place. **Delete ▸ Hit**, **Loop** or **Release** deletes that part of the picked hit's marks; deleting the note leaves its place marked. The small **←** and **→** at the far right of the row under it pick the hit before and after it in the take, bringing it into view. A dragged loop marker snaps to the nearest point, within 40 ms, where the take rises through zero, so the loop joins smoothly; hold Alt to place it exactly. Drag a marker to move its
-cut: both lanes follow it, and when you let go its region or loop is written to
-the file's marks, one edit a drag, with the audio untouched. A marker stops at the
-cuts either side of it, so a loop stays inside its attack and a fade ends with
-it. Moved cuts are edits like a gain: **Save** writes them, **Revert** takes
-them back, and a gain applied after them keeps them.
+Click a box to pick its hit. Click where no box is to mark a place, such as a
+strike the file does not mark yet.
 
-Under the picked hit, beside **Play original**, its controls play it as the
-instrument will. **Category**, by the gain, is the take's category,
-one of those a piano library files itself under, grand until you choose; the
-build applies that category's defaults, and levels and fades can be changed
-afterwards in the piano editor. **Clean audio**, on unless you turn it off,
-cleans each hit of the take's hum and hiss as `nord piano build` cleans it;
-the take's noise is found once, from when the take opens, which takes a few
-seconds on a long take, and a control pressed before then says to wait. Where
-no hum or hiss is found, as in a one-note file with no quiet stretch after its
-note, the caption under Clean audio says why and the hit is heard as
-recorded. Both
-are edits like a gain, kept in the WAV on **Save**, and the build follows them:
-a take with Clean audio off is built as recorded. Click **Play hit** to hear
-the whole hit, and click it again, as **Stop**, to stop it: the attack, once round its loop, then the release. Hold it
-down as you would hold a key: the attack plays shaped as `nord piano build`
-shapes it, with its loop evened out and crossfaded, the note's loudest layer at
-its recorded level, as Play original plays it, and a softer layer half its
-recorded gap under it,
-fading from the start as a library of that category fades, then round its loop,
-fading as that category's loops fade, until you let go. Let go, and it fades
-away as a key-up fades it, under its release, at the balance the build plays the
-release at; a key above the category's damper rings on instead. **Loop wrap**
-plays from a second before the loop's end and round the loop, at one level, so
-the join is heard and not the fade; click it again to stop. **Release** plays
-the release alone. The fades are the ones a library built from rules states: the
-key-up fade is confirmed on the instrument, and each category's rates are fitted
-to vendor libraries, so take them as close, not exact.
+**Detect** finds the take's hits as `nord piano prep` does: it names each by its
+pitch, chooses up to four layers of each note by level, and marks each hit's
+attack, its loop or fade, and its release, in place of the take's regions.
+**Skip hits** sets how far over the take's noise a hit must stand to be kept:
+the build raises every layer to one level, so a quiet hit's hiss would rise with
+it. **Build piano library…** opens **New ▸ Piano library** with the take as it
+is now.
+
+### The picked hit
+
+Under the take, the picked hit is drawn close up, with a marker at each cut: the
+start and end of its attack, loop and release, and where a fade starts. Drag a
+marker to move its cut. A loop marker snaps to where the take rises through
+zero, so the loop joins smoothly; hold Alt to place it exactly. **←** and **→**
+pick the hit before and after it.
+
+**Add** and **Delete** mark and unmark parts of the take; the audio is never
+changed. **Add ▸ Hit** marks the strike at the place clicked, named by its pitch
+and by how loud it is against the note's other layers. **Add ▸ Release** and
+**Add ▸ Loop** give the picked hit a release or a loop to drag into place.
+**Delete** removes the hit, its loop or its release. To rename a hit, type its
+note and layer, such as `D4 v30`, in its name box.
+
+### Hearing it as the instrument will
+
+**Play original** plays the picked hit, or the place clicked, as recorded.
+**Category** is the kind of piano the take is built as, and the build applies
+its defaults. **Clean audio** takes out the take's hum and hiss as the build
+does; with it off, the take is built as recorded. **Play hit** plays the hit as
+the instrument will: hold it down as you would a key, and let go to hear its
+release. **Loop wrap** plays round the loop, so the join is heard, and
+**Release** plays the release alone. The fades are close to the instrument's,
+not exact.
+
+### Instruments from WAVs
 
 **New ▸ Sample instrument (.nsmp)…** takes several WAVs, one zone each, with a
 root key for each. **New ▸ Sample Editor project (.nsmpproj)…** makes a project

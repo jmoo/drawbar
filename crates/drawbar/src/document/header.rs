@@ -606,9 +606,9 @@ fn take_row(
     loud(ui, entity, facts, stage, act);
     if let Some(limit) = facts.extras.limit {
         let mut held = limit;
-        let hint = "Detect skips a note standing this little over the take's noise: the \
-                    build raises every layer to one level, and a quiet note's hiss rises \
-                    with it";
+        let hint = "Detect skips a hit whose level is no more than this over the take's \
+                    noise: the build raises every layer to one level, and a quiet hit's \
+                    hiss rises with it";
         ui.label(egui::RichText::new("Skip hits").color(quiet))
             .on_hover_text(hint);
         let changed = ui
