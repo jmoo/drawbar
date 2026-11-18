@@ -4503,6 +4503,32 @@ fn an_unsaved_edit_over_a_file_changed_since_asks_which_to_keep() {
     assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
 }
 
+/// A draft of a file nothing tags is kept by its path alone, which does not say the file
+/// there now is the one it was made over.
+#[test]
+fn an_unsaved_edit_kept_by_a_path_whose_file_changed_since_comes_back_apart_from_it() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("a.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let a = first.named("a.ne5p");
+    let edited = first.edit(a, "96");
+    first.autosave();
+    first.close();
+    let changed = with_gain(&program, "12");
+    fs::write(root.at("a.ne5p"), &changed).unwrap();
+
+    let mut second = Session::open(&root);
+    second.read_all();
+    let transcript = second.bench.log.transcript();
+    let listed = second.bench.workspace.listed();
+    let listed: Vec<(Vec<u8>, bool)> = listed
+        .map(|entity| (entity.bytes.to_vec(), entity.is_unsaved()))
+        .collect();
+    assert!(listed.contains(&(changed, false)), "{transcript}");
+    assert!(listed.contains(&(edited, true)), "{transcript}");
+}
+
 /// An unsaved edit of a slot's view is kept by the slot, outside the library folder,
 /// and is there again when the same instrument's slot is viewed after a quit.
 #[test]

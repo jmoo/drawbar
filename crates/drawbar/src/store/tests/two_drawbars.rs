@@ -935,6 +935,34 @@ fn an_edit_kept_under_an_entity_a_join_deletes_goes_back_over_its_file() {
     }
 }
 
+/// Each unsaved edit kept for the library at `root`, rewritten without the path its header
+/// records, as drawbar 0.11.0 kept edits.
+fn without_kept_paths(root: &Temp) {
+    let (unsaved, mut stripped) = (root.local().join("unsaved"), 0);
+    for keep in fs::read_dir(&unsaved).unwrap() {
+        let keep = keep.unwrap().path();
+        let kept = fs::read(&keep).unwrap();
+        let end = kept.iter().position(|&byte| byte == b'\n').unwrap();
+        let mut header: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&kept[..end]).unwrap();
+        stripped += usize::from(header.remove("path").is_some());
+        let mut rewritten = serde_json::to_vec(&header).unwrap();
+        rewritten.extend_from_slice(&kept[end..]);
+        fs::write(&keep, rewritten).unwrap();
+    }
+    assert!(stripped > 0, "no keep in {unsaved:?} recorded a path");
+}
+
+#[test]
+fn an_edit_kept_with_no_path_under_an_entity_a_join_deletes_goes_back_over_its_file() {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let edited = edited_unseen(&ours, &theirs);
+    for (root, edited) in [&ours, &theirs].into_iter().zip(edited) {
+        without_kept_paths(root);
+        assert_edit_over_strings(&Session::open(root), &edited);
+    }
+}
+
 /// The library at `from` and this install's own state for it, copied to `to`.
 fn copy_library(from: &Temp, to: &Temp) {
     copy_tree(&from.0, &to.0);
@@ -993,25 +1021,31 @@ fn an_edit_whose_joined_entitys_file_changed_never_goes_over_a_copy_elsewhere() 
     }
 }
 
-/// Two drawbars each tag `Strings.ne5p` before either sees the other, and the file then
-/// changes outside, so it holds neither entity's facts: the higher entity is alike to the
-/// lower, and the file's row shows the tags of both. Renaming or removing a tag reaches the
-/// entity that wears it, whichever that is.
-#[test]
-fn a_tag_of_an_entity_alike_to_a_rows_own_shows_on_the_row_and_is_renamed_and_removed() {
-    let (ours, theirs) = (Temp::new(), Temp::new());
+/// Two drawbars tag `Strings.ne5p`, "Live" at `ours` and "Gig" at `theirs`, before either
+/// sees the other, and the file then changes outside, so it holds neither entity's facts:
+/// the higher entity is alike to the lower. Returns the drawbar at `ours` once it has seen
+/// both, and the one at `theirs`.
+fn tagged_alike(ours: &Temp, theirs: &Temp) -> (Session, Session) {
     let program = Fresh::Program.bytes().unwrap();
     fs::write(ours.at("Strings.ne5p"), &program).unwrap();
     fs::write(theirs.at("Strings.ne5p"), &program).unwrap();
-    let (mut here, mut there) = (Session::open(&ours), Session::open(&theirs));
+    let (mut here, mut there) = (Session::open(ours), Session::open(theirs));
     let file = here.named("Strings.ne5p");
     here.tag(&[file], "Live");
     let file = there.named("Strings.ne5p");
     there.tag(&[file], "Gig");
     fs::write(ours.at("Strings.ne5p"), with_gain(&program, "12")).unwrap();
-    bring_writers(&theirs, &ours);
-
+    bring_writers(theirs, ours);
     here.refocus();
+    (here, there)
+}
+
+/// The row of a file whose entity another is alike to shows the tags of both. Renaming or
+/// removing a tag reaches the entity that wears it, whichever that is.
+#[test]
+fn a_tag_of_an_entity_alike_to_a_rows_own_shows_on_the_row_and_is_renamed_and_removed() {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let (mut here, _there) = tagged_alike(&ours, &theirs);
     let file = here.named("Strings.ne5p");
     let transcript = here.bench.log.transcript();
     assert_eq!(here.worn(file), ["Gig", "Live"], "{transcript}");
@@ -1028,4 +1062,33 @@ fn a_tag_of_an_entity_alike_to_a_rows_own_shows_on_the_row_and_is_renamed_and_re
         "{}",
         again.bench.log.transcript()
     );
+}
+
+/// Taking each tag off the row of a file whose entity another is alike to takes it off
+/// the entity that wears it, whichever that is.
+#[test]
+fn untagging_a_row_takes_a_tag_off_an_entity_alike_to_its_own() {
+    let (ours, theirs) = (Temp::new(), Temp::new());
+    let (mut here, _there) = tagged_alike(&ours, &theirs);
+    let file = here.named("Strings.ne5p");
+    let tags: Vec<u64> = here
+        .bench
+        .browser
+        .tags
+        .all()
+        .iter()
+        .map(|tag| tag.id)
+        .collect();
+    for tag in tags {
+        here.bench.act(vec![Act::Untag {
+            ids: vec![file],
+            tag,
+        }]);
+        here.decided();
+    }
+    here.close();
+    let again = Session::open(&ours);
+    let file = again.named("Strings.ne5p");
+    let transcript = again.bench.log.transcript();
+    assert_eq!(again.worn(file), Vec::<String>::new(), "{transcript}");
 }
