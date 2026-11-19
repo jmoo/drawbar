@@ -104,7 +104,7 @@ impl Envelope {
     /// The envelope of `x`, a take at `rate` as [`highpassed`] returns it, its floor read
     /// by `floor`. A one-note file's rest is found here: the quietest stretch that stays
     /// level, as [`Envelope::rest`] says, and holds none of the pitch of its loudest
-    /// moment, as [`sounds`] hears it.
+    /// moment, as [`REST_HARMONICS`] says.
     pub fn read(x: &[f64], rate: u32, floor: Floor) -> Envelope {
         let env = Envelope::of(x, rate);
         if floor == Floor::Take {
