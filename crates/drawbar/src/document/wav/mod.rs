@@ -198,7 +198,8 @@ pub fn apply(
     let mut out = match total {
         Some(db) => {
             let mut out = original.to_vec();
-            wav::scale(&mut out[layout.data], layout.format.encoding, factor(db)?);
+            wav::scale(&mut out[layout.data], layout.format.encoding, factor(db)?)
+                .map_err(error)?;
             let now = wav::read_marks(current).ok();
             match (&marks, now) {
                 (None, Some(now)) if wav::read_marks(original).ok() != Some(now.clone()) => {
@@ -357,6 +358,9 @@ impl Notes {
         let Encoding::Int { bits } = layout.format.encoding else {
             return Notes::default();
         };
+        let Ok(samples) = wav::int_samples(bytes, layout.data, bits) else {
+            return Notes::default();
+        };
         let x = detect::highpassed(&nord_format::take::plan::mono(audio), audio.rate);
         let env = Envelope::of(&x, audio.rate);
         // ⚠️ A file shorter than one envelope frame has no floor to find onsets over.
@@ -372,7 +376,7 @@ impl Notes {
         let channels = usize::from(layout.format.channels);
         let mut peaks = vec![(0, 0); starts.len()];
         let mut note = 0;
-        for (at, sample) in wav::int_samples(bytes, layout.data, bits).enumerate() {
+        for (at, sample) in samples.enumerate() {
             while starts
                 .get(note + 1)
                 .is_some_and(|next| at / channels >= *next)
@@ -531,7 +535,7 @@ fn held_gain(original: (&[u8], &Audio), edited: (&[u8], &Audio)) -> Option<f64> 
         return None;
     }
     let mut data = was[from.data].to_vec();
-    wav::scale(&mut data, from.format.encoding, factor(db).ok()?);
+    wav::scale(&mut data, from.format.encoding, factor(db).ok()?).ok()?;
     (data[..] == now[to.data]).then_some(db)
 }
 

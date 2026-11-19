@@ -359,7 +359,8 @@ pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a
             parse_stroke_name(&region.label, Stem::None).filter(|_| region.frames > 0)
         else {
             return malformed(named(&format!(
-                "region {:?} at frame {} is no stroke: a region here must span frames                  and be labeled as a stroke's WAV is named, as in 060-b0-l00",
+                "region {:?} at frame {} is no stroke: a region here must span frames \
+                 and be labeled as a stroke's WAV is named, as in 060-b0-l00",
                 region.label, region.start
             )));
         };
@@ -394,7 +395,8 @@ pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a
         }
         if owner.bank == Bank::Release || owner.sample_loop.is_some() || owner.fade.is_some() {
             return malformed(refuse(&format!(
-                "fades {stroke:?}, which is a release, loops, or fades already; only an                  attack or resonance that does not loop fades"
+                "fades {stroke:?}, which is a release, loops, or fades already; only an \
+                 attack or resonance that does not loop fades"
             )));
         }
         owner.fade = Some(fade.start - owner.region.start);
@@ -760,8 +762,6 @@ mod tests {
         assert!(err.to_string().contains("twice"), "{err}");
     }
 
-    /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
-    /// read out of bounds, cleaned or not.
     #[test]
     fn a_take_s_cuts_are_refused_as_its_build_refuses_them() {
         let region = |start, frames, label: &str| Region {
@@ -795,7 +795,12 @@ mod tests {
         refused(&twice, "more than one");
         let mut faded = good.clone();
         faded.regions.push(region(8000, 1000, "060-b0-v22-fade"));
-        refused(&faded, "loops, or fades already");
+        // The whole message, so a lost line join cannot open a gap in it again.
+        refused(
+            &faded,
+            "fades \"060-b0-v22\", which is a release, loops, or fades already; only an \
+             attack or resonance that does not loop fades",
+        );
         refused(
             &Marks {
                 regions: vec![region(1000, 30_000, "060-b0-v22")],
@@ -805,6 +810,8 @@ mod tests {
         );
     }
 
+    /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
+    /// read out of bounds, cleaned or not.
     #[test]
     fn a_region_past_the_audio_s_end_is_refused() {
         let take = Audio {

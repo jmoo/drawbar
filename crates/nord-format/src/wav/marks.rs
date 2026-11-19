@@ -452,11 +452,6 @@ fn sample_period(rate: u32) -> u32 {
     (1e9 / f64::from(rate)).round() as u32
 }
 
-/// `bytes` with its `cue `, `adtl` and `smpl` chunks replaced by ones declaring `marks`,
-/// written after every other chunk, which is copied as it was. No regions writes no
-/// `cue ` or `adtl`; a `smpl` chunk is kept, with `marks.loops` and the old one's header
-/// and sampler data, if the file had one or `marks` has loops. Each loop is tied to the
-/// region holding it by the region's cue id.
 /// The `note` text `bytes` gives each of `regions`, by the label of the cue it was on:
 /// a comment a recorder left on a marker survives an edit of the other marks. None
 /// where the old list does not read.
@@ -480,6 +475,11 @@ fn kept_notes(bytes: &[u8], chunks: &[Chunk], regions: &[Region]) -> Vec<Option<
         .collect()
 }
 
+/// `bytes` with its `cue `, `adtl` and `smpl` chunks replaced by ones declaring `marks`,
+/// written after every other chunk, which is copied as it was. No regions writes no
+/// `cue ` or `adtl`; a `smpl` chunk is kept, with `marks.loops` and the old one's header
+/// and sampler data, if the file had one or `marks` has loops. Each loop is tied to the
+/// region holding it by the region's cue id.
 pub fn with_marks(bytes: &[u8], marks: &Marks) -> Result<Vec<u8>, Error> {
     let layout = layout(bytes)?;
     let frames = layout.frames();
@@ -793,7 +793,7 @@ mod tests {
         let wav = append(
             &wav,
             b"LIST",
-            &adtl_list(markers, &[Some(b"take 3, good ".to_vec())]),
+            &adtl_list(markers, &[Some(b"take 3, good\0".to_vec())]),
         );
         let stroke = Region {
             start: 100,
@@ -811,7 +811,7 @@ mod tests {
         assert_eq!(adtl.notes.len(), 1);
         assert_eq!(adtl.labels[&2], "Marker 1", "the marker is cue 2 now");
         assert_eq!(
-            adtl.notes[&2], b"take 3, good ",
+            adtl.notes[&2], b"take 3, good\0",
             "and its note goes with it"
         );
     }
