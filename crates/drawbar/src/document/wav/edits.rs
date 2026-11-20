@@ -40,7 +40,7 @@ pub(super) fn detected_marks(value: &str) -> Result<wav::Marks, String> {
     Ok(marks)
 }
 
-/// `marks` with every region of the sample whose attack is `label` renamed to the sample
+/// `marks` with every region of the hit whose attack is `label` renamed to the hit
 /// whose attack label is `to`.
 pub(super) fn renamed(
     marks: &wav::Marks,
@@ -50,10 +50,10 @@ pub(super) fn renamed(
 ) -> Result<wav::Marks, String> {
     let from = take::mark(label, 0..0)
         .hit
-        .ok_or_else(|| format!("{path}: names no sample"))?;
+        .ok_or_else(|| format!("{path}: names no hit"))?;
     let to = take::mark(to, 0..0)
         .hit
-        .ok_or_else(|| format!("{path}: {to} names no sample"))?;
+        .ok_or_else(|| format!("{path}: {to} names no hit"))?;
     let mut out = marks.clone();
     if from == to {
         return Ok(out);
@@ -94,9 +94,9 @@ pub(super) fn renamed(
 /// The word a [`DELETED`] path names `piece` by.
 pub(super) fn piece_slug(piece: hit::Piece) -> &'static str {
     match piece {
-        hit::Piece::Note => "note",
+        hit::Piece::Hit => "hit",
         hit::Piece::Loop => "loop",
-        hit::Piece::KeyOff => "key-off",
+        hit::Piece::Release => "release",
     }
 }
 
@@ -119,7 +119,7 @@ pub(super) fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
     }
 }
 
-/// Whether `path` adds, deletes or renames a sample, or marks what Detect found.
+/// Whether `path` adds, deletes or renames a hit, or marks what Detect found.
 pub(super) fn is_piece(path: &str) -> bool {
     path == DETECTED
         || [RENAMED, ADDED, LOOPED, DELETED]
@@ -174,12 +174,12 @@ pub(super) fn pieced(
     let mut deleted = || {
         let (label, piece) = rest
             .rsplit_once('/')
-            .ok_or_else(|| format!("{path}: names no piece of a sample"))?;
+            .ok_or_else(|| format!("{path}: names no piece of a hit"))?;
         let hit = take::mark(label, 0..0)
             .hit
-            .ok_or_else(|| format!("{path}: names no sample"))?;
+            .ok_or_else(|| format!("{path}: names no hit"))?;
         let cuts = hit::Cuts::of(&take::Marked::from_marks(marks), hit);
-        // The sample's own loop, as the lanes pair it: never a neighbor's its attack has
+        // The hit's own loop, as the lanes pair it: never a neighbor's its attack has
         // grown over.
         let inside = |found: &wav::Loop| {
             (cuts.looped.as_ref())
@@ -190,19 +190,15 @@ pub(super) fn pieced(
             mark.hit == Some(hit) && part.is_none_or(|part| mark.part == part)
         };
         match piece {
-            "note" => {
+            "hit" => {
                 out.regions.retain(|region| !of(region, None));
                 out.loops.retain(|found| !inside(found));
             }
             "loop" => out.loops.retain(|found| !inside(found)),
-            "key-off" => out
+            "release" => out
                 .regions
                 .retain(|region| !of(region, Some(take::Part::Release))),
-            _ => {
-                return Err(format!(
-                    "{path}: {piece} is not a note, a loop or a key-off"
-                ))
-            }
+            _ => return Err(format!("{path}: {piece} is not a hit, a loop or a release")),
         }
         Ok(out.clone())
     };

@@ -138,20 +138,14 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
         false => detect::Floor::Take,
     };
     let x = detect::highpassed(mono, rate);
-    let env = Envelope {
-        floor: floor_rule,
-        ..Envelope::of(&x, rate)
-    };
+    let env = Envelope::read(&x, rate, floor_rule);
     let hits = detect::hits(&x, rate, &env);
     let hum = hum::find(&x, rate, &env);
     let cleaned = match &hum {
         Ok(found) => found.removed(&x, rate),
         Err(_) => x.clone(),
     };
-    let quiet = Envelope {
-        floor: floor_rule,
-        ..Envelope::of(&cleaned, rate)
-    };
+    let quiet = Envelope::read(&cleaned, rate, floor_rule);
     let floor = quiet.floor();
     let noise = Noise::measured(rate, hum.as_ref().ok().cloned(), &cleaned, &quiet);
 
@@ -509,6 +503,23 @@ mod tests {
         assert!(!plan.rests, "a floor of {}", plan.floor_db);
         let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
         assert!(matches!(fates.as_slice(), [Fate::Kept { .. }]), "{fates:?}");
+    }
+
+    /// A clean note cut while it still dies slowly is kept and built as recorded: its
+    /// tail sounds its note, so it is no rest to hold the note to.
+    #[test]
+    fn a_clean_note_cut_while_dying_slowly_is_kept() {
+        let rate = 35_002;
+        for db_per_s in [1.0, 2.0, 4.0] {
+            let x = crate::take::detect::tests::dying(rate, 60.0, 12.0, db_per_s, 0.0);
+            let plan = plan(&x, rate, &one_note());
+            assert!(!plan.rests, "{db_per_s} dB/s: a floor of {}", plan.floor_db);
+            let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+            assert!(
+                matches!(fates.as_slice(), [Fate::Kept { .. }]),
+                "{db_per_s} dB/s: {fates:?}"
+            );
+        }
     }
 
     /// Only a one-note file starts with a hit: a take that starts mid-note does not.

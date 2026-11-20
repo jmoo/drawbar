@@ -6,15 +6,14 @@ use super::*;
 /// A megabyte as the computer's own file sizes count one.
 pub(super) const MB: usize = 1 << 20;
 
-/// The largest WAV drawbar-web opens, in bytes. Opening a take costs the page about nine
-/// times its file in memory, and finding its noise as much again in its worker (a 132 MB
-/// take of 522 s, 24-bit stereo at 44.1 kHz, takes 1.2 GB each), and a browser tab gets
-/// at most 4 GB, often far less. A WAV of a few notes is
-/// far smaller: past this, a take is for the desktop.
+/// The largest WAV drawbar-web opens, in bytes. Opening a take costs the page several
+/// times its file in memory, and finding its noise as much again in its worker, and a
+/// browser tab gets at most 4 GB, often far less. A WAV of a few notes is far smaller:
+/// past this, a take is for the desktop.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(super) const WEB_MOST_BYTES: usize = 120 * MB;
 
-/// The lowest rate a take is read at, in Hz: the detectors filter, find pitch and find
+/// The lowest rate a WAV is opened at, in Hz: the detectors filter, find pitch and find
 /// noise up to frequencies a lower rate cannot hold, and the build resamples every take
 /// to 35,002 Hz anyway.
 pub(super) const LEAST_RATE: u32 = 8_000;
@@ -24,7 +23,7 @@ pub(super) const LEAST_RATE: u32 = 8_000;
 pub(super) fn heard_rate(audio: Audio) -> Result<Audio, String> {
     if audio.rate < LEAST_RATE {
         return Err(format!(
-            "this WAV is at {} Hz; a take needs at least {LEAST_RATE} Hz",
+            "this WAV is at {} Hz; drawbar opens WAVs of {LEAST_RATE} Hz and up",
             audio.rate
         ));
     }
@@ -60,7 +59,8 @@ pub(super) fn too_large(len: usize, most: usize) -> Option<String> {
             false => format!("{:.1}", (len as f64 / MB as f64 * 10.0).floor() / 10.0),
         };
         format!(
-            "This WAV is {size} MB, more than the browser can work on ({} MB). Use the Desktop version of Drawbar instead.",
+            "{size} MB: too large for the browser, which opens WAVs of up to {} MB; open it in \
+             the desktop app",
             most / MB
         )
     })

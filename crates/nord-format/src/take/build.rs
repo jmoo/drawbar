@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{malformed, Result};
 use crate::formats::npno::encode::{
-    self, parse_stroke_name, Clash, Kind, LayerTag, Recording, Stem, FADE_SUFFIX,
+    self, parse_stroke_name, Clash, Kind, LayerClash, LayerTag, Recording, Stem, FADE_SUFFIX,
 };
 use crate::formats::npno::{Bank, Version};
 use crate::note;
@@ -232,16 +232,7 @@ pub fn prepared<'a>(
         .collect();
     let values = match encode::layer_values(&named, version) {
         Ok(values) => values,
-        Err(clash) => {
-            let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
-            return malformed(match clash.how {
-                Clash::BothForms => format!(
-                    "{what} names some of its layers by index (l..) and some by value \
-                     (v..); all layers of one root and bank must use the same form"
-                ),
-                Clash::Twice => format!("{what} names one of its layers twice"),
-            });
-        }
+        Err(clash) => return malformed(clash_said(&clash)),
     };
     let highest = version.highest_played_layer();
     if let Some((stroke, value)) = strokes.iter().zip(&values).find(|(_, &v)| v > highest) {
@@ -267,6 +258,18 @@ pub fn prepared<'a>(
             under_attack,
         })
         .collect())
+}
+
+/// Why the build refuses the layer names of `clash`'s root and bank.
+fn clash_said(clash: &LayerClash) -> String {
+    let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+    match clash.how {
+        Clash::BothForms => format!(
+            "{what} names some of its layers by index (l..) and some by value \
+             (v..); all layers of one root and bank must use the same form"
+        ),
+        Clash::Twice => format!("{what} names one of its layers twice"),
+    }
 }
 
 /// `pcm`, a stroke of `root` and `bank` at layer value `value`, as the encoder takes
@@ -340,8 +343,9 @@ pub struct Cut<'a> {
 ///
 /// Refused where a region is no stroke or runs past the audio, a loop crosses a
 /// region's end or lies in no region or two, a fade does not end with the stroke it
-/// fades or fades a release, a looped stroke or one faded already, or no region is a
-/// stroke at all.
+/// fades or fades a release, a looped stroke or one faded already, a root and bank name
+/// their layers both by index and by value or one layer twice, or no region is a stroke
+/// at all.
 pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a>>> {
     let named = |e: &dyn std::fmt::Display| format!("{file}: {e}");
     let mut out: Vec<Cut> = Vec::new();
@@ -359,7 +363,8 @@ pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a
             parse_stroke_name(&region.label, Stem::None).filter(|_| region.frames > 0)
         else {
             return malformed(named(&format!(
-                "region {:?} at frame {} is no stroke: a region here must span frames                  and be labeled as a stroke's WAV is named, as in 060-b0-l00",
+                "region {:?} at frame {} is no stroke: a region here must span frames \
+                 and be labeled as a stroke's WAV is named, as in 060-b0-l00",
                 region.label, region.start
             )));
         };
@@ -394,13 +399,21 @@ pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a
         }
         if owner.bank == Bank::Release || owner.sample_loop.is_some() || owner.fade.is_some() {
             return malformed(refuse(&format!(
-                "fades {stroke:?}, which is a release, loops, or fades already; only an                  attack or resonance that does not loop fades"
+                "fades {stroke:?}, which is a release, loops, or fades already; only an \
+                 attack or resonance that does not loop fades"
             )));
         }
         owner.fade = Some(fade.start - owner.region.start);
     }
     if out.is_empty() {
         return malformed(named(&"no region to build a library from"));
+    }
+    let layers: Vec<(u8, Bank, LayerTag)> = (out.iter())
+        .map(|cut| (cut.root, cut.bank, cut.layer))
+        .collect();
+    // A clash is found before any value is spread, so the version does not matter.
+    if let Err(clash) = encode::layer_values(&layers, Version::V6) {
+        return malformed(named(&clash_said(&clash)));
     }
     Ok(out)
 }
@@ -760,8 +773,6 @@ mod tests {
         assert!(err.to_string().contains("twice"), "{err}");
     }
 
-    /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
-    /// read out of bounds, cleaned or not.
     #[test]
     fn a_take_s_cuts_are_refused_as_its_build_refuses_them() {
         let region = |start, frames, label: &str| Region {
@@ -795,7 +806,12 @@ mod tests {
         refused(&twice, "more than one");
         let mut faded = good.clone();
         faded.regions.push(region(8000, 1000, "060-b0-v22-fade"));
-        refused(&faded, "loops, or fades already");
+        // The whole message, so a lost line join cannot open a gap in it again.
+        refused(
+            &faded,
+            "fades \"060-b0-v22\", which is a release, loops, or fades already; only an \
+             attack or resonance that does not loop fades",
+        );
         refused(
             &Marks {
                 regions: vec![region(1000, 30_000, "060-b0-v22")],
@@ -803,8 +819,18 @@ mod tests {
             },
             "past the audio's end",
         );
+        // A layer named by index beside one named by value, as a rename can leave it,
+        // and one layer named twice.
+        let mut mixed = good.clone();
+        mixed.regions.push(region(12_000, 2000, "060-b0-l01"));
+        refused(&mixed, "some by value");
+        let mut again = good.clone();
+        again.regions.push(region(12_000, 2000, "060-b0-v22"));
+        refused(&again, "names one of its layers twice");
     }
 
+    /// Any WAV's cue chunk can reach the build: a region past the audio is refused, not
+    /// read out of bounds, cleaned or not.
     #[test]
     fn a_region_past_the_audio_s_end_is_refused() {
         let take = Audio {

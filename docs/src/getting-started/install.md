@@ -18,6 +18,24 @@ On Windows, download `drawbar-<version>-x86_64-windows.exe` from the newest
 and run it. It is not signed, so Windows may ask before running it the first
 time.
 
+On a Mac with Apple silicon and macOS 14 or later, download
+`drawbar-<version>-aarch64-macos.dmg` from the newest
+[drawbar release](https://github.com/jmoo/drawbar/releases), open it, and drag
+drawbar to Applications.
+
+On Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13 or Fedora 40,
+download `drawbar-<version>-x86_64-linux.AppImage` from the newest
+[drawbar release](https://github.com/jmoo/drawbar/releases), make it executable,
+and run it:
+
+```sh
+chmod +x drawbar-*-x86_64-linux.AppImage
+./drawbar-*-x86_64-linux.AppImage
+```
+
+If it says FUSE is missing, add `--appimage-extract-and-run` to the second line.
+To reach an instrument, Linux also needs [a udev rule](#connecting-on-linux).
+
 Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
 
 ```sh
@@ -32,8 +50,14 @@ cargo install drawbar
 
 ## The `nord` command
 
-On Windows, download `nord-<version>-x86_64-windows.exe` from the newest
-[nord-cli release](https://github.com/jmoo/drawbar/releases),
+On Linux, download `nord-<version>-x86_64-linux.tar.gz`, or
+`nord-<version>-aarch64-linux.tar.gz` on ARM, from the newest
+[nord-cli release](https://github.com/jmoo/drawbar/releases), unpack it, and put
+`nord` in a folder on your `PATH`. It is statically linked, so it needs no other
+libraries. To reach an instrument, Linux also needs
+[a udev rule](#connecting-on-linux).
+
+On Windows, download `nord-<version>-x86_64-windows.exe` from the same release,
 rename it to `nord.exe`, and put it in a folder on your `PATH`.
 
 ```sh
@@ -43,6 +67,19 @@ nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
 
 To build either from a source checkout, see
 [Building from source](../reference/building.md).
+
+## Connecting on Linux
+
+Linux lets drawbar and `nord` open an instrument only once a udev rule allows it.
+This rule allows whoever is signed in at the computer:
+
+```sh
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0ffc", TAG+="uaccess"' |
+  sudo tee /etc/udev/rules.d/70-nord.rules
+sudo udevadm control --reload
+```
+
+Then unplug the instrument and plug it in again.
 
 ## If drawbar does not load
 

@@ -127,7 +127,7 @@ impl Work for FindHits {
 
     fn run(self, progress: &Progress) -> Detected {
         use nord_format::take::plan::{self, Fate, PlanOptions};
-        progress.say("finding the take's notes");
+        progress.say("finding the take's hits");
         let rate = self.take.rate;
         let mono = self.take.sum();
         let mut options = PlanOptions::new(Vec::new(), 4);

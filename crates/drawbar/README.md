@@ -15,6 +15,12 @@ cargo install drawbar
 
 On Windows, download it from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases).
+On Linux, download the AppImage from the same release; see
+[Install](../../docs/src/getting-started/install.md#on-the-desktop).
+
+On a Mac with Apple silicon, download the disk image from the same release; see
+[Install](../../docs/src/getting-started/install.md#on-the-desktop) for the first
+open.
 
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
@@ -22,6 +28,9 @@ On Windows, download it from the newest
 - Trim a piano library until it fits, build a sample instrument from WAVs or a
   Sample Editor project, and listen to either from the screen or a MIDI
   controller before you send it.
+- Turn a recording of your own instrument into a piano library: find each note
+  in the take, trim and loop it, hear it as the Nord will play it, then build the
+  library.
 - Sync with the keyboard in one go: one sheet shows what changed on each side,
   and which way each sound goes.
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either

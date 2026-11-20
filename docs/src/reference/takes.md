@@ -14,27 +14,30 @@ note's hits within `--min-layer-gap` dB of a louder one are dropped, and the res
 spread evenly in dB. With `--order played`, the first hits played are kept, the
 first the loudest.
 
-A take's floor is the level a tenth of its 10 ms frames are under. A one-note file
-of a folder holds its note for most of its length, so its floor is read on its rest
+A take's floor is the level a tenth of its 10 ms frames are under. A one-note file of
+a folder holds its note for most of its length, so its floor is read on its rest
 instead: of the half seconds after its loudest frame, the quietest by median whose
 halves lie within 1 dB of each other, at least 10 dB under the loudest, mostly not
 digital silence, and with nothing 6 dB quieter after it, so a fade, zero padding, a
-slow decay or a plateau of the release is not taken for it. Only its loudest hit
-counts, and it starts with a hit where it is cut at the strike, standing 15 dB over
-its rest where it has one. A file with no rest has no floor to read: it is not held
-to the too-quiet limit, and the build finds no noise in it and builds it as
-recorded. A file of noise alone is as level as a held note, so it is taken for one. `prep` notes in each file it writes
-that its floor is read this way, and the build reads its noise the same way before
-cleaning it.
+slow decay or a plateau of the release is not taken for it. Nor is a half second that
+still sounds the note: most of the note's first four harmonics peaking 6 dB over the
+bands beside them, as a slow tail cut before it reaches the hiss does and hiss does
+not. Only its loudest hit counts, and it starts with a hit where it is cut at the
+strike, standing 15 dB over its rest where it has one. A file with no rest has no
+floor to read: it is not held to the too-quiet limit, and the build finds no noise in
+it and builds it as recorded. A file of noise alone is as level as a held note, so it
+is taken for one. `prep` notes in each file it writes that its floor is read this
+way, and the build reads its noise the same way before cleaning it.
 
 A folder's hits are sorted by pitch before their notes are named, so a stretched
 note has its neighbors to go by. Each keeps the octave its pitch was read in.
 
 A hit standing less than the
 [`--min-snr`](../nord-cli/libraries.md#building-from-a-recorded-take) limit over the
-floor is left out: leveled with the others, its hiss would come up with it. Each kept hit becomes an attack, from its strike to
-its key-up, and a release from the key-up. A key-off that stands clear of neither
-the quiet before its hit nor the floor gets no release.
+floor is left out: leveled with the others, its hiss would come up with it. Each kept
+hit becomes an attack, from its strike to its key-up, and a release from the key-up.
+A key-off that stands clear of neither the quiet before its hit nor the floor gets no
+release.
 
 ## Sustain
 

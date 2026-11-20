@@ -212,6 +212,73 @@ let
         });
   };
 
+  # drawbar.app around the binary `packages` builds, so CI compiles drawbar once.
+  # scripts/dmg.bash checks it with the system's own tools and makes the disk image.
+  drawbarApp =
+    let
+      inherit (manifests.drawbar) version;
+      bin = crates.drawbar.overrideAttrs { doCheck = false; };
+      info = final.writeText "Info.plist" (
+        final.lib.generators.toPlist { escape = true; } {
+          CFBundleDisplayName = "drawbar";
+          CFBundleExecutable = "drawbar";
+          CFBundleIconFile = "drawbar";
+          CFBundleIdentifier = "app.drawbar";
+          CFBundleInfoDictionaryVersion = "6.0";
+          CFBundleName = "drawbar";
+          CFBundlePackageType = "APPL";
+          CFBundleShortVersionString = version;
+          CFBundleVersion = version;
+          LSMinimumSystemVersion = "@minos@";
+          NSHighResolutionCapable = true;
+        }
+      );
+    in
+    final.runCommand "drawbar-app-${version}"
+      {
+        nativeBuildInputs = [
+          final.darwin.binutils-unwrapped
+          final.file
+          final.libicns
+          final.resvg
+        ];
+        meta.description = "drawbar as a macOS application bundle";
+      }
+      ''
+        contents="$out/drawbar.app/Contents"
+        mkdir -p "$contents/MacOS" "$contents/Resources"
+        install -m 755 ${bin}/bin/drawbar "$contents/MacOS/drawbar"
+
+        # ⚠️ The Rust standard library links libiconv, and nixpkgs resolves it to its own
+        # build. Nothing calls into it; the system's copy has the same compatibility
+        # version. cctools' install_name_tool renews the linker's ad-hoc signature.
+        install_name_tool -change ${final.libiconv}/lib/libiconv.2.dylib /usr/lib/libiconv.2.dylib \
+          "$contents/MacOS/drawbar"
+
+        # A library outside these two trees is missing from a Mac without Nix.
+        while IFS= read -r -d "" file; do
+          case "$(file -b "$file")" in Mach-O*) ;; *) continue ;; esac
+          foreign="$(otool -L "$file" | tail -n +2 | awk '{ print $1 }' | grep -Ev '^(/usr/lib|/System/Library)/' || true)"
+          if [ -n "$foreign" ]; then
+            echo "''${file#"$out/"} links what a Mac without Nix lacks:" $foreign >&2
+            exit 1
+          fi
+        done < <(find "$out" -type f -print0)
+
+        minos="$(otool -l "$contents/MacOS/drawbar" | awk '$1 == "cmd" { cmd = $2 } cmd == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }')"
+        [ -n "$minos" ] || {
+          echo "drawbar carries no LC_BUILD_VERSION to read its minimum macOS from" >&2
+          exit 1
+        }
+        substitute ${info} "$contents/Info.plist" --replace-fail @minos@ "$minos"
+
+        # The icon is the favicon, which is the titlebar's mark.
+        for size in 16 32 128 256 512 1024; do
+          resvg -w "$size" -h "$size" ${./crates/drawbar/favicon.svg} "$size.png"
+        done
+        png2icns "$contents/Resources/drawbar.icns" {16,32,128,256,512,1024}.png
+      '';
+
   targets = {
     windows = {
       crossPkgs = final.pkgsCross.mingwW64;
@@ -236,16 +303,32 @@ let
       };
     };
   }
+  # ⚠️ A musl cross set links against the store's `ld-musl` unless told otherwise;
+  # `static` links musl in, and mkCross refuses a binary that still names a loader.
   // optionalAttrs final.stdenv.hostPlatform.isLinux {
-    linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
-  };
-
-  emulators = optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
     linux-aarch64 = {
-      cmd = "qemu-aarch64";
-      package = final.qemu;
+      crossPkgs = final.pkgsCross.aarch64-multiplatform-musl;
+      static = true;
+    };
+    linux-x86_64 = {
+      crossPkgs = final.pkgsCross.musl64;
+      static = true;
     };
   };
+
+  # How this host runs a target's executables: an emulator, or null where it runs them
+  # itself. A target missing here is built and never run.
+  emulators =
+    optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+      linux-aarch64 = {
+        cmd = "qemu-aarch64";
+        package = final.qemu;
+      };
+      linux-x86_64 = null;
+    }
+    // optionalAttrs (final.stdenv.hostPlatform.system == "aarch64-linux") {
+      linux-aarch64 = null;
+    };
 
   # Where cargo puts the artifacts, and what BUILD_INFO records.
   tripleOf = spec: spec.triple or spec.crossPkgs.stdenv.hostPlatform.rust.rustcTarget;
@@ -275,14 +358,18 @@ let
         "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
       }
     )
-    // optionalAttrs (spec ? libs) (
+    // optionalAttrs (spec ? libs || spec.static or false) (
       let
-        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs;
+        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs or [ ];
       in
       {
         # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
         # `-l:` requests.
-        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = paths;
+        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatStringsSep " " (
+          optional (spec.static or false) "-C target-feature=+crt-static" ++ optional (spec ? libs) paths
+        );
+      }
+      // optionalAttrs (spec ? libs) {
         # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
         # doctests are all the target's.
         RUSTDOCFLAGS = paths;
@@ -318,7 +405,9 @@ let
           # something that can run it.
           doCheck = spec ? testRunner;
           nativeBuildInputs =
-            optional (needsLinker spec) spec.crossPkgs.stdenv.cc ++ spec.testRunner.packages or [ ];
+            optional (needsLinker spec) spec.crossPkgs.stdenv.cc
+            ++ optional (spec.static or false) final.file
+            ++ spec.testRunner.packages or [ ];
           pname = "${crate}-${name}";
           inherit (manifests.${crate}) version;
         }
@@ -360,6 +449,23 @@ let
               exit 1
             fi
 
+            ${optionalString (spec.static or false) ''
+              # `file` calls a static position-independent executable `static-pie linked`.
+              for bin in $(find "$out" -maxdepth 1 -type f -perm -u+x); do
+                linkage="$(file -b "$bin")"
+                case $linkage in
+                *interpreter* | *dynamically\ linked*)
+                  echo "$bin is not static: $linkage" >&2
+                  exit 1
+                  ;;
+                *statically\ linked* | *static-pie\ linked*) ;;
+                *)
+                  echo "$bin: no linkage in $linkage" >&2
+                  exit 1
+                  ;;
+                esac
+              done
+            ''}
             echo "${crate} ${manifests.${crate}.version} built for ${tripleOf spec}" > "$out/BUILD_INFO"
             echo "installed:" >&2
             ls -la "$out" >&2
@@ -573,6 +679,14 @@ let
       );
   };
 
+  # drawbar as one Linux executable: the tested binary, set to run on the host's
+  # libraries, and the AppImage runtime.
+  drawbarAppImage = final.callPackage ./crates/drawbar/appimage {
+    inherit (crates) drawbar;
+    inherit (workspaceManifest.package) repository;
+    inherit guiLibs;
+  };
+
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
   docs = final.stdenvNoCC.mkDerivation {
@@ -738,16 +852,63 @@ let
         touch "$out"
       '';
 
+  crossBuilds = concatMapAttrs (
+    crate: names:
+    listToAttrs (map (n: nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
+  ) crateTargets;
+
+  # What a release attaches for each static target: `nord`, the project's license, and
+  # the notices of what is compiled into it.
+  tarballs = mapAttrs' (
+    name: spec:
+    let
+      inherit (manifests.nord-cli) version;
+      inherit (spec.crossPkgs.stdenv.hostPlatform) parsed;
+      stem = "nord-${version}-${parsed.cpu.name}-${parsed.kernel.name}";
+      notices = ./crates/nord-cli/THIRD-PARTY-NOTICES.txt;
+    in
+    nameValuePair "nord-cli-${name}-tarball" (
+      crane.mkCargoDerivation (
+        commonArgs
+        // {
+          pname = "nord-cli-${name}-tarball";
+          inherit version;
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          # Every registry crate linked into the binary must be named in the notices.
+          buildPhaseCargoCommand = ''
+            cargo tree --locked --offline -p nord-cli --edges normal,no-proc-macro \
+              --target ${tripleOf spec} --prefix none --format '{p}' |
+              sed -e 's/ (\*)$//' | grep -v ' (/' | sed -e 's/ v/ /' | sort -u >linked
+            [ -s linked ] || {
+              echo "cargo tree listed no crates" >&2
+              exit 1
+            }
+            while read -r crate; do
+              grep -qxF -- "- $crate" ${notices} || unlisted="''${unlisted:+$unlisted, }$crate"
+            done <linked
+            if [ -n "''${unlisted-}" ]; then
+              echo "THIRD-PARTY-NOTICES.txt lacks $unlisted; run scripts/licenses.bash" >&2
+              exit 1
+            fi
+          '';
+          installPhaseCommand = ''
+            mkdir -p "${stem}" "$out"
+            cp ${crossBuilds."nord-cli-${name}"}/nord "${stem}/nord"
+            cp ${./crates/LICENSE} "${stem}/LICENSE"
+            cp ${notices} "${stem}/THIRD-PARTY-NOTICES.txt"
+            chmod -R u+w,go-w "${stem}"
+            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -c "${stem}" |
+              gzip -9n >"$out/${stem}.tar.gz"
+          '';
+        }
+      )
+    )
+  ) (filterAttrs (_: spec: spec.static or false) targets);
+
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
-  # the host-independent web bundle.
-  crossed =
-    concatMapAttrs (
-      crate: names:
-      listToAttrs (map (n: nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
-    ) crateTargets
-    // {
-      inherit drawbar-web;
-    };
+  # the host-independent web bundle and the release tarballs.
+  crossed = crossBuilds // tarballs // { inherit drawbar-web; };
 
   # The read-only inventory sweep, replayed. Exercises transport → wire → session
   # → op → CLI without a device, so the same proof runs on every target.
@@ -824,8 +985,10 @@ in
     # Not in `all`: they start browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
       browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
+      drawbar-appimage = drawbarAppImage;
       toshokan-browser-crash = toshokanBrowserCrash;
     }
+    // optionalAttrs final.stdenv.hostPlatform.isDarwin { drawbar-app = drawbarApp; }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {
