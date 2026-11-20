@@ -276,7 +276,7 @@ impl Sounding {
     }
 
     /// Where a click of Play hit lets the key go, in frames: once the loop has gone
-    /// round once after the attack's end, so the whole sample, its loop and its key-off
+    /// round once after the attack's end, so the whole hit, its loop and its release
     /// are heard; at the end of an attack without a loop.
     pub fn tapped(&self) -> usize {
         match &self.looped {

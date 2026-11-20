@@ -54,7 +54,7 @@ pub const ADDED: &str = "add/";
 pub const LOOPED: &str = "loop/";
 
 /// The path prefix of a set that deletes, from the hit whose attack it names, the
-/// piece after it: `note`, `loop` or `key-off`.
+/// piece after it: `hit`, `loop` or `release`.
 pub const DELETED: &str = "delete/";
 
 /// The path prefix of a set that renames the hit whose attack it names to the hit
@@ -334,7 +334,7 @@ pub struct State {
     pub close: hit::Close,
     /// Both lanes as they were before this frame's menu edit moved the pick, put back if
     /// the edit is refused, so the pick never names a hit the take does not mark.
-    before_edit: Option<(take::View, hit::Close)>,
+    pub(super) before_edit: Option<(take::View, hit::Close)>,
     /// What the take is heard as, kept across new bytes.
     pub audition: audition::Audition,
     /// What Detect asks for and found, kept across new bytes.
@@ -633,6 +633,12 @@ impl State {
         }
     }
 
+    /// Forget the lanes kept before this frame's menu edit, which was taken: a later
+    /// refusal has nothing of it to put back.
+    pub fn taken(&mut self) {
+        self.before_edit = None;
+    }
+
     /// Note that the bytes stamped `stamp` hold `total` against the original.
     pub fn made(&mut self, stamp: u64, total: f64) {
         self.made.retain(|(made, _)| *made != stamp);
@@ -756,14 +762,14 @@ impl State {
     }
 
     /// Whether the file marks hits, so the take's cards show.
-    pub fn marks_samples(&self) -> bool {
+    pub fn marks_hits(&self) -> bool {
         self.read.marks.as_ref().is_ok_and(marks_a_stroke)
     }
 
     /// Whether a library can be built from the take: it marks hits and its audio
     /// reads, which on the web a take too large for the browser does not.
     pub fn builds(&self) -> bool {
-        self.marks_samples() && self.read.source.is_ok()
+        self.marks_hits() && self.read.source.is_ok()
     }
 
     /// Start Detect on the take, where its audio reads: at once on a take that marks no
@@ -827,7 +833,7 @@ impl State {
         self.read.source.as_ref().ok()
     }
 
-    /// What a total gain of `db` would clip, in notes, or `None` where nothing clips.
+    /// What a total gain of `db` would clip, in strikes, or `None` where nothing clips.
     pub fn clipping(&self, db: f64) -> Result<Option<String>, String> {
         let clipped = self.notes.clipped(factor(db)?);
         let notes = self.notes.peaks.len();
@@ -863,7 +869,7 @@ pub fn ui(
         };
         ui.label(egui::RichText::new(said).small().color(ink));
     }
-    if state.marks_samples() {
+    if state.marks_hits() {
         // From the take's opening, so its samples are ready to hear by the time one is
         // picked.
         state.follow_noise(ui.ctx());
@@ -873,7 +879,7 @@ pub fn ui(
     if state.audio().is_some() {
         ui.horizontal(|ui| {
             gain(ui, state, sets);
-            if state.marks_samples() {
+            if state.marks_hits() {
                 ui.add_space(12.0);
                 if let Some(kind) = audition::category(ui, state.kind()) {
                     sets.push((KIND.to_string(), kind.word().to_string()));
@@ -958,7 +964,7 @@ pub fn ui(
                 (false, false) => ("Play", Glyph::AudioLines),
             };
             audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
-            if state.marks_samples() {
+            if state.marks_hits() {
                 asked = audition::controls(ui, state, played);
                 steps(ui, state);
             }
@@ -1001,7 +1007,7 @@ fn pieces(
     };
     match wanted {
         Wanted::Add(Piece::Release) => {
-            if let Some(release) = adding::release(audio, attack.start, attack.end) {
+            if let Some(release) = adding::bounded_release(audio, marked, attack.clone()) {
                 sets.push((
                     format!("{ADDED}{}", adding::release_label(hit)),
                     span_value(&release),

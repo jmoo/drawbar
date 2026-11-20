@@ -988,7 +988,7 @@ fn counts(queue: &Queue) -> (usize, usize, usize) {
 }
 
 /// `n` and the noun for it.
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     match n {
         1 => format!("1 {one}"),
         n => format!("{n} {many}"),

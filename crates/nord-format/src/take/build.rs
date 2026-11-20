@@ -411,7 +411,7 @@ pub fn cuts<'a>(file: &str, marks: &'a Marks, total: usize) -> Result<Vec<Cut<'a
     let layers: Vec<(u8, Bank, LayerTag)> = (out.iter())
         .map(|cut| (cut.root, cut.bank, cut.layer))
         .collect();
-    // ⚠️ A clash is found before any value is spread, so the version is no matter.
+    // A clash is found before any value is spread, so the version does not matter.
     if let Err(clash) = encode::layer_values(&layers, Version::V6) {
         return malformed(named(&clash_said(&clash)));
     }

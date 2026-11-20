@@ -233,7 +233,7 @@ fn a_24_bit_and_a_float_file_read_as_float_for_the_waveform_and_player() {
 }
 
 #[test]
-fn the_clipping_a_gain_would_cause_is_counted_in_notes() {
+fn the_clipping_a_gain_would_cause_is_counted_in_strikes() {
     let state = opened(&take(&[0.9, 0.3, 0.05]));
     assert_eq!(state.notes.peaks.len(), 3);
     assert_eq!(state.clipping(0.0), Ok(None));
@@ -444,7 +444,7 @@ fn a_moved_cut_is_written_to_the_marks_and_changes_no_sample() {
     assert!(apply(&bytes, &bytes, &[none]).is_err(), "no such hit");
 }
 
-/// A sample, key-off and loop are added and deleted in the marks, the audio
+/// A hit, release and loop are added and deleted in the marks, the audio
 /// untouched, and each is named for Undo.
 #[test]
 fn pieces_are_added_and_deleted_in_the_marks() {
@@ -486,7 +486,7 @@ fn pieces_are_added_and_deleted_in_the_marks() {
         .regions
         .iter()
         .all(|region| !region.label.starts_with("069")));
-    assert_eq!(marks.loops.len(), 1, "the other sample's loop stays");
+    assert_eq!(marks.loops.len(), 1, "the other hit's loop stays");
 }
 
 /// What the edits leave the build accepts, as its own check of a take's marks says,
@@ -513,7 +513,7 @@ fn an_edit_the_build_would_refuse_is_refused() {
     .unwrap();
     assert_eq!(builds(&out).unwrap(), 4);
 
-    // A key-off over the loop of its own attack, a fade on a looped attack.
+    // A release over the loop of its own attack, a fade on a looped attack.
     let refused = [
         set(format!("{ADDED}069-b2-v30"), "41000..52000"),
         set(format!("{ADDED}071-b0-v00-fade"), "68000..70000"),
@@ -535,10 +535,10 @@ fn an_edit_the_build_would_refuse_is_refused() {
     assert!(builds(&mended).is_ok());
 }
 
-/// A rename relabels every region of the sample, keeps its loop, and refuses a name
+/// A rename relabels every region of the hit, keeps its loop, and refuses a name
 /// the take marks already or one whose layer form the note's other layers do not share.
 #[test]
-fn a_sample_is_renamed_every_region_of_it() {
+fn a_hit_is_renamed_every_region_of_it() {
     let bytes = marked_take(&[0.9, 0.3]);
     let rename = |to: &str| [(format!("{RENAMED}069-b0-v22"), to.to_string())];
     let (out, _) = apply(&bytes, &bytes, &rename("071-b0-v30")).unwrap();
@@ -586,10 +586,10 @@ fn a_refused_edit_puts_the_pick_back() {
     assert_eq!(state.view.picked, None, "nothing to put back");
 }
 
-/// A resonance sample's fade is renamed with it, and keeps its bank, so the build
+/// A resonance hit's fade is renamed with it, and keeps its bank, so the build
 /// still finds the stroke it fades.
 #[test]
-fn a_resonance_sample_s_fade_is_renamed_with_it() {
+fn a_resonance_hit_s_fade_is_renamed_with_it() {
     let region = |start: u32, frames: u32, label: &str| wav::Region {
         start,
         frames,

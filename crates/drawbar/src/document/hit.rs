@@ -110,7 +110,7 @@ pub struct Cuts {
     pub looped: Option<Range<u32>>,
     /// The take's other loops, likewise, which none of the hit's regions may reach into.
     pub other_loops: Vec<Range<u32>>,
-    /// The take's other regions, the hit's key-off among them, which its loop may not
+    /// The take's other regions, the hit's release among them, which its loop may not
     /// reach into.
     pub other_regions: Vec<Range<u32>>,
 }

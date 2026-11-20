@@ -23,6 +23,11 @@ const AFTER: f64 = 10.0;
 /// click on a hit's first moments still finds it.
 const LATE: f64 = 0.2;
 
+/// How far before a hit's onset a marked attack may start and still be that hit's, in
+/// seconds: Detect starts an attack a moment before its hit, and a hand may drag it a
+/// little further.
+const PRE_ROLL: f64 = 0.01;
+
 /// How long an attack is where no key-up is found, in seconds.
 const ATTACK: f64 = 3.0;
 
@@ -98,8 +103,10 @@ fn frames_of(audio: &Audio) -> usize {
 /// The hit at `place` in `audio`, whose file marks `marked`: from the hit's
 /// onset to its key-up, with a release after, named by its pitch and by its loudness
 /// against its note's other layers. A hit an attack holds the onset of, or starts
-/// within, is passed over, so a click in the quiet after a hit adds no second one of
-/// it, even where its start was trimmed past the onset. Where no hit is found, it starts
+/// within from [`PRE_ROLL`] before its onset to as long before the next one, is passed
+/// over, so a click in the quiet after a hit adds no second one of it, even where its
+/// start was trimmed past the onset, and a hit just before a marked one is still
+/// found. Where no hit is found, it starts
 /// at `place`; where no key-up is, it lasts [`ATTACK`]; where no pitch is, it is named
 /// by the hit nearest it, or as middle C. Neither it nor its release runs past the
 /// start of the next stroke the take marks.
@@ -114,22 +121,34 @@ pub fn hit(audio: &Audio, marked: &Marked, place: u32) -> Added {
     let mut pitch = None;
     if let Some(window) = Window::of(audio, place.saturating_sub(secs(BEFORE))..stop) {
         let onsets = detect::onsets(&window.env);
-        // A hit an attack holds the onset of, or starts within, is marked: its start
-        // may have been trimmed past the onset.
-        let marked_over = |hit: Range<usize>| {
-            (marked.regions.iter())
-                .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance))
-                .any(|mark| {
-                    let start = mark.frames.start as usize;
-                    mark.frames.contains(&(hit.start as u32)) || hit.contains(&start)
-                })
-        };
         let hit_of = |i: usize| {
             let end = onsets.get(i + 1).map_or(window.env.db.len(), |&next| next);
             window.frame(onsets[i])..window.frame(end)
         };
+        // A hit an attack holds the onset of is marked, and so is one an attack starts
+        // within, each hit's span moved [`PRE_ROLL`] earlier: its start may have been
+        // trimmed past the onset, and Detect starts an attack a moment before its hit,
+        // which would otherwise be inside the hit before.
+        let onset_at = |i: usize| window.frame(onsets[i]);
+        let own = |i: usize| {
+            let span = hit_of(i);
+            let last = i + 1 == onsets.len();
+            span.start.saturating_sub(secs(PRE_ROLL))..if last {
+                span.end
+            } else {
+                span.end.saturating_sub(secs(PRE_ROLL))
+            }
+        };
+        let marked_over = |i: usize| {
+            (marked.regions.iter())
+                .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance))
+                .any(|mark| {
+                    mark.frames.contains(&(onset_at(i) as u32))
+                        || own(i).contains(&(mark.frames.start as usize))
+                })
+        };
         let starts: Vec<usize> = (0..onsets.len())
-            .filter(|&i| !marked_over(hit_of(i)))
+            .filter(|&i| !marked_over(i))
             .map(|i| onsets[i])
             .collect();
         // The last hit to start by the click, a moment after it allowed; else the
@@ -162,21 +181,13 @@ pub fn hit(audio: &Audio, marked: &Marked, place: u32) -> Added {
             }
         }
     }
-    // The next stroke the take marks, which the new one must not run over.
-    let next = (marked.regions.iter())
-        .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance | Part::Release))
-        .map(|mark| mark.frames.start as usize)
-        .filter(|&start| start > onset)
-        .min()
-        .unwrap_or(total);
+    let next = next_stroke(marked, onset, total);
     let end = keyup
         .unwrap_or(onset + secs(ATTACK))
         .min(stop.max(onset + 1))
         .min(next)
         .clamp(onset + 1, total);
-    let release = release(audio, onset as u32, end as u32)
-        .map(|release| release.start..release.end.min(next as u32))
-        .filter(|release| !release.is_empty());
+    let release = bounded_release(audio, marked, onset as u32..end as u32);
     let root = pitch
         .map(|midi| midi.round())
         .filter(|midi| (21.0..=108.0).contains(midi))
@@ -193,6 +204,26 @@ pub fn hit(audio: &Audio, marked: &Marked, place: u32) -> Added {
         attack: onset as u32..end as u32,
         release,
     }
+}
+
+/// The start of the next stroke `marked` after `onset`, which a new hit or release must
+/// not run over, or `total`.
+fn next_stroke(marked: &Marked, onset: usize, total: usize) -> usize {
+    (marked.regions.iter())
+        .filter(|mark| matches!(mark.part, Part::Attack | Part::Resonance | Part::Release))
+        .map(|mark| mark.frames.start as usize)
+        .filter(|&start| start > onset)
+        .min()
+        .unwrap_or(total)
+}
+
+/// The release of `attack` in `audio`, as [`release`] finds it, cut where the next
+/// stroke `marked` starts; none where nothing is left of it.
+pub fn bounded_release(audio: &Audio, marked: &Marked, attack: Range<u32>) -> Option<Range<u32>> {
+    let next = next_stroke(marked, attack.start as usize, frames_of(audio)) as u32;
+    release(audio, attack.start, attack.end)
+        .map(|release| release.start..release.end.min(next))
+        .filter(|release| !release.is_empty())
 }
 
 /// The release of an attack over `attack_start` to `keyup` in `audio`: from the key-up
@@ -410,6 +441,68 @@ mod tests {
         );
     }
 
+    /// Two A3 strikes, at 1 s and, 8 dB softer, at 4 s, each as [`take`] plays its one:
+    /// two layers, where two of one level would be one.
+    fn two_strikes() -> Audio {
+        let one = take(0.5);
+        let mut samples = one.samples[..RATE as usize * 4].to_vec();
+        samples.extend_from_slice(&take(0.2).samples[RATE as usize..]);
+        Audio { samples, ..one }
+    }
+
+    /// A strike Detect skipped, before one it marked, is found wherever it is clicked:
+    /// Detect starts the marked one's attack a moment before its onset, inside the
+    /// skipped strike, and that attack is still the marked strike's own.
+    #[test]
+    fn a_strike_just_before_a_marked_hit_is_found() {
+        let audio = two_strikes();
+        let mono = nord_format::take::plan::mono(&audio);
+        let options = nord_format::take::plan::PlanOptions::new(Vec::new(), 4);
+        let found = nord_format::take::plan::plan(&mono, RATE, &options);
+        let regions: Vec<_> = (found.regions().iter())
+            .map(|r| take::mark(&r.label, r.start..r.start + r.frames))
+            .filter(|mark| mark.frames.start > RATE * 3)
+            .collect();
+        let second = (regions.iter())
+            .find(|mark| matches!(mark.part, Part::Attack))
+            .expect("Detect marks the second strike");
+        assert!(
+            second.frames.start < RATE * 4,
+            "Detect's attack starts before its onset, at {}",
+            second.frames.start
+        );
+        // As Detect marks it, dragged 5 ms early by hand, and trimmed 20 ms late.
+        let ms = RATE / 1000;
+        for moved in [0, -5, 20] {
+            let mut regions = regions.clone();
+            for mark in &mut regions {
+                if matches!(mark.part, Part::Attack) {
+                    mark.frames.start = mark.frames.start.saturating_add_signed(moved * ms as i32);
+                }
+            }
+            let marked = Marked {
+                regions,
+                loops: Vec::new(),
+            };
+            for click in (0..20).map(|i| RATE + i * RATE * 3 / 20) {
+                let added = hit(&audio, &marked, click);
+                let onset = f64::from(added.attack.start) / f64::from(RATE);
+                assert!(
+                    (onset - 1.0).abs() < 0.05,
+                    "moved {moved} ms, a click at {click} adds a hit at {onset} s, not the \
+                     strike at 1 s"
+                );
+            }
+            // The marked strike is still marked: a click on it adds no second one of it.
+            let added = hit(&audio, &marked, RATE * 5);
+            assert!(
+                added.attack.start.abs_diff(RATE * 4) > RATE / 20,
+                "moved {moved} ms, a click on the marked strike re-marks it at {}",
+                added.attack.start
+            );
+        }
+    }
+
     /// An attack added in a gap stops where the next marked stroke starts, and has no
     /// release where it reaches it.
     #[test]
@@ -429,6 +522,29 @@ mod tests {
         let added = hit(&audio, &marked, RATE);
         assert_eq!(added.attack, RATE..RATE * 2);
         assert_eq!(added.release, None);
+    }
+
+    /// A release added to a marked hit stops where the next marked stroke starts, as an
+    /// added hit's does.
+    #[test]
+    fn an_added_release_stops_at_the_next_stroke() {
+        let audio = Audio {
+            rate: RATE,
+            channels: 1,
+            samples: vec![0.0; RATE as usize * 6],
+        };
+        let next = RATE * 2 + RATE / 4;
+        let marked = Marked {
+            regions: vec![
+                take::mark("064-b0-v22", RATE..RATE * 2),
+                take::mark("064-b0-v40", next..RATE * 3),
+            ],
+            loops: Vec::new(),
+        };
+        let free = release(&audio, RATE, RATE * 2).expect("a release");
+        assert!(free.end > next, "unbounded, it runs on to {}", free.end);
+        let bounded = bounded_release(&audio, &marked, RATE..RATE * 2);
+        assert_eq!(bounded, Some(RATE * 2..next));
     }
 
     /// A note held to the take's end has no release: none is made past the audio.

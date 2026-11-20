@@ -129,21 +129,13 @@ impl Detect {
             ),
             Ok((found, limit)) => format!(
                 "{} of {}{}",
-                counted(found.kept, "hit"),
-                counted(found.notes, "note"),
+                crate::queue::plural(found.kept, "hit", "hits"),
+                crate::queue::plural(found.notes, "note", "notes"),
                 match found.too_quiet {
                     0 => String::new(),
                     n => format!(" · {}", skipped(n, *limit)),
                 }
             ),
         })
-    }
-}
-
-/// `n` of `what`, in the plural unless one.
-fn counted(n: usize, what: &str) -> String {
-    match n {
-        1 => format!("1 {what}"),
-        n => format!("{n} {what}s"),
     }
 }
