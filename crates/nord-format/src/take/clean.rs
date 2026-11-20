@@ -41,10 +41,7 @@ impl Noise {
     /// noise to read apart from its note, so none is found and it builds as recorded.
     pub fn of(mono: &[f64], rate: u32, floor: Floor) -> Noise {
         let x = detect::highpassed(mono, rate);
-        let env = Envelope {
-            floor,
-            ..Envelope::of(&x, rate)
-        };
+        let env = Envelope::read(&x, rate, floor);
         if !env.rests() {
             return Noise {
                 rate,
@@ -57,10 +54,7 @@ impl Noise {
             Some(found) => found.removed(&x, rate),
             None => x,
         };
-        let quiet = Envelope {
-            floor,
-            ..Envelope::of(&cleaned, rate)
-        };
+        let quiet = Envelope::read(&cleaned, rate, floor);
         Noise::measured(rate, hum, &cleaned, &quiet)
     }
 
