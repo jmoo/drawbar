@@ -3,7 +3,13 @@
 # Pack drawbar.app into the disk image a release carries, and check the copy in it.
 # With no arguments the app is this checkout's, and the image lands in the current
 # folder under its release name.
-# macOS only: hdiutil, codesign, plutil and ditto are the system's.
+#
+# DRAWBAR_SIGN_IDENTITY names a Developer ID Application identity in the keychain.
+# Without it the app is signed ad hoc, and Gatekeeper refuses the download.
+# DRAWBAR_NOTARY_PROFILE names a notarytool keychain profile. With it Apple notarizes
+# the image, and Gatekeeper opens the download without a warning.
+#
+# macOS only: hdiutil, codesign, plutil, ditto, spctl and xcrun are the system's.
 set -euo pipefail
 
 usage() {
@@ -21,6 +27,11 @@ fail() {
   echo "$*" >&2
   exit 1
 }
+
+identity=${DRAWBAR_SIGN_IDENTITY:-}
+profile=${DRAWBAR_NOTARY_PROFILE:-}
+[[ -z $profile || -n $identity ]] ||
+  fail "DRAWBAR_NOTARY_PROFILE needs DRAWBAR_SIGN_IDENTITY: Apple notarizes only what a Developer ID signed"
 
 tmp="$(mktemp -d)"
 mounted=""
@@ -42,10 +53,29 @@ mkdir "$tmp/image"
 cp -R "$built" "$tmp/image/drawbar.app"
 chmod -R u+w "$tmp/image"
 # The linker signs the binary alone, and a bundle verifies only once a signature
-# seals its Info.plist and resources too. Ad hoc: no identity, so Gatekeeper still asks.
-/usr/bin/codesign --force --sign - "$tmp/image/drawbar.app"
+# seals its Info.plist and resources too.
+if [[ -n $identity ]]; then
+  # The notary service refuses a signature without the hardened runtime or a timestamp.
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$identity" "$tmp/image/drawbar.app"
+else
+  /usr/bin/codesign --force --sign - "$tmp/image/drawbar.app"
+fi
 ln -s /Applications "$tmp/image/Applications"
 /usr/bin/hdiutil create -quiet -ov -volname drawbar -srcfolder "$tmp/image" -format ULMO "$out"
+[[ -z $identity ]] || /usr/bin/codesign --timestamp --sign "$identity" "$out"
+
+if [[ -n $profile ]]; then
+  # ⚠️ Reported, not measured here: notarytool exits 0 for an image the service rejected.
+  /usr/bin/xcrun notarytool submit "$out" --keychain-profile "$profile" --wait \
+    --output-format json >"$tmp/notary.json"
+  verdict="$(/usr/bin/plutil -extract status raw "$tmp/notary.json")"
+  if [[ $verdict != Accepted ]]; then
+    /usr/bin/xcrun notarytool log --keychain-profile "$profile" \
+      "$(/usr/bin/plutil -extract id raw "$tmp/notary.json")" >&2 || true
+    fail "$out: Apple's notary service answered $verdict"
+  fi
+  /usr/bin/xcrun stapler staple -q "$out"
+fi
 
 mkdir "$tmp/mount"
 /usr/bin/hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$tmp/mount" "$out"
@@ -62,6 +92,13 @@ app="$tmp/drawbar.app"
 /usr/bin/codesign --verify --deep --strict "$app" ||
   fail "$out: drawbar.app's signature does not verify, so macOS would kill it at launch"
 
+if [[ -n $profile ]]; then
+  /usr/bin/spctl --assess --type open --context context:primary-signature "$out" ||
+    fail "$out: Gatekeeper would refuse the image"
+  /usr/bin/spctl --assess --type execute "$app" ||
+    fail "$out: Gatekeeper would refuse drawbar.app"
+fi
+
 # A missing library or a rejected signature ends the process before it opens a window.
 # HOME keeps the app's settings and library away from the caller's.
 mkdir "$tmp/home"
@@ -77,4 +114,11 @@ fi
 kill "$pid"
 wait "$pid" 2>/dev/null || true
 
-echo "$out: drawbar $version, $(du -h "$out" | cut -f1)"
+if [[ -n $profile ]]; then
+  signed="notarized"
+elif [[ -n $identity ]]; then
+  signed="signed, not notarized"
+else
+  signed="signed ad hoc"
+fi
+echo "$out: drawbar $version, $(du -h "$out" | cut -f1), $signed"
