@@ -68,7 +68,8 @@ are, and the take editor follows the other document editors.
    inputs to the detectors, not stored:
    - `--notes`: the notes in playing order, as names or numbers (`B1,D2,F#2`). Takes of one layer
      each take their layer from their order.
-   - `--layers`: how many, where the hits per note are more than wanted.
+   - `--layers`: the most each note keeps, where it has more hits than wanted. Without it, a note
+     keeps every hit it has.
    - `--order played`, in place of loudness: the first hit of a note is the loudest layer. This
      suits players who play loud, medium, soft, and recordings whose level can't be trusted (a
      phone's automatic gain made measured loudness useless on our first test take).
@@ -189,10 +190,10 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   moves on to the next note when its pitch class is nearer that note's than the current one's.
   Dropped hits take no part. Comparing pitch class tolerates the octave errors common on low notes.
 - A hit more than half a semitone from its note's pitch class gets a warning.
-- More hits than layers: loudness mode keeps the hits nearest evenly spaced levels between the
-  loudest and softest; playing-order mode keeps the first N.
-- The number of layers can differ per range of roots, for example 4 layers over the middle octaves
-  and 3 elsewhere.
+- The number of layers comes from the take: Detect and `nord piano prep` keep each note's hits, so
+  a take played with 4 strikes over the middle octaves and 3 elsewhere builds 4 and 3 layers.
+- More hits than `--layers` allows: loudness mode keeps the hits nearest evenly spaced levels
+  between the loudest and softest; playing-order mode keeps the first N.
 - Layer values are named into the stroke names, and the build turns them into thresholds as it does
   now. See Unresolved questions for the default spread.
 
@@ -403,14 +404,12 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
   larger than a stated bound.
 - The hum filter lowers a synthetic hum line by a stated amount and changes a tone 30 notch-widths
   away by less than a stated amount.
-- A short self-recorded take as a fixture. It is ours, so it may be committed. The test checks the
-  hit count and the note order the note list states.
 - Region round trip: regions, labels and loops written to a WAV read back unchanged, every other
   chunk and the audio are byte for byte the same, and the build makes the same strokes from regions
   as from the same audio cut into separate WAVs.
 - 24-bit and float takes read to the same samples as a 16-bit copy, within its precision.
-- The Python prototype's output on the same fixture was a hand-checked reference while porting. It
-  is not a committed oracle.
+- The Python prototype's output on our interface take was a hand-checked reference while porting.
+  Neither is committed.
 
 ### Pull requests
 
@@ -464,8 +463,6 @@ If nothing is done, library building stays limited to people willing to hand-edi
 
 - **Other editors.** Which editors keep `cue `/`adtl` regions and `smpl` loops when they save? To be
   checked before relying on them.
-- **Default layer values, trims and ladders for v6** are the build's job, tracked in #278 and #279.
-  The prototype's values: 4 layers at 0/22/50/85, 3 at 0/20/70.
 
 ## Future possibilities
 
