@@ -21,9 +21,7 @@ time.
 On a Mac with Apple silicon and macOS 14 or later, download
 `drawbar-<version>-aarch64-macos.dmg` from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases), open it, and drag
-drawbar to Applications. It is not signed, so macOS refuses to open it the first
-time. Choose **Open Anyway** in System Settings ▸ Privacy & Security, then open
-drawbar again.
+drawbar to Applications.
 
 On Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13 or Fedora 40,
 download `drawbar-<version>-x86_64-linux.AppImage` from the newest
