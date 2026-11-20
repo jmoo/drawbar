@@ -1,37 +1,35 @@
-# drawbar
+# drawbar user guide
 
-drawbar reads, edits and moves the sounds on a Nord keyboard. It comes as an app
-that runs in your browser or on your desktop, and as `nord`, a command for your
-terminal.
+Use drawbar to bring sounds home from your Nord keyboard, organize them for a
+gig, or turn your own recordings into playable instruments. You can listen to a
+sample or piano through your computer before you connect a keyboard.
 
-![drawbar with an instrument attached and a piano library open in its editor](assets/screenshot.png)
+**First visit?** [Play your first sound](drawbar/overview.md) walks you through
+opening a demo piano and finding your way around. [Open drawbar in your browser](https://drawbar.app/).
 
-> **Alpha software.** Back up your instrument and your files before you use it.
-> The file formats and the USB protocol were worked out by studying real
-> instruments. [What is supported](getting-started/support.md) lists what has
-> been tested on hardware.
+## What would you like to do?
 
-**Open drawbar** at [drawbar.app](https://drawbar.app/). Connecting an
-instrument from the browser needs Chrome, Edge or Brave.
-[Install](getting-started/install.md) covers the desktop app and `nord`.
+| I want to… | Start here |
+|---|---|
+| Set up the desktop app or find out if my keyboard works | [Install drawbar](getting-started/install.md) · [What is supported](getting-started/support.md) |
+| Find my sounds again before rehearsal | [Use folders, tags and search](drawbar/organize.md) |
+| Keep a backup or use my sounds on another computer | [Back up or move a library](drawbar/this-computer.md) |
+| Copy a sound from my keyboard or put one back | [Connect and transfer](drawbar/instrument.md) |
+| Change a patch or rearrange a song | [Edit programs and set lists](drawbar/editing.md) |
+| Play my own recordings on the keys | [Make a sample instrument](drawbar/samples.md) · [Build a piano from a take](drawbar/recording.md) |
+| Fit a piano into the memory I have left | [Trim a piano library](drawbar/pianos.md#trim-to-fit) |
+| Find missing work or understand a message | [Recover files and edits](drawbar/recovery.md) · [Get help](drawbar/help.md) |
 
-## In this guide
+> drawbar is alpha software. Keep copies of your files and make a full instrument
+> backup in Nord Sound Manager before changing sounds on the keyboard.
 
-- **drawbar** is the app. Start with [The window](drawbar/overview.md).
-- **nord-cli** is the `nord` command. Start with its
-  [overview](nord-cli/overview.md).
-- **Reference** is for developers: building from source, the file formats, the
-  USB protocol, and how to contribute.
-
-Both tools are built on Rust libraries you can use in your own projects:
-`nord-format` for files and `nord-usb` for the instrument. drawbar's library is
-built on `toshokan`, which keeps tags and history beside a folder of files. The
-source is on [GitHub](https://github.com/jmoo/drawbar).
+For terminal commands and scripts, start with [nord-cli](nord-cli/overview.md).
+For the source, tests and file formats, see [Building from source](reference/building.md)
+and [File formats](reference/file-formats.md).
 
 ## Disclaimer
 
-Not affiliated with, authorized, or endorsed by
-[Clavia DMI AB](https://www.nordkeyboards.com). "Nord", "Clavia", and "Electro"
-are trademarks of Clavia DMI AB, used here only to identify the hardware these
-formats come from. Proprietary sound libraries and firmware are not distributed
-here.
+Not affiliated with, authorized, or endorsed by Clavia DMI AB. "Nord", "Clavia",
+and "Electro" are trademarks of Clavia DMI AB, used here only to identify the
+hardware these formats come from. Proprietary sound libraries and firmware are
+not distributed here.

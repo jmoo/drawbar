@@ -1,96 +1,76 @@
-# Editing
+# Edit a program or set list
 
-There is no Apply button. A control you move is set on the document at once,
-and the name shows a `*` until you save. Nothing on the instrument changes until
-you queue the document and send it.
+A *program* remembers a playable setup, such as a piano and organ split with
+effects. A *song* in a set list remembers which programs you want to call up.
+Changing the order of programs in a song leaves the programs themselves alone.
 
-## The document header
+## Try a program change
 
-Every document has the same strip across the top: its kind and name, a format
-badge, where it lives (a slot, a folder, or this computer), its size, and its
-state: `edited`, `matches keyboard`, `differs from keyboard`, `waiting to send`
-or `on the keyboard`. Hover any of them for the detail.
+1. Import a program file, or [copy one from your keyboard](instrument.md#copy-a-sound-to-this-computer).
+   Double-click the file under **This computer**.
+2. In **Basic**, choose a section at the top to jump to its controls. Try
+   dragging a knob up to increase its value, or double-click it to type a
+   value. The `*` beside the document name means you have unsaved edits.
+3. To keep the new version as a separate file, use **Export…** in the document
+   header. To change the library copy, choose **File ▸ Save**. **Revert**
+   discards the unsaved edits and returns to the last save.
+4. To hear the edited program on the keyboard, [send it to a slot](instrument.md#sending),
+   then load that slot. **Load on instrument** plays whatever is already stored
+   there.
 
-To the right are the two faces, **Revert**, **Export…**, and the document's
-main action, usually **Queue send**. That action is grayed out when there is
-nowhere to send to, and becomes a warning such as `Won't fit · 70 MB over` when
-the send cannot happen yet.
+Saving a library copy linked to the keyboard also queues it for its slot.
+If you opened the instrument slot directly, **Save** writes back to the keyboard.
 
-A document that belongs to a slot on the connected instrument also has **Load on
-instrument**, which makes the panel play that slot. The panel plays what the
-instrument holds there, so edits you have not sent are not heard.
+## Work with the panel controls
 
-## The faces
+Programs, live slots, presets and settings open with the controls available
+for that file. Click a lamp to flip a switch, open a selector to choose a
+setting, or pull a drawbar down. Inactive sections may be folded. An
+**unrecognized value** is the value that was in the file. You can leave it
+as it is.
 
-- **Basic** is the sound's controls, in the instrument's own words.
-- **Advanced** is the record of the bytes, top to bottom:
-  - **About this file**: what the file says about itself. Songs, files
-    with nothing to edit and bytes drawbar could not read have none.
-  - **Container**: what the file's header states, and whether its checksum
-    matches.
-  - **On the instrument**, for a document read from a slot: what the
-    instrument reports about that slot.
-  - The body. For a program, live slot, settings file or preset this is
-    **Every field**, a table that includes values the Basic face does not draw.
-    **Raw** is the value as last saved. Type into the **Writes** column to set a
-    field. A value the field cannot hold is refused, with the reason. A field
-    changed since the last save is highlighted and marked with a pencil, and the
-    count above the table says how many there are. Samples and pianos list what
-    drawbar can edit in them and where each edit lands in the file. A song
-    shows its four stored slots, and a file with nothing to edit shows its
-    **Body bytes**. Bytes drawbar could not read have no body to show.
+To edit with the keyboard, press Tab to reach a control. The arrow keys step
+a knob, Page Up and Page Down take larger steps, Home and End reach the limits,
+and Space flips a switch.
 
-A WAV has only Basic, and bytes drawbar could not read have only Advanced, so
-neither shows the switch.
+**Choose a piano.** With the instrument connected, choose the piano **Type**,
+then choose a **Model** from the pianos it holds. The program will use that
+piano when you send it. Without the instrument, a program may identify a piano
+or sample only by number.
 
-## Programs, live slots, settings and presets
-
-These open on a panel divided into sections the way the instrument's is, with a
-strip of chips at the top to jump between them. Each field is drawn as the
-control the panel uses: a lamp for a switch, a menu for a selector, a knob with
-the panel's own reading, drawbars you pull down, a grid for a pattern. A value
-drawbar has no name for reads `unrecognized value (6)` with a warning mark, and
-stays in its menu so you can change back to it.
-
-Every control answers the keyboard. Tab reaches it, the arrow keys step a knob,
-Page Up and Page Down jump it, Home and End take it to its stops, and Space flips
-a lamp. Double-click a knob to type a value.
-
-Where a program refers to a piano or sample by id, drawbar asks the connected
-instrument for its name and shows it. With an instrument connected, the piano
-**Model** lists its pianos of the chosen **Type**. Changing either one points the
-program at the piano now chosen, which is what the instrument plays. Sections the
-program stores but is not using are folded away.
-
-A control with a morph shows three dots. Pick a morph source in the inspector's
-**Morph** card and every morphed control shows that source's target instead.
-Editing then writes the morph. **Panel**, or **Back to the panel** above
-the sections, shows the panel's own values again.
+**Change a morph.** A morph lets a playing control, such as a wheel, move a
+setting toward a second value. Three dots mark a control with a morph. Pick
+the source in the inspector's **Morph** card and set its target value. Choose
+**Panel** or **Back to the panel** when you're ready to edit the starting value
+again.
 
 ## Set lists
 
-A song from a set list opens as the programs it plays, one row each, with its bank and slot,
-the program's name where drawbar knows it, and whether the entry resolves. Drag
-rows to reorder them.
+Double-click a song to see its four program entries in playing order. Drag a
+row to move it earlier or later in the song. To choose a different program,
+enter its bank and slot as shown on the keyboard.
+
+Check the **State** column before rehearsal. An unread bank means drawbar
+hasn't seen what's there yet. A message such as **no program at 1:2** means it
+has checked and the slot is empty. Connect the instrument to see program
+names and check references. To carry a song *and* the sounds it plays to
+another computer, [export a bundle](this-computer.md#bundles).
 
 ## Notes
 
-A text file opens as a box you type in: the set list, the cues, what the desk
-needs. A `.txt`, a `.md` or any other plain text file of up to 256 KiB opens
-this way, and **New ▸ Text note** starts an empty one. Tab types a tab, and
-pasted control characters other than tabs and line breaks are dropped.
+Choose **New ▸ Text note** for lyrics, cues or a set list you just want to
+read. Type, save and tag the note like any other library file. You can also
+open plain text such as a `.txt` or `.md` file up to 256 KiB. Notes stay on
+the computer.
 
-A note is saved, reverted, renamed, filed, tagged and exported like anything
-else on the list. The header counts its lines where another document's header
-gives its size. Notes stay on this computer; see
-[What is supported](../getting-started/support.md).
+## The document header
 
-## Files with nothing to edit
+The strip above the controls identifies the sound, its location and its state.
+Hover over an icon or status for details. **Basic** shows the playing controls.
+In **Advanced**, **Every field** includes settings the panel view leaves out.
+**Raw** shows the saved value. Type a new one under **Writes**. Changed fields
+are marked with a pencil. If drawbar recognizes a file but has no editor for
+it, **Advanced** lets you inspect its contents.
 
-A file drawbar recognizes but cannot yet edit opens with what the container
-says, and its bytes are under **Body bytes** on the Advanced face. It can still
-be sent, copied and tagged, and goes back to the instrument byte for byte as it
-came off.
-
-Sample instruments and piano libraries have editors of their own. See
-[Samples](samples.md) and [Pianos](pianos.md).
+Audio files have their own controls. See [sample instruments](samples.md),
+[piano libraries](pianos.md) and [WAV recordings](recording.md).

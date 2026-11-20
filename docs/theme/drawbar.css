@@ -384,6 +384,7 @@ html.js .sidebar .sidebar-resize-handle {
   padding: 0.5rem 0.9rem;
   border: 1px solid var(--table-border-color);
 }
+.content table :is(td, th) code { overflow-wrap: anywhere; }
 .content table tbody tr:nth-child(2n) { background: var(--table-alternate-bg); }
 .content table tbody tr:nth-child(2n+1) { background: transparent; }
 

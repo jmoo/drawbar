@@ -1,73 +1,59 @@
-# The window
+# Play your first sound
 
-drawbar is one window over two places: the files on your computer and the sounds
-on your instrument. Open it at [drawbar.app](https://drawbar.app/), or run the
-desktop app.
+Start with the demo electric piano. All you need is your computer, its speakers
+or headphones, and a connection to download the sounds.
 
-| Part | What it is for |
-|---|---|
-| **Top bar** | Import, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
-| **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
-| **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
-| **Documents** (center) | Every sound you open gets a tab. |
-| **Keyboard** (center) | The instrument's slots, bank by bank, once connected. |
-| **Inspector** (right) | What is selected and what you can do with it. |
-| **Status line** | The last thing that happened. Click it for the activity log. |
+1. [Open drawbar](https://drawbar.app/). On the welcome screen, choose **Start
+   with a demo**. If you're already in the app, choose **Help ▸ Welcome**.
+   In the browser, the menus are under **☰** at the right end of the top bar.
+2. On the left under **This computer**, expand **Demo sounds**. Double-click
+   **drawbar-tine**. The piano opens in a tab in the center of the window.
+3. Find **Key map** and click a key under one of the bands. You'll hear the
+   electric piano. Try another key under the same band. Both play the same
+   recording at different pitches. Keys beyond the last band are silent.
+4. Under **Roots**, open a row. A *root* is the note at which a sound was
+   recorded. Here you can listen to that recording on its own or save it as a WAV.
 
-⌘K (Ctrl+K) jumps to the search box. The buttons at the two ends of the row of
-tabs show and hide the side panels, and dragging a panel's edge resizes it.
+![The Demo sounds folder with drawbar-tine selected. In its tab, the Key map shows three recorded roots above the on-screen keyboard.](../assets/demo-piano.png)
+
+The demo folder also holds a pad in two sample formats. Double-click
+**drawbar-pad v2** to try its key map. Click the piano's tab to get back to it.
+You can choose **Start with a demo** again to bring back a demo file you removed.
+
+## Find your way around
+
+- **On the left**, **This computer** holds your files. A connected instrument
+  appears under its own name, with folders for the sounds on the keyboard.
+- **In the center**, the **Library** tab helps you find sounds across both
+  places. Double-click a sound to open its editor. The **Keyboard** tab shows
+  the connected instrument bank by bank.
+- **On the right**, the inspector shows what you selected and actions you can
+  take. **Room** shows how much space the connected instrument has left.
+- **At the bottom**, the status line tells you what just happened. Click it for
+  the activity log. The magnifier changes the size of text and controls.
+
+Use the buttons at either end of the tab row to hide or show the side panels.
+Drag a panel's inside edge to give it more room. The sun and moon control
+switches between the system, light and dark themes.
 
 ## Menus
 
-On macOS the menus are in the menu bar. On Windows they are at the left of the
-top bar. On Linux and in the browser they are behind the ☰ button. In the
-browser, a few keys use ⌥ (⌃ on a Mac) in place of ⌘.
-
-## The activity log
-
-Click the status line, or press ⌥⌘L, for the log. **Problems** shows only what
-went wrong. The copy button puts the whole log on the clipboard for a bug report.
-
-## Selecting
-
-Click a row to select it, ⌘-click to add more, ⇧-click to select a run, and
-double-click to open. Right-click for a menu that acts on everything selected.
-F2 renames. With more than 64 rows selected, the inspector sums them up: how
-many, how large, and how many of each kind. A folder or tag selected on its own
-shows how many files it has.
-
-## Reading the Library
-
-The **Where** column says where a sound lives: on this computer, on the keyboard,
-or both, with `=` when the two copies match and `≠` when they differ. It turns
-red when a send is waiting. While an instrument is attached, the **Needs** column
-names the sample or piano a sound plays. A name in italics with a `*` has unsaved
-edits. Hover anything for an explanation.
-
-## Folders and tags
-
-Folders on this computer are real folders, and the instrument never sees them.
-Make one with **New ▸ New folder**. Removing a folder moves what was in it up a
-level. If it holds [hidden files](this-computer.md#where-your-library-lives),
-drawbar asks first: **Move them up too** moves them with the rest, and **Show
-them** turns on **Show hidden files** and opens the folder, which stays.
-
-Tags label sounds without moving them, and a sound can have several. **Tag** in a
-row's menu, or **Add tag** in the inspector's Tags card, puts a tag or a new one on
-the selected sounds. Click a tag in the card to put it on, or take it off,
-everything selected. Renaming a tag to the name of
-another merges the two. Removing a tag deletes no sounds.
+On a Mac, the desktop app's menus are in the system menu bar. On Windows,
+they're at the left of the top bar. On Linux and in a browser, open **☰**.
+The menus show the shortcuts for your platform.
 
 ## MIDI controllers
 
-**Instrument ▸ Listen to MIDI controllers** lets a controller play the sample or
-piano in the front tab. Nothing is sent to your instrument.
-[What is supported](../getting-started/support.md#midi-controllers) says which
-browsers can do this. The browser asks for access on each visit, so turn it on
-again there. If another program is using the controller, close it and turn
-listening off and on again.
+To play a sample or piano from a controller, connect the controller to the
+computer, open the sound's tab, and choose **Instrument ▸ Listen to MIDI
+controllers**. Play a few notes. You'll hear the sound through the computer.
+The frontmost sample or piano tab is the one you play.
 
-## Theme and zoom
+In a browser, allow MIDI access when asked and turn listening on again when you
+return. If the controller is busy, close the other music app, then turn
+listening off and on. [Check browser MIDI support](../getting-started/support.md#midi-controllers).
 
-The sun and moon button in the top bar switches between your system's theme,
-light and dark. The magnifier at the right of the status line zooms the window.
+## Bring in your own sounds
+
+Drop a file on the window to add a copy to **This computer**. To start with a
+sound that's on your keyboard, follow [Copy and send sounds over USB](instrument.md).

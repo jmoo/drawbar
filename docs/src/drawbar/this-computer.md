@@ -1,361 +1,107 @@
-# Your files
+# Back up or move your library
 
-**This computer** is your library: the sounds you open, make, or copy off an
-instrument. Each one is a file. On the desktop, the files are in a folder you
-can see.
+Your library is everything under **This computer**. Choose the copy that suits
+what you want to keep.
+
+| What you want to keep | How to keep it |
+|---|---|
+| All your library files, folders and tags | Back up the library folder, or export your browser library as a ZIP |
+| A single sound in its current edited form | Open the sound and choose **Export…** |
+| A program or song with the pianos and samples it plays | [Export a bundle](#bundles) |
+| Everything on the keyboard | Make a full backup in Nord Sound Manager |
 
 ## Where your library lives
 
-On the desktop, your library is a folder in drawbar's own data:
+**Desktop.** Choose **File ▸ Show library folder** to see the files. Back up the
+whole folder, including the hidden `.drawbar` folder, which holds your tags and
+remembers which instrument slots the sounds came from. The default locations are:
 
-- macOS: `~/Library/Application Support/drawbar/library`
-- Linux: `~/.local/share/drawbar/library`
-- Windows: `%LOCALAPPDATA%\drawbar\library`
+| System | Library folder |
+|---|---|
+| macOS | `~/Library/Application Support/drawbar/library` |
+| Windows | `%LOCALAPPDATA%\drawbar\library` |
+| Linux | `~/.local/share/drawbar/library` |
 
-**File ▸ Show library folder** opens it. Finder, your backups and Nord
-Sample Editor see the same files and folders drawbar does. drawbar keeps your
-tags, and where each sound came from, in a hidden `.drawbar` folder beside them,
-so back up the whole library folder. That folder says nothing about your other
-files, so it stays small however large the library is. Your unsaved edits are
-kept on this computer, in drawbar's own data, never in the library folder.
+**Browser.** By default, your library lives in the browser you used to open
+drawbar.app. Clearing the site's data deletes it, and the browser can reclaim
+the space. Save a copy before changing browsers or clearing storage. Browser
+retention varies. [Check your browser](../getting-started/support.md#the-library-in-the-browser).
 
-drawbar hides the files in the library it does not open, such as a PDF or a
-photo, and never changes them on its own. **View ▸ Show hidden files** lists
-them, drawn faint, and a hidden file's menu offers **Delete…**. Names that start
-with a dot never show. On Windows, drawbar opens no file or folder whose name
-Windows cannot hold, such as one that ends in a dot or a space, and says why;
-rename it on the computer that made it.
-
-In the browser, your library is kept in the browser's own storage for
-drawbar.app, which no other site or app can see. It keeps your files, tags and
-unsaved edits from one visit to the next, but the browser can delete it, as
-[What is supported](../getting-started/support.md#the-library-in-the-browser)
-explains, and clearing the site's data deletes it too. drawbar says so once each
-visit, and hovering **This computer** shows what may delete it. **Help ▸ About
-drawbar** shows how much space it takes; see [Help and About](help.md).
+**Unsaved edits** stay with this copy of drawbar. Save the library files you
+want to take with you before you copy the folder or export the whole library.
 
 ## Keeping a copy in the browser
 
-**File ▸ Export library** downloads the whole library as one ZIP
-file, named for the day, such as `drawbar library 2026-10-30.zip`. It holds your
-files, folders and tags. Unsaved edits stay in the browser. Change nothing in the
-library until the download finishes, or the copy may not be whole.
+1. Save any library files whose names have a `*` and whose edits you want to keep.
+2. Choose **File ▸ Export library**. Your browser downloads a dated ZIP with
+   your files, folders and tags. Leave the library as it is until the download
+   finishes.
+3. Store the ZIP somewhere you can reach even if the browser's storage is cleared.
 
-To bring a copy back, choose **File ▸ Import library…** after the browser
-deleted the library, or in another browser. drawbar imports only a copy it
-exported, and the item is unavailable while the library holds any file, hidden
-ones included. Close drawbar in the browser's other tabs first. If an import
-stops partway, the library opens read-only until you import the copy again.
-A web app added to the Dock or the Home Screen keeps storage of its own, apart
-from Safari's, so export a copy in Safari and import it in the web app. In a
-browser that can open a folder, you can also unzip the copy and open the folder
-with **File ▸ Open folder…**.
+To restore, open drawbar in the destination browser. Its library must be empty,
+including hidden files. Close other drawbar tabs in that browser, choose **File
+▸ Import library…**, and select the ZIP drawbar exported. If the restore stops
+partway and the library opens read-only, repeat the import with the same ZIP.
+
+You can also unzip the backup and open the resulting folder on the desktop or
+in a browser with **Open folder…**. A web app added to the Dock or Home Screen
+has storage separate from Safari. Export from Safari and import in the web app
+to take your library across.
 
 ## Opening another folder
 
-On the desktop, **File ▸ Open folder…** opens any folder as your
-library: a Sample Editor project, a sample pack, a folder on a shared drive.
-**File ▸ Open recent** switches back. drawbar opens the last library
-again when it starts, and changes nothing in a folder until you change something
-there. Unsaved edits come back when you open the library again from the same
-place. A library you moved or renamed opens without them.
+Choose **File ▸ Open folder…** and select the folder you want to use. Its
+files become **This computer**. A save now writes to the file in that folder.
+This works well for a Sample Editor project whose WAVs are already arranged in
+subfolders, or for a library in Dropbox, OneDrive, iCloud Drive or a network
+share.
 
-In the browser, browsers that can open a folder on your computer offer **File ▸
-Open folder…** too ([What is supported](../getting-started/support.md)
-lists them). The browser asks whether drawbar may change the folder. It forgets
-that answer when drawbar.app closes, unless you allowed it on every visit, so the
-next visit starts with the browser's own library. Choose the folder in **File ▸
-Open recent** and the browser asks again. If you take the permission back while
-the folder is open, drawbar closes it the same way. A folder's unsaved edits come
-back while it is on **File ▸ Open recent**; picked again after it left that list,
-it opens without them.
+Use **File ▸ Open recent** to return to a library. On the desktop, drawbar
+reopens your last library at startup. In a browser, grant access when asked.
+If you granted access for one visit, drawbar starts in browser storage next time.
+Pick your folder from **Open recent** to grant access again. [Browsers that can open a folder](../getting-started/support.md#the-library-in-the-browser).
 
-The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
-network share. A copy that is out of date, changes that arrive out of order, and
-a folder partly restored from a backup all come together again without your
-help. Each drawbar keeps its own record of what it changed in the `.drawbar`
-folder, so none overwrites another's. Several drawbars can therefore use one
-library at once: on two computers, in two windows, in two browser tabs, or in
-the browser and the desktop app on one folder. A tab shows another tab's changes
-as soon as they are made. Otherwise drawbar shows what the others changed when
-you come back to the window, and the activity log says so.
+Keep the folder in the same place to pick up unsaved edits next time.
+In a browser, reopen it from **Open recent**. If you want to move or rename
+the folder, save your edits first.
 
-If two drawbars tag the same file before either sees the other's tags, as while
-a sync is paused, the file wears every tag either gave it once the sync catches
-up. The activity log of the drawbar that brought them together names the file. A
-file of another drawbar's record that a sync client keeps only online, or that
-this computer may not read, is named in the activity log once, and its changes
-show once drawbar can read it.
+## Share a folder between computers
 
-In the browser, and on a desktop disk that cannot refuse to move a file onto one
-already there, drawbar checks that a name is free before a saved, copied or
-moved file takes it. A file another program makes at that name in the instant
-between is replaced, and what it held is lost.
+Open the same synced folder on each computer. Sync the hidden `.drawbar` folder
+along with the sounds so tags and slot information travel with them. Unsaved
+edits stay on the computer where you made them. Return to the drawbar window to
+see changes from another computer after sync finishes.
 
-## Adding and making sounds
-
-Drop files on the window, or use **File ▸ Import…**. drawbar copies them into
-your library and leaves the originals where they were. A kind of file drawbar
-does not open, such as a PDF, is not copied in, and the activity log says so. A
-file drawbar cannot read still shows up, and the activity log says what went
-wrong.
-
-**New** makes a fresh sound, note or folder. A fresh sound is not a factory
-sound, and some kinds start with every control at zero.
-
-## Sounds an earlier version kept
-
-drawbar 0.10 and earlier kept This computer in the browser's storage, or in
-drawbar's settings on the desktop, rather than as files. The first time this
-version opens a library it can change, it brings those sounds in as files. Each
-folder becomes a folder at the top of the library, and each sound a file in its
-folder, named after it, with its tags and the slot it came from. A name already
-taken gets a number. A sound with an edit you had not saved comes back with that
-edit, still unsaved. If the browser's storage is full, the edit comes in as a file
-of its own beside the sound instead. A note named for a kind of file drawbar does
-not open, such as `.json`, keeps its name and comes in as a hidden file, and an
-edit you had not saved to it is a hidden file of its own beside it. Bytes
-drawbar could not read come in unchanged, and hidden unless their name ends in
-an extension drawbar opens; a name with no extension gains `.bin`, so `Junk`
-becomes `Junk.bin`. In the browser, a
-[copy of the library](#keeping-a-copy-in-the-browser) includes the hidden files.
-The activity log says how many sounds came in.
-
-Undo does not take this back; delete the sounds you do not want. Once the sounds
-are in the library and their unsaved edits are kept, drawbar does not bring them
-in again, but it leaves the old list where it was, so the earlier version still
-finds it. If drawbar stops before then, it puts the unsaved edits back the next
-time it starts. If the change fails, drawbar says why and tries again the next
-time it starts.
-
-## Saving
-
-Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
-writes the file, and queues it for sending if the sound came from a slot on the
-connected instrument. **Revert** goes back to the last save.
-
-Unsaved edits are kept when you quit: those of sounds in your library, and those
-of a sound you were viewing in a slot of the instrument. A slot's edits come
-back when you view that slot of the same instrument again with the same library
-open; if the slot changed since, drawbar asks which to keep. **Keep mine** keeps
-your edits, to send when you choose, **Take theirs** discards them, and **Keep
-both** keeps yours as a new file on this computer. Where edits kept from an
-earlier session meet edits you made since, **Take theirs** puts the earlier
-edits back, and **Keep both** keeps the earlier edits as a new file. drawbar also keeps
-edits every few seconds, so after a crash you may lose the last few seconds. In
-the browser, closing the tab before drawbar has kept your latest edit makes the
-browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
-library keeps unsaved edits too, since drawbar keeps them on this computer and
-never in the library folder.
-
-Unsaved edits belong to this computer's copy of drawbar, not to one window. A
-window or tab that opens the library shows the edits kept for it, including
-those of another window still open. Where two windows kept edits of one sound,
-the one kept last is shown, and the activity log says so.
-
-## Undo
-
-**Edit ▸ Undo** (⌘Z) takes back the last change you made to your files and
-tags, and **Edit ▸ Redo** (⇧⌘Z) makes it again. Undo reaches back only to when
-this window opened the library: a change from before, or from another window,
-cannot be undone. The menu says which change it is, such as **Undo Rename
-“c3.ne5p”**. A save, a new sound, a copy, a rename or move, a deletion, a new or
-removed folder, and a change to tags can each be undone. One action is one
-step: dropping, moving or deleting several sounds at once, unpacking a bundle,
-writing over a sound, removing a folder with what is in it, or making a tag and
-naming it, is one undo. An action on more files than the library can keep as one
-step is refused whole and changes nothing; do it in smaller parts. That is tens of
-thousands of files with short names, and about ten thousand with names hundreds
-of characters long. If another drawbar has changed what an undo would take
-back, that undo is refused, and Undo goes on to the change before it. An edit
-you have not saved is taken back with **Revert** instead.
-
-Undo and Redo are off while a change is being written. A change that takes more
-than two seconds shows what it is doing over the window.
-
-Deleting a sound or a hidden file, or saving over a sound, moves the old file
-into drawbar's trash in the `.drawbar` folder, where Undo finds it. The trash
-keeps only what Undo can still reach, at most 1 GiB. Past that, the oldest goes
-first, and the activity log says which change Undo no longer reaches. Quitting
-empties the trash. What a crash left there goes when the library next opens,
-once drawbar has finished any change the crash interrupted.
-
-When drawbar has to go on with a history of its own, Undo starts again. If that
-happens while the library is open, drawbar empties the trash of the history it
-leaves. If it happens as the library opens, or because drawbar's data was copied
-to a second computer, that trash stays in the library folder, under
-`.drawbar/library/writers.2`, until you remove it by hand.
-
-**Export…** saves a copy somewhere else. **File ▸ Export…** (⇧⌘E) exports the
-checked sounds on this computer, or the open document when nothing on this
-computer is checked.
-Rename with F2. If a name is taken, drawbar asks whether to **Overwrite** the
-file there or **Keep both**. Only **Keep both** is offered when the file there is
-hidden, and the question says so.
+If you add different tags to the same sound while offline, both sets of tags
+appear after sync. If something looks missing during a sync, let it finish.
+For conflicting edits or a **Kept apart** message, see [Recover files and edits](recovery.md).
 
 ## Bundles
 
-A bundle (`.ne5pbundle` or `.ne5tbundle`) is the file Nord Sound Manager uses to
-carry programs or songs, together with the pianos and samples they play.
-Drop one on the window, or open it with **File ▸ Import…**, and drawbar unpacks it
-into a new folder named after the bundle. The bundle itself is not kept.
+For a set list, the song file holds the locations of its programs. A program in
+turn can depend on a piano or sample. A Nord Sound Manager *bundle* carries the
+related files together.
 
-To make one, check the sounds to bundle and choose **Export as bundle…**. They
-can be on this computer, on the instrument, or both. drawbar adds what they
-need: the programs a song plays, and the pianos and samples a program plays.
-Sounds on the instrument are copied to this computer first. In the browser the
-bundle arrives in your downloads.
+1. Connect the instrument that holds the sounds. Select the programs or songs
+   you want, on the instrument, on this computer, or across both.
+2. Choose **Export as bundle…**. drawbar copies sounds it needs from the
+   instrument to this computer and includes the dependencies it can identify.
+   In a browser, look for the bundle in your downloads.
+3. Click the status line to open the activity log. Check for anything left out
+   before relying on the bundle elsewhere. A program file identifies its piano
+   and sample by number. Copying it from its slot lets drawbar ask the instrument
+   for their names.
 
-A program's file names its piano and sample by a number only the instrument can
-put a name to. A piano or sample already on this computer is added when the
-instrument has named it, which happens when drawbar copies the program from its
-slot. The activity log lists anything the bundle had to leave out.
+To unpack a bundle, drop it on the window or choose **File ▸ Import…**.
+The contents appear in a new folder named after the bundle. Keep the original
+bundle if you need it again. [Supported bundle formats](../getting-started/support.md#files).
 
-## Changes made outside drawbar
+## Hidden files
 
-You can rename, move, edit and delete your files in Finder or any other app.
-drawbar notices when you come back to its window or tab, and a renamed or moved
-sound keeps its tags and where it came from.
+To see other files already in the folder, such as a PDF set list, choose
+**View ▸ Show hidden files**. They appear faintly. Names beginning with a dot
+stay hidden. Files drawbar doesn't open can stay beside your sounds. An import
+skips those files and records the reason in the activity log.
 
-drawbar never writes over a change made outside it without asking. If a file
-changed while you had unsaved edits to it, drawbar asks what to do:
-
-- **Keep mine** keeps your edits. Your next save replaces the file.
-- **Take theirs** drops your edits and uses the file as it is now.
-- **Keep both** saves your edits as a new file beside it.
-
-A sound that changed on disk is not sent to the instrument until you have looked
-at it.
-
-## Kept apart
-
-drawbar keeps a history of the changes made to a library, such as tags added and
-files renamed, so that every computer sharing the folder agrees on them.
-Sometimes part of that history cannot be merged with the rest. **Kept apart**
-then appears in the sidebar, and the activity log says so once. Click it to see
-each group of changes: who made them, when, and what each one does. A group
-lists at most 100 changes and counts the rest.
-
-This happens when:
-
-- drawbar's own data was copied to a second computer, restored from a backup,
-  or brought back with a virtual machine, and both copies went on making
-  changes, however briefly. Each copy's changes are a branch of their own, and
-  the activity log says that this drawbar goes on with a history of its own.
-- A sync has brought later changes before the earlier ones they follow. These
-  wait until the rest arrives and are merged then. Meanwhile they can be taken
-  but not dismissed.
-- A sync or a backup replaced part of the history with an older version, leaving
-  changes only that version holds. These can be taken or dismissed.
-
-Nothing kept apart changes your library until you choose to:
-
-- **Take** makes one change. **Take all** makes every change in the group,
-  including those it does not list. Each is one step that **Edit ▸ Undo** takes
-  back. Taking a change to a sound the branch added brings the sound too, at its
-  file. Where your library already has a sound at that file, the change is made
-  to it.
-- Taking a change to where a sound's file is makes the sound's file the one at
-  that path. The file must be there, as drawbar last found it, and belong to no
-  other sound; otherwise the activity log says why it was not taken.
-- **Dismiss…** stops showing a branch, on this computer and every other. It
-  cannot be undone. A branch whose changes you have all taken says there is
-  nothing left to review, and offers only this. A branch you dismissed can show
-  again once the drawbar that made it goes on with it; dismiss it again if you
-  still don't want it.
-- **Show file** shows a sound a branch left without a file, which cannot be
-  taken.
-
-A change marked “only taking it settles this” replaced a value that no computer
-shows any more, so it stays listed until you take it.
-
-When the inspector shows a sound with changes kept apart, it says so and links
-to them.
-
-## Demo sounds
-
-**Start with a demo** on the welcome sheet (**Help ▸ Welcome**) downloads a tine
-electric piano and a looped pad into a **Demo sounds** folder. Ask again to
-bring back any you deleted.
-
-## If something goes wrong
-
-- **Read-only.** A library is read-only when:
-  - drawbar cannot write its folder;
-  - a newer drawbar gave its `.drawbar` folder a newer layout, or changed it from
-    this computer in a way this one cannot read;
-  - drawbar could not finish a change, as when another program put a file where
-    a save was going;
-  - the folder does not make sure a change is kept, as on some network and USB
-    drives. Move such a library to a folder on a local disk.
-
-  Hover the library's name for the reason and what to do, then choose the
-  library in **File ▸ Open recent** to open it again. Unsaved edits are still
-  kept, and an edit you save there comes back unsaved. New sounds, moves and
-  deletions in a read-only library are held in memory only, and are lost when
-  you quit. If opening it again would lose a sound or an edit, drawbar asks
-  first.
-- **Not opened.** If a library cannot be opened, hover its name for the reason,
-  then choose it in **File ▸ Open recent** to try again. Nothing you
-  make meanwhile is kept.
-- **A change left unfinished.** If drawbar on another computer, or in a browser
-  on this one, stopped in the middle of changing files in a shared library,
-  drawbar asks once the change has stood for a few seconds: **Finish** completes
-  the change, **Roll back** puts the files back as they were, **Leave as is**
-  stops asking, and **Later** asks next time. Finishing or rolling back is no
-  step of Undo. What drawbar left unfinished on this computer, after a crash, a
-  failed save or in another window, is finished without asking, by its next
-  change or when the library next opens. If it can no longer be finished,
-  because a file it was moving is gone or was saved over since, drawbar asks
-  whether to roll it back or leave it as is, and Undo no longer reaches the
-  changes before it.
-- **A folder that stays.** Where a folder moves one file at a time, as in the
-  browser, a folder that still holds a file drawbar does not list, such as one
-  whose name starts with a dot, stays where it was, and the activity log names
-  it.
-- **Too many tabs.** One library opens in at most 16 tabs or windows at once. The
-  next one does not open it and says so; close one, then open the library again.
-- **Not answering.** If the library has not answered for a minute, drawbar
-  asks whether to reopen it. Edits made since drawbar last kept them
-  are lost, and drawbar names them. A library you leave meanwhile, by opening
-  another or quitting, is closed after that minute without asking, and those
-  edits are lost too; the desktop app names them. If the library stops
-  altogether, drawbar closes it and says so; **File ▸ Open recent** opens it
-  again.
-- **Restored from a backup.** When the library folder no longer holds changes
-  drawbar showed before, as after a restore from a backup, drawbar shows the
-  folder as it is the next time it looks, without asking. While a sync is still
-  bringing the folder's files, changes can disappear the same way and come back
-  once they arrive. A change you make meanwhile is kept: at worst it shows beside
-  the one the sync brings.
-- **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
-  edits, or came from your keyboard. Save it to bring the file back, or delete
-  it. After a restart, a missing file with tags shows as lost, with its tags,
-  until you let it go.
-- **Two files that could each be one.** A tagged file was moved or copied
-  outside drawbar, and now two files hold what it held, neither where it was.
-  drawbar cannot tell which is the file, so it gives neither the tags, keeps
-  them with the missing file, and says so once in the activity log. Move the
-  right one back, or delete the other, and drawbar finds it.
-- **A write to the instrument left a file.** If drawbar stopped, or could not
-  put the old sound back, while it replaced a sound on your keyboard, the sound
-  that was there may now be only on this computer. drawbar puts it in the
-  library as a file of its own, named after the slot it came from, once the
-  instrument is idle or when the library next opens. Undo does not take it out,
-  since it may be the only copy, but you can delete it like any other file.
-  While the library cannot be written, drawbar keeps it aside and asks: **Show
-  the file** shows where it is, **Discard** deletes it, and **Later** leaves it
-  for the next library that can take it. A file that does not read is not a
-  copy of the sound, and drawbar offers only to discard it.
-- **Not read** or **not all listed.** drawbar could not read that file or
-  folder, and the activity log names it. What is in such a folder is not shown
-  until drawbar can read it, and neither is such a file when drawbar must read it
-  to tell which sound it is.
-- **Failed verification.** The sample or piano file is damaged. drawbar checks
-  one when you open or send it, and will not send a damaged one.
-- **No storage in the browser.** Some private windows give drawbar none. drawbar
-  says so, and what you make lasts only until the tab closes. drawbar also cannot
-  keep a copy of a sound it would replace, so it sends only to empty slots.
-
-How the library works underneath is in
-[Library data model](../reference/data-model.md).
+Missing a file, an unsaved edit, or a sound from an earlier version?
+See [Recover files and edits](recovery.md).
