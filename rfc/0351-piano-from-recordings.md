@@ -34,21 +34,25 @@ import gave 50 WAV documents, each detected on its own, and no one view to check
 
 ## Guide-level explanation
 
-**New ▸ Piano project…** opens with one question:
+**New ▸ Piano project…** opens the same file picker as **New ▸ Piano library**, and drawbar reads the
+WAVs picked. A single WAV is one recording of the whole instrument, and nothing is asked. For several,
+the dialog asks what they are, offering only what several WAVs can be:
 
 ```
 What do you have?
-( ) One recording of the whole instrument
 ( ) A few recordings: one per layer, or one per range of keys
 ( ) One recording per note struck
 ( ) Finished strokes, cut and looped
 ```
 
-The WAVs are chosen as a folder or as files. drawbar asks for the shape rather than deciding it,
-because the shape tells the detectors where a gain change or a new noise floor can begin, as RFC-0276
-chose.
+drawbar picks its best guess from what it read: finished strokes where the files are named as strokes
+or already marked, one per note where each holds one hit, a few recordings where each holds many.
+Choosing another reads the rows again, so a wrong guess shows at once. drawbar asks for the shape
+rather than deciding it outright, because the shape tells the detectors where a gain change or a new
+noise floor can begin, as RFC-0276 chose. Whether a few recordings are layers or ranges is not asked:
+takes over the same notes are layers, and takes over different notes are ranges.
 
-- **One recording** is today's take: its hits found, a note's hits its layers by level.
+- **One recording**, a single WAV, is today's take: its hits found, a note's hits its layers by level.
 - **A few recordings** are either one per layer, each playing every note once with the loudest
   first, or one per range of keys, each a take of its own over its notes. A note found in two
   recordings of ranges is refused with both names, not merged.
@@ -74,7 +78,8 @@ end. Everything the take editor does on one WAV it does here: stepping through t
 and loops, auditions, cleaning, and Build. A single WAV made into a project looks the same, as a set
 of one.
 
-The project is saved in the library like any document, with copies of its WAVs in a folder beside
+In the library the project shows as a "piano project": recordings with their notes, layers, loops and
+key-offs marked, ready to build a piano library. It is saved there like any document, with copies of its WAVs in a folder beside
 it, as a Sample Editor project's are. Opening it again shows the long view as it was left.
 
 A WAV opened on its own from the library is unchanged: it opens in the take editor, and **Build
@@ -147,8 +152,6 @@ CLI share it:
 ## Unresolved questions
 
 - The hint under each choice, and the New menu item's hover text.
-- Whether the choice is preselected from what is picked (one file, many short files, files named as
-  strokes).
 - How the long view shows a set of hundreds of files: I'd like to show only each recording's hit
   (attack to release end) with a short gap between, which keeps it small on the web.
 - What a set of recordings at different sample rates does: refused, naming the odd ones out, unless
