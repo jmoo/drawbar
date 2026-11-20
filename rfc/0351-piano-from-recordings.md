@@ -1,8 +1,8 @@
-# RFC-0000: A piano library from recordings
+# RFC-0351: A piano library from recordings
 
 - Start date: 2026-11-20
 - Authors: mikesprad
-- RFC PR: [jmoo/drawbar#0000](https://github.com/jmoo/drawbar/pull/0000)
+- RFC PR: [jmoo/drawbar#351](https://github.com/jmoo/drawbar/pull/351)
 - Tracking issue: none yet
 
 ## Summary
