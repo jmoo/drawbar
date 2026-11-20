@@ -105,6 +105,10 @@ CLI share it:
   only on save, with only the cue, label and loop chunks rewritten and the audio and other chunks kept
   byte for byte. The files the recordings were copied from are never written. The project file holds
   nothing the WAVs already say.
+- What the whole set is built with is the project's, not each recording's: one gain, one category
+  and one choice of cleaning, since they all become one `.npno`. They are kept in the project file
+  and applied when the library is built, so a project's gain never rewrites a recording's audio, as
+  a gain on a WAV opened on its own does today.
 - The long view is built in memory from the recordings and never written as a WAV. Each recording
   keeps its own noise floor and its own place as a layer. A save that changes several recordings
   asks for each of their saves at once, so the library takes them as one change and **Edit ▸ Undo**
