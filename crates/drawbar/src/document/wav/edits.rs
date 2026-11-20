@@ -40,7 +40,7 @@ pub(super) fn detected_marks(value: &str) -> Result<wav::Marks, String> {
     Ok(marks)
 }
 
-/// `marks` with every region of the sample whose attack is `label` renamed to the sample
+/// `marks` with every region of the hit whose attack is `label` renamed to the hit
 /// whose attack label is `to`.
 pub(super) fn renamed(
     marks: &wav::Marks,
@@ -119,7 +119,7 @@ pub(super) fn frames_in(path: &str, value: &str) -> Result<Range<u32>, String> {
     }
 }
 
-/// Whether `path` adds, deletes or renames a sample, or marks what Detect found.
+/// Whether `path` adds, deletes or renames a hit, or marks what Detect found.
 pub(super) fn is_piece(path: &str) -> bool {
     path == DETECTED
         || [RENAMED, ADDED, LOOPED, DELETED]
@@ -179,7 +179,7 @@ pub(super) fn pieced(
             .hit
             .ok_or_else(|| format!("{path}: names no hit"))?;
         let cuts = hit::Cuts::of(&take::Marked::from_marks(marks), hit);
-        // The sample's own loop, as the lanes pair it: never a neighbor's its attack has
+        // The hit's own loop, as the lanes pair it: never a neighbor's its attack has
         // grown over.
         let inside = |found: &wav::Loop| {
             (cuts.looped.as_ref())

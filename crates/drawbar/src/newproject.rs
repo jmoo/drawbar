@@ -593,7 +593,7 @@ impl Draft {
             for take in &self.takes {
                 let prepped = take.prepped().ok_or_else(|| {
                     format!(
-                        "{}: takes build on their own, not with WAVs of one hit each",
+                        "{}: takes build on their own, not with WAVs of one stroke each",
                         take.path
                     )
                 })?;

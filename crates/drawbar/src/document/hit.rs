@@ -110,7 +110,7 @@ pub struct Cuts {
     pub looped: Option<Range<u32>>,
     /// The take's other loops, likewise, which none of the hit's regions may reach into.
     pub other_loops: Vec<Range<u32>>,
-    /// The take's other regions, the hit's key-off among them, which its loop may not
+    /// The take's other regions, the hit's release among them, which its loop may not
     /// reach into.
     pub other_regions: Vec<Range<u32>>,
 }
@@ -469,10 +469,10 @@ pub fn snapped(audio: &Audio, cut: Cut, frame: u32, room: &RangeInclusive<u32>) 
         .unwrap_or(frame)
 }
 
-/// A part of a sample the close lane's Add and Delete menus add or delete.
+/// A part of a hit the close lane's Add and Delete menus add or delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Piece {
-    /// A whole sample: its attack, and on adding, a key-off.
+    /// A whole hit: its attack, and on adding, a release.
     Hit,
     Loop,
     Release,

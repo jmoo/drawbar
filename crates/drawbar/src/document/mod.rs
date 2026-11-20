@@ -237,8 +237,8 @@ impl Opened {
     /// ⚠️ Reading a WAV copies every sample, so it happens once here and never per
     /// frame.
     ///
-    /// A WAV left for another tab comes back as `parked`, with its history and the
-    /// noise found for it.
+    /// A WAV left for another tab comes back as `parked`, with its view, its pick and
+    /// the noise found for it.
     fn new(
         asset: Asset<'_>,
         view: bool,
@@ -280,8 +280,8 @@ pub struct Document {
     open: Option<Opened>,
     /// Which face each document was left on.
     views: std::collections::HashMap<u64, Face>,
-    /// The WAV documents left for another tab, so their undo and the noise found for
-    /// them outlive the switch. Only those still in a tab are kept; see
+    /// The WAV documents left for another tab, so their view, their pick and the noise
+    /// found for them outlive the switch. Only those still in a tab are kept; see
     /// [`Document::keep_wavs`].
     parked: std::collections::HashMap<u64, wav::State>,
     /// The Advanced table's filter and selected cell. One table serves every tab; see
@@ -1414,10 +1414,18 @@ impl Document {
             Err(why) => {
                 log.error(why.clone());
                 self.refused(Some(why.clone()));
+                let open = self.open.as_mut().filter(|open| open.id == id);
+                if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
+                    state.refused();
+                }
                 return Err(why);
             }
         };
         self.refused(None);
+        let open = self.open.as_mut().filter(|open| open.id == id);
+        if let Some(state) = open.and_then(|open| open.wav.as_mut()) {
+            state.taken();
+        }
         // `replace_bytes` decides whether the bytes changed; it is the only place two
         // bodies are compared.
         if let Some(out) = made {
@@ -3567,6 +3575,51 @@ mod tests {
             );
         }
         assert!(said.iter().any(|word| word == "Play"), "{said:?}");
+    }
+
+    /// A WAV edit the take refuses puts the pick back where it was before the edit moved
+    /// it, so the pick never names a hit the take does not mark.
+    #[test]
+    fn a_refused_wav_edit_puts_the_pick_back() {
+        use nord_format::formats::npno::encode::LayerTag;
+        use nord_format::wav as prep;
+        let audio = prep::Audio {
+            rate: 44_100,
+            channels: 1,
+            samples: (0..44_100 * 3)
+                .map(|i| 0.3 * (i as f32 * 0.06).sin())
+                .collect(),
+        };
+        let region = |start: u32, frames: u32, label: &str| prep::Region {
+            start,
+            frames,
+            label: label.into(),
+        };
+        let marks = prep::Marks {
+            regions: vec![
+                region(10_000, 30_000, "069-b0-v22"),
+                region(70_000, 30_000, "069-b0-v60"),
+            ],
+            loops: Vec::new(),
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 16 }).unwrap();
+        let bytes = prep::with_marks(&bytes, &marks).unwrap();
+        let mut open = Open::file("take.wav", bytes);
+        open.frame(Vec::new());
+        let was = Some((69, LayerTag::Value(22)));
+        let state = open.state().wav.as_mut().expect("a WAV state");
+        state.view.picked = was;
+        state.before_edit = Some((state.view.clone(), state.close.clone()));
+        state.view.picked = Some((69, LayerTag::Value(30)));
+
+        let sets = vec![(format!("{}069-b0-v60", wav::RENAMED), "069-b0-v22".into())];
+        let (id, ctx) = (open.id, &mut open);
+        let outcome = ctx
+            .document
+            .apply(id, sets, &mut ctx.workspace, &mut ctx.log);
+        assert!(outcome.is_err(), "a rename onto a marked hit is refused");
+        let state = open.state().wav.as_ref().expect("a WAV state");
+        assert_eq!(state.view.picked, was, "the pick is put back");
     }
 
     /// A WAV that reads offers audition and gain, and states its audio in the header. One that does not read says why and offers none of them.

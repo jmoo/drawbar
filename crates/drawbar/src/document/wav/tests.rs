@@ -7,11 +7,12 @@ fn a_wav_too_large_for_the_browser_says_its_size_and_where_to_open_it() {
     assert_eq!(
         too_large(138_193_000, WEB_MOST_BYTES).as_deref(),
         Some(
-            "This WAV is 131 MB, more than the browser can work on (120 MB). Use the Desktop version of Drawbar instead."
+            "131 MB: too large for the browser, which opens WAVs of up to 120 MB; open it in the \
+             desktop app"
         )
     );
     let just = too_large(120 * MB + MB / 2, WEB_MOST_BYTES).unwrap();
-    assert!(just.starts_with("This WAV is 120.5 MB,"), "{just}");
+    assert!(just.starts_with("120.5 MB:"), "{just}");
 }
 
 fn mono(samples: &[i16]) -> Vec<u8> {
@@ -232,15 +233,15 @@ fn a_24_bit_and_a_float_file_read_as_float_for_the_waveform_and_player() {
 }
 
 #[test]
-fn the_clipping_a_gain_would_cause_is_counted_in_notes() {
+fn the_clipping_a_gain_would_cause_is_counted_in_strikes() {
     let state = opened(&take(&[0.9, 0.3, 0.05]));
     assert_eq!(state.notes.peaks.len(), 3);
     assert_eq!(state.clipping(0.0), Ok(None));
     assert_eq!(state.clipping(-12.0), Ok(None));
     // 0.9 x 1.995 is past full scale; 0.3 x 3.98 is too; 0.05 x 15.85 is not.
-    assert_eq!(state.clipping(6.0), Ok(Some("1 of 3 notes clips".into())));
-    assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 notes clip".into())));
-    assert_eq!(state.clipping(24.0), Ok(Some("2 of 3 notes clip".into())));
+    assert_eq!(state.clipping(6.0), Ok(Some("1 of 3 strikes clips".into())));
+    assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 strikes clip".into())));
+    assert_eq!(state.clipping(24.0), Ok(Some("2 of 3 strikes clip".into())));
     assert!(state.clipping(25.0).is_err());
 }
 
@@ -284,7 +285,7 @@ fn a_wav_closed_with_an_unsaved_gain_opens_on_that_gain() {
         );
     }
     let state = State::new(workspace.get(id).unwrap());
-    assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 notes clip".into())));
+    assert_eq!(state.clipping(12.0), Ok(Some("2 of 3 strikes clip".into())));
 }
 
 /// A gain is found again whatever order the edits around it moved the file's chunks
@@ -443,7 +444,7 @@ fn a_moved_cut_is_written_to_the_marks_and_changes_no_sample() {
     assert!(apply(&bytes, &bytes, &[none]).is_err(), "no such hit");
 }
 
-/// A sample, key-off and loop are added and deleted in the marks, the audio
+/// A hit, release and loop are added and deleted in the marks, the audio
 /// untouched, and each is named for Undo.
 #[test]
 fn pieces_are_added_and_deleted_in_the_marks() {
@@ -485,7 +486,7 @@ fn pieces_are_added_and_deleted_in_the_marks() {
         .regions
         .iter()
         .all(|region| !region.label.starts_with("069")));
-    assert_eq!(marks.loops.len(), 1, "the other sample's loop stays");
+    assert_eq!(marks.loops.len(), 1, "the other hit's loop stays");
 }
 
 /// What the edits leave the build accepts, as its own check of a take's marks says,
@@ -512,7 +513,7 @@ fn an_edit_the_build_would_refuse_is_refused() {
     .unwrap();
     assert_eq!(builds(&out).unwrap(), 4);
 
-    // A key-off over the loop of its own attack, a fade on a looped attack.
+    // A release over the loop of its own attack, a fade on a looped attack.
     let refused = [
         set(format!("{ADDED}069-b2-v30"), "41000..52000"),
         set(format!("{ADDED}071-b0-v00-fade"), "68000..70000"),
@@ -534,10 +535,10 @@ fn an_edit_the_build_would_refuse_is_refused() {
     assert!(builds(&mended).is_ok());
 }
 
-/// A rename relabels every region of the sample, keeps its loop, and refuses a name
-/// the take marks already.
+/// A rename relabels every region of the hit, keeps its loop, and refuses a name
+/// the take marks already or one whose layer form the note's other layers do not share.
 #[test]
-fn a_sample_is_renamed_every_region_of_it() {
+fn a_hit_is_renamed_every_region_of_it() {
     let bytes = marked_take(&[0.9, 0.3]);
     let rename = |to: &str| [(format!("{RENAMED}069-b0-v22"), to.to_string())];
     let (out, _) = apply(&bytes, &bytes, &rename("071-b0-v30")).unwrap();
@@ -552,6 +553,10 @@ fn a_sample_is_renamed_every_region_of_it() {
     let added = [(format!("{ADDED}071-b0-v30"), "60000..70000".to_string())];
     let (both, _) = apply(&bytes, &bytes, &added).unwrap();
     assert!(apply(&both, &both, &rename("071-b0-v30")).is_err());
+    // A name by index beside the note's layer named by value, which the build refuses.
+    let why = apply(&both, &both, &rename("071-b0-l01")).unwrap_err();
+    assert!(why.starts_with("the build would refuse this"), "{why}");
+    assert!(why.contains("some by value"), "{why}");
 
     assert_eq!(
         hit::named("B4 v30"),
@@ -564,10 +569,27 @@ fn a_sample_is_renamed_every_region_of_it() {
     assert!(hit::named("B4").is_err() && hit::named("H4 v30").is_err());
 }
 
-/// A resonance sample's fade is renamed with it, and keeps its bank, so the build
+/// A refused add or rename puts the pick back where it was, so it names no hit the take
+/// does not mark; with no menu edit this frame, a refusal leaves the pick alone.
+#[test]
+fn a_refused_edit_puts_the_pick_back() {
+    use nord_format::formats::npno::encode::LayerTag;
+    let mut state = opened(&marked_take(&[0.9, 0.3]));
+    let was = Some((69, LayerTag::Value(22)));
+    state.view.picked = was;
+    state.before_edit = Some((state.view.clone(), state.close.clone()));
+    state.view.picked = Some((71, LayerTag::Index(1)));
+    state.refused();
+    assert_eq!(state.view.picked, was);
+    state.view.picked = None;
+    state.refused();
+    assert_eq!(state.view.picked, None, "nothing to put back");
+}
+
+/// A resonance hit's fade is renamed with it, and keeps its bank, so the build
 /// still finds the stroke it fades.
 #[test]
-fn a_resonance_sample_s_fade_is_renamed_with_it() {
+fn a_resonance_hit_s_fade_is_renamed_with_it() {
     let region = |start: u32, frames: u32, label: &str| wav::Region {
         start,
         frames,
@@ -736,7 +758,10 @@ fn a_take_at_too_low_a_rate_does_not_read() {
         let bytes = wav::write(&audio, wav::Encoding::Int { bits: 16 }).unwrap();
         let state = opened(&bytes);
         let why = state.read.source.as_ref().unwrap_err();
-        assert!(why.contains("at least 8000 Hz"), "{why}");
+        assert!(
+            why.ends_with("drawbar opens WAVs of 8000 Hz and up"),
+            "{why}"
+        );
     }
     assert!(opened(&take(&[0.5])).read.source.is_ok());
 }
@@ -811,5 +836,8 @@ fn a_detect_result_for_audio_since_changed_is_let_go() {
     );
     detect.limit = 70.0;
     let said = detect.said().unwrap();
-    assert!(said.contains("at 200 dB") && !said.contains("70"), "{said}");
+    assert!(
+        said.contains("200 dB or less") && !said.contains("70"),
+        "{said}"
+    );
 }

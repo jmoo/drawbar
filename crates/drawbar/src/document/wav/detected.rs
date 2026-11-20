@@ -21,7 +21,7 @@ pub(in crate::document) fn detect_loud(state: &State) -> crate::document::header
             label: "Detecting…".to_string(),
             short: "Detecting…".to_string(),
             tone: Tone::Idle,
-            hint: "finding the take's notes".to_string(),
+            hint: "finding the take's hits".to_string(),
             click: Click::Nothing,
             ..ready
         };
@@ -40,7 +40,7 @@ pub(in crate::document) fn detect_loud(state: &State) -> crate::document::header
 /// Detect on a take: the too-quiet limit it uses, the search running, and what the last
 /// one found.
 pub struct Detect {
-    /// A note standing this little over the floor is skipped, in dB.
+    /// A hit standing this little over the floor is skipped, in dB.
     pub limit: f64,
     /// The search running, the [`audition::print`] of the audio it searches and the
     /// limit it was given.
@@ -52,7 +52,7 @@ pub struct Detect {
 }
 
 /// What Detect asks before it replaces a take's regions.
-pub const DETECT_REPLACES: &str = "Detect will replace any notes already defined";
+pub const DETECT_REPLACES: &str = "Detect will replace any hits already defined";
 
 /// How wide the Detect question is at most, in points, as the browser's are.
 pub(super) const DETECT_ASK_WIDTH: f32 = 440.0;
@@ -117,22 +117,23 @@ impl Detect {
     /// What the last search found, in words.
     pub fn said(&self) -> Option<String> {
         if self.running() {
-            return Some("finding the take's notes…".to_string());
+            return Some("finding the take's hits…".to_string());
         }
+        let skipped =
+            |n: usize, limit: f64| format!("{n} skipped, {limit:.0} dB or less over noise");
         Some(match self.found.as_ref()? {
             Err(why) => why.clone(),
             Ok((found, limit)) if found.kept == 0 => format!(
-                "Detect marked no sample: skipped {} at {limit:.0} dB or less over noise; the \
-                 take's regions are as they were",
-                found.too_quiet
+                "No hits marked · {} · regions unchanged",
+                skipped(found.too_quiet, *limit)
             ),
             Ok((found, limit)) => format!(
-                "Detect marked {} hit(s) of {} note(s){}",
-                found.kept,
-                found.notes,
+                "{} of {}{}",
+                crate::queue::plural(found.kept, "hit", "hits"),
+                crate::queue::plural(found.notes, "note", "notes"),
                 match found.too_quiet {
                     0 => String::new(),
-                    n => format!(", skipped {n} at {limit:.0} dB or less over noise"),
+                    n => format!(" · {}", skipped(n, *limit)),
                 }
             ),
         })
