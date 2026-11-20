@@ -161,6 +161,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    environment: drawbar-signing
     permissions:
       contents: write # release uploads
     steps:
@@ -171,6 +172,15 @@ jobs:
         with:
           cache: native
           save: "false"
+      # The identity and credentials scripts/dmg.bash signs and notarizes with.
+      - if: runner.os == 'macOS'
+        run: scripts/signing-keychain.bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
       - run: nix develop -c scripts/assets.bash
         env:
           GH_TOKEN: ${{ github.token }}

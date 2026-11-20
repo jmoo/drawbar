@@ -28,6 +28,11 @@ fail() {
   exit 1
 }
 
+# Nix's shell points xcrun at its own SDK, which holds no notarytool or stapler.
+xcrun() {
+  env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun "$@"
+}
+
 identity=${DRAWBAR_SIGN_IDENTITY:-}
 profile=${DRAWBAR_NOTARY_PROFILE:-}
 [[ -z $profile || -n $identity ]] ||
@@ -66,15 +71,15 @@ ln -s /Applications "$tmp/image/Applications"
 
 if [[ -n $profile ]]; then
   # ⚠️ Reported, not measured here: notarytool exits 0 for an image the service rejected.
-  /usr/bin/xcrun notarytool submit "$out" --keychain-profile "$profile" --wait \
+  xcrun notarytool submit "$out" --keychain-profile "$profile" --wait \
     --output-format json >"$tmp/notary.json"
   verdict="$(/usr/bin/plutil -extract status raw "$tmp/notary.json")"
   if [[ $verdict != Accepted ]]; then
-    /usr/bin/xcrun notarytool log --keychain-profile "$profile" \
+    xcrun notarytool log --keychain-profile "$profile" \
       "$(/usr/bin/plutil -extract id raw "$tmp/notary.json")" >&2 || true
     fail "$out: Apple's notary service answered $verdict"
   fi
-  /usr/bin/xcrun stapler staple -q "$out"
+  xcrun stapler staple -q "$out"
 fi
 
 mkdir "$tmp/mount"

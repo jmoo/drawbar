@@ -41,7 +41,10 @@ declares, and runs it without a display or a graphics card. On macOS,
 `nix build .#drawbar-app` builds `drawbar.app` and fails if it links a library
 outside the system, and `scripts/dmg.bash` packs it into
 `drawbar-<version>-aarch64-macos.dmg` and checks that the app copied out of the
-image verifies and launches. `nix fmt` formats everything.
+image verifies and launches. With `DRAWBAR_SIGN_IDENTITY` naming a Developer ID
+identity it signs the app and the image with it, and with `DRAWBAR_NOTARY_PROFILE`
+naming a `notarytool` profile it has Apple notarize the image and checks that
+Gatekeeper accepts it. `nix fmt` formats everything.
 [Testing](testing.md) describes the suites, and [Contributing](contributing.md)
 the house rules.
 
@@ -56,7 +59,8 @@ the house rules.
 | `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
 
 On `master`, `release` publishes the crates and creates their GitHub releases,
-`assets` attaches the files in `scripts/assets.tsv` to them, `telemetry` deploys
+`assets` attaches the files in `scripts/assets.tsv` to them, signing and notarizing
+the Mac download with the `drawbar-signing` environment's secrets, `telemetry` deploys
 the collector, and `pages` deploys drawbar.app. An optional `safari` workflow runs
 the browser suites in Safari when toshokan or drawbar's library changes. Other
 cross targets are checked locally only.
