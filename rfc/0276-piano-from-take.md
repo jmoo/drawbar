@@ -204,12 +204,13 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 - Floor: each WAV's own, read on its rest. Of the half seconds after its loudest frame, the rest is
   the quietest by median whose halves lie within 1 dB of each other, at least 10 dB under the
   loudest, mostly not digital silence, and with nothing 6 dB quieter after it, so a fade, zero
-  padding or a plateau of the release is not taken for it. A held note fills most of its file and
-  rests only after its key-off, so the long take's floor, the level a tenth of the frames are under,
-  would read the note itself (an organ A3: -77 dB read, -96 dB real). A WAV with no rest has no
-  floor to read: it is not held to the too-quiet limit, and the build finds no noise in it and
-  builds it as recorded. #340 tracks a slow tail, cut before it reaches the hiss, that is level
-  enough to be taken for a rest.
+  padding, a slow decay or a plateau of the release is not taken for it. Nor is a half second that
+  still sounds the note: most of the note's first four harmonics peaking 6 dB over the bands beside
+  them, as a slow tail cut before it reaches the hiss does and hiss does not. A held note fills most
+  of its file and rests only after its key-off, so the long take's floor, the level a tenth of the
+  frames are under, would read the note itself (an organ A3: -77 dB read, -96 dB real). A WAV with
+  no rest has no floor to read: it is not held to the too-quiet limit, and the build finds no noise
+  in it and builds it as recorded.
 - Note: its pitch. The folder's hits are sorted by pitch and named as a long take's are, so the
   stretch check has each note's neighbors to go by. Each keeps the octave its pitch was read in.
   File names are not read: in one free set the numbers in them were indexes, not MIDI notes. With no
