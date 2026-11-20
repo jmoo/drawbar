@@ -90,8 +90,8 @@ CLI share it:
 
 ### drawbar: the project
 
-- A piano project is a small file in the library: its shape and its recordings' paths in the
-  project's folder. The marks live in the recordings, as the take editor saves them, so the project
+- A piano project is a small `.drawbar-piano` file in the library: its shape and its recordings'
+  paths in the project's folder. The extension names it as drawbar's own, not one of Nord's. The marks live in the recordings, as the take editor saves them, so the project
   holds nothing the WAVs already say.
 - Its document is the page above. Detect runs `set::plan` in the background, as Detect does now,
   and writes each recording's marks.
@@ -125,8 +125,6 @@ CLI share it:
 
 ## Unresolved questions
 
-- The project file's name and extension. It is drawbar's own, so it should not look like one of
-  Nord's.
 - Whether the page's grid should follow the existing keyboard view or be a plain table first.
 
 ## Future possibilities
