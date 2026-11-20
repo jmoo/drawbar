@@ -1,101 +1,74 @@
-# Pianos
+# Trim or build a piano
 
-A piano library (`.npno`) holds one recording, called a **stroke**, per root
-note, bank and velocity layer. The editor is for choosing which strokes go to the
-instrument, so that a library fits the memory it has free, and for setting how it
-plays.
-
-## Edits are a plan
-
-An edit is a plan over the saved library, shown at once, and every switch can
-be turned back on. The library is rewritten only when you save, export or queue
-it, and that can take a moment for a large one. Until then the plan is an
-unsaved edit like any other: the name is starred, and **Revert** drops it.
-
-## The key map
-
-Each root has a cell over the keys it answers. Drag the boundary between two
-roots to move keys, and the outer ends to cover or uncover keys. Click a key to
-hear it, or play the keys on a [MIDI controller](overview.md#midi-controllers).
-A key sounds the loudest layer the plan keeps, however hard you play it.
+A piano library (`.npno`) can hold several recordings of the same note: a soft
+strike, a loud strike, the sound of the pedal, or the release when you lift your
+finger. If the library is too large for your keyboard, you can choose which
+recordings are worth the space for the part you'll play.
 
 ## Trim to fit
 
-A list of switches, each with the size it keeps: one per velocity layer, **Pedal
-resonance**, **Release samples**, and **Keys**, which narrows the range. A meter
-compares the library with the instrument's free piano memory and names the
-cheapest cut that would make it fit. A library that does not fit cannot be
-queued.
+1. Connect the instrument so drawbar can read its free piano memory. Find the
+   piano under **This computer**. To keep the full version,
+   right-click the piano and choose **Duplicate**. Open the copy and find
+   **Trim to fit** below the keys.
+2. Compare the size kept with the space available. For a split where you play
+   piano only with your right hand, try narrowing **Keys** to that range.
+   To keep the full keyboard, try removing **Pedal resonance**, **Release
+   samples** or a velocity layer instead. The meter suggests a cut that would
+   free enough space.
+3. Click keys across the range you'll play, especially at its ends. A hatched
+   range is silent. You can switch a layer back on or widen the range while
+   you try different cuts.
+4. When the meter says the piano fits, choose **Save** on your working copy.
+   Use **Export…** if you also want the smaller file elsewhere. Saving,
+   exporting or queuing a piano can write the cuts into its library file.
+   Choose **Revert** before any of those actions to discard your trial cuts.
 
-**Velocity layers** goes finer: one lane per layer, one segment per root. Click a
-segment to drop that layer for that root only. Each segment gives the velocities
-its layer plays at with the program's KBD Touch at 0, on the instrument
-[What is supported](../getting-started/support.md) names. A higher KBD Touch
-reaches each softer layer with a softer note.
+![Piano editor showing three recordings mapped across the keys and a Trim to fit meter reporting 17.6 MB to spare](../assets/piano-key-map.png)
 
-## Playback
+For finer cuts, open **Velocity layers**. Each lane represents a layer and
+each segment a recorded note, or *root*. Click a segment to drop that layer
+for just that root. The velocity ranges shown assume the program's **KBD
+Touch** is at 0. The on-screen piano and MIDI preview play the loudest layer
+you've kept for each key. Test the full playing dynamics on your instrument.
+[Send the piano to the keyboard](instrument.md#sending).
 
-**Instrument gain**, the damper limit (**Keys ring on above**), and **Kind**,
-which is what the instrument files the library under. Kind changes nothing about
-the sound.
+## Change how the piano plays
 
-**Roots** lists each root. Open one to trim its level, hear it, save it as a
-WAV, or drop it. A 6.x library trims in tenths of a decibel and can also boost a
-stroke, by up to about 10.8 dB together with the instrument gain. A 5.x library
-trims in whole decibels and cannot boost. **Per key** paints a fine tune across the keyboard.
+- **Key map.** Drag the boundary between two roots to give keys to the
+  neighboring recording. Drag the outside edges to change the covered range.
+- **Playback.** **Instrument gain** changes the overall level. **Keys ring on
+  above** sets the highest key that is damped when you let go. **Kind** changes
+  where the keyboard files an existing piano.
+- **Roots.** Open a row to hear a recording, save a WAV, adjust its level or
+  drop that root. Format 6.x allows level adjustments in tenths of a decibel
+  and can boost a stroke. Format 5.x trims in whole decibels.
+- **Per key.** Adjust fine tuning for a single key or draw a tuning change
+  across several keys.
 
 ## A new library
 
-**New ▸ Piano library (.npno)…** takes one WAV per stroke: 16-bit PCM, mono or
-stereo, at any sample rate. A file named like `060-b0-l00.wav` fills in its root (MIDI
-note 60), bank and layer for you. Otherwise set them in the dialog. **Template** builds on a library you already
-have.
+If you've recorded several notes into **one long WAV**, start with
+[Make a piano from a recording](recording.md). If you already have **one WAV
+per recording**, build the library directly:
 
-It also takes takes: WAVs whose regions are labeled as strokes, as **Detect** in
-a WAV's document or `nord piano prep` marks them. A take is one row, its regions
-its strokes, and it builds as `nord piano build` builds it: each region cleaned
-unless the take's **Clean audio** is off, shaped and leveled, and the lowest and
-highest roots pitched out to reach every key. Takes build on their own, not with
-WAVs of one stroke each. **Category**, beside the name, is the category whose
-rules a library without a template follows, preset from the take's own.
-**Advanced ▸ Don't decay long notes** keeps each held note's own decay and holds
-its loop at its level, and lets each release ring out its recorded tail, for organs
-and other steady sounds. The instrument has no organ category: for an organ, a pad
-or strings, choose **Hybrid** and tick Don't decay long notes.
+1. Choose **New ▸ Piano library (.npno)…**. Select your WAVs. Use 16-bit PCM,
+   mono or stereo, at any sample rate.
+2. Enter a name and **Category**. For each WAV, choose the root, the bank
+   (attack, pedal resonance or release), and the layer. A filename such as
+   `060-b0-l00.wav` fills in middle C, attack and the loudest layer for you.
+3. For a sustained organ or pad, choose **Hybrid**, then open **Advanced** and
+   select **Don't decay long notes**. The note keeps its recorded decay and
+   its loop holds steady. For a piano, leave the box clear so the sound fades
+   as you hold the key.
+4. Choose **Create**, then try keys on the map and inspect the roots. To use
+   the finished library on the keyboard, [choose a destination and review the send](instrument.md#sending).
 
-A new library is written in piano format 6.x. **Advanced ▸ Format** offers 5.x
-for an instrument that does not play 6.x. With a template, the library takes the
-template's format. A layer's value is on its format's scale: in 6.x a root's
-layers step 20 apart, spanning at least 0 to 50 and at most 0 to 100, and 5.x
-uses a fifth of each value.
+A loop marked in an attack WAV repeats while you hold the key. Audio beyond
+the loop end is left out. A release recording plays when you lift the key,
+at the level the note has reached by then. Release recordings cannot loop.
 
-Without a template, each stroke decays from the moment its key is struck as the
-instrument's own grand pianos do, faster on higher keys. A 6.x library trims each
-layer to play at the level of its root's loudest layer, softer layers a little
-louder as the instrument's own grand pianos have them, so the recordings carry the
-dynamics, and trims each release 18 dB below the loudest. When a soft layer needs more
-boost than the instrument gives, the whole library is turned down to fit. A 5.x
-library, like one built on a template, trims each attack and resonance stroke
-3 dB more than its layer's value states, and each release stroke 12 dB.
-
-A WAV with a loop, which most sample editors can set, makes a stroke that loops
-there while the key is held, and the dialog marks it. Audio after the loop's end
-is not used, and the loop's last four samples are replaced by the four just
-before its start, which a seamless loop already has. While the key is held, the
-loop fades the way the instrument's own grand pianos do, faster on higher keys;
-with **Template** it fades as the template's does, or as pianos of the template's
-kind do when the template itself never loops. Without a loop, a stroke plays
-to its end. Release strokes cannot loop.
-
-A release stroke plays at the level the note has fallen to when the key comes
-up, so a release recorded at full level suits a note let go at once and is
-heard softer after a long hold. A key let go where its attack recording is
-silent plays no release.
-
-[What is supported](../getting-started/support.md) says which of these edits
-have been played on an instrument.
-
-## Sending
-
-Queue a library from its header. It is checked against the instrument and its
-free space first.
+A new library uses format 6.x by default. If your keyboard needs 5.x, choose
+it under **Advanced ▸ Format**. To borrow playback settings from an existing
+piano, choose it under **Advanced ▸ Template**. The template also determines
+the format. [See which builds and edits have been played on hardware](../getting-started/support.md#piano-libraries).

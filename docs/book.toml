@@ -1,4 +1,5 @@
 [book]
+description = "Learn to organize, edit, and transfer Nord sounds with drawbar and nord-cli."
 language = "en"
 src = "src"
 title = "drawbar"
@@ -14,6 +15,7 @@ git-repository-url = "https://github.com/jmoo/drawbar"
 # mdBook does not rewrite url() inside a supplied theme file, so hashed asset
 # names would break theme/fonts/fonts.css.
 hash-files = false
+no-section-label = true
 preferred-dark-theme = "coal"
 
 # Turns ```mermaid blocks into <pre class="mermaid">, which mermaid-init.js draws.

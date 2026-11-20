@@ -1,65 +1,54 @@
-# Editing
+# Edit a file or slot
 
-`edit` changes fields inside a program, live slot, settings file, song or
-sample instrument, in a file or in a slot. Piano libraries have flags of their
-own, covered in [Samples and pianos](libraries.md).
-
-```sh
-nord program edit --fields                                    # every field, and what it accepts
-nord program edit patch.ne5p --set center_panel.gain=96 -o out.ne5p
-nord program edit patch.ne5p --set effects_panel.fx1_rate=96 --yes    # in place
-nord program edit 7:4 --set center_panel.split=true --dry-run         # on the instrument
-nord program edit --set center_panel.gain=64 -o fresh.ne5p            # a new program
-```
-
-Editing a slot reads it, changes it and writes it back, so it asks first. Editing
-a file in place asks too. `-o` writes somewhere else instead, and `--dry-run`
-shows which fields and bytes would change without writing anything.
-
-## Values
-
-Spell a value the way `inspect` and `--fields` print it. A value the field cannot
-hold is refused before anything is written:
-
-```
-$ nord program edit patch.ne5p --set center_panel.gain=200 --dry-run
-error: "200" is not a value of gain (accepts 0 .. 127)
-```
-
-Some fields work in pairs. A transpose amount is ignored unless transpose is
-enabled, so setting one without the other gets a warning.
-
-## Live slots and settings
+To change a program's gain, start with the [practice program](overview.md#try-it-without-a-keyboard)
+or substitute your own file. Use a fresh output name to keep the original.
 
 ```sh
-nord live edit 1:2 --set center_panel.gain=96 --yes
+nord edit practice.ne5p --fields
+nord edit practice.ne5p --set center_panel.gain=96 --dry-run
+nord edit practice.ne5p --set center_panel.gain=96 -o louder.ne5p
+nord inspect louder.ne5p
+```
+
+`--fields` lists the names and values this particular file accepts.
+`--dry-run` lists the fields and bytes that would change. The third command
+writes the edited copy. Without `-o`, an edit to the input file asks for
+confirmation.
+
+## Pick a value
+
+Use the spelling from `--fields`. A value outside the allowed range is
+refused before writing. For example, the program gain accepts 0 through 127.
+Repeat `--set` to change several fields together. If a setting needs a
+switch, such as the amount and the enable switch for transpose, set both.
+
+`nord edit` identifies the format from the file. Use it for a program, preset,
+song, sample instrument or Sample Editor project. Piano libraries have
+[editing and trimming options of their own](libraries.md#pianos).
+
+## Songs, samples and projects
+
+```sh
+nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o revised.ne5t
+nord edit pad.nsmp --set zone1.top_note=C4 -o lower-pad.nsmp
+nord edit marimba.nsmpproj --fields
+```
+
+A song's four fields hold program slot addresses. For a sample, you can change
+a zone's root and top notes, and its lower limit in formats that store it.
+Note names use C4 for middle C. To rename a sample, check that its fields include
+`name`. The original sample format stores no name.
+
+## Edit an instrument slot
+
+Use the command for the kind of slot. The first example previews a change to
+a live slot. Remove `--dry-run` to review the write and apply it.
+
+```sh
+nord live edit 1:2 --set center_panel.gain=96 --dry-run
 nord settings edit 1:1 --set fine_tune=0 --dry-run
 ```
 
-Writing settings reloads the program on the panel, and unsaved panel changes are
-lost. Store them first.
-
-## Songs and samples
-
-A song's fields are the slots it plays, `slot1` to `slot4`. A sample
-instrument's are its name, where it stores one, and each zone's root key and
-top note, plus its low note in the layouts that store one. Instruments from the
-original Sample Library store no name. Notes are written as names (`C4` is middle
-C) or as numbers, and `--fields` lists what a given file offers.
-
-```sh
-nord setlist edit song.ne5t --set slot1=2:5 --set slot4=8:50 -o out.ne5t
-nord sample edit inst.nsmp --set name="My Piano" --set zone2.top_note=C4 -o out.nsmp
-```
-
-## Any file
-
-`nord edit` works out the format from the file itself, so it reaches everything
-the commands above do, plus formats without a command of their own: Stage
-programs and presets, and Sample Editor projects.
-
-```sh
-nord edit stage.ns3f --fields
-nord edit stage.ns3f --set split_enabled=true -o out.ns3f
-nord edit project.nsmpproj --set name=Marimba --set zone129.root_key=C3 --yes
-```
+A slot edit reads the current sound before changing it. Store any unsaved
+panel changes before writing settings because the write reloads the selected
+program. [Work with an instrument](instrument.md).

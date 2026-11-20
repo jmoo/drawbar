@@ -1,35 +1,38 @@
 # Summary
 
-[Introduction](introduction.md)
+[drawbar user guide](introduction.md)
 
 # Getting started
 
-- [Install](getting-started/install.md)
+- [Play your first sound](drawbar/overview.md)
+- [Open or install drawbar](getting-started/install.md)
 - [What is supported](getting-started/support.md)
 
-# drawbar
+# Using drawbar
 
-- [The window](drawbar/overview.md)
-- [Your files](drawbar/this-computer.md)
-- [Your instrument](drawbar/instrument.md)
-- [Editing](drawbar/editing.md)
-- [Samples](drawbar/samples.md)
-- [Pianos](drawbar/pianos.md)
-- [Help and About](drawbar/help.md)
+- [Organize your sounds](drawbar/organize.md)
+- [Back up or move your library](drawbar/this-computer.md)
+- [Copy and send sounds over USB](drawbar/instrument.md)
+- [Edit a program or set list](drawbar/editing.md)
+- [Make a sample instrument](drawbar/samples.md)
+- [Trim or build a piano](drawbar/pianos.md)
+- [Make a piano from a recording](drawbar/recording.md)
+- [Recover files and edits](drawbar/recovery.md)
+- [Get help](drawbar/help.md)
 
-# nord-cli
+# Using nord-cli
 
-- [Overview](nord-cli/overview.md)
-- [Files](nord-cli/files.md)
-- [The instrument](nord-cli/instrument.md)
-- [Editing](nord-cli/editing.md)
-- [Samples and pianos](nord-cli/libraries.md)
+- [Start with the nord command](nord-cli/overview.md)
+- [Inspect files and unpack bundles](nord-cli/files.md)
+- [Edit a file or slot](nord-cli/editing.md)
+- [Work with an instrument](nord-cli/instrument.md)
+- [Work with samples and pianos](nord-cli/libraries.md)
 
 # Reference
 
 - [Building from source](reference/building.md)
 - [File formats](reference/file-formats.md)
-- [Takes](reference/takes.md)
+- [Recorded takes](reference/takes.md)
 - [Library data model](reference/data-model.md)
 - [USB protocol](reference/usb-protocol.md)
 - [Testing](reference/testing.md)
