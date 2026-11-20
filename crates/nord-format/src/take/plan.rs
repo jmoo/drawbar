@@ -505,13 +505,13 @@ mod tests {
         assert!(matches!(fates.as_slice(), [Fate::Kept { .. }]), "{fates:?}");
     }
 
-    /// A clean note cut while it still dies slowly, as in #340, is kept and built as
-    /// recorded: its tail sounds its note, so it is no rest to hold the note to.
+    /// A clean note cut while it still dies slowly is kept and built as recorded: its
+    /// tail sounds its note, so it is no rest to hold the note to.
     #[test]
     fn a_clean_note_cut_while_dying_slowly_is_kept() {
         let rate = 35_002;
         for db_per_s in [1.0, 2.0, 4.0] {
-            let x = crate::take::detect::tests::dying(rate, 12.0, db_per_s, 0.0);
+            let x = crate::take::detect::tests::dying(rate, 60.0, 12.0, db_per_s, 0.0);
             let plan = plan(&x, rate, &one_note());
             assert!(!plan.rests, "{db_per_s} dB/s: a floor of {}", plan.floor_db);
             let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();

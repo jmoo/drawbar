@@ -47,8 +47,8 @@ pub struct Envelope {
     /// How its noise floor is read.
     pub floor: Floor,
     /// A one-note file's rest, as [`Envelope::read`] found it; none for a take, whose
-    /// floor is read on all its frames.
-    pub rest: Option<std::ops::Range<usize>>,
+    /// floor is read on all its frames. Only `read` sets it: see [`Envelope::rest`].
+    pub(crate) rest: Option<std::ops::Range<usize>>,
 }
 
 /// How an [`Envelope`]'s noise floor is read.
@@ -102,9 +102,11 @@ pub const TONE_DB: f64 = 6.0;
 
 impl Envelope {
     /// The envelope of `x`, a take at `rate` as [`highpassed`] returns it, its floor read
-    /// by `floor`. A one-note file's rest is found here: the quietest stretch that stays
-    /// level, as [`Envelope::rest`] says, and holds none of the pitch of its loudest
-    /// moment, as [`REST_HARMONICS`] says.
+    /// by `floor`. A one-note file's rest is found here: the quietest [`QUIETEST`]
+    /// seconds after its loudest frame whose two halves' medians lie within
+    /// [`LEVEL_DB`] of each other, [`FALL_DB`] or more under the loudest frame, mostly
+    /// not digital silence, with nothing after it falling [`LATER_FALL_DB`] further, and
+    /// holding none of the pitch of its loudest moment, as [`REST_HARMONICS`] says.
     pub fn read(x: &[f64], rate: u32, floor: Floor) -> Envelope {
         let env = Envelope::of(x, rate);
         if floor == Floor::Take {
@@ -156,6 +158,12 @@ impl Envelope {
         }
     }
 
+    /// A one-note file's rest, in frames, as [`Envelope::read`] found it; none for a
+    /// take, or for a file with no rest.
+    pub fn rest(&self) -> Option<std::ops::Range<usize>> {
+        self.rest.clone()
+    }
+
     /// Whether its floor is read on a rest: a take's always is, and a one-note file's
     /// where it rests at least [`QUIETEST`] seconds.
     pub fn rests(&self) -> bool {
@@ -178,10 +186,8 @@ impl Envelope {
             .collect()
     }
 
-    /// The stretches its rest may be, quietest first: of the [`QUIETEST`] seconds after
-    /// its loudest frame, those that stay level by median, as [`LEVEL_DB`] says, lie
-    /// [`FALL_DB`] under the loudest, are mostly not digital silence, and are not fallen
-    /// from later, as [`LATER_FALL_DB`] says. Medians, so a fade, a click or the filter's
+    /// The stretches its rest may be by level, quietest first, by the rule
+    /// [`Envelope::read`] states. Medians, so a fade, a click or the filter's
     /// ringing into zero padding moves none of it.
     fn rests_by_level(&self) -> Vec<std::ops::Range<usize>> {
         let span = frames(QUIETEST).max(2);
@@ -226,7 +232,7 @@ impl Envelope {
                 level_ones.push((level, window));
             }
         }
-        // ⚠️ Stable, so of two as quiet the earlier comes first, as before.
+        // Stable, so of two as quiet the earlier comes first.
         level_ones.sort_by(|a, b| a.0.total_cmp(&b.0));
         level_ones.into_iter().map(|(_, window)| window).collect()
     }
@@ -234,15 +240,18 @@ impl Envelope {
 
 /// Whether `x`, a stretch of a take at `rate`, still sounds the note `midi`: most of
 /// its first [`REST_HARMONICS`] harmonics under the Nyquist peak [`TONE_DB`] over the
-/// loudest of the bands either side of them, each as wide as the 1.5% the harmonic is
-/// searched in, as [`pitch`] searches.
+/// loudest of the bands either side of them, each as wide as the band the harmonic is
+/// searched in: the 1.5% [`pitch`] searches, and never narrower than the window's main
+/// lobe, which spreads a low note's harmonic over more than 1.5% of it.
 fn sounds(x: &[f64], rate: u32, midi: f64) -> bool {
     let n = x.len().next_power_of_two().max(1 << 15);
     let spec = spectrum(x, &fft::Plan::new(n));
     let df = f64::from(rate) / n as f64;
+    // A Hann window's main lobe reaches two bins of its own length either side.
+    let lobe = 2.0 * f64::from(rate) / x.len().max(1) as f64;
     let peak = |from: f64, to: f64| {
         let (from, to) = (
-            (from / df) as usize,
+            (from.max(0.0) / df) as usize,
             ((to / df) as usize).min(spec.len() - 1),
         );
         spec[from.min(to)..=to].iter().copied().fold(0.0, f64::max)
@@ -256,7 +265,7 @@ fn sounds(x: &[f64], rate: u32, midi: f64) -> bool {
     let over = 10f64.powf(TONE_DB / 20.0);
     let standing = (harmonics.iter())
         .filter(|&&g| {
-            let half = (g * 0.015).max(2.0 * df);
+            let half = (g * 0.015).max(lobe).max(2.0 * df);
             let beside = peak(g - 3.0 * half, g - half).max(peak(g + half, g + 3.0 * half));
             peak(g - half, g + half) > over * beside
         })
@@ -537,9 +546,10 @@ fn keyup_onset(db: &[f64], start: usize, at: usize, span: usize) -> usize {
 pub(crate) mod tests {
     use super::*;
 
-    /// A one-note test file at `rate`: `seconds` of a C4 of six partials dying
-    /// `db_per_s` from -10 dB, then `rest` seconds of the -110 dB hiss under it alone.
-    pub(crate) fn dying(rate: u32, seconds: f64, db_per_s: f64, rest: f64) -> Vec<f64> {
+    /// A one-note test file at `rate`: `seconds` of the MIDI note `midi` of six partials
+    /// dying `db_per_s` from -10 dB, then `rest` seconds of the -110 dB hiss under it
+    /// alone.
+    pub(crate) fn dying(rate: u32, midi: f64, seconds: f64, db_per_s: f64, rest: f64) -> Vec<f64> {
         let hiss = take(rate, seconds + rest, &[], -110.0);
         (hiss.iter().enumerate())
             .map(|(i, n)| {
@@ -548,7 +558,8 @@ pub(crate) mod tests {
                     true => 0.3 * 10f64.powf(-db_per_s * t / 20.0),
                     false => 0.0,
                 };
-                let w = 2.0 * std::f64::consts::PI * 261.6 * t;
+                let f0 = 440.0 * 2f64.powf((midi - 69.0) / 12.0);
+                let w = 2.0 * std::f64::consts::PI * f0 * t;
                 let tone: f64 = (1..=6)
                     .map(|k| (f64::from(k) * w).sin() / f64::from(k))
                     .sum();
@@ -637,21 +648,38 @@ pub(crate) mod tests {
     }
 
     /// A note still dying when its file ends sounds its pitch to the end: its tail,
-    /// level within [`LEVEL_DB`] and far under the strike, is no rest. Hiss after a note
-    /// that has died is. C4s of six partials over -110 dB hiss, as in #340.
+    /// level within [`LEVEL_DB`] and far under the strike, is no rest, on the lowest
+    /// notes as on the middle ones. Hiss after a note that has died is. Notes of six
+    /// partials over -110 dB hiss.
     #[test]
     fn a_slow_tail_still_sounding_its_note_is_no_rest() {
         let rate = 35_002;
-        let note = |seconds, db_per_s, rest| dying(rate, seconds, db_per_s, rest);
-        for db_per_s in [1.0, 2.0, 4.0] {
-            let x = highpassed(&note(12.0, db_per_s, 0.0), rate);
-            let env = Envelope::read(&x, rate, Floor::OneNote);
-            assert!(!env.rests(), "{db_per_s} dB/s: rest {:?}", env.rest);
+        // A0, C1, C2, E2, G2, C4 and C6.
+        for midi in [21.0, 24.0, 36.0, 40.0, 43.0, 60.0, 84.0] {
+            for db_per_s in [1.0, 2.0, 4.0] {
+                let x = highpassed(&dying(rate, midi, 12.0, db_per_s, 0.0), rate);
+                let env = Envelope::read(&x, rate, Floor::OneNote);
+                assert!(
+                    !env.rests(),
+                    "{midi} at {db_per_s} dB/s: rest {:?}",
+                    env.rest()
+                );
+            }
         }
-        let x = highpassed(&note(3.0, 2.0, 2.0), rate);
+        let x = highpassed(&dying(rate, 36.0, 60.0, 0.5, 0.0), rate);
         let env = Envelope::read(&x, rate, Floor::OneNote);
-        assert!(env.rests(), "the hiss after the note is its rest");
-        assert!((env.floor() + 110.0).abs() < 3.0, "{}", env.floor());
+        assert!(
+            !env.rests(),
+            "a C2 dying 0.5 dB/s for 60 s: rest {:?}",
+            env.rest()
+        );
+        // A0, C4 and C8.
+        for midi in [21.0, 60.0, 108.0] {
+            let x = highpassed(&dying(rate, midi, 3.0, 2.0, 2.0), rate);
+            let env = Envelope::read(&x, rate, Floor::OneNote);
+            assert!(env.rests(), "{midi}: the hiss after the note is its rest");
+            assert!((env.floor() + 110.0).abs() < 3.0, "{midi}: {}", env.floor());
+        }
     }
 
     #[test]
