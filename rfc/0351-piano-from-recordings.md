@@ -7,12 +7,13 @@
 
 ## Summary
 
-Make **New ▸ Piano library (.npno)…** the one way into building a library from recordings. Its first
-step asks what was recorded: one recording of the whole instrument, a few recordings (one per layer,
-or one per range of keys), one recording per note struck, or finished strokes. drawbar detects the
-hits across the whole set, shows them on a page of notes by layers, opens any of them in the take
-editor, and builds. The set is kept as a piano project in the library, so the work can be closed and
-picked up later.
+Add **New ▸ Piano project…**, a way into building a piano library from recordings, next to **New ▸
+Piano library (.npno)…**, which stays as it is. It asks what was recorded: one recording of the whole
+instrument, a few recordings (one per layer, or one per range of keys), one recording per note struck,
+or finished strokes. drawbar finds each recording's notes and levels and shows the whole set in the take
+editor as if it were one long WAV: the notes from lowest to highest, each note's strokes from loudest to
+softest. The set is saved as a piano project in the library, so the work can be closed and picked up
+later.
 
 ## Motivation
 
@@ -29,11 +30,11 @@ knowing where to look:
 - The same goes for one take per velocity layer, which `prep` handles and drawbar does not.
 
 Trying it on a set of 50 one-note WAVs, I found no way to get from them to a library in drawbar:
-import gave 50 WAV documents, each detected on its own.
+import gave 50 WAV documents, each detected on its own, and no one view to check them in.
 
 ## Guide-level explanation
 
-**New ▸ Piano library (.npno)…** opens with one question:
+**New ▸ Piano project…** opens with one question:
 
 ```
 What do you have?
@@ -41,37 +42,43 @@ What do you have?
 ( ) A few recordings: one per layer, or one per range of keys
 ( ) One recording per note struck
 ( ) Finished strokes, cut and looped
-
-[Choose WAVs…]  [Choose folder…]
 ```
 
-The answer is preselected from what is picked: one file is one recording, many short files are one
-per note, and files named as strokes (`060-b0-l00.wav`) are finished strokes. It can be changed
-before **Detect**. drawbar asks rather than decides because the shape tells the detectors where a
-gain change or a new noise floor can begin, as RFC-0276 chose.
+The WAVs are chosen as a folder or as files. drawbar asks for the shape rather than deciding it,
+because the shape tells the detectors where a gain change or a new noise floor can begin, as RFC-0276
+chose.
 
-- **One recording** is today's take: Detect marks its hits, a note's hits its layers by level.
+- **One recording** is today's take: its hits found, a note's hits its layers by level.
 - **A few recordings** are either one per layer, each playing every note once with the loudest
   first, or one per range of keys, each a take of its own over its notes. A note found in two
-  recordings of ranges is refused with both names, not merged. drawbar tells the two apart by
-  whether the recordings play the same notes, and asks where it cannot tell.
+  recordings of ranges is refused with both names, not merged.
 - **One recording per note** is `nord piano prep`'s folder of one-note files: each file's note from
   its pitch, its layer from its level among its note's files.
-- **Finished strokes** are built as they are, as New ▸ Piano library builds them today.
+- **Finished strokes** are kept as they are, and can still be checked, cleaned and adjusted.
 
-**Detect** runs across the whole set, then opens the project's page: the keyboard's notes across,
-the layers down, each hit a cell. A cell shows the hit's level and whether it loops or fades. Under it,
-the files left out are listed with the reason: too quiet, within the layer gap of a louder one, no
-pitch found, or did not read. Clicking a cell opens that recording in the take editor with the hit
-picked. Edits are made and saved there, as for any WAV, and the page shows them when it is next
-shown. **Build** names, categorises and builds the library as New ▸ Piano library does now.
+A dialog then lists each WAV with what was found, for example:
 
-The project is saved in the library like any document, named by the user, with copies of its
-recordings in a folder beside it, as a Sample Editor project's are. Opening it again shows the page
-as it was left. Detecting again asks first, as the take editor's Detect does.
+```
+Grand-01.wav    C1, layer 2 of 3
+Grand-02.wav    no note found: added to the end
+Grand-03.wav    too quiet: added to the end
+Take-low.wav    detected 10 notes (C2 – C4) with 3 velocity layers each
+Broken.wav      did not read: …
+```
 
-A WAV opened on its own keeps the take editor and **Build piano library…**, which makes a project of
-that one recording.
+The rows only report; nothing is fixed there. **Create** saves the project and opens it.
+
+The project opens in the take editor, as one long view of the whole set: the notes from lowest to
+highest, each note's strokes from loudest to softest, and anything drawbar could not work out at the
+end. Everything the take editor does on one WAV it does here: stepping through the hits, editing cuts
+and loops, auditions, cleaning, and Build. A single WAV made into a project looks the same, as a set
+of one.
+
+The project is saved in the library like any document, with copies of its WAVs in a folder beside
+it, as a Sample Editor project's are. Opening it again shows the long view as it was left.
+
+A WAV opened on its own from the library is unchanged: it opens in the take editor, and **Build
+piano library…** works as it does now.
 
 ## Reference-level explanation
 
@@ -80,9 +87,10 @@ that one recording.
 `nord piano prep`'s set logic moves out of `nord-cli` into `nord_format::take::set`, so drawbar and the
 CLI share it:
 
-- `Shape { Take, PerLayer, PerRange, PerNote }`.
-- `set::plan(takes: &[(name, Audio)], shape, &PlanOptions) -> SetPlan`: for each take its
-  `plan::Plan`, and for each file left out the reason, as `prep` lists them today.
+- `Shape { PerLayer, PerRange, PerNote }`; one take on its own is planned as now.
+- `set::plan(count, shape, &PlanOptions, skips, read)`: for each take its `plan::Plan`, or why it did
+  not read, and for a one-note take where it was placed. Each take is read through `read`, so none is
+  held with the others.
 - `PerLayer` and `PerNote` are what `prep` does now with several takes and with a folder.
   `PerRange` plans each take on its own, as a single take, and refuses a note two takes both name.
 - The CLI's listing, file walking and writing stay in `nord-cli`. `prep` gains `--ranges` for
@@ -90,29 +98,38 @@ CLI share it:
 
 ### drawbar: the project
 
-- A piano project is a small `.drawbar-piano` file in the library: its shape and its recordings'
-  paths in the project's folder. The extension names it as drawbar's own, not one of Nord's. The marks live in the recordings, as the take editor saves them, so the project
-  holds nothing the WAVs already say.
-- Its document is the page above. Detect runs `set::plan` in the background, as Detect does now,
-  and writes each recording's marks.
-- **Build** hands the recordings to the same build as New ▸ Piano library, whose takes already
+- A piano project is a small `.drawbar-piano` file in the library: its shape, its recordings' paths in
+  the project's folder, and their order in the long view. The extension names it as drawbar's own, not
+  one of Nord's.
+- The marks live in each recording's copy in the library, as the take editor saves them now: written
+  only on save, with only the cue, label and loop chunks rewritten and the audio and other chunks kept
+  byte for byte. The files the recordings were copied from are never written. The project file holds
+  nothing the WAVs already say.
+- The long view is built in memory from the recordings and never written as a WAV. Each recording
+  keeps its own noise floor and its own place as a layer. A save that changes several recordings
+  asks for each of their saves at once, so the library takes them as one change and **Edit ▸ Undo**
+  takes them back in one step.
+- Finding the notes runs `set::plan` in the background, as Detect does now.
+- **Build** hands the recordings to the same build as New ▸ Piano library, whose marked takes already
   build together.
-- On the web, **Choose folder…** shows where the browser can pick a folder, as the library picker
-  does.
 
 ## Drawbacks
 
 - A new document type and file in the library, kept for as long as drawbar reads it.
-- Copying the recordings into the library doubles their space on disk. A project that pointed at
-  them in place would break when they moved, and on the web there is no path to point at.
+- Copying the recordings into the library doubles their space on disk. drawbar keeps everything it
+  works on in its library, and on the web there is no path to point at instead.
+- The take editor's unsaved edit history covers one WAV today; the long view needs one that spans its
+  recordings.
 
 ## Rationale and alternatives
 
-- **Join the recordings into one long take** and reuse the take editor as it is. Rejected: each file
-  has its own noise floor and, for one per layer, is its own layer. The joined take would have to
-  carry both, and Detect would have to place the floors that the shapes exist to state.
-- **A separate New entry per route.** Rejected: whoever recorded the instrument knows what they
-  have, not what a stroke WAV is. One entry that asks sends them down the right route.
+- **Join the recordings into one long WAV** and reuse the take editor as it is. Rejected: each file
+  has its own noise floor and, for one per layer, is its own layer, and a joined file would have to
+  carry both. The long view gives the same single place to work without writing a new WAV.
+- **A page of notes by layers** for the project. Rejected: the piano document already shows a built
+  library's notes by layers, and one more page makes drawbar harder to learn.
+- **Asking the question inside New ▸ Piano library.** Rejected: it would change a dialog that works
+  for what it does today. A separate entry leaves it as it is.
 - **A one-off dialog, nothing saved.** Rejected: fixing 50 files is not a single sitting.
 - **Doing nothing** leaves drawbar's piano building usable only by those who know the CLI.
 
@@ -125,9 +142,17 @@ CLI share it:
 
 ## Unresolved questions
 
-- Whether the page's grid should follow the existing keyboard view or be a plain table first.
+- The hint under each choice, and the New menu item's hover text.
+- Whether the choice is preselected from what is picked (one file, many short files, files named as
+  strokes).
+- How the long view shows a set of hundreds of files: I'd like to show only each recording's hit
+  (attack to release end) with a short gap between, which keeps it small on the web.
+- What a set of recordings at different sample rates does: refused, naming the odd ones out, unless
+  there is a better answer.
+- What **Edit ▸ Undo** calls a save that changed many recordings.
 
 ## Future possibilities
 
 - A retake of a few notes merged into a project.
 - Rebuilding a library from the project it was built from (RFC-0276's link back to takes).
+- A WAV opened on its own opening as a project of one, so every route works the same way.
