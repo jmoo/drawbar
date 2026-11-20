@@ -98,9 +98,9 @@ app="$tmp/drawbar.app"
   fail "$out: drawbar.app's signature does not verify, so macOS would kill it at launch"
 
 if [[ -n $profile ]]; then
-  /usr/bin/spctl --assess --type open --context context:primary-signature "$out" ||
+  /usr/sbin/spctl --assess --type open --context context:primary-signature "$out" ||
     fail "$out: Gatekeeper would refuse the image"
-  /usr/bin/spctl --assess --type execute "$app" ||
+  /usr/sbin/spctl --assess --type execute "$app" ||
     fail "$out: Gatekeeper would refuse drawbar.app"
 fi
 
