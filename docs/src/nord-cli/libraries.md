@@ -109,8 +109,10 @@ nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
 an octave off the notes played either side of it is put back in line. Each note may
 be hit several times, loud to soft or in any order. Where the pitches mislead, give
 the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then goes
-to the nearest note in the list. Each note keeps up to `--layers` hits, spread evenly
-in level, or the first ones played with `--order played`. `--min-layer-gap`, 1 dB
+to the nearest note in the list. Each note keeps the hits left after the checks below
+as its layers, so a note played three times at three levels has three layers.
+`--layers N` keeps at most N, spread evenly in level, or the first ones played with
+`--order played`. `--min-layer-gap`, 1 dB
 unless you change it, drops a hit too close in level to a louder one, and `--skip`
 leaves out hits by their number in the listing. A hit less than 54 dB over the
 take's noise is left out as too quiet, since the build raises it and its hiss with
@@ -140,8 +142,8 @@ nord piano prep "Upright Piano/" -o regions/
 ```
 
 Each file's loudest hit is its note, named by its pitch in the octave it was read
-in, so file names are never read. A note's files become its layers by level, up to
-`--layers`, and a file within `--min-layer-gap` dB of a louder one, such as a second
+in, so file names are never read. A note's files become its layers by level, all of
+them or at most `--layers`, and a file within `--min-layer-gap` dB of a louder one, such as a second
 round-robin, is left out. Each file placed is written under `-o` at its own path, with the build
 command for them all. A file that does not read, or has no hit, no pitch, or too
 little level over its own noise, is listed and left out. Linked folders are not

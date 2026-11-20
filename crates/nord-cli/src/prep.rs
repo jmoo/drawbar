@@ -31,8 +31,9 @@ pub struct PrepArgs {
     #[arg(long, value_name = "NOTES", value_delimiter = ',')]
     pub notes: Vec<String>,
 
-    /// The layers each note of a single take gets: 4 unless given. Takes of one layer
-    /// each give a note one layer per take.
+    /// The most layers each note of a single take gets: unless given, every hit it keeps
+    /// after --min-snr and --min-layer-gap. Takes of one layer each give a note one layer
+    /// per take.
     #[arg(long, value_name = "N")]
     pub layers: Option<usize>,
 
@@ -94,8 +95,8 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
                 .into(),
         );
     }
-    let layers = args.layers.unwrap_or(4);
-    if layers == 0 {
+    let layers = args.layers;
+    if layers == Some(0) {
         return Err("--layers must be at least 1".into());
     }
     for (flag, value) in [
@@ -193,7 +194,7 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
 /// hit, its floor read on its quietest stretch, named and layered across the set as
 /// [`layers::place`] says. Each file placed is written into `args.out` with its
 /// regions, at its path under `dir`.
-fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: usize) -> Result<(), String> {
+fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Result<(), String> {
     for (given, flag) in [
         (!args.notes.is_empty(), "--notes"),
         (args.order.is_some(), "--order"),
@@ -443,8 +444,8 @@ fn wavs_in(dir: &Path, out: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
-/// What `args` tell [`plan::plan`], for `notes` as `layers` layers.
-fn plan_options(args: &PrepArgs, notes: Vec<u8>, layers: usize) -> PlanOptions {
+/// What `args` tell [`plan::plan`], for `notes` as `layers` layers at most.
+fn plan_options(args: &PrepArgs, notes: Vec<u8>, layers: Option<usize>) -> PlanOptions {
     let mut options = PlanOptions::new(notes, layers);
     options.order = match args.order {
         Some(OrderName::Played) => Order::Played,

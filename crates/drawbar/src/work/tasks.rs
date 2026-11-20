@@ -130,7 +130,7 @@ impl Work for FindHits {
         progress.say("finding the take's hits");
         let rate = self.take.rate;
         let mono = self.take.sum();
-        let mut options = PlanOptions::new(Vec::new(), 4);
+        let mut options = PlanOptions::new(Vec::new(), None);
         options.min_snr_db = f64::from_bits(self.min_snr_db);
         let found = plan::plan(&mono, rate, &options);
         let marks = nord_format::wav::Marks {
@@ -358,7 +358,7 @@ mod tests {
     fn a_take_s_samples_found_through_a_message_are_the_samples_found_in_place() {
         use nord_format::take::plan::{self, PlanOptions};
         let audio = take();
-        let mut options = PlanOptions::new(Vec::new(), 4);
+        let mut options = PlanOptions::new(Vec::new(), None);
         options.min_snr_db = 40.0;
         let here = plan::plan(&plan::mono(&audio), audio.rate, &options);
         let marks = nord_format::wav::Marks {
