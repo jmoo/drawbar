@@ -47,7 +47,8 @@ pub struct Envelope {
     /// How its noise floor is read.
     pub floor: Floor,
     /// A one-note file's rest, as [`Envelope::read`] found it; none for a take, whose
-    /// floor is read on all its frames. Only `read` sets it: see [`Envelope::rest`].
+    /// floor is read on all its frames. [`Envelope::read`] finds it; outside this crate,
+    /// [`Envelope::rest`] reads it.
     pub(crate) rest: Option<std::ops::Range<usize>>,
 }
 
@@ -121,8 +122,18 @@ impl Envelope {
         let samples_of = |frames: &std::ops::Range<usize>| {
             &x[(frames.start * env.width).min(x.len())..(frames.end * env.width).min(x.len())]
         };
-        let rest = (env.rests_by_level().into_iter())
-            .find(|window| note.is_none_or(|note| !sounds(samples_of(window), rate, note)));
+        // The windows are all as long, so one plan serves them.
+        let mut plan: Option<fft::Plan> = None;
+        let rest = (env.rests_by_level().into_iter()).find(|window| {
+            note.is_none_or(|note| {
+                let x = samples_of(window);
+                let n = x.len().next_power_of_two().max(1 << 15);
+                if plan.as_ref().is_none_or(|plan| plan.size() != n) {
+                    plan = Some(fft::Plan::new(n));
+                }
+                !sounds(x, rate, note, plan.as_ref().expect("made above"))
+            })
+        });
         Envelope { floor, rest, ..env }
     }
 
@@ -243,15 +254,20 @@ impl Envelope {
 /// loudest of the bands either side of them, each as wide as the band the harmonic is
 /// searched in: the 1.5% [`pitch`] searches, and never narrower than the window's main
 /// lobe, which spreads a low note's harmonic over more than 1.5% of it.
-fn sounds(x: &[f64], rate: u32, midi: f64) -> bool {
-    let n = x.len().next_power_of_two().max(1 << 15);
-    let spec = spectrum(x, &fft::Plan::new(n));
+///
+/// # Panics
+///
+/// If `plan` is shorter than `x`.
+fn sounds(x: &[f64], rate: u32, midi: f64, plan: &fft::Plan) -> bool {
+    let n = plan.size();
+    assert!(x.len() <= n, "a plan as long as the stretch");
+    let spec = spectrum(x, plan);
     let df = f64::from(rate) / n as f64;
     // A Hann window's main lobe reaches two bins of its own length either side.
     let lobe = 2.0 * f64::from(rate) / x.len().max(1) as f64;
     let peak = |from: f64, to: f64| {
         let (from, to) = (
-            (from.max(0.0) / df) as usize,
+            (from / df) as usize,
             ((to / df) as usize).min(spec.len() - 1),
         );
         spec[from.min(to)..=to].iter().copied().fold(0.0, f64::max)
@@ -551,6 +567,7 @@ pub(crate) mod tests {
     /// alone.
     pub(crate) fn dying(rate: u32, midi: f64, seconds: f64, db_per_s: f64, rest: f64) -> Vec<f64> {
         let hiss = take(rate, seconds + rest, &[], -110.0);
+        let f0 = 440.0 * 2f64.powf((midi - 69.0) / 12.0);
         (hiss.iter().enumerate())
             .map(|(i, n)| {
                 let t = i as f64 / f64::from(rate);
@@ -558,7 +575,6 @@ pub(crate) mod tests {
                     true => 0.3 * 10f64.powf(-db_per_s * t / 20.0),
                     false => 0.0,
                 };
-                let f0 = 440.0 * 2f64.powf((midi - 69.0) / 12.0);
                 let w = 2.0 * std::f64::consts::PI * f0 * t;
                 let tone: f64 = (1..=6)
                     .map(|k| (f64::from(k) * w).sin() / f64::from(k))
@@ -654,7 +670,6 @@ pub(crate) mod tests {
     #[test]
     fn a_slow_tail_still_sounding_its_note_is_no_rest() {
         let rate = 35_002;
-        // A0, C1, C2, E2, G2, C4 and C6.
         for midi in [21.0, 24.0, 36.0, 40.0, 43.0, 60.0, 84.0] {
             for db_per_s in [1.0, 2.0, 4.0] {
                 let x = highpassed(&dying(rate, midi, 12.0, db_per_s, 0.0), rate);
@@ -673,7 +688,6 @@ pub(crate) mod tests {
             "a C2 dying 0.5 dB/s for 60 s: rest {:?}",
             env.rest()
         );
-        // A0, C4 and C8.
         for midi in [21.0, 60.0, 108.0] {
             let x = highpassed(&dying(rate, midi, 3.0, 2.0, 2.0), rate);
             let env = Envelope::read(&x, rate, Floor::OneNote);

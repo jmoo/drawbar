@@ -15,6 +15,11 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The points it transforms.
+    pub fn size(&self) -> usize {
+        self.n
+    }
+
     /// # Panics
     ///
     /// If `n` is not a power of two of at least 4.
