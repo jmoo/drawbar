@@ -34,15 +34,21 @@ import gave 50 WAV documents, each detected on its own, and no one view to check
 
 ## Guide-level explanation
 
-**New ▸ Piano project…** opens the same file picker as **New ▸ Piano library**, and drawbar reads the
-WAVs picked. A single WAV is one recording of the whole instrument, and nothing is asked. For several,
-the dialog asks what they are, offering only what several WAVs can be:
+**New ▸ Piano project…**, whose hover reads "prepares WAVs for a piano library; copies them into a new
+folder", opens the same file picker as **New ▸ Piano library**, and drawbar reads the WAVs picked. A
+single WAV is one recording of the whole instrument, and nothing is asked; the dialog's caption says
+"One recording of the whole instrument: its notes and layers are found from its hits." For several,
+the caption says "The WAVs are copied into a new folder with the project. Nothing is changed in the
+originals.", and the dialog asks what they are, offering only what several WAVs can be:
 
 ```
 What do you have?
 ( ) A few recordings: one per layer, or one per range of keys
+    each a take of many notes: every note at one level, or some of the keys at every level
 ( ) One recording per note struck
+    each WAV holds one note, struck once; its level sets its layer
 ( ) Finished strokes, cut and looped
+    named like 060-b0-l00.wav; kept as they are, to check and clean
 ```
 
 drawbar picks its best guess from what it read: finished strokes where the files are named as strokes
@@ -79,11 +85,17 @@ and loops, auditions, cleaning, and Build. A single WAV made into a project look
 of one.
 
 In the library the project shows as a "piano project": recordings with their notes, layers, loops and
-key-offs marked, ready to build a piano library. It is saved there like any document, with copies of its WAVs in a folder beside
-it, as a Sample Editor project's are. Opening it again shows the long view as it was left.
+key-offs marked, ready to build a piano library. It is saved there like any document, with copies of
+its WAVs in a folder beside it, as a Sample Editor project's are. Opening it again shows the long view
+as it was left.
 
 A WAV opened on its own from the library is unchanged: it opens in the take editor, and **Build
 piano library…** works as it does now.
+
+One string of **New ▸ Piano library** changes. Its hover says "encodes one WAV per stroke", but it also
+builds each marked hit of a take, and takes a recording nobody has marked as a single stroke on one
+key, with no warning. It becomes "builds from finished strokes or marked takes; for raw recordings use
+Piano project…".
 
 ## Reference-level explanation
 
@@ -114,8 +126,11 @@ CLI share it:
   and one choice of cleaning, since they all become one `.npno`. They are kept in the project file
   and applied when the library is built, so a project's gain never rewrites a recording's audio, as
   a gain on a WAV opened on its own does today.
-- The long view is built in memory from the recordings and never written as a WAV. Each recording
-  keeps its own noise floor and its own place as a layer. A save that changes several recordings
+- The long view is built in memory from the recordings and never written as a WAV. It shows each
+  hit, a quarter second either side of it, with a quarter second of silence before the next, so a
+  set of hundreds of files stays small enough for the web; a recording with no hit found is shown
+  whole at the end. Each recording keeps its own noise floor and its own place as a layer. An edit
+  reads and rewrites only the recordings whose marks it moved. A save that changes several recordings
   asks for each of their saves at once, so the library takes them as one change and **Edit ▸ Undo**
   takes them back in one step.
 - Finding the notes runs `set::plan` in the background, as Detect does now.
@@ -151,9 +166,6 @@ CLI share it:
 
 ## Unresolved questions
 
-- The hint under each choice, and the New menu item's hover text.
-- How the long view shows a set of hundreds of files: I'd like to show only each recording's hit
-  (attack to release end) with a short gap between, which keeps it small on the web.
 - What a set of recordings at different sample rates does: refused, naming the odd ones out, unless
   there is a better answer.
 - What **Edit ▸ Undo** calls a save that changed many recordings.
