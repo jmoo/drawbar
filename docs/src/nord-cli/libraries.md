@@ -135,6 +135,16 @@ Each take is one layer, whatever its level, so you may raise the gain for the so
 ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
 12 of the second take.
 
+Or give takes that each cover a range of the keyboard, every note of it at every level, with
+`--ranges`:
+
+```sh
+nord piano prep low.wav middle.wav high.wav --ranges -o regions/
+```
+
+Each is prepped as a single take is, its notes found from their pitches. A note found in
+two of them is refused, naming both.
+
 Or give a folder of one-note files, such as a free sample set, its subfolders too:
 
 ```sh

@@ -25,6 +25,7 @@ pub mod hum;
 pub mod layers;
 pub mod plan;
 pub mod resample;
+pub mod set;
 pub mod sustain;
 
 /// The most threads [`each`] runs at once. Each tracking block of [`hum::find`] holds

@@ -6,8 +6,9 @@ use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
 use nord_format::take::detect::{self, Floor};
-use nord_format::take::layers::{self, Choice, Order, Placed};
-use nord_format::take::plan::{self, Fate, PlanOptions, SetLayer};
+use nord_format::take::layers::{Choice, Order, Placed};
+use nord_format::take::plan::{self, Fate, PlanOptions};
+use nord_format::take::set::{self, Shape};
 use nord_format::take::sustain::Sustain;
 use nord_format::wav;
 
@@ -18,7 +19,8 @@ use crate::ui::Ui;
 pub struct PrepArgs {
     /// The take: one WAV of every note played, 16 to 32-bit PCM or float, mono or
     /// stereo, at any rate. Or several, one per velocity layer, the loudest first, each
-    /// holding every note once: a note played again keeps its last hit. Or a folder of
+    /// holding every note once: a note played again keeps its last hit. Or several ranges
+    /// of the keyboard with --ranges, each played as a single take is. Or a folder of
     /// one-note files, a sample set, its subfolders too: each file's note is found from
     /// its pitch and its layer from its level, and each is written into the -o folder.
     #[arg(value_name = "TAKE", required = true, num_args = 1..)]
@@ -70,6 +72,11 @@ pub struct PrepArgs {
     /// the instrument's first, at its own bit depth.
     #[arg(short, long, value_name = "FILE|DIR")]
     pub out: PathBuf,
+
+    /// Several takes are ranges of the keyboard, not layers: each plays its own notes at
+    /// every velocity, as a single take does, and no note is in two of them.
+    #[arg(long)]
+    pub ranges: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -88,7 +95,17 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
         .map(|n| note::parse(n))
         .collect::<Result<Vec<u8>, String>>()?;
     let set = args.takes.len() > 1;
-    if set && (args.layers.is_some() || args.order.is_some()) {
+    if args.ranges && !set {
+        return Err("--ranges is for several takes, each a range of the keyboard".into());
+    }
+    if args.ranges && !notes.is_empty() {
+        return Err(
+            "--notes names one take's notes; with --ranges each take's are found from their \
+             pitches"
+                .into(),
+        );
+    }
+    if set && !args.ranges && (args.layers.is_some() || args.order.is_some()) {
         return Err(
             "--layers and --order choose among a single take's hits; with several takes, \
              each take is one layer"
@@ -143,25 +160,50 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
         }
     }
     // Every take is planned before any is written, so one that fails leaves none.
+    let options = plan_options(&args, notes.clone(), layers);
+    let plans: Vec<plan::Plan> = match set {
+        false => {
+            let mut options = options;
+            options.skip = skips[0].clone();
+            let loaded = load(&args.takes[0], &outs[0])?;
+            vec![plan::plan(
+                &plan::mono(&loaded.take),
+                loaded.take.rate,
+                &options,
+            )]
+        }
+        true => {
+            let shape = match args.ranges {
+                true => Shape::PerRange,
+                false => Shape::PerLayer,
+            };
+            let read = |i: usize| {
+                load(&args.takes[i], &outs[i]).map(|l| (plan::mono(&l.take), l.take.rate))
+            };
+            (set::plan(args.takes.len(), shape, &options, &skips, read)
+                .map_err(|e| e.to_string())?)
+            .into_iter()
+            .map(|planned| planned.map(|p| p.plan))
+            .collect::<Result<_, _>>()?
+        }
+    };
     let mut planned = Vec::new();
-    for (index, (path, out)) in args.takes.iter().zip(&outs).enumerate() {
+    for (index, ((path, out), plan)) in args.takes.iter().zip(&outs).zip(plans).enumerate() {
         if set {
             ui.out(format!(
-                "take {}: {}, layer {} of {}",
+                "take {}: {}, {} {} of {}",
                 index + 1,
                 path.display(),
+                match args.ranges {
+                    true => "range",
+                    false => "layer",
+                },
                 index + 1,
                 args.takes.len()
             ));
         }
-        let mut options = plan_options(&args, notes.clone(), layers);
-        options.skip = skips[index].clone();
-        options.set = set.then_some(SetLayer {
-            layer: index,
-            of: args.takes.len(),
-        });
-        let (bytes, hits) = prep_take(ui, path, out, &options)?;
-        for &skip in &options.skip {
+        let (bytes, hits) = prep_take(ui, path, out, plan, notes.is_empty())?;
+        for &skip in &skips[index] {
             if !hits.contains(&skip) {
                 let named = match set {
                     true => format!("{}:{skip}", index + 1),
@@ -232,7 +274,6 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Resu
     ));
 
     // Each file on its own: its hit, its pitch, and how far it stands over its floor.
-    #[derive(Default)]
     struct Found {
         hit: Option<plan::Planned>,
         floor_db: f64,
@@ -240,47 +281,39 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Resu
         /// Why it could not be read, which leaves it out.
         unread: Option<String>,
     }
+    let read = |i: usize| load(&files[i], &outs[i]).map(|l| (plan::mono(&l.take), l.take.rate));
+    let options = plan_options(args, Vec::new(), layers);
+    let set =
+        set::plan(files.len(), Shape::PerNote, &options, &[], read).map_err(|e| e.to_string())?;
     let mut found = Vec::new();
-    for (file, out) in files.iter().zip(&outs) {
-        let loaded = match load(file, out) {
-            Ok(loaded) => loaded,
+    let mut placed = Vec::new();
+    let mut plans = Vec::new();
+    for planned in set {
+        match planned {
+            Ok(planned) => {
+                found.push(Found {
+                    hit: set::loudest(&planned.plan).cloned(),
+                    floor_db: planned.plan.floor_db,
+                    rests: planned.plan.rests,
+                    unread: None,
+                });
+                placed.push(planned.placed);
+                plans.push(Some(planned.plan));
+            }
             Err(why) => {
                 found.push(Found {
+                    hit: None,
+                    floor_db: 0.0,
+                    rests: false,
                     unread: Some(why),
-                    ..Found::default()
                 });
-                continue;
+                placed.push(None);
+                plans.push(None);
             }
-        };
-        let mut options = plan_options(args, Vec::new(), layers);
-        options.one_note = true;
-        let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
-        found.push(Found {
-            // The loudest hit is the file's note, a hit with no pitch included.
-            hit: plan.hits.into_iter().reduce(|a, b| {
-                if b.hit.level_db > a.hit.level_db {
-                    b
-                } else {
-                    a
-                }
-            }),
-            floor_db: plan.floor_db,
-            rests: plan.rests,
-            unread: None,
-        });
+        }
     }
-    let struck: Vec<_> = found
-        .iter()
-        .map(|f| match &f.hit {
-            Some(planned) if !matches!(planned.fate, Fate::TooQuiet { .. }) => {
-                Some(planned.hit.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    let placed = layers::place(&struck, layers, args.min_layer_gap);
 
-    // Then each placed file again, as its note and layer.
+    // Then each placed file, as its note and layer.
     let mut rows = Vec::new();
     let mut planned = Vec::new();
     for (i, (file, out)) in files.iter().zip(&outs).enumerate() {
@@ -288,13 +321,7 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Resu
         let (note, what, sustain) = match (&placed[i], &found[i].hit) {
             (Some(Placed::Layer { note, layer, of }), _) => {
                 let loaded = load(file, out)?;
-                let mut options = plan_options(args, vec![*note], layers);
-                options.one_note = true;
-                options.set = Some(SetLayer {
-                    layer: *layer,
-                    of: *of,
-                });
-                let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, &options);
+                let plan = plans[i].take().expect("a placed file was read");
                 let rate = f64::from(plan.rate);
                 let kept = plan.hits.iter().find_map(|p| match &p.fate {
                     Fate::Kept { value, .. } => Some((*value, sustain_of(&p.fate, rate))),
@@ -482,19 +509,19 @@ fn skips(given: &[String], takes: usize) -> Result<Vec<Vec<usize>>, String> {
     Ok(out)
 }
 
-/// Finds one take's hits and lists them: the take with its regions, as written to
-/// `out`, and the numbers of its hits.
+/// Lists one take's hits as `plan` found them: the take with its regions, as written to
+/// `out`, and the numbers of its hits. `found` says its notes were found from pitches.
 fn prep_take(
     ui: &Ui,
     path: &std::path::Path,
     out: &std::path::Path,
-    options: &PlanOptions,
+    plan: plan::Plan,
+    found: bool,
 ) -> Result<(Vec<u8>, Vec<usize>), String> {
     let loaded = load(path, out)?;
     let resampled = loaded.resampled;
-    let plan = plan::plan(&plan::mono(&loaded.take), loaded.take.rate, options);
 
-    if options.notes.is_empty() {
+    if found {
         let found: Vec<String> = plan.notes.iter().map(|&n| note::name(n)).collect();
         ui.note(format!(
             "notes found from the hits' pitches: {}",
@@ -889,6 +916,66 @@ mod tests {
             }) => args,
             _ => panic!("build did not parse"),
         }
+    }
+
+    /// Two takes of ranges: each keeps its own notes' hits as their layers, and a note
+    /// both play is refused.
+    #[test]
+    fn takes_of_ranges_prep_their_own_notes() {
+        let dir = crate::edit::tests::scratch("piano-prep-ranges");
+        let low = take(
+            44_100,
+            9.0,
+            &[(1.0, 48.0, -12.0, 3.0), (5.0, 48.0, -24.0, 7.0)],
+        );
+        let high = take(
+            44_100,
+            9.0,
+            &[(1.0, 72.0, -12.0, 3.0), (5.0, 72.0, -24.0, 7.0)],
+        );
+        let paths = [dir.join("low.wav"), dir.join("high.wav")];
+        for (path, audio) in paths.iter().zip([&low, &high]) {
+            let bytes = wav::write(audio, wav::Encoding::Int { bits: 24 }).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let out = dir.join("regions");
+        let (a, b, out_s) = (
+            paths[0].to_str().unwrap(),
+            paths[1].to_str().unwrap(),
+            out.to_str().unwrap(),
+        );
+        let err = prep(&Ui::piped(), prep_args(&[a, "--ranges", "-o", out_s])).unwrap_err();
+        assert!(err.contains("several takes"), "{err}");
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, b, "--ranges", "--notes", "C3", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("--notes"), "{err}");
+        let err = prep(&Ui::piped(), prep_args(&[a, a, "--ranges", "-o", out_s])).unwrap_err();
+        assert!(err.contains("two takes"), "{err}");
+
+        prep(&Ui::piped(), prep_args(&[a, b, "--ranges", "-o", out_s])).unwrap();
+        let labels = |name: &str| -> Vec<String> {
+            let bytes = std::fs::read(out.join(name)).unwrap();
+            (wav::read_marks(&bytes).unwrap().regions.into_iter())
+                .map(|r| r.label)
+                .filter(|l| l.contains("-b0-"))
+                .collect()
+        };
+        assert_eq!(labels("low.wav"), ["048-b0-v00", "048-b0-v40"]);
+        assert_eq!(labels("high.wav"), ["072-b0-v00", "072-b0-v40"]);
+
+        let clash = dir.join("clash.wav");
+        let bytes = wav::write(&low, wav::Encoding::Int { bits: 24 }).unwrap();
+        std::fs::write(&clash, bytes).unwrap();
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, clash.to_str().unwrap(), "--ranges", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("both play C3"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Two takes, one per layer, the second recorded with more gain: each note's last
