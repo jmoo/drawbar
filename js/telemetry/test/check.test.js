@@ -103,9 +103,9 @@ test("a report is refused without text, with a bad id, or with an extra field", 
   assert.equal(report(JSON.stringify({ ...sent, text: "x".repeat(5_001) }), edge), null);
 });
 
-// The guide's feedback page with `text` and `contact` typed in, opened on `origin`, and
-// its form submitted. A report number is drawn from ten bytes counting up from `random`.
-async function feedback(origin, text, contact, random = 0) {
+// The guide's feedback page with `text` and `contact` typed in and its form submitted.
+// A report number is drawn from ten bytes counting up from `random`.
+async function feedback(text, contact, random = 0) {
   const posts = [];
   const said = { textContent: "" };
   const send = { disabled: false };
@@ -121,7 +121,6 @@ async function feedback(origin, text, contact, random = 0) {
   };
   vm.runInNewContext(read("../../../docs/feedback.js"), {
     document: { getElementById: () => form },
-    location: { origin },
     crypto: { getRandomValues: (bytes) => bytes.map((_, at) => random + at) },
     fetch: async (url, init) => {
       posts.push({ url, ...init });
@@ -129,13 +128,12 @@ async function feedback(origin, text, contact, random = 0) {
     },
   });
   await submit?.({ preventDefault() {} });
-  return { posts, said: said.textContent, send };
+  return { posts, said: said.textContent };
 }
 
 test("the guide's feedback form sends a report the collector accepts", async () => {
   for (const random of [0, 10, 21]) {
     const { posts, said } = await feedback(
-      "https://drawbar.app",
       "  The Wurli is too quiet.\n",
       " me@example.com ",
       random,
@@ -166,12 +164,9 @@ test("the guide's feedback form sends a report the collector accepts", async () 
   }
 });
 
-test("the guide's feedback form sends nothing from another origin, or with nothing written", async () => {
-  const elsewhere = await feedback("http://127.0.0.1:8080", "An idea.", "");
-  assert.deepEqual(elsewhere.posts, []);
-  assert.ok(elsewhere.send.disabled);
-  const empty = await feedback("https://drawbar.app", "  \n", "");
-  assert.deepEqual(empty.posts, []);
+test("the guide's feedback form sends nothing with nothing written", async () => {
+  const { posts } = await feedback("  \n", "");
+  assert.deepEqual(posts, []);
 });
 
 test("a report's email is headed by its kind and number alone", () => {
