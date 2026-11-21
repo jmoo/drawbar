@@ -86,6 +86,11 @@ drawbar suite fails until the matching script is re-run.
 `assets/icons` as outlines. Re-run it after adding an icon to the list in
 `icon.rs`; the drawbar suite fails while the font and the list differ.
 
+`scripts/guide-shots.bash` redraws this guide's screenshots of the demo sounds,
+each in the light and the dark theme, from this checkout's browser build in a
+headless Firefox. It clicks by position, so look at every image it writes before
+committing it.
+
 `scripts/fonts.py` writes the Ubuntu and Hack faces drawbar bundles, keeping
 only what egui reads. It takes the released font files as arguments and refuses
 any whose SHA-256 differs from the release's.
