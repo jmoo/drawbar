@@ -24,7 +24,9 @@ and an email address if you give one. You decide whether to include recent
 errors, details of the build and connected instrument, and an activity log
 that names your files. A problem report starts with all three attachments
 selected. Feedback starts with none. Review the preview before sending.
-The form works even when usage sharing is off.
+The form works even when usage sharing is off. This guide's
+[feedback form](feedback.md) sends what you write, an email address if you give
+one, and a note that it came from the guide.
 
 Reports are emailed privately to drawbar's developer and deleted after 90
 days. To see your report or have it deleted sooner, give the report number

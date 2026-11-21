@@ -47,4 +47,5 @@
 ---
 
 [Community](community.md)
+[Feedback](feedback.md)
 [Privacy](privacy.md)

@@ -467,7 +467,7 @@ html.coal .content img[src$="#gh-light-mode-only"],
 html.navy .content img[src$="#gh-light-mode-only"],
 html.ayu .content img[src$="#gh-light-mode-only"] { display: none; }
 
-.content a.button {
+.content .button {
   display: inline-block;
   margin: 0.4rem 0.6rem 0.4rem 0;
   padding: 0.7rem 1.4rem;
@@ -478,13 +478,35 @@ html.ayu .content img[src$="#gh-light-mode-only"] { display: none; }
   font-weight: 700;
   text-decoration: none;
 }
-.content a.button:hover { background: var(--db-hovered); }
-.content a.button.primary {
+.content .button:hover { background: var(--db-hovered); }
+.content .button.primary {
   border-color: var(--db-accent);
   background: var(--db-accent);
   color: #ffffff;
 }
-.content a.button.primary:hover { filter: brightness(1.1); }
+.content .button.primary:hover { filter: brightness(1.1); }
+
+.content button.button { font: inherit; font-weight: 700; cursor: pointer; }
+.content button.button:disabled { opacity: 0.5; cursor: default; }
+
+.content form.feedback label {
+  display: block;
+  margin: 1.6rem 0 0.4rem;
+  font-weight: 700;
+  color: var(--db-ink-strong);
+}
+.content form.feedback :is(textarea, input) {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-extreme-bg);
+  color: var(--db-ink);
+  font: inherit;
+}
+.content form.feedback textarea { resize: vertical; }
+.content form.feedback [role="status"] { margin-left: 0.8rem; color: var(--db-ink-weak); }
 
 .content .cards {
   display: grid;
