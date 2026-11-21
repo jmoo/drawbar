@@ -8,8 +8,6 @@
   if (!form) {
     return;
   }
-  // The collector answers no other origin.
-  const ORIGIN = "https://drawbar.app";
   const COLLECTOR = "https://t.drawbar.app/report";
   // The app's report numbers use the same alphabet, which has no look-alikes.
   const ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz";
@@ -17,11 +15,6 @@
   const send = form.querySelector("button");
 
   form.hidden = false;
-  if (location.origin !== ORIGIN) {
-    send.disabled = true;
-    said.textContent = "This form sends from drawbar.app only.";
-    return;
-  }
 
   const number = () =>
     Array.from(
