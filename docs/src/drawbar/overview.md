@@ -60,8 +60,8 @@ Each band plays one recording at different pitches. Under **Roots**, open a row
 to hear that recording on its own or save it as a WAV. A *root* is the note at
 which a sound was recorded.
 
-![The Demo sounds folder with drawbar-tine selected. In its tab, the Key map shows three recorded roots above the on-screen keyboard.](../assets/demo-piano-light.png#gh-light-mode-only)
-![The Demo sounds folder with drawbar-tine selected. In its tab, the Key map shows three recorded roots above the on-screen keyboard.](../assets/demo-piano-dark.png#gh-dark-mode-only)
+![The top of drawbar's window after Start with a demo. Under This computer, the Demo sounds folder is open with drawbar-tine selected. Its tab shows the document header and the Key map: three roots, E3, E5 and E7, above the on-screen keyboard.](../assets/demo-piano-light.png#gh-light-mode-only)
+![The top of drawbar's window after Start with a demo. Under This computer, the Demo sounds folder is open with drawbar-tine selected. Its tab shows the document header and the Key map: three roots, E3, E5 and E7, above the on-screen keyboard.](../assets/demo-piano-dark.png#gh-dark-mode-only)
 
 The demo folder also holds a pad in two sample formats. Double-click
 **drawbar-pad v2** to try its key map. Choose **Start with a demo** again to

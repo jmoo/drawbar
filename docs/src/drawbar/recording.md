@@ -50,8 +50,8 @@ missed note, add it by hand (see below).
 
 ## Check a hit by ear
 
-![The practice take with E3 selected. The upper waveform shows all three strikes. In the close-up below, two markers enclose the loop inside the attack, and the release follows on the right.](../assets/take-editor-light.png#gh-light-mode-only)
-![The practice take with E3 selected. The upper waveform shows all three strikes. In the close-up below, two markers enclose the loop inside the attack, and the release follows on the right.](../assets/take-editor-dark.png#gh-dark-mode-only)
+![The practice take, tine-take.wav, in the WAV editor after Detect, with hit E3 selected. The take's waveform on top marks E3, E5 and E7. The close-up below shows E3's attack, the loop's two markers inside it and the release after it, above Play original, Play hit, Loop wrap and Release.](../assets/take-editor-light.png#gh-light-mode-only)
+![The practice take, tine-take.wav, in the WAV editor after Detect, with hit E3 selected. The take's waveform on top marks E3, E5 and E7. The close-up below shows E3's attack, the loop's two markers inside it and the release after it, above Play original, Play hit, Loop wrap and Release.](../assets/take-editor-dark.png#gh-dark-mode-only)
 
 Click a box in the top waveform to see that hit below. The **attack** starts
 when you strike the note, the **loop** repeats while you hold the key, and the

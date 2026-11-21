@@ -5,7 +5,7 @@ your terminal, or from your own code.
 
 [**Open drawbar**](https://drawbar.app/) · [User guide](docs/src/introduction.md) · [What is supported](docs/src/getting-started/support.md)
 
-![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](docs/src/assets/screenshot.png)
 
 > ⚠️ **Alpha.** Back up your instrument and your files first.
 > [What is supported](docs/src/getting-started/support.md) lists what has been

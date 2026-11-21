@@ -19,7 +19,7 @@ Sound Manager. [Check support for your keyboard](../getting-started/support.md#u
 If your instrument doesn't appear, check [browser USB support](../getting-started/support.md#usb)
 or [USB permissions on Linux](../getting-started/install.md#connecting-on-linux).
 
-![drawbar with an instrument attached. Its folders are in the left panel below This computer, a piano library is open in the center, and Room on the right shows the space left for each kind of sound.](../assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](../assets/screenshot.png)
 
 ## Folders and slots
 
