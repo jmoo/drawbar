@@ -47,7 +47,7 @@ open.
 
 Connecting an instrument from the browser needs Chrome, Edge or Brave.
 
-Start with [Play your first sound](../../docs/src/drawbar/overview.md) in the user guide,
+Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before
 trusting alpha software with sounds you cannot re-create.
 [Building from source](../../docs/src/reference/building.md) covers a checkout.
