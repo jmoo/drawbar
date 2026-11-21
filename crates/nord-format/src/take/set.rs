@@ -56,6 +56,23 @@ pub fn plan<R>(
     shape: Shape,
     options: &PlanOptions,
     skips: &[Vec<usize>],
+    read: R,
+) -> Result<Vec<Result<Planned, String>>, SetError>
+where
+    R: FnMut(usize) -> Result<(Vec<f64>, u32), String>,
+{
+    plan_named(count, shape, options, skips, &[], read)
+}
+
+/// As [`plan()`], with each take's name in `names`: of one note per take, a take near the
+/// level of a louder one of its note is kept as a layer where the two are named as one
+/// series ([`one_series`]), not left out as a duplicate. No names, no series.
+pub fn plan_named<R>(
+    count: usize,
+    shape: Shape,
+    options: &PlanOptions,
+    skips: &[Vec<usize>],
+    names: &[&str],
     mut read: R,
 ) -> Result<Vec<Result<Planned, String>>, SetError>
 where
@@ -107,13 +124,35 @@ where
             }
             Ok(planned)
         }
-        Shape::PerNote => Ok(per_note(count, options, read)),
+        Shape::PerNote => Ok(per_note(count, options, names, read)),
     }
+}
+
+/// Whether two takes are named as one series, as `Grand-C5v00.wav` and `Grand-C5v01.wav`
+/// are: the same name once each drops its extension and the last run of digits in it.
+pub fn one_series(a: &str, b: &str) -> bool {
+    fn stem(name: &str) -> String {
+        let leaf = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let stem = leaf.rsplit_once('.').map_or(leaf, |(stem, _)| stem);
+        let Some(last) = stem.rfind(|c: char| c.is_ascii_digit()) else {
+            return stem.to_string();
+        };
+        let first = stem[..=last]
+            .rfind(|c: char| !c.is_ascii_digit())
+            .map_or(0, |at| at + 1);
+        format!("{}{}", &stem[..first], &stem[last + 1..])
+    }
+    a != b && stem(a) == stem(b)
 }
 
 /// Each take of one note, planned on its own for its loudest hit, then placed among the
 /// others and planned again as its note's layer.
-fn per_note<R>(count: usize, options: &PlanOptions, mut read: R) -> Vec<Result<Planned, String>>
+fn per_note<R>(
+    count: usize,
+    options: &PlanOptions,
+    names: &[&str],
+    mut read: R,
+) -> Vec<Result<Planned, String>>
 where
     R: FnMut(usize) -> Result<(Vec<f64>, u32), String>,
 {
@@ -131,7 +170,11 @@ where
             _ => None,
         })
         .collect();
-    let placed = layers::place(&struck, options.layers, options.min_layer_gap_db);
+    let series = |a: usize, b: usize| match (names.get(a), names.get(b)) {
+        (Some(a), Some(b)) => one_series(a, b),
+        _ => false,
+    };
+    let placed = layers::place_series(&struck, options.layers, options.min_layer_gap_db, series);
     (found.into_iter().zip(placed).enumerate())
         .map(|(i, (found, placed))| {
             let found = found?;
@@ -170,6 +213,21 @@ fn kept_notes(plan: &Plan) -> std::collections::BTreeSet<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takes_are_one_series_where_only_their_last_number_differs() {
+        assert!(one_series("Grand-C5v00.wav", "Grand-C5v01.wav"));
+        assert!(one_series("dir/Organ_158_rr1.wav", "Organ_158_rr2.wav"));
+        assert!(!one_series(
+            "NT5_Man3Quiet_158_rr1.wav",
+            "Rode_Man3Open_49.wav"
+        ));
+        assert!(!one_series("Grand-C5.wav", "Grand-D5.wav"));
+        assert!(
+            !one_series("Grand-C5v00.wav", "Grand-C5v00.wav"),
+            "not itself"
+        );
+    }
 
     const RATE: u32 = 35_002;
 

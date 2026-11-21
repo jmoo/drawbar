@@ -283,8 +283,17 @@ fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Resu
     }
     let read = |i: usize| load(&files[i], &outs[i]).map(|l| (plan::mono(&l.take), l.take.rate));
     let options = plan_options(args, Vec::new(), layers);
-    let set =
-        set::plan(files.len(), Shape::PerNote, &options, &[], read).map_err(|e| e.to_string())?;
+    let names: Vec<String> = (files.iter())
+        .map(|file| {
+            file.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let set = set::plan_named(files.len(), Shape::PerNote, &options, &[], &names, read)
+        .map_err(|e| e.to_string())?;
     let mut found = Vec::new();
     let mut placed = Vec::new();
     let mut plans = Vec::new();
