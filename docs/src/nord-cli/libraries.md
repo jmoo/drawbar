@@ -135,6 +135,16 @@ Each take is one layer, whatever its level, so you may raise the gain for the so
 ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
 12 of the second take.
 
+Or give takes that each cover a range of the keyboard, every note of it at every level, with
+`--ranges`:
+
+```sh
+nord piano prep low.wav middle.wav high.wav --ranges -o regions/
+```
+
+Each is prepped as a single take is, its notes found from their pitches. A note found in
+two of them is refused, naming both.
+
 Or give a folder of one-note files, such as a free sample set, its subfolders too:
 
 ```sh
@@ -142,9 +152,11 @@ nord piano prep "Upright Piano/" -o regions/
 ```
 
 Each file's loudest hit is its note, named by its pitch in the octave it was read
-in, so file names are never read. A note's files become its layers by level, all of
-them or at most `--layers`, and a file within `--min-layer-gap` dB of a louder one, such as a second
-round-robin, is left out. Each file placed is written under `-o` at its own path, with the build
+in, never by its file name. A note's files become its layers by level, all of
+them or at most `--layers`, and a file within `--min-layer-gap` dB of a louder one is left out,
+unless the two are named as one series: the same name but for its last number, as
+`Grand-C5v00.wav` and `Grand-C5v01.wav` or a set's `_rr1` and `_rr2` are. Near-equal levels can
+still differ in tone, so such a file is kept as a layer of its own. Each file placed is written under `-o` at its own path, with the build
 command for them all. A file that does not read, or has no hit, no pitch, or too
 little level over its own noise, is listed and left out. Linked folders are not
 followed. A file that rests under half a second has no noise
