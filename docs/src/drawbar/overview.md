@@ -39,7 +39,7 @@ The menus show the shortcuts for your platform, and
 ## Bring in your own sounds
 
 Drop a file on the window to add a copy to **This computer**. To start with a
-sound that's on your keyboard, follow [Copy and send sounds over USB](sending.md).
+sound that's on your keyboard, follow [Copy and send sounds](sending.md).
 
 ## Try it without a keyboard
 
