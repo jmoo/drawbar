@@ -74,7 +74,7 @@ are, and the take editor follows the other document editors.
      suits players who play loud, medium, soft, and recordings whose level can't be trusted (a
      phone's automatic gain made measured loudness useless on our first test take).
    - Loudness, the default: hits sorted by measured level, with near-duplicates within 1 dB dropped
-     and the kept layers spread evenly in dB.
+     and, under `--layers`, the kept ones spread evenly in dB.
 4. **Take editor.** The take's waveform, with a box over each hit the regions mark (`C4 v22`), and
    under it the picked hit's own lane with its cut points. Both lanes start linear, so a hit's shape
    shows as it decays, and small + and − at the right bend the scale toward log so quiet releases
@@ -195,7 +195,10 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 - More hits than `--layers` allows: loudness mode keeps the hits nearest evenly spaced levels
   between the loudest and softest; playing-order mode keeps the first N.
 - Layer values are named into the stroke names, and the build turns them into thresholds as it does
-  now. See Unresolved questions for the default spread.
+  now. Three layers take 0, 20 and 70, and four take 0, 22, 50 and 85, both chosen by ear on the
+  instrument. Confirmed on hardware. One, two and five layers take the values vendor libraries use,
+  and six or more are spread evenly from 0 to 100. Inferred from specimens; not confirmed on
+  hardware.
 
 ### One-note takes
 
