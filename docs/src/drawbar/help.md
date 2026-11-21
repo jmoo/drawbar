@@ -28,7 +28,9 @@ log** copies the whole log, including filenames.
    report number if you want to ask about it later.
 
 Use **Help ▸ Send feedback…** for an idea or comment. Feedback starts with no
-attachments selected. Reports go directly to the developer. [Privacy](../privacy.md).
+attachments selected. Without the app open, this guide's
+[feedback form](../feedback.md) does the same. Reports go directly to the
+developer. [Privacy](../privacy.md).
 
 ## Version, updates and settings
 
