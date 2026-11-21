@@ -32,7 +32,8 @@ warning such as `Won't fit · 70 MB over`.
 Saving, exporting or queuing a piano can write the cuts into its file. To
 discard trial cuts, choose **Revert** before any of those.
 
-![Piano editor showing three recordings mapped across the keys and a Trim to fit meter reporting 17.6 MB to spare](../assets/piano-key-map.png)
+![Piano editor showing three recordings mapped across the keys, with Trim to fit below listing what is kept and its size](../assets/piano-key-map-light.png#gh-light-mode-only)
+![Piano editor showing three recordings mapped across the keys, with Trim to fit below listing what is kept and its size](../assets/piano-key-map-dark.png#gh-dark-mode-only)
 
 <details>
 <summary>Cut single layers in Velocity layers</summary>
