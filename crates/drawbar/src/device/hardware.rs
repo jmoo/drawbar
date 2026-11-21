@@ -21,28 +21,27 @@ use nord_usb::{Location, ObjectClass};
 use super::{Connection, DeviceCmd};
 use crate::browser::{apply, Act};
 use crate::ondisk::OnDisk;
-use crate::queue::Diff;
 use crate::store::Store;
 use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
 
 /// The prefix of every name this suite writes to a slot, and the only names it deletes.
-const MARK: &str = "drawbar-hw-";
+pub(super) const MARK: &str = "drawbar-hw-";
 
 /// The bytes of a CBIN header ahead of the body the instrument stores.
-const HEADER: usize = 44;
+pub(super) const HEADER: usize = 44;
 
 /// More than a write takes, the backup read, delete and restore of a replace included.
-const SEND_LIMIT: Duration = Duration::from_secs(300);
+pub(super) const SEND_LIMIT: Duration = Duration::from_secs(300);
 
 /// More than attaching takes: the partition table, and a walk of every class.
-const ATTACH_LIMIT: Duration = Duration::from_secs(120);
+pub(super) const ATTACH_LIMIT: Duration = Duration::from_secs(120);
 
 /// The most any single allocation may take while a file is sent: a few transfer chunks.
 const BOUNDED: usize = 128 << 10;
 
 /// Whether this run may write to the instrument, and one is attached.
-fn attached() -> bool {
+pub(super) fn attached() -> bool {
     if std::env::var("DRAWBAR_HARDWARE").as_deref() != Ok("1") {
         eprintln!("skipped: set DRAWBAR_HARDWARE=1 to write to an attached instrument");
         return false;
@@ -83,7 +82,7 @@ fn noun(class: ObjectClass) -> &'static str {
 
 /// nord-cli, for what drawbar is not under test for: reading sources, reading back and
 /// deleting.
-struct Cli(PathBuf);
+pub(super) struct Cli(pub(super) PathBuf);
 
 impl Cli {
     fn run(&self, args: &[&str]) -> std::process::Output {
@@ -95,7 +94,7 @@ impl Cli {
     }
 
     /// What a command printed to stdout and stderr, or why it failed.
-    fn said(&self, args: &[&str]) -> Result<(String, String), String> {
+    pub(super) fn said(&self, args: &[&str]) -> Result<(String, String), String> {
         let out = self.run(args);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         match out.status.success() {
@@ -104,7 +103,7 @@ impl Cli {
         }
     }
 
-    fn ok(&self, args: &[&str]) -> String {
+    pub(super) fn ok(&self, args: &[&str]) -> String {
         self.said(args).unwrap_or_else(|why| panic!("{why}")).0
     }
 
@@ -132,13 +131,13 @@ impl Cli {
         ]);
     }
 
-    fn delete(&self, class: ObjectClass, slot: Location) -> Result<(), String> {
+    pub(super) fn delete(&self, class: ObjectClass, slot: Location) -> Result<(), String> {
         self.said(&[noun(class), "delete", &shown(slot), "--yes"])
             .map(|_| ())
     }
 
     /// Every occupied slot of the class, and its name.
-    fn list(&self, class: ObjectClass) -> Result<Vec<(Location, String)>, String> {
+    pub(super) fn list(&self, class: ObjectClass) -> Result<Vec<(Location, String)>, String> {
         let (list, _) = self.said(&[noun(class), "list"])?;
         Ok(list
             .lines()
@@ -361,7 +360,7 @@ fn assert_no_strays(class: ObjectClass) {
 }
 
 /// A library file placed in the rig's library under a name of this suite.
-fn place(library: &Temp, name: &str, from: &Path) -> PathBuf {
+pub(super) fn place(library: &Temp, name: &str, from: &Path) -> PathBuf {
     let to = library.at(name);
     fs::copy(from, &to).unwrap_or_else(|e| panic!("{from:?} -> {to:?}: {e}"));
     to
@@ -408,10 +407,13 @@ impl Sending {
 
 /// The app with no window: a library over a temporary folder and the instrument it
 /// attaches, run a frame at a time as [`crate::app::DrawbarApp`] runs them.
-struct Rig {
-    library: Temp,
-    store: Store,
-    bench: Bench,
+pub(super) struct Rig {
+    pub(super) library: Temp,
+    pub(super) store: Store,
+    pub(super) bench: Bench,
+    /// Whether Sync was pressed and its sheet is still up: it is confirmed, as the user
+    /// would, every frame from when its read lands until Sync has run and closed it.
+    pub(super) syncing: bool,
 }
 
 impl Rig {
@@ -427,6 +429,7 @@ impl Rig {
             library,
             store,
             bench,
+            syncing: false,
         };
         let names: Vec<String> = files.iter().map(|(name, _)| name.to_string()).collect();
         rig.until(
@@ -447,7 +450,7 @@ impl Rig {
 
     /// One frame of the app's update, without the panels: the library, the instrument's
     /// events, the queue, the acts, and the next command.
-    fn frame(&mut self, acts: Vec<Act>) {
+    pub(super) fn frame(&mut self, acts: Vec<Act>) {
         let Bench {
             ctx,
             browser,
@@ -470,16 +473,23 @@ impl Rig {
         if !device.take_kept().is_empty() {
             self.store.rescue_due();
         }
-        crate::queue::follow(workspace, device, queue, log);
         let mut acts = acts;
-        if released {
-            acts.push(Act::SendAll);
+        self.syncing &= device.asks.sheet.is_some();
+        self.syncing |= acts.iter().any(|act| matches!(act, Act::Sync(_)));
+        // ⚠️ A confirmation the library holds for its check is dropped, and the release
+        // that follows may find the sheet still reading; confirming every frame until the
+        // sheet closes covers both.
+        let read = device.asks.sheet.as_ref();
+        if released || (self.syncing && read.is_some_and(|sheet| sheet.read(&device.state))) {
+            let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+            crate::bring::accept(device, &sync, workspace);
+            acts.push(Act::SyncAll);
         }
         // As the app holds a send until the library's files are checked for outside
         // changes.
-        let sending = acts.iter().any(|act| matches!(act, Act::SendAll));
+        let sending = acts.iter().any(|act| matches!(act, Act::SyncAll));
         if !released && sending && self.store.hold_send() {
-            acts.retain(|act| !matches!(act, Act::SendAll));
+            acts.retain(|act| !matches!(act, Act::SyncAll));
         }
         apply(
             browser, shell, acts, workspace, device, tabs, queue, builds, log,
@@ -507,7 +517,7 @@ impl Rig {
 
     /// Whether the instrument has nothing left to do: no command running or waiting, and
     /// no walk.
-    fn idle(&self) -> bool {
+    pub(super) fn idle(&self) -> bool {
         let device = &self.bench.device;
         let state = &device.state;
         state.connected()
@@ -524,7 +534,7 @@ impl Rig {
 
     /// Attach the instrument as the Connect button does, and wait for the walk of every
     /// class.
-    fn connect(&mut self) {
+    pub(super) fn connect(&mut self) {
         let started = Instant::now();
         self.frame(vec![Act::Connect]);
         loop {
@@ -550,7 +560,7 @@ impl Rig {
 
     /// Release the instrument as the Disconnect button does, and wait until the worker
     /// has let the interface go.
-    fn release(&mut self) {
+    pub(super) fn release(&mut self) {
         if !self.bench.device.state.connected() {
             return;
         }
@@ -611,8 +621,9 @@ impl Rig {
             .collect()
     }
 
-    /// Run `acts`, which queue `id` and send it, until its write lands or fails, calling
-    /// `during` with every range of `file` the send has read so far.
+    /// Run `acts`, which place `id` on a slot and Sync, until its write lands or fails,
+    /// calling `during` with every range of `file` the send has read so far. A failed
+    /// write leaves the send placed by hand, and the errors the log says since are why.
     fn send(
         &mut self,
         acts: Vec<Act>,
@@ -622,6 +633,7 @@ impl Rig {
     ) -> Sending {
         file.take_reads();
         let started = Instant::now();
+        let logged = self.bench.log.iter().count();
         let mut reads = Vec::new();
         let mut backup = 0;
         let (outcome, largest) = largest_allocation_anywhere(|| {
@@ -634,13 +646,14 @@ impl Rig {
                 for (_, len) in self.backups() {
                     backup = backup.max(len);
                 }
-                let queue = &self.bench.queue;
-                let failure = queue.entry(id).and_then(|held| held.failure.clone());
+                let errors = self.bench.log.iter().skip(logged);
+                let errors = errors.filter(|entry| entry.level == crate::log::Level::Error);
+                let failure: Vec<&str> = errors.map(|entry| entry.text.as_str()).collect();
                 if self.bench.device.state.in_flight.is_none() {
-                    match (queue.holds(id), failure) {
+                    match (self.bench.queue.holds(id), failure.is_empty()) {
                         (false, _) => return Ok(()),
-                        (true, Some(why)) => return Err(why),
-                        (true, None) => {}
+                        (true, false) => return Err(failure.join("\n")),
+                        (true, true) => {}
                     }
                 }
                 assert!(
@@ -663,13 +676,13 @@ impl Rig {
         }
     }
 
-    fn logged(&self, text: &str) -> bool {
+    pub(super) fn logged(&self, text: &str) -> bool {
         self.bench.log.iter().any(|entry| entry.text.contains(text))
     }
 
     /// The same library opened again, as the next start of the app opens it, with the
     /// instrument let go.
-    fn reopen(mut self) -> Rig {
+    pub(super) fn reopen(mut self) -> Rig {
         self.release();
         let library = std::mem::replace(&mut self.library, Temp::new());
         drop(self);
@@ -679,6 +692,7 @@ impl Rig {
             library,
             store,
             bench,
+            syncing: false,
         };
         rig.until("the library opens", ATTACH_LIMIT, |rig| {
             rig.store.takes_files() && !rig.store.listing()
@@ -789,7 +803,7 @@ fn send_into_vacant(rig: &mut Rig, id: u64, class: ObjectClass, slot: Location) 
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -801,7 +815,7 @@ fn send_into_vacant(rig: &mut Rig, id: u64, class: ObjectClass, slot: Location) 
 }
 
 /// A piano library resting in its file is sent to an empty slot through the queue and the
-/// worker: it lands byte for byte, the asset stands on the slot, and the send holds no
+/// worker: it lands byte for byte, the asset is linked to the slot, and the send holds no
 /// more than a few transfer chunks and never the file.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
@@ -832,9 +846,9 @@ fn s1_a_resting_piano_lands_in_an_empty_slot_streamed() {
     assert_streamed(&sending, len);
     let entity = rig.bench.workspace.get(id).unwrap();
     assert_eq!(
-        entity.link,
+        crate::device::slot_of(&rig.bench.device.state, entity),
         Some((class, slot)),
-        "the asset stands on the slot"
+        "the asset is linked to the slot"
     );
     rig.release();
     assert_no_strays(class);
@@ -855,14 +869,20 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
         slot_from("DRAWBAR_HARDWARE_PIANO", "1:6"),
     );
     let mut claims = Claims::default();
-    let mut rig = Rig::open(&[("drawbar-hw-piano.npno", &source)]);
+    // A file and its slot that agree have nothing to sync, so the occupant is replaced by
+    // a second copy under another name, placed on the slot by hand.
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-piano.npno", &source),
+        ("drawbar-hw-again.npno", &source),
+    ]);
     rig.connect();
     let class = ObjectClass::Piano;
     let slot = rig.vacant(class, 0);
     claims.take(class, slot);
-    let id = rig.asset("drawbar-hw-piano.npno");
+    let occupant = rig.asset("drawbar-hw-piano.npno");
+    send_into_vacant(&mut rig, occupant, class, slot);
+    let id = rig.asset("drawbar-hw-again.npno");
     let file = rig.file(id);
-    send_into_vacant(&mut rig, id, class, slot);
 
     let sending = rig.send(
         vec![
@@ -871,7 +891,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -899,7 +919,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
     assert_streamed(&sending, file.len);
     rig.release();
     assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-piano");
+    assert_holds(class, slot, &source, "drawbar-hw-again");
 }
 
 /// A file overwritten while it is sent onto an occupied slot fails the send before its
@@ -943,7 +963,7 @@ fn s3_a_file_changed_mid_send_restores_the_occupant() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1049,7 +1069,7 @@ fn s4_a_file_cut_short_mid_send_leaves_an_empty_slot_empty() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1123,7 +1143,12 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
         slot_from("DRAWBAR_HARDWARE_SAMPLE", "1:20"),
     );
     let mut claims = Claims::default();
-    let mut rig = Rig::open(&[("drawbar-hw-sample.nsmp", &source)]);
+    // A file and its slot that agree have nothing to sync, so the round trip is replaced
+    // by a second copy under another name, placed on the slot by hand.
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-sample.nsmp", &source),
+        ("drawbar-hw-again.nsmp", &source),
+    ]);
     rig.connect();
     let class = ObjectClass::Sample;
     let slot = rig.vacant(class, 0);
@@ -1133,11 +1158,14 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
 
     let first = send_into_vacant(&mut rig, id, class, slot);
     assert_streamed(&first, file.len);
+    let entity = rig.bench.workspace.get(id).unwrap();
     assert_eq!(
-        rig.bench.workspace.get(id).unwrap().link,
+        crate::device::slot_of(&rig.bench.device.state, entity),
         Some((class, slot))
     );
 
+    let id = rig.asset("drawbar-hw-again.nsmp");
+    let file = rig.file(id);
     let again = rig.send(
         vec![
             Act::Replace {
@@ -1145,7 +1173,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,
@@ -1167,114 +1195,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
 
     rig.release();
     assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-sample");
-}
-
-/// The queue compares a resting asset with the slot it would replace by the checksum of
-/// the slot's body, read off the instrument: the same body is Identical, and another of
-/// the same length is Checksum. Neither asset's file is read.
-#[test]
-#[ignore = "writes to an attached instrument; see the module's documentation"]
-fn s6_the_queue_compares_a_slot_by_checksum_without_reading_the_file() {
-    if !attached() {
-        return;
-    }
-    let source = run().source(
-        ObjectClass::Sample,
-        slot_from("DRAWBAR_HARDWARE_SAMPLE", "1:20"),
-    );
-    let edited = run().dir.join("sample-edited");
-    let fields = run()
-        .cli
-        .ok(&["sample", "edit", &source.display().to_string(), "--fields"]);
-    let root = fields
-        .lines()
-        .find_map(|line| line.strip_prefix("zone1.root_key"))
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("a first zone with a root key");
-    let to = if root == "C4" { "D4" } else { "C4" };
-    run().cli.ok(&[
-        "sample",
-        "edit",
-        &source.display().to_string(),
-        "--set",
-        &format!("zone1.root_key={to}"),
-        "-o",
-        &edited.display().to_string(),
-    ]);
-    assert_eq!(
-        fs::metadata(&edited).unwrap().len(),
-        fs::metadata(&source).unwrap().len(),
-        "the edit keeps the length"
-    );
-
-    let mut claims = Claims::default();
-    let mut rig = Rig::open(&[
-        ("drawbar-hw-sample.nsmp", &source),
-        ("drawbar-hw-edited.nsmp", &edited),
-    ]);
-    rig.connect();
-    let class = ObjectClass::Sample;
-    let slot = rig.vacant(class, 0);
-    claims.take(class, slot);
-    let id = rig.asset("drawbar-hw-sample.nsmp");
-    let other = rig.asset("drawbar-hw-edited.nsmp");
-    send_into_vacant(&mut rig, id, class, slot);
-    let (file, other_file) = (rig.file(id), rig.file(other));
-    file.take_reads();
-    other_file.take_reads();
-
-    let diff_of = |rig: &Rig, id: u64| match rig.bench.queue.entry(id).map(|held| &held.diff) {
-        Some(Diff::Pending) | None => None,
-        Some(Diff::Identical) => Some("Identical"),
-        Some(Diff::Checksum) => Some("Checksum"),
-        Some(Diff::Empty) => Some("Empty"),
-        Some(Diff::Fields(_)) => Some("Fields"),
-        Some(Diff::Bytes { .. }) => Some("Bytes"),
-    };
-    let started = Instant::now();
-    rig.frame(vec![Act::Replace {
-        id,
-        class,
-        at: slot,
-    }]);
-    rig.until("the compare read of the same body", SEND_LIMIT, |rig| {
-        diff_of(rig, id).is_some() && rig.idle()
-    });
-    eprintln!(
-        "the same body: {:?} in {:.1?}",
-        diff_of(&rig, id),
-        started.elapsed()
-    );
-    assert_eq!(diff_of(&rig, id), Some("Identical"));
-
-    rig.frame(vec![Act::Replace {
-        id: other,
-        class,
-        at: slot,
-    }]);
-    assert!(!rig.bench.queue.holds(id), "the slot takes one asset");
-    let started = Instant::now();
-    rig.until("the compare read for another body", SEND_LIMIT, |rig| {
-        diff_of(rig, other).is_some() && rig.idle()
-    });
-    eprintln!(
-        "another body: {:?} in {:.1?}",
-        diff_of(&rig, other),
-        started.elapsed()
-    );
-    assert_eq!(diff_of(&rig, other), Some("Checksum"));
-    assert_eq!(
-        file.take_reads(),
-        [],
-        "the compare read nothing of the file"
-    );
-    assert_eq!(other_file.take_reads(), [], "nor of the other");
-
-    rig.frame(vec![Act::ClearQueue]);
-    rig.release();
-    assert_no_strays(class);
-    assert_holds(class, slot, &source, "drawbar-hw-sample");
+    assert_holds(class, slot, &source, "drawbar-hw-again");
 }
 
 /// A program on the instrument exports as the bundle nord-cli makes of it: the program
@@ -1434,7 +1355,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
                 class,
                 at: slot,
             },
-            Act::SendAll,
+            Act::Sync(None),
         ],
         id,
         &file,

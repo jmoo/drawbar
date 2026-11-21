@@ -20,7 +20,7 @@ the bytes.
 | What | Desktop | Browser |
 |---|---|---|
 | Library files | The library folder | The private file system's root, or a picked folder |
-| Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
+| Tags, origins, links, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
 | Unsaved edits, identities, rescued slot contents | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of the private file system |
 | Theme, panels and other preferences | eframe's store: `app.ron` in drawbar's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store | |
@@ -46,9 +46,15 @@ A library is a folder tree. A folder in the sidebar is a directory, an asset is
 a file, and a move is a rename. Any folder can be opened as a library.
 
 What a file cannot say lives in `.drawbar/library/`: an asset's tags, where it
-came from (New, a slot, or a rescue), and the library's list of tags. toshokan
-keeps these as facts about entities. An entity exists only for a file with
-something to say, so a library of untouched files keeps nothing about them.
+came from (New, a slot, or a rescue), the slot it is linked to on each keyboard,
+and the library's list of tags. toshokan keeps these as facts about entities. An
+entity exists only for a file with something to say, so a library of untouched
+files keeps nothing about them.
+
+A link names a keyboard by its model and serial number, and records the checksums
+its file and its slot have shared, newest first. A file has one link per keyboard.
+Where two drawbars each left one, every drawbar shows the same one, and the next
+change to that file's links keeps it alone.
 
 toshokan binds each entity to its file by path. Where the file moved, it finds
 the file by its identity: a BLAKE3 hash of its length and bytes. A Nord file's
@@ -66,7 +72,8 @@ Every name drawbar makes follows the strictest rules of macOS, Windows and
 Linux, so a library can move between them. Two names in one folder collide when
 they differ only in case or Unicode normalization (`store/names.rs`).
 
-Losing `.drawbar/` loses the tags, the origins and the trash that undo needs.
+Losing `.drawbar/` loses the tags, the origins, the links and the trash that undo
+needs.
 Every other file stays as it was.
 
 ## What this install keeps
@@ -182,8 +189,8 @@ Two drawbars can each make an entity of one file before either sees the other's,
 as when both tag it while a sync is paused.
 [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)
 says which keeps the file. A drawbar that can write commits one change joining
-each such pair: the entity that keeps the file gains the tags and the origin it
-lacks, and the other is deleted. That change is no step of Undo. A read-only
+each such pair: the entity that keeps the file gains the tags, the links and the
+origin it lacks, and the other is deleted. That change is no step of Undo. A read-only
 drawbar writes nothing and shows the tags of both on the file.
 
 A change another drawbar left unfinished is settled
@@ -224,7 +231,7 @@ opening.
 
 A rescan lists every file by name, length and time, and reads a file's identity
 only where that decides which file is an entity's, so an asset renamed or moved
-outside drawbar keeps its tags and its origin
+outside drawbar keeps its tags, its links and its origin
 ([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
 A file with no entity is known by its path alone, so its rename reads as one file
 gone and another arrived, with nothing lost.

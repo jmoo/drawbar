@@ -414,6 +414,27 @@ fn a_plan_stores_libraries_first_and_lists_set_lists_first() {
     assert_eq!(plan.unmet, [("A.ne5p".to_string(), Key::Sample(9))]);
 }
 
+/// 0x92e0cba2 is the `library_id` of `drawbar-tine`.
+#[test]
+fn a_piano_member_provides_the_id_of_its_name() {
+    let program = item(
+        "Program/Bank 1/Keys.ne5p",
+        Class::Program,
+        None,
+        &[Key::Piano(0x92e0_cba2)],
+    );
+    let piano = Item::of(&header("npno", 2, 0), "drawbar-tine", None).unwrap();
+    let plan = Plan::new(vec![program, piano], 204).unwrap();
+    assert_eq!(plan.unmet, []);
+    assert_eq!(
+        plan.manifest.files,
+        [Dependencies {
+            name: "Program/Bank 1/Keys.ne5p".into(),
+            deps: vec!["Piano/EPiano1/drawbar-tine.npno".into()]
+        }]
+    );
+}
+
 #[test]
 fn a_plan_refuses_two_members_at_one_path() {
     let twice = vec![

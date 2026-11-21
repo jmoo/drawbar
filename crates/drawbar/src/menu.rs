@@ -61,9 +61,7 @@ pub enum Command {
     Disconnect,
     ReadEverything,
     ReadAgain,
-    ReviewQueue,
-    SendAll,
-    ClearQueue,
+    Sync,
     Unqueue,
     Listen,
     Guide,
@@ -155,10 +153,8 @@ pub fn label(command: Command) -> String {
         Command::Disconnect => "Disconnect",
         Command::ReadEverything => "Read everything",
         Command::ReadAgain => "Read again",
-        Command::ReviewQueue => "Review send queue…",
-        Command::SendAll => "Send all",
-        Command::ClearQueue => "Clear send queue",
-        Command::Unqueue => "Remove from queue",
+        Command::Sync => "Sync…",
+        Command::Unqueue => "Leave out of Sync",
         Command::Listen => "Listen to MIDI controllers",
         Command::Guide => "User guide",
         Command::WhatsNew => "What's new",
@@ -323,9 +319,7 @@ fn instrument_entries() -> Vec<Entry> {
         Do(C::ReadEverything),
         Do(C::ReadAgain),
         Rule,
-        Do(C::ReviewQueue),
-        Do(C::SendAll),
-        Do(C::ClearQueue),
+        Do(C::Sync),
         Do(C::Unqueue),
         Rule,
         Do(C::Listen),
@@ -387,7 +381,7 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
         Command::Inspector => command_and(With::ALT, Key::I),
         Command::Activity => command_and(With::ALT, Key::L),
         Command::ReadEverything => Shortcut::new(With::COMMAND, Key::R),
-        Command::ReviewQueue => command_and(With::SHIFT, Key::S),
+        Command::Sync => command_and(With::SHIFT, Key::S),
         // A browser zooms its page with these, so the web build leaves them to it.
         Command::Zoom(step) if platform.windowed() => Shortcut::new(
             With::COMMAND,
@@ -430,12 +424,12 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// The commands with keys, in the order a key press is matched against them.
 ///
 /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored: ⇧⌘S
-/// must be taken before ⌘S, or asking to review the send queue would save the open
+/// must be taken before ⌘S, or asking to Sync would save the open
 /// document and lose its revert. A bound key is consumed whether or not its command is
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
 const KEYED: [Command; 17] = [
-    Command::ReviewQueue,
+    Command::Sync,
     Command::Redo,
     Command::Undo,
     Command::Export,
@@ -508,7 +502,6 @@ impl DrawbarApp {
     pub(crate) fn offer(&self, command: Command) -> Option<Offer> {
         let attached = self.attached();
         let active = self.tabs.active();
-        let waiting = self.queue.len();
         let plain = Offer::of(command);
         let check = |on| Offer {
             checked: Some(on),
@@ -634,17 +627,13 @@ impl DrawbarApp {
                     ..plain
                 })?
             }
-            Command::Disconnect | Command::ReadEverything | Command::ReviewQueue => {
+            Command::Disconnect | Command::ReadEverything | Command::Sync => {
                 attached.then_some(plain)?
             }
             Command::ReadAgain => {
                 let class = self.open_class().filter(|_| attached)?;
                 relabeled(format!("Read {} again", folder(class)))
             }
-            Command::SendAll => {
-                (attached && waiting > 0).then(|| relabeled(format!("Send all ({waiting})")))?
-            }
-            Command::ClearQueue => (attached && waiting > 0).then_some(plain)?,
             Command::Unqueue => (attached && !self.queued_picks().is_empty()).then_some(plain)?,
             Command::Listen => {
                 let supported = crate::midi::supported();
@@ -725,9 +714,7 @@ impl DrawbarApp {
             Command::Disconnect => acts.push(Act::Disconnect),
             Command::ReadEverything => acts.push(Act::Resync),
             Command::ReadAgain => acts.extend(self.open_class().map(Act::ReadAgain)),
-            Command::ReviewQueue => acts.push(Act::ReviewQueue),
-            Command::SendAll => acts.push(Act::AskSendAll),
-            Command::ClearQueue => acts.push(Act::ClearQueue),
+            Command::Sync => acts.push(Act::Sync(None)),
             Command::Unqueue => acts.extend(self.queued_picks().into_iter().map(Act::Unqueue)),
             Command::Listen => match self.midi.on() {
                 true => self.midi.stop(),
@@ -791,11 +778,12 @@ impl DrawbarApp {
         }
     }
 
-    /// The class of the slot the open document came off, for the item that reads that
-    /// folder again. A document that did not come off a slot has none.
+    /// The class of the slot the open document stands for, for the item that reads that
+    /// folder again. A document that stands for no slot has none.
     pub(crate) fn open_class(&self) -> Option<ObjectClass> {
         let id = self.tabs.active()?;
-        let (class, _) = self.workspace.get(id)?.origin.slot()?;
+        let entity = self.workspace.get(id)?;
+        let (class, _) = crate::device::slot_of(&self.device.state, entity)?;
         Some(class)
     }
 

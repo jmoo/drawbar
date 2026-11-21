@@ -31,8 +31,8 @@ open.
 - Turn a recording of your own instrument into a piano library: find each note
   in the take, trim and loop it, hear it as the Nord will play it, then build the
   library.
-- Queue your changes and send them in one go, with a review of what each one
-  replaces.
+- Sync with the keyboard in one go: one sheet shows what changed on each side,
+  and which way each sound goes.
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
   side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.

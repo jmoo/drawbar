@@ -1,6 +1,6 @@
 # Your instrument
 
-Back up your instrument before you send anything. Nord Sound Manager makes a full
+Back up your instrument before you sync. Nord Sound Manager makes a full
 backup. [What is supported](../getting-started/support.md) says which instruments
 have been tested.
 
@@ -28,7 +28,7 @@ opens at the slot when you rename from the Keyboard tab or the Library.
 
 Samples and pianos keep the name they were sent with, so they cannot be renamed
 or duplicated on the instrument. The instrument also keeps one of each name: a
-sample or piano named like one already there is queued to replace it, and
+sample or piano named like one already there goes on Sync to replace it, and
 cannot go to any other slot until you rename it.
 
 With several slots checked, **Copy to this computer** reads each folder's slots
@@ -39,27 +39,22 @@ writes them, with what they play, as one bundle; see
 Drag to move things:
 
 - a slot onto **This computer** copies it;
-- a sound onto a slot queues it for sending;
+- a sound onto a slot places it there for Sync;
 - a slot onto another slot in the same folder swaps the two.
 
-## Sending
+## Sync
 
-Nothing is written until you send. Dropping a sound on a slot, **Queue for
-sending**, and saving a sound that came from a slot all add to the queue. **Send**
-in the top bar counts what is waiting.
-
-Click **Send**, or press ⇧⌘S, to review the queue. Click a destination to change
-it, click × to remove a row, and select a row to see what the slot holds now and
-what it will hold after sending.
-**Send all** writes everything. If the instrument refuses something, the rest
-stays queued.
-
-When sounds on this computer no longer match the slots they came from, a
-**Queue** button appears beside **Send**. Click it to queue them all.
+Nothing is written until you sync. **Sync** in the top bar, or **Instrument ▸
+Sync…** (⇧⌘S), reads the instrument and lists what differs. `↑` writes a sound to
+the keyboard, `↓` brings one to this computer; click the arrow to turn it. A `!`
+row waits for your pick. When an instrument attaches with changes of its own, the
+list opens by itself.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
-`Africa-Split` on the panel. Sending a sound renamed on this computer renames its
-slot, even when the slot already holds the same sound.
+`Africa-Split` on the panel.
+
+Library undo, or **Undo** in the activity log, puts back a file Sync brought in, or
+a link it moved or removed.
 
 ## Safety
 
@@ -68,7 +63,7 @@ slot, even when the slot already holds the same sound.
   it puts the old one back. If that fails too, the old sound is kept on this
   computer, and the activity log says where.
 - In the browser, a page left open while drawbar.app is updated cannot copy the
-  old sound, so it writes over none until you reload it. Sending to an empty
+  old sound, so it writes over none until you reload it. Writing to an empty
   slot still works.
 - An interrupted transfer cannot leave the instrument stuck on its progress
   screen.
@@ -77,5 +72,5 @@ slot, even when the slot already holds the same sound.
 
 ## Disconnecting
 
-Unplug, and the instrument's slots disappear. The send queue is kept, so plug
-back in and send.
+Unplug, and the instrument's slots disappear. Sounds you placed on a slot stay
+listed, so plug back in and sync.

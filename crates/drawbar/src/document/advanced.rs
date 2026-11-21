@@ -301,7 +301,7 @@ impl Advanced {
     }
 
     /// The record, block by block: what the container states and what the instrument says
-    /// about the slot it came off. Each block is laid out like [`Advanced::about`].
+    /// about the slot it stands for. Each block is laid out like [`Advanced::about`].
     pub fn meta(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<SlotDetails> {
         controls::heading(
             ui,
@@ -313,13 +313,8 @@ impl Advanced {
         facts(ui, &container(entity));
 
         let mut asked = None;
-        if entity.origin.slot().is_some() {
-            controls::heading(
-                ui,
-                "On the instrument",
-                "what the slot these bytes came off reports",
-                None,
-            );
+        if crate::device::slot_of(&device.state, entity).is_some() {
+            controls::heading(ui, "On the instrument", "what its slot reports", None);
             asked = slot(ui, entity, device);
         }
         asked
@@ -572,9 +567,9 @@ fn counted(half: u16) -> String {
     }
 }
 
-/// What the instrument says about the slot this came off.
+/// What the instrument says about the slot this stands for.
 fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<SlotDetails> {
-    let (class, at) = entity.origin.slot()?;
+    let (class, at) = crate::device::slot_of(&device.state, entity)?;
     let mut asked = None;
     facts(ui, &[("Slot", strings::place(class, at), String::new())]);
     let busy = device.state.in_flight.is_some();

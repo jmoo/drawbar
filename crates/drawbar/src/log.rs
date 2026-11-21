@@ -11,10 +11,16 @@ use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
 use crate::icon::{painted, sized, Glyph};
+use crate::link::{Held, Keyboard};
+use crate::strings::{display_name, place};
+use crate::workspace::Workspace;
 
 /// Entries kept before the oldest is dropped. A session that opens a hundred files
 /// still fits; a runaway loop cannot grow the app without bound.
 const CAPACITY: usize = 500;
+
+/// The most bytes one entry keeps for its Undo.
+pub const KEPT: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -38,6 +44,170 @@ pub struct Entry {
     pub text: String,
     /// Seconds since the app started.
     pub at: f64,
+    /// What its Undo button takes back, until it is pressed.
+    pub undo: Option<Undo>,
+    /// Counts entries from the session's first, so one can be found after older ones go.
+    serial: u64,
+}
+
+/// What drawbar did on its own, as the one change that takes it back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Undo {
+    /// Files linked on their own: unlink each, and keep it off that keyboard.
+    Unlink { keyboard: Keyboard, ids: Vec<u64> },
+    /// Files brought in from the keyboard, each as it was before.
+    Restore(Vec<Restored>),
+    /// Links drawbar moved or removed: put each back, unless another file is linked to
+    /// one of those slots now.
+    Relink {
+        keyboard: Keyboard,
+        links: Vec<(u64, Held)>,
+    },
+    /// Files unlinked from a slot another file kept: link each back, in place of that one.
+    Reclaim {
+        keyboard: Keyboard,
+        links: Vec<(u64, Held)>,
+    },
+}
+
+/// A file as it was before it was brought in, and the link bringing it in left.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Restored {
+    pub id: u64,
+    pub bytes: Vec<u8>,
+    pub keyboard: Keyboard,
+    pub before: Held,
+    /// The link it was brought in under. Its base is what the file was saved as.
+    pub after: Held,
+}
+
+impl Undo {
+    /// Take the change back, and say what was taken back. A file that is gone is left
+    /// alone; a file brought in is put back only while it is as bringing it in left it.
+    /// `None` when every file it names is gone.
+    pub fn perform(self, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
+        match self {
+            Undo::Unlink { keyboard, mut ids } => {
+                ids.retain(|id| here(workspace, *id));
+                for id in &ids {
+                    workspace.keep_off(*id, &keyboard);
+                }
+                (!ids.is_empty()).then(|| format!("Unlinked {}.", named(workspace, &ids, "files")))
+            }
+            Undo::Restore(kept) => restore(kept, workspace, log),
+            Undo::Relink {
+                keyboard,
+                mut links,
+            } => {
+                links.retain(|(id, _)| here(workspace, *id));
+                let ours = |id| links.iter().any(|(it, _)| *it == id);
+                let taken = links.iter().find_map(|(_, held)| {
+                    let other = workspace.linked_at(&keyboard, held.class(), &held.spot)?;
+                    (!ours(other)).then_some((other, held))
+                });
+                if let Some((other, held)) = taken {
+                    let name = named(workspace, &[other], "files");
+                    return Some(format!(
+                        "Not undone: {name} is linked to {} now.",
+                        spot(held)
+                    ));
+                }
+                relink(workspace, &keyboard, links)
+            }
+            Undo::Reclaim {
+                keyboard,
+                mut links,
+            } => {
+                links.retain(|(id, _)| here(workspace, *id));
+                relink(workspace, &keyboard, links)
+            }
+        }
+    }
+
+    /// The bytes it keeps.
+    pub fn weight(&self) -> usize {
+        match self {
+            Undo::Restore(kept) => kept.iter().map(|kept| kept.bytes.len()).sum(),
+            Undo::Unlink { .. } | Undo::Relink { .. } | Undo::Reclaim { .. } => 0,
+        }
+    }
+}
+
+/// Put back each file still as bringing it in left it: saved as what it was brought in as,
+/// and linked as bringing it in linked it.
+fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
+    let mut put = Vec::new();
+    let mut changed = Vec::new();
+    for Restored {
+        id,
+        bytes,
+        keyboard,
+        before,
+        after,
+    } in kept
+    {
+        let Some(entity) = workspace.get(id) else {
+            continue;
+        };
+        let left = !entity.is_unsaved()
+            && entity.saved_print() == Some(after.base)
+            && entity.held_on(&keyboard) == Some(&after);
+        if !left {
+            changed.push(id);
+            continue;
+        }
+        workspace.replace_bytes(id, bytes, log);
+        workspace.mark_saved(id);
+        workspace.link(id, &keyboard, before);
+        put.push(id);
+    }
+    let (put, changed) = (
+        named(workspace, &put, "sounds"),
+        named(workspace, &changed, "sounds"),
+    );
+    match (put.is_empty(), changed.is_empty()) {
+        (true, true) => None,
+        (true, false) => Some(format!("Not undone: {changed} changed since.")),
+        (false, true) => Some(format!("Put back {put}.")),
+        (false, false) => Some(format!("Put back {put}; {changed} changed since.")),
+    }
+}
+
+fn relink(
+    workspace: &mut Workspace,
+    keyboard: &Keyboard,
+    links: Vec<(u64, Held)>,
+) -> Option<String> {
+    let ids: Vec<u64> = links.iter().map(|(id, _)| *id).collect();
+    for (id, held) in links {
+        workspace.link(id, keyboard, held);
+    }
+    (!ids.is_empty()).then(|| format!("Linked {} again.", named(workspace, &ids, "files")))
+}
+
+/// Whether a file is still on this computer.
+fn here(workspace: &Workspace, id: u64) -> bool {
+    workspace.get(id).is_some_and(|it| it.kept)
+}
+
+/// One file by its name, several by their count, none as nothing.
+fn named(workspace: &Workspace, ids: &[u64], many: &str) -> String {
+    match ids {
+        [] => String::new(),
+        [id] => format!(
+            "“{}”",
+            display_name(workspace.get(*id).map_or("", |it| it.name.as_str()))
+        ),
+        _ => format!("{} {many}", ids.len()),
+    }
+}
+
+/// The slot a link names, as the user knows it.
+fn spot(held: &Held) -> String {
+    match held.location() {
+        Some(at) => place(held.class(), at),
+        None => held.name().unwrap_or_default().to_string(),
+    }
 }
 
 pub struct Log {
@@ -49,6 +219,10 @@ pub struct Log {
     clock: f64,
     /// The sentence the status strip shows when nothing is running.
     status: (Level, String),
+    /// The serial the next entry takes.
+    next: u64,
+    /// An Undo pressed in the popover, until taken.
+    pressed: Option<Undo>,
 }
 
 impl Default for Log {
@@ -57,6 +231,8 @@ impl Default for Log {
             entries: VecDeque::new(),
             clock: 0.0,
             status: (Level::Info, "Ready.".to_string()),
+            next: 0,
+            pressed: None,
         }
     }
 }
@@ -105,7 +281,47 @@ impl Log {
             level,
             text: text.into(),
             at: self.clock,
+            undo: None,
+            serial: self.next,
         });
+        self.next += 1;
+    }
+
+    /// Give the newest entry an Undo, unless it would keep more than [`KEPT`] bytes.
+    /// Returns the entry's serial, for [`Log::entry_mut`].
+    pub fn offer(&mut self, undo: Undo) -> Option<u64> {
+        let entry = self.entries.back_mut()?;
+        entry.undo = (undo.weight() <= KEPT).then_some(undo);
+        Some(entry.serial)
+    }
+
+    /// The entry [`Log::offer`] returned `serial` for, while the log still holds it.
+    pub fn entry_mut(&mut self, serial: u64) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|entry| entry.serial == serial)
+    }
+
+    /// Take back what the Undo pressed in the popover since the last call undoes, and say
+    /// what it took back.
+    pub fn undo_pressed(&mut self, workspace: &mut Workspace) {
+        let Some(undo) = self.pressed.take() else {
+            return;
+        };
+        if let Some(said) = undo.perform(workspace, self) {
+            self.say(said);
+        }
+    }
+
+    /// Press the Undo of the newest entry that says `text`, as a click in the popover
+    /// does. Returns whether it had one.
+    #[cfg(test)]
+    pub fn press(&mut self, text: &str) -> bool {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.text.contains(text));
+        self.pressed = entry.and_then(|entry| entry.undo.take());
+        self.pressed.is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -184,7 +400,9 @@ impl Log {
                         ui.set_min_size(size);
                         ui.set_max_size(size);
                         open = self.head(ui, problems_only);
-                        self.rows(ui, *problems_only);
+                        if let Some(pressed) = self.rows(ui, *problems_only) {
+                            self.pressed = Some(pressed);
+                        }
                     });
             });
         let (escape, clicked) = ctx.input(|input| {
@@ -253,8 +471,9 @@ impl Log {
         open
     }
 
-    /// The entries, newest first.
-    fn rows(&self, ui: &mut egui::Ui, problems_only: bool) {
+    /// The entries, newest first. Returns the Undo pressed, taken off its entry.
+    fn rows(&mut self, ui: &mut egui::Ui, problems_only: bool) -> Option<Undo> {
+        let mut pressed = None;
         egui::ScrollArea::vertical()
             .id_salt("activity_rows")
             .auto_shrink([false; 2])
@@ -262,13 +481,15 @@ impl Log {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 let shown = self
                     .entries
-                    .iter()
+                    .iter_mut()
                     .rev()
                     .filter(|entry| !problems_only || entry.level != Level::Info);
                 let mut any = false;
                 for entry in shown {
                     any = true;
-                    row(ui, entry);
+                    if row(ui, entry) {
+                        pressed = entry.undo.take();
+                    }
                 }
                 if !any {
                     ui.add_space(12.0);
@@ -278,6 +499,7 @@ impl Log {
                     });
                 }
             });
+        pressed
     }
 }
 
@@ -288,16 +510,24 @@ const POPOVER: egui::Vec2 = egui::vec2(640.0, 360.0);
 const TIME: f32 = 62.0;
 const MARK: f32 = 16.0;
 
-/// One entry: when, how it went, and what happened. An error's row is tinted.
-fn row(ui: &mut egui::Ui, entry: &Entry) {
+/// The width kept at a row's right for its Undo button.
+const UNDO: f32 = 56.0;
+
+/// One entry: when, how it went, and what happened, and its Undo where it has one. An
+/// error's row is tinted. Returns whether Undo was pressed.
+fn row(ui: &mut egui::Ui, entry: &Entry) -> bool {
     let visuals = ui.visuals().clone();
     let width = ui.available_width() - 16.0;
     let text_left = TIME + MARK + 16.0;
+    let undo = match entry.undo {
+        Some(_) => UNDO,
+        None => 0.0,
+    };
     let galley = ui.painter().layout(
         entry.text.clone(),
         egui::FontId::proportional(12.5),
         visuals.text_color(),
-        width - text_left - 10.0,
+        width - text_left - 10.0 - undo,
     );
     let height = (galley.size().y + 8.0).max(26.0);
     let (rect, response) = ui.allocate_exact_size(
@@ -336,6 +566,16 @@ fn row(ui: &mut egui::Ui, entry: &Entry) {
         galley,
         visuals.text_color(),
     );
+    if entry.undo.is_none() {
+        return false;
+    }
+    let button = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - UNDO / 2.0, top),
+        egui::vec2(UNDO - 8.0, 22.0),
+    );
+    let label = egui::RichText::new("Undo").size(11.5);
+    ui.put(button, egui::Button::new(label).corner_radius(7.0))
+        .clicked()
 }
 
 /// A segmented control: one segment per choice, the chosen one raised.

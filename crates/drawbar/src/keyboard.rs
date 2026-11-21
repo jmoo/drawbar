@@ -15,12 +15,11 @@ use crate::app::{accent, caption, tint, ui as ui_text, warn};
 use crate::browser::{cell_ink, Act, Browser, Held, Item, Kind, Onto};
 use crate::device::{occupancy, read_only, Device};
 use crate::icon::{painted, Glyph};
-use crate::library::Needs;
 use crate::panel::{
     cut, list_width, row_ink, tonal_button, view_header, Track, GAP, GLYPH, PAD, ROW_INSET,
     VIEW_PAD,
 };
-use crate::queue::{Queue, Queued};
+use crate::queue::Queue;
 use crate::room;
 use crate::strings::{place, shown};
 use crate::tabs::Tabs;
@@ -700,19 +699,6 @@ fn list(
             .frame(egui::Frame::new())
             .show_inside(ui, |ui| boxed(ui, |ui| meter(ui, class, device, held)));
     }
-    // Settings is a single live object, so what a queued write would change is shown
-    // here as well as in the send queue.
-    if class == ObjectClass::Settings {
-        if let Some(held) = waiting_in(queue, class) {
-            let name = workspace
-                .get(held.id)
-                .map_or("", |entity| entity.name.as_str());
-            egui::TopBottomPanel::bottom("keyboard_settings")
-                .resizable(false)
-                .frame(egui::Frame::new())
-                .show_inside(ui, |ui| boxed(ui, |ui| crate::queue::table(ui, held, name)));
-        }
-    }
 
     let slots: Vec<(Location, Option<&ProgramInfo>)> = banks
         .iter()
@@ -892,10 +878,8 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
     };
     let unknown = || "—".to_string();
     match view.class {
-        ObjectClass::SetList => plays(at, view.workspace).unwrap_or_else(unknown),
-        ObjectClass::Sample => {
-            played_by(info.name.trim(), view.workspace, view.device).unwrap_or_else(unknown)
-        }
+        ObjectClass::SetList => plays(at, view.workspace, view.device).unwrap_or_else(unknown),
+        ObjectClass::Sample => played_by(info.name.trim(), view.workspace).unwrap_or_else(unknown),
         ObjectClass::Piano => view
             .device
             .state
@@ -908,14 +892,11 @@ fn fourth(view: &View, at: Location, info: Option<&ProgramInfo>) -> String {
 
 /// The four programs a set list plays.
 ///
-/// ⚠️ Only from a decoded body: a copy kept on this computer, or a slot open as a view.
+/// ⚠️ Only from a decoded body: the copy linked to it, or the slot open as a view.
 /// A walk reports only a slot's name, length, and format, so a set list with no local
 /// copy shows nothing.
-fn plays(at: Location, workspace: &Workspace) -> Option<String> {
-    let entity = workspace
-        .entities()
-        .iter()
-        .find(|held| held.origin.slot() == Some((ObjectClass::SetList, at)))?;
+fn plays(at: Location, workspace: &Workspace, device: &Device) -> Option<String> {
+    let entity = crate::device::standing_on(&device.state, workspace, ObjectClass::SetList, at)?;
     let nord_format::Entity::Song(nord_format::Song::Electro5(song)) = entity.entity.as_deref()?
     else {
         return None;
@@ -932,20 +913,9 @@ fn plays(at: Location, workspace: &Workspace) -> Option<String> {
 }
 
 /// The programs on this computer that play this sample.
-///
-/// ⚠️ A program's file stores a bare library id and a walk reports a bare name, so they
-/// can be matched only through the dependency list the instrument gave for that
-/// program's slot. An unmatched sample shows as unknown, not as unused.
-fn played_by(name: &str, workspace: &Workspace, device: &Device) -> Option<String> {
-    let played: Vec<&str> = workspace
-        .entities()
-        .iter()
-        .filter(|entity| {
-            matches!(
-                crate::library::wanted(entity, &device.state),
-                Needs::Named { class, name: held } if class == ObjectClass::Sample && held == name
-            )
-        })
+fn played_by(name: &str, workspace: &Workspace) -> Option<String> {
+    let key = crate::plays::slot_key(ObjectClass::Sample, name);
+    let played: Vec<&str> = crate::plays::played_by(workspace, key)
         .map(|entity| entity.name.as_str())
         .collect();
     (!played.is_empty()).then(|| played.join(", "))
@@ -985,11 +955,6 @@ fn boxed<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// The first queued entry for any slot in a folder.
-fn waiting_in(queue: &Queue, class: ObjectClass) -> Option<&Queued> {
-    queue.entries().iter().find(|held| held.class == class)
-}
-
 /// The full description of a slot, shown on hover.
 fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> String {
     let where_ = place(view.class, at);
@@ -999,7 +964,7 @@ fn hint(view: &View, at: Location, info: Option<&ProgramInfo>, state: State) -> 
     };
     match state {
         State::Loaded => said.push_str(", loaded on the instrument now"),
-        State::Incoming => said.push_str("; a write to this slot is queued"),
+        State::Incoming => said.push_str("; something goes here on Sync"),
         State::Empty | State::Held => {}
     }
     let fact = fourth(view, at, info);

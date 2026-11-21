@@ -6,7 +6,7 @@ desktop app.
 
 | Part | What it is for |
 |---|---|
-| **Top bar** | Import, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
+| **Top bar** | Import, New and Save, the search box, **Sync**, and **Connect instrument…** or your instrument's name. |
 | **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
 | **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
@@ -20,13 +20,15 @@ tabs show and hide the side panels, and dragging a panel's edge resizes it.
 ## Menus
 
 On macOS the menus are in the menu bar. On Windows they are at the left of the
-top bar. On Linux and in the browser they are behind the ☰ button. In the
+top bar. On Linux and in the browser they are under the ☰ button. In the
 browser, a few keys use ⌥ (⌃ on a Mac) in place of ⌘.
 
 ## The activity log
 
 Click the status line, or press ⌥⌘L, for the log. **Problems** shows only what
 went wrong. The copy button puts the whole log on the clipboard for a bug report.
+When drawbar links files on its own, or Sync brings in a slot or moves or removes
+a link, the line that says so has an **Undo** beside it.
 
 ## Selecting
 
@@ -39,10 +41,20 @@ shows how many files it has.
 ## Reading the Library
 
 The **Where** column says where a sound lives: on this computer, on the keyboard,
-or both, with `=` when the two copies match and `≠` when they differ. It turns
-red when a send is waiting. While an instrument is attached, the **Needs** column
-names the sample or piano a sound plays. A name in italics with a `*` has unsaved
-edits. Hover anything for an explanation.
+or both. A file is on both when the slot it is linked to on the attached keyboard
+holds something, and **At** gives that slot. Copying a slot to this computer or
+sending a file to a slot links the two; **Link to** and **Unlink** in a row's menu
+change a link.
+
+The mark before a name says how a file stands with its slot: `↑` when the file is
+newer, `↓` when the slot is, and `!` when it waits for your pick. An address in gray is a slot not read yet, or the slot on a
+keyboard that is not attached. The **Needs** column names the piano or sample a
+program plays, once it is on this computer or on the keyboard. A name in italics
+with a `*` has unsaved edits. Hover anything for an explanation.
+
+Select one program and the inspector's **Plays** card lists the piano and sample it
+plays. A piano's or sample's **Played by** card lists the programs on this
+computer that play it.
 
 ## Folders and tags
 

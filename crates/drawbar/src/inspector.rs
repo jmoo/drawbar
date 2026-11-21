@@ -7,7 +7,7 @@
 //! absent without one.
 //! Nothing here asks for data the rest of the app does not already have.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use eframe::egui;
 
@@ -16,14 +16,16 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::app::{accent, bold, caption, good, tint, ui as ui_text, warn};
 use crate::browser::{tag_items, Act, Browser, Bulk, Item, Kind, Offer};
-use crate::device::{fit, occupancy, Device, Fit};
+use crate::device::{fit, occupancy, Device, DeviceState, Fit};
+use crate::document::Click;
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{row_of, Row, Where};
+use crate::library::{mark_ink, row_of, Mark, Row, Where};
 use crate::panel::{cut, signal_pill, tonal_button, CARD_RADIUS, GAP, GUTTER};
-use crate::queue::{Diff, Queue};
+use crate::plays::Catalog;
+use crate::queue::Queue;
 use crate::room;
 use crate::shell::Shell;
-use crate::strings::{kind_word, place};
+use crate::strings::{kind_word, place, shown};
 use crate::tags::Tags;
 use crate::workspace::Workspace;
 
@@ -238,7 +240,7 @@ struct Sources {
     picked: u64,
     revision: u64,
     device: u64,
-    queue: Vec<(u64, std::mem::Discriminant<Diff>)>,
+    queue: Vec<(crate::queue::Waiting, bool)>,
     tags: u64,
 }
 
@@ -252,12 +254,17 @@ struct Shown {
     offers: Vec<(Bulk, Offer)>,
     /// Each tag on any of the selection, and whether it is on all of it.
     wearing: Vec<(u64, String, bool)>,
+    /// What one picked row plays, or what plays it.
+    sounds: Option<Sounds>,
 }
 
 /// What the selection card says about what is picked.
 enum About {
     Nothing,
+    /// A folder or a tag.
     One(Vec<Fact>),
+    /// One asset or slot.
+    Row(Box<Single>),
     /// Several rows, in a line or two.
     Several(Vec<String>),
 }
@@ -306,37 +313,48 @@ impl Shown {
                 .map(|_| Item::Local(id))
                 .into_iter()
                 .collect(),
-            None => as_listed(browser.picked().items(), workspace),
+            None => as_listed(browser.picked().items(), workspace, &device.state),
         };
         let locals: Vec<u64> = checked.iter().copied().filter_map(Item::local).collect();
         let (about, going) = match checked.len() {
             0 => (About::Nothing, None),
             many if many > MANY => (About::Several(summed(&checked, workspace, device)), None),
             _ => {
+                let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+                let tags = browser.tags();
                 let rows: Vec<Row> = checked
                     .iter()
-                    .filter_map(|item| {
-                        row_of(*item, workspace, &device.state, queue, browser.tags())
-                    })
+                    .filter_map(|item| row_of(*item, workspace, &device.state, tags, &sync))
                     .collect();
-                let going = crate::library::consequence(
-                    &rows.iter().collect::<Vec<_>>(),
-                    &device.state,
-                    queue,
-                );
+                let going = (checked.len() > 1)
+                    .then(|| {
+                        crate::library::consequence(
+                            &rows.iter().collect::<Vec<_>>(),
+                            &device.state,
+                            queue,
+                        )
+                    })
+                    .flatten();
                 (about(&checked, &rows, browser, workspace, device), going)
             }
         };
+        let one = checked.len() == 1;
         let offers = Bulk::ALL
             .into_iter()
+            .filter(|action| !(one && *action == Bulk::Queue))
             .map(|action| {
                 (
                     action,
                     Offer::of(action, &checked, workspace, &device.state),
                 )
             })
+            .filter(|(action, offer)| !(one && *action == Bulk::Copy && !offer.live))
             .collect();
         let wearing = wearing(&locals, browser.tags());
+        let sounds = match checked.as_slice() {
+            [item] => sounds(*item, workspace, &device.state),
+            _ => None,
+        };
         Shown {
             sources,
             checked,
@@ -345,6 +363,7 @@ impl Shown {
             going,
             offers,
             wearing,
+            sounds,
         }
     }
 }
@@ -368,9 +387,10 @@ fn selection(
         match &shown.about {
             About::Nothing => return faint(ui, "Nothing is selected."),
             About::One(facts) => facts.iter().for_each(|fact| fact_line(ui, fact)),
+            About::Row(picked) => one(ui, picked, acts),
             About::Several(lines) => lines.iter().for_each(|line| void(ui, line)),
         }
-        bulk_actions(ui, browser, shown, device, acts);
+        actions(ui, browser, shown, device, acts);
     });
     if shown.checked.is_empty() {
         return;
@@ -384,10 +404,35 @@ fn selection(
         acts,
     );
     kept_apart(ui, &shown.locals, browser, acts);
+    if let Some(sounds) = &shown.sounds {
+        sounds_card(ui, sounds, acts);
+    }
     let answer = answered(browser, device).filter(|_| shown.sources.front.is_none());
     if let Some((slot, deps)) = answer {
         dependencies(ui, slot, deps);
     }
+}
+
+/// One picked row: its name, its place, the slots holding its bytes, and the one action
+/// the document header offers.
+struct Single {
+    name: String,
+    /// The slot's place, or `None` for an asset with no slot.
+    at: Option<String>,
+    mark: Option<Mark>,
+    /// The words of the mark, from the asset's Sync row.
+    said: String,
+    faint: bool,
+    /// The asset's id; a slot has none.
+    id: Option<u64>,
+    /// The header's action for an asset: its label, its hover, and what a click asks for.
+    action: Option<(String, String, Click)>,
+    /// The slots [`crate::device::also_at`] finds for an asset with no slot.
+    also: Vec<(ObjectClass, Location)>,
+    /// Its kind and size, as the library's table shows them, for the name's hover.
+    about: String,
+    /// Why the attached instrument refuses it.
+    refused: Option<String>,
 }
 
 /// One line about a single picked asset: its label, its value, and the full text when
@@ -398,41 +443,10 @@ pub struct Fact {
     pub hint: Option<String>,
 }
 
-/// The facts about the single picked asset.
-///
-/// The row is the library table's own, so these facts match the table. `fit` is the
-/// attached instrument's verdict on the asset, which gets a line only when it refuses.
-pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
-    let mut said = vec![
-        Fact {
-            what: "name",
-            said: crate::strings::display_name(&row.name).to_string(),
-            hint: (crate::strings::display_name(&row.name) != row.name).then(|| row.name.clone()),
-        },
-        Fact {
-            what: "kind",
-            said: kind_word(row.kind, row.qualifier),
-            hint: None,
-        },
-        Fact {
-            what: "where",
-            said: row.where_.short().to_string(),
-            hint: Some(row.where_.sentence().to_string()),
-        },
-        Fact {
-            what: "size",
-            said: room::measure(row.size),
-            hint: None,
-        },
-    ];
-    if let Fit::Refuses(why) = fit {
-        said.push(Fact {
-            what: "refused",
-            said: why.clone(),
-            hint: None,
-        });
-    }
-    said
+/// A row's kind and size, as the library's table shows them.
+pub fn about_row(row: &Row) -> String {
+    let kind = kind_word(row.kind, row.qualifier);
+    format!("{kind} · {}", room::measure(row.size))
 }
 
 /// The summary of a multiple selection: how many rows are picked, and of the assets among
@@ -473,13 +487,99 @@ fn about(
         // A folder picked beside one asset is still several picked.
         return About::Several(vec![tally(picked, rows)]);
     }
-    let held = row
-        .item
-        .local()
-        .and_then(|id| workspace.get(id))
-        .map(|entity| fit(&device.state, entity))
-        .unwrap_or(Fit::Unattached);
-    About::One(facts(row, &held))
+    let entity = row.item.local().and_then(|id| workspace.get(id));
+    let held = entity.map_or(Fit::Unattached, |entity| fit(&device.state, entity));
+    let action = entity
+        .and_then(|entity| crate::document::action(entity, &device.state))
+        .map(|loud| (loud.label, loud.hint, loud.click));
+    let also = entity
+        .filter(|_| row.at.is_none())
+        .map_or_else(Vec::new, |entity| {
+            crate::device::also_at(&device.state, workspace, entity)
+        });
+    About::Row(Box::new(Single {
+        name: row.name.clone(),
+        at: row.at.map(|(class, at)| place(class, at)),
+        mark: row.mark,
+        said: row.said.clone(),
+        faint: row.faint,
+        id: entity.map(|entity| entity.id),
+        action,
+        also,
+        about: about_row(row),
+        refused: match held {
+            Fit::Refuses(why) => Some(why),
+            _ => None,
+        },
+    }))
+}
+
+/// What a click on the document header's action asks for, from the inspector.
+fn clicked(click: Click, id: u64) -> Option<Act> {
+    match click {
+        Click::Pick => Some(Act::SendTo(id)),
+        Click::Load(class, at) => Some(Act::LoadOnInstrument { class, at }),
+        Click::Save => Some(Act::SaveDoc(id)),
+        Click::Build => Some(Act::Build(id)),
+        Click::Sync => Some(Act::Sync(Some(id))),
+        // Only a take's own editor offers Detect.
+        Click::Detect | Click::Nothing => None,
+    }
+}
+
+/// One picked row: its name, where it is with its mark, the slots that also hold its
+/// bytes, and why the instrument refuses it. Its kind and size are the name's hover.
+fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
+    let name = crate::strings::display_name(&picked.name);
+    ui.label(egui::RichText::new(name).font(egui::FontId::new(14.0, bold())))
+        .on_hover_text(format!("{} · {}", picked.name, picked.about));
+    let quiet = ui.visuals().weak_text_color();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let place = picked.at.as_deref().unwrap_or("This computer");
+        let ink = match picked.faint {
+            true => quiet,
+            false => ui.visuals().text_color(),
+        };
+        ui.label(egui::RichText::new(place).text_style(ui_text()).color(ink));
+        if let Some(mark) = picked.mark {
+            let said = format!(" · {}", picked.said);
+            let ink = mark_ink(mark, ui.visuals());
+            ui.label(egui::RichText::new(said).text_style(ui_text()).color(ink));
+        }
+    });
+    if let (Some(id), false) = (picked.id, picked.also.is_empty()) {
+        also_at(ui, id, &picked.also, acts);
+    }
+    if let Some(why) = &picked.refused {
+        let (what, said, hint) = ("refused", why.clone(), None);
+        fact_line(ui, &Fact { what, said, hint });
+    }
+}
+
+/// `Also at 5:46 · Link`: the first two slots holding a file's bytes, how many more, and
+/// Link, which links the file to the first.
+fn also_at(ui: &mut egui::Ui, id: u64, offers: &[(ObjectClass, Location)], acts: &mut Vec<Act>) {
+    let shown: Vec<String> = offers.iter().take(2).map(|(_, at)| shown(*at)).collect();
+    let more = match offers.len().saturating_sub(2) {
+        0 => String::new(),
+        n => format!(" +{n}"),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let quiet = ui.visuals().weak_text_color();
+        let said = format!("Also at {}{more} · ", shown.join(", "));
+        ui.label(egui::RichText::new(said).text_style(ui_text()).color(quiet));
+        let (class, at) = offers[0];
+        let link = ui
+            .add(egui::Link::new(
+                egui::RichText::new("Link").text_style(ui_text()),
+            ))
+            .on_hover_text(format!("link it to {}", place(class, at)));
+        if link.clicked() {
+            acts.push(Act::Link { id, class, at });
+        }
+    });
 }
 
 /// The facts about a folder or a tag: its name, and how many files are in it or wear it.
@@ -506,21 +606,19 @@ fn grouping(item: Item, browser: &Browser, workspace: &Workspace) -> Option<Vec<
 }
 
 /// The selection as the library's table shows it: a slot that an asset on this computer
-/// stands for is that asset's row.
-fn as_listed(items: impl Iterator<Item = Item>, workspace: &Workspace) -> Vec<Item> {
-    let items: Vec<Item> = items.collect();
-    if !items.iter().any(|item| matches!(item, Item::Slot { .. })) {
-        return items;
-    }
-    let mut spots = BTreeMap::new();
-    for entity in workspace.listed() {
-        if let Some((class, at)) = entity.spot() {
-            spots.entry(Item::Slot { class, at }).or_insert(entity.id);
-        }
-    }
+/// is linked to is that asset's row.
+fn as_listed(
+    items: impl Iterator<Item = Item>,
+    workspace: &Workspace,
+    device: &DeviceState,
+) -> Vec<Item> {
     let listed: BTreeSet<Item> = items
-        .into_iter()
-        .map(|item| spots.get(&item).map_or(item, |id| Item::Local(*id)))
+        .map(|item| match item {
+            Item::Slot { class, at } => crate::device::standing_on(device, workspace, class, at)
+                .filter(|entity| entity.kept)
+                .map_or(item, |entity| Item::Local(entity.id)),
+            item => item,
+        })
         .collect();
     listed.into_iter().collect()
 }
@@ -568,9 +666,10 @@ fn summed(checked: &[Item], workspace: &Workspace, device: &Device) -> Vec<Strin
     said
 }
 
-/// What sending the selection would do, when there is something to say, then every
-/// action on the whole of it, wrapped to the card's width.
-fn bulk_actions(
+/// What sending the selection would do, when there is something to say, then one row of
+/// buttons: the single row's own action and the actions that reach the keyboard, then
+/// the rest behind `…`.
+fn actions(
     ui: &mut egui::Ui,
     browser: &mut Browser,
     shown: &Shown,
@@ -588,9 +687,36 @@ fn bulk_actions(
         // folding its label into the room left.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         crate::panel::tonal(ui);
-        for (action, offer) in &shown.offers {
+        let own = match &shown.about {
+            About::Row(picked) => picked.id.zip(picked.action.as_ref()),
+            _ => None,
+        };
+        if let Some((id, (label, hint, click))) = own {
+            let live = *click != Click::Nothing;
+            let button = ui
+                .add_enabled(live, egui::Button::new(label))
+                .on_hover_text(hint)
+                .on_disabled_hover_text(hint);
+            if let (true, Some(act)) = (button.clicked(), clicked(*click, id)) {
+                acts.push(act);
+            }
+        }
+        let (near, rest): (Vec<_>, Vec<_>) = shown
+            .offers
+            .iter()
+            .partition(|(action, _)| matches!(action, Bulk::Queue | Bulk::Copy));
+        for (action, offer) in near {
             browser.bulk_button(ui, *action, offer, &shown.checked, &device.state, acts);
         }
+        if rest.is_empty() {
+            return;
+        }
+        let more = ui.button("…").on_hover_text("more actions");
+        egui::Popup::menu(&more).show(|ui| {
+            for (action, offer) in rest {
+                browser.bulk_button(ui, *action, offer, &shown.checked, &device.state, acts);
+            }
+        });
     });
 }
 
@@ -725,11 +851,189 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
                         .color(quiet),
                 )
                 .on_hover_text(format!(
-                    "this names a {} the instrument has not listed by id",
+                    "the instrument holds no {} by this id",
                     Kind::from_class(class).chip()
                 ));
             }
         }
+    });
+}
+
+/// What the Plays or Played by card lists for the one picked row.
+#[derive(Debug, PartialEq, Eq)]
+enum Sounds {
+    /// The pianos and samples a program plays, piano first.
+    Plays(Vec<Sound>),
+    /// The programs a set list plays, by address, each with its name where it resolves.
+    Programs(Vec<(Location, Option<String>)>),
+    /// The programs on this computer that play a piano or sample.
+    PlayedBy(Vec<(u64, String)>),
+}
+
+/// A piano or sample a program plays.
+#[derive(Debug, PartialEq, Eq)]
+struct Sound {
+    class: ObjectClass,
+    /// Its name, or its kind where nothing here or on the instrument goes by its id.
+    name: String,
+    lies: Lies,
+}
+
+/// Where a piano or sample a program plays is.
+#[derive(Debug, PartialEq, Eq)]
+enum Lies {
+    Here,
+    /// Only in this slot of the attached instrument.
+    KeyboardOnly(Location),
+    Nowhere,
+}
+
+/// What the one picked row plays, or what plays it: `None` for a row that neither plays
+/// nor is played.
+fn sounds(item: Item, workspace: &Workspace, device: &DeviceState) -> Option<Sounds> {
+    let entity = match item {
+        Item::Local(id) => workspace.get(id)?,
+        Item::Slot { class, at } if class.is_library() => {
+            let name = device.slot(class, at).flatten()?.name.trim();
+            return Some(played_by(workspace, crate::plays::slot_key(class, name)));
+        }
+        Item::Slot { .. } | Item::Folder(_) | Item::Tag(_) => return None,
+    };
+    if let Some(key) = crate::plays::key_of(entity) {
+        return Some(played_by(workspace, key));
+    }
+    let decoded = entity.entity.as_deref();
+    let seen = crate::document::setlist::Catalog { device, workspace };
+    if let Some(programs) = decoded.and_then(|song| crate::document::setlist::programs(song, &seen))
+    {
+        return Some(Sounds::Programs(programs));
+    }
+    let catalog = Catalog::of(workspace, device);
+    let mut plays: Vec<Sound> = crate::plays::named(entity)
+        .iter()
+        .filter_map(|plays| sound(plays.key(), &catalog, device))
+        .collect();
+    let dialed = crate::bundle::dialed(decoded)
+        .and_then(|(category, model)| device.piano_at(category, model));
+    if let Some(piano) = dialed {
+        let dialed = sound(
+            crate::plays::slot_key(ObjectClass::Piano, piano),
+            &catalog,
+            device,
+        );
+        plays.splice(0..0, dialed);
+    }
+    (!plays.is_empty()).then_some(Sounds::Plays(plays))
+}
+
+/// A piano or sample a program names, by the name it goes by. One nothing here or on the
+/// instrument names is listed as missing only while the attached instrument's library of
+/// its class has been read whole, and is otherwise left out.
+fn sound((class, id): crate::plays::Key, catalog: &Catalog, device: &DeviceState) -> Option<Sound> {
+    let Some(found) = catalog.get((class, id)) else {
+        return (device.connected() && device.read_whole(class)).then(|| Sound {
+            class,
+            name: Kind::from_class(class).chip().to_string(),
+            lies: Lies::Nowhere,
+        });
+    };
+    let lies = match (found.here.is_empty(), found.there) {
+        (true, Some(at)) => Lies::KeyboardOnly(at),
+        _ => Lies::Here,
+    };
+    Some(Sound {
+        class,
+        name: found.name.clone(),
+        lies,
+    })
+}
+
+fn played_by(workspace: &Workspace, key: crate::plays::Key) -> Sounds {
+    let programs = crate::plays::played_by(workspace, key)
+        .map(|entity| {
+            (
+                entity.id,
+                crate::strings::display_name(&entity.name).to_string(),
+            )
+        })
+        .collect();
+    Sounds::PlayedBy(programs)
+}
+
+/// The Plays card of a program or set list, or the Played by card of a piano or sample.
+fn sounds_card(ui: &mut egui::Ui, sounds: &Sounds, acts: &mut Vec<Act>) {
+    match sounds {
+        Sounds::Plays(plays) => card(ui, Head::fixed(Glyph::ListMusic, "Plays"), |ui| {
+            plays.iter().for_each(|sound| sound_line(ui, sound, acts));
+        }),
+        Sounds::Programs(programs) => card(ui, Head::fixed(Glyph::ListMusic, "Plays"), |ui| {
+            for (n, (at, name)) in (1..).zip(programs) {
+                let name = name.as_deref().unwrap_or("—");
+                void(ui, &format!("{n}  {}  {name}", crate::strings::shown(*at)));
+            }
+        }),
+        Sounds::PlayedBy(programs) => {
+            let head = Head {
+                badge: Some((programs.len().to_string(), caption(ui.visuals()))),
+                ..Head::fixed(Glyph::ListMusic, "Played by")
+            };
+            card(ui, head, |ui| {
+                if programs.is_empty() {
+                    return faint(ui, "No program here plays it.");
+                }
+                for (id, name) in programs {
+                    if ui
+                        .link(egui::RichText::new(name).text_style(ui_text()))
+                        .clicked()
+                    {
+                        acts.push(Act::Open(Item::Local(*id)));
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// One piano or sample a program plays: its name, shortened to the room Copy leaves, and
+/// under it where it is when that is not here.
+fn sound_line(ui: &mut egui::Ui, sound: &Sound, acts: &mut Vec<Act>) {
+    let line = egui::vec2(ui.available_width(), LINE);
+    let right = egui::Layout::right_to_left(egui::Align::Center);
+    let quiet = ui.visuals().weak_text_color();
+    ui.allocate_ui_with_layout(line, right, |ui| {
+        if let Lies::KeyboardOnly(at) = sound.lies {
+            if ui.small_button("Copy").clicked() {
+                acts.push(Act::Copy {
+                    class: sound.class,
+                    at,
+                });
+            }
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            icon(ui, Kind::from_class(sound.class).glyph(), GLYPH, quiet);
+            if sound.lies == Lies::Nowhere {
+                ui.label(
+                    egui::RichText::new("!")
+                        .text_style(ui_text())
+                        .color(warn(ui.visuals())),
+                );
+            }
+            let name = egui::RichText::new(&sound.name).text_style(ui_text());
+            ui.add(egui::Label::new(name).truncate())
+                .on_hover_text(&sound.name);
+        });
+    });
+    let note = match sound.lies {
+        Lies::Here => return,
+        Lies::KeyboardOnly(_) => "on the keyboard only",
+        Lies::Nowhere => "not here",
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(GLYPH + ui.spacing().item_spacing.x);
+        ui.add(
+            egui::Label::new(egui::RichText::new(note).text_style(ui_text()).color(quiet))
+                .truncate(),
+        );
     });
 }
 
@@ -885,9 +1189,11 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::LOAD_ON_INSTRUMENT;
+    use crate::link::Standing;
     use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
-    use crate::workspace::Fresh;
+    use crate::workspace::{Fresh, Origin};
     use nord_usb::wire::{Dependency, Status};
 
     /// An instrument that has counted a library, holds a program, and has answered which
@@ -1108,8 +1414,310 @@ mod tests {
         );
     }
 
+    fn program_playing(piano: &str, sample: u32) -> Vec<u8> {
+        let sets = [
+            (
+                "piano_panel.id".into(),
+                crate::plays::slot_key(ObjectClass::Piano, piano)
+                    .1
+                    .to_string(),
+            ),
+            ("sample_panel.id".into(), sample.to_string()),
+        ];
+        crate::fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .1
+    }
+
     #[test]
-    fn the_facts_of_one_picked_asset_are_its_rows_own() {
+    fn a_program_plays_what_is_here_on_the_keyboard_only_or_missing_from_a_library_read_whole() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let marimba = crate::plays::slot_key(ObjectClass::Sample, "Marimba").1;
+        let program = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", marimba),
+            &mut log,
+        );
+        let gone = workspace.ingest(
+            "Pad.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", 0x0999_0999),
+            &mut log,
+        );
+        workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        device.pretend_lengths(ObjectClass::Sample, 1, &[None, Some(("Marimba", 1000))]);
+        let marimba_at = Location::from_user(1, 2);
+
+        let plays = |id| sounds(Item::Local(id), &workspace, &device.state);
+        let tine = Sound {
+            class: ObjectClass::Piano,
+            name: "Tine".into(),
+            lies: Lies::Here,
+        };
+        assert_eq!(
+            plays(program),
+            Some(Sounds::Plays(vec![
+                tine,
+                Sound {
+                    class: ObjectClass::Sample,
+                    name: "Marimba".into(),
+                    lies: Lies::KeyboardOnly(marimba_at),
+                },
+            ]))
+        );
+        let tine = || Sound {
+            class: ObjectClass::Piano,
+            name: "Tine".into(),
+            lies: Lies::Here,
+        };
+        assert_eq!(
+            plays(gone),
+            Some(Sounds::Plays(vec![tine()])),
+            "a sample nothing names is left out while its library is partly read"
+        );
+
+        device.pretend_geometry(ObjectClass::Sample, &[("Samples", 2)]);
+        let missing = Sound {
+            class: ObjectClass::Sample,
+            name: "sample".into(),
+            lies: Lies::Nowhere,
+        };
+        assert_eq!(
+            sounds(Item::Local(gone), &workspace, &device.state),
+            Some(Sounds::Plays(vec![tine(), missing]))
+        );
+    }
+
+    #[test]
+    fn with_nothing_attached_a_program_lists_only_what_is_found_by_name() {
+        let Bench {
+            mut workspace,
+            mut log,
+            device,
+            ..
+        } = Bench::new();
+        let program = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Royal Grand 3D", 0x0999_0999),
+            &mut log,
+        );
+        assert_eq!(
+            sounds(Item::Local(program), &workspace, &device.state),
+            None
+        );
+    }
+
+    #[test]
+    fn a_piano_is_played_by_the_programs_here_that_name_it() {
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let keys = workspace.ingest(
+            "Keys.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Tine", 0),
+            &mut log,
+        );
+        workspace.ingest(
+            "Other.ne5p".into(),
+            Origin::Fresh,
+            program_playing("Wurli", 0),
+            &mut log,
+        );
+        let tine = workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        device.pretend_lengths(ObjectClass::Piano, 3, &[Some(("Tine", 1000))]);
+        let by_keys = Some(Sounds::PlayedBy(vec![(keys, "Keys".into())]));
+
+        assert_eq!(
+            sounds(Item::Local(tine), &workspace, &device.state),
+            by_keys
+        );
+        let slot = Item::Slot {
+            class: ObjectClass::Piano,
+            at: Location::from_user(3, 1),
+        };
+        assert_eq!(sounds(slot, &workspace, &device.state), by_keys);
+    }
+
+    #[test]
+    fn a_set_list_plays_its_programs_by_address_named_where_they_resolve() {
+        use nord_format::formats::ne5;
+        use nord_format::{Entity, Song};
+
+        let Bench {
+            mut workspace,
+            mut device,
+            mut log,
+            ..
+        } = Bench::new();
+        let (one, two) = ((0, 0).try_into().unwrap(), (1, 3).try_into().unwrap());
+        let song = ne5::song::new((0, 0).try_into().unwrap(), 1, [one, two, one, one]).unwrap();
+        let bytes = nord_format::to_bytes(&Entity::Song(Song::Electro5(song))).unwrap();
+        let id = workspace.ingest("Gig.ne5t".into(), Origin::Fresh, bytes, &mut log);
+        device.pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+
+        let Some(Sounds::Programs(programs)) = sounds(Item::Local(id), &workspace, &device.state)
+        else {
+            panic!("a set list plays programs");
+        };
+        assert_eq!(
+            programs[..2],
+            [
+                (Location::from_user(1, 1), Some("Africa Split".to_string())),
+                (Location::from_user(2, 4), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_plays_card_says_where_a_sound_is_missing_and_offers_a_copy() {
+        let ctx = context();
+        let plays = Sounds::Plays(vec![
+            Sound {
+                class: ObjectClass::Piano,
+                name: "Tine".into(),
+                lies: Lies::Here,
+            },
+            Sound {
+                class: ObjectClass::Sample,
+                name: "Marimba".into(),
+                lies: Lies::KeyboardOnly(Location::from_user(1, 2)),
+            },
+            Sound {
+                class: ObjectClass::Sample,
+                name: "sample 0x09990999".into(),
+                lies: Lies::Nowhere,
+            },
+        ]);
+        let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                sounds_card(ui, &plays, &mut Vec::new());
+            });
+        });
+        let said = testing::words(&output);
+        for word in [
+            "Plays",
+            "Tine",
+            "on the keyboard only",
+            "Copy",
+            "!",
+            "not here",
+        ] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_name_in_the_plays_card_is_shortened_and_its_note_and_copy_stay_in_the_card() {
+        let ctx = context();
+        let plays = Sounds::Plays(vec![Sound {
+            class: ObjectClass::Piano,
+            name: "Royal Grand 3D YaS6 XL 5.4 Extended Release".into(),
+            lies: Lies::KeyboardOnly(Location::from_user(1, 2)),
+        }]);
+        let screen = egui::vec2(800.0, 400.0);
+        let width = crate::shell::SIDE_LEAST;
+        let frame = || {
+            let input = testing::screen(screen, Vec::new());
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::right("inspector")
+                    .exact_width(width)
+                    .show(ctx, |ui| sounds_card(ui, &plays, &mut Vec::new()));
+            });
+            testing::painted(&output)
+        };
+        frame();
+        let said = frame();
+        let note = testing::where_(&said, "on the keyboard only");
+        let copy = testing::where_(&said, "Copy");
+        let name = said
+            .iter()
+            .find(|word| word.text.starts_with("Royal"))
+            .map(|word| word.rect)
+            .expect("the name is painted");
+        for (what, rect) in [("note", note), ("Copy", copy)] {
+            assert!(
+                rect.right() <= screen.x && rect.left() >= screen.x - width,
+                "{what} at {rect:?} runs past the card"
+            );
+        }
+        assert!(name.right() <= copy.left(), "{name:?} runs under {copy:?}");
+        assert!(note.top() >= name.bottom(), "the note goes under the name");
+    }
+
+    /// A bench with one new program picked and an instrument attached.
+    fn one_picked() -> Bench {
+        let mut bench = Bench::new();
+        bench.device.pretend_attached_as("Nord Electro 5");
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 1, &["Africa Split"]);
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        bench.browser.check(Item::Local(id));
+        bench
+    }
+
+    #[test]
+    fn one_picked_file_shows_its_one_action_and_keeps_the_rest_behind_more() {
+        let mut bench = one_picked();
+
+        let said = inspected(&mut bench);
+        for word in ["Send to…", "…"] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+        let behind = ["Export…", "Export as bundle…", "Delete…"];
+        let gone = [Bulk::Queue.label(), Bulk::Copy.label(), "kind", "size"];
+        for word in behind.into_iter().chain(gone) {
+            assert!(!said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+        assert!(
+            !said.iter().any(|held| held.starts_with("→")),
+            "no consequence line: {said:?}"
+        );
+    }
+
+    #[test]
+    fn more_opens_the_actions_on_the_file_itself() {
+        let mut bench = one_picked();
+        inspect(&mut bench, Vec::new());
+        let seen = testing::painted(&inspect(&mut bench, Vec::new()));
+        let more = testing::where_(&seen, "…").center();
+
+        inspect(&mut bench, testing::click(more));
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            said = testing::words(&inspect(&mut bench, Vec::new()));
+        }
+        for word in ["Export…", "Export as bundle…", "Delete…"] {
+            assert!(said.iter().any(|held| held == word), "{word}: {said:?}");
+        }
+    }
+
+    #[test]
+    fn the_hover_of_one_picked_asset_says_its_rows_own_kind_and_size() {
         use crate::browser::Qualifier;
         use nord_format::accept::Family;
 
@@ -1120,43 +1728,16 @@ mod tests {
             name: "Africa Split".into(),
             tags: 1,
             unsaved: true,
-            where_: Where::Both(Some(false)),
+            where_: Where::Both(Standing::Ahead),
             at: None,
+            faint: false,
+            mark: None,
+            said: String::new(),
             size: 2_048,
             needs: crate::library::Needs::Nothing,
         };
 
-        let said = facts(&row, &Fit::Takes);
-        let lines: Vec<(&str, &str)> = said
-            .iter()
-            .map(|fact| (fact.what, fact.said.as_str()))
-            .collect();
-        assert_eq!(
-            lines,
-            [
-                ("name", "Africa Split"),
-                ("kind", "Stage 4 program"),
-                ("where", "both ≠"),
-                ("size", "2.0 kB"),
-            ]
-        );
-        assert_eq!(
-            said[2].hint.as_deref(),
-            Some(Where::Both(Some(false)).sentence()),
-            "the hover gives the full sentence"
-        );
-
-        // The only fact not taken from the row is the instrument's refusal.
-        let why = "This is a Stage 4 file and the instrument is a Nord Electro 5D.";
-        let refused = facts(&row, &Fit::Refuses(why.into()));
-        assert_eq!(refused.len(), said.len() + 1);
-        assert_eq!(refused[4].what, "refused");
-        assert_eq!(refused[4].said, why);
-        assert_eq!(
-            facts(&row, &Fit::Warn("untried".into())).len(),
-            said.len(),
-            "an untried write is the queue's warning, not a fact about the asset"
-        );
+        assert_eq!(about_row(&row), "Stage 4 program · 2.0 kB");
     }
 
     #[test]
@@ -1203,12 +1784,15 @@ mod tests {
             unsaved,
             where_,
             at: None,
+            faint: false,
+            mark: None,
+            said: String::new(),
             size: 0,
             needs: crate::library::Needs::Nothing,
         };
         let rows = [
             row("kept", false, Where::Computer),
-            row("edited", true, Where::Both(Some(false))),
+            row("edited", true, Where::Both(Standing::Ahead)),
             row("read off a slot", false, Where::Keyboard),
         ];
         assert_eq!(tally(3, &rows), "3 selected, 1 unsaved, 2 on the keyboard");
@@ -1219,8 +1803,12 @@ mod tests {
 
     /// One frame of the inspector over the bench, and every word it painted.
     fn inspected(bench: &mut Bench) -> Vec<String> {
-        let input = testing::screen(egui::vec2(800.0, 900.0), Vec::new());
-        let output = testing::run(&bench.ctx, input, |ctx| {
+        testing::words(&inspect(bench, Vec::new()))
+    }
+
+    fn inspect(bench: &mut Bench, events: Vec<egui::Event>) -> egui::FullOutput {
+        let input = testing::screen(egui::vec2(800.0, 900.0), events);
+        testing::run(&bench.ctx, input, |ctx| {
             egui::SidePanel::right("inspector")
                 .exact_width(crate::shell::INSPECTOR)
                 .show(ctx, |panel| {
@@ -1243,8 +1831,7 @@ mod tests {
                         queue,
                     );
                 });
-        });
-        testing::words(&output)
+        })
     }
 
     #[test]
@@ -1294,27 +1881,74 @@ mod tests {
         bench.browser.check(Item::Slot { class, at });
         let copy = |bench: &Bench| {
             let shown = bench.shell.picked.shown.as_ref().unwrap();
-            let mut offers = shown.offers.iter();
-            offers
-                .find(|(action, _)| *action == Bulk::Copy)
-                .unwrap()
-                .1
-                .live
+            shown
+                .offers
+                .iter()
+                .any(|(action, offer)| *action == Bulk::Copy && offer.live)
         };
 
         let said = inspected(&mut bench);
-        assert!(said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(said.iter().any(|word| word == "Programs 7:1"), "{said:?}");
         assert!(copy(&bench), "a slot on the keyboard only can be copied");
 
         let name = "Africa Split.ne5p".to_string();
-        bench
+        let print = crate::workspace::print_of(&bytes).unwrap();
+        let id = bench
             .workspace
             .ingest(name, origin(), bytes, &mut bench.log);
-        bench.device.relink(&mut bench.workspace);
+        crate::device::link_copy(
+            &bench.device.state,
+            &mut bench.workspace,
+            id,
+            class,
+            at,
+            print,
+        );
         let said = inspected(&mut bench);
-        assert!(said.iter().any(|word| word.starts_with("both")), "{said:?}");
-        assert!(!said.iter().any(|word| word == "keyboard"), "{said:?}");
+        assert!(said.iter().any(|word| word == "Programs 7:1"), "{said:?}");
+        assert!(
+            said.iter().any(|word| word == LOAD_ON_INSTRUMENT),
+            "{said:?}"
+        );
         assert!(!copy(&bench), "a copy is already on this computer");
+    }
+
+    #[test]
+    fn one_picked_file_says_where_it_is_its_one_action_and_where_else_its_bytes_are() {
+        let mut bench = Bench::new();
+        let class = ObjectClass::Program;
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = bench
+            .workspace
+            .ingest("Jazzy.ne5p".into(), Origin::Fresh, bytes, &mut bench.log);
+        let crc = bench.workspace.get(id).unwrap().saved_print().unwrap().crc;
+        bench
+            .device
+            .pretend_bodies(class, 5, &[None, Some(("First", crc))]);
+        bench.browser.check(Item::Local(id));
+        let said = inspected(&mut bench);
+        for word in ["This computer", "Send to…", "Also at 5:2 · ", "Link"] {
+            assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
+        }
+
+        let base = crate::link::Print {
+            crc: !crc,
+            len: 121,
+        };
+        let held = crate::link::Held::new(class, Location { bank: 4, slot: 0 }, "", base);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        bench.workspace.link(id, &keyboard, held.unwrap());
+        bench
+            .device
+            .pretend_bodies(class, 5, &[Some(("Jazzy", !crc))]);
+        let said = inspected(&mut bench);
+        for word in ["Programs 5:1", " · newer here", "Sync…"] {
+            assert!(said.iter().any(|said| said == word), "{word}: {said:?}");
+        }
+        assert!(
+            !said.iter().any(|word| word.starts_with("Also at")),
+            "{said:?}"
+        );
     }
 
     /// ⚠️ Every class is addressed by the same banks and slots, so the sample at a
@@ -1343,13 +1977,6 @@ mod tests {
             picking(ObjectClass::Program, elsewhere),
             None,
             "a program nothing has asked about"
-        );
-        // A dependency returned with a blank name has only its id to show.
-        assert_eq!(
-            device
-                .state
-                .dependency_name(ObjectClass::Sample, 0x0999_0999),
-            None,
         );
     }
 
@@ -1400,11 +2027,11 @@ mod tests {
         assert!(painted(&[]).is_empty(), "{:?}", painted(&[]));
     }
 
-    /// The Selection card offers every action on the selection, whole, on one line, and
-    /// inside the card at any width the inspector takes, and Queue for sending queues what
-    /// is selected.
+    /// The Selection card offers the actions that reach the keyboard on a selection of
+    /// several, whole, on one line, and inside the card at any width the inspector takes,
+    /// and Add to Sync places what is selected.
     #[test]
-    fn the_selection_card_offers_every_action_on_the_selection() {
+    fn the_selection_card_offers_the_keyboards_actions_on_the_selection() {
         let Bench {
             ctx,
             mut browser,
@@ -1416,8 +2043,11 @@ mod tests {
             ..
         } = Bench::new();
         device.pretend_attached_as("Nord Electro 5");
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        browser.check(Item::Local(id));
+        let ids = [
+            workspace.create(Fresh::Program, &mut log).unwrap(),
+            workspace.create(Fresh::Program, &mut log).unwrap(),
+        ];
+        ids.iter().for_each(|id| browser.check(Item::Local(*id)));
         let screen = egui::vec2(800.0, 900.0);
 
         let least = crate::shell::SIDE_LEAST as usize;
@@ -1446,7 +2076,7 @@ mod tests {
             frame(Vec::new());
             let said = frame(Vec::new());
             let line = testing::where_(&said, "Selection").height();
-            for action in Bulk::ALL {
+            for action in [Bulk::Queue, Bulk::Copy] {
                 let word = testing::where_(&said, action.label());
                 assert!(
                     word.left() >= screen.x - width && word.right() <= screen.x - GUTTER,
@@ -1464,8 +2094,8 @@ mod tests {
             ));
             assert!(
                 acts.iter()
-                    .any(|act| matches!(act, Act::SendChecked(ids) if ids == &[id])),
-                "{width}: Queue for sending queues the selection; got {} acts",
+                    .any(|act| matches!(act, Act::SendChecked(sent) if sent == &ids)),
+                "{width}: Add to Sync places the selection; got {} acts",
                 acts.len()
             );
         }

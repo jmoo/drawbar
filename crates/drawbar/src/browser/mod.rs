@@ -30,9 +30,10 @@ mod row;
 mod selection;
 mod tree;
 
+pub(crate) use act::batches;
 pub use act::{
     apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
-    LOAD_ON_INSTRUMENT,
+    LOAD_ON_INSTRUMENT, SYNC,
 };
 #[cfg(test)]
 pub(crate) use drag::TAGGED;
@@ -246,6 +247,7 @@ pub struct Browser {
     /// A slot to scroll to and select, once the branches holding it have been laid out.
     jump: Option<(ObjectClass, Location)>,
     rows: Rows,
+    synced: crate::bring::Synced,
     /// Acts waiting for the assets they read to be read, in the order they were asked.
     held: Vec<Act>,
     /// Where this computer's folders were drawn as places a drop lands, in drawing order:
@@ -270,6 +272,7 @@ impl Default for Browser {
             open: BTreeSet::from([Branch::Computer, Branch::Instrument]),
             jump: None,
             rows: Rows::default(),
+            synced: crate::bring::Synced::default(),
             held: Vec::new(),
             targets: Vec::new(),
             followed: true,
@@ -1867,7 +1870,7 @@ mod tests {
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }
 
-    /// The review warns once per format, however many items carry it.
+    /// The sheet warns once per format, however many items carry it.
     ///
     /// The instrument reports a model the acceptance table does not know, so the only
     /// check left is against the folder's own formats. A known family would refuse these
@@ -1901,7 +1904,9 @@ mod tests {
             ids.push(id);
         }
 
-        let warnings = send_warnings(&queue, &workspace, &device.state);
+        let writes = queue.entries().iter();
+        let writes = writes.filter_map(|held| Some((held.class, workspace.get(held.id)?)));
+        let warnings = send_warnings(writes, &device.state);
         let foreign = warnings
             .iter()
             .filter(|warning| warning.contains("This file is ns4p"))

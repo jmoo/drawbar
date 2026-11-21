@@ -59,6 +59,9 @@ pub struct Plan {
     pub dismiss: Vec<Run>,
     /// Entities to join into others, after the fact changes.
     pub joins: Vec<Joined>,
+    /// Whether it is committed as final: no step of undo, and its writes undo takes for
+    /// another writer's.
+    pub r#final: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

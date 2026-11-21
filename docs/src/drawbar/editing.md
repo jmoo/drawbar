@@ -2,23 +2,21 @@
 
 There is no Apply button. A control you move is set on the document at once,
 and the name shows a `*` until you save. Nothing on the instrument changes until
-you queue the document and send it.
+you save the document and sync.
 
 ## The document header
 
 Every document has the same strip across the top: its kind and name, a format
-badge, where it lives (a slot, a folder, or this computer), its size, and its
-state: `edited`, `matches keyboard`, `differs from keyboard`, `waiting to send`
-or `on the keyboard`. Hover any of them for the detail.
+badge, where it lives (the slot it is linked to, a folder, or this computer), its
+size, and `edited` or `to sync`. The place carries the library's mark:
+`↑ Programs 1:7` is newer here, `↓ Programs 1:7` is newer on the keyboard, and
+`! Programs 7:14` needs attention. Hover any of them for the detail.
 
 To the right are the two faces, **Revert**, **Export…**, and the document's
-main action, usually **Queue send**. That action is grayed out when there is
-nowhere to send to, and becomes a warning such as `Won't fit · 70 MB over` when
-the send cannot happen yet.
-
-A document that belongs to a slot on the connected instrument also has **Load on
-instrument**, which makes the panel play that slot. The panel plays what the
-instrument holds there, so edits you have not sent are not heard.
+main action: **Save**, **Send to…**, **Load on instrument**, or **Sync…** when
+the document and its slot differ, which opens the Sync sheet on it. It becomes a
+warning such as `Won't fit · 70 MB over` when the write cannot happen yet. The
+panel plays what the instrument holds, so edits you have not synced are not heard.
 
 ## The faces
 
@@ -56,11 +54,11 @@ Every control answers the keyboard. Tab reaches it, the arrow keys step a knob,
 Page Up and Page Down jump it, Home and End take it to its stops, and Space flips
 a lamp. Double-click a knob to type a value.
 
-Where a program refers to a piano or sample by id, drawbar asks the connected
-instrument for its name and shows it. With an instrument connected, the piano
-**Model** lists its pianos of the chosen **Type**. Changing either one points the
-program at the piano now chosen, which is what the instrument plays. Sections the
-program stores but is not using are folded away.
+Where a program refers to a piano or sample, drawbar shows its name when that
+piano or sample is on this computer or on the instrument. With an instrument
+connected, the piano **Model** lists its pianos of the chosen **Type**. Changing
+either one points the program at the piano now chosen, which is what the
+instrument plays. Sections the program stores but is not using are folded away.
 
 A control with a morph shows three dots. Pick a morph source in the inspector's
 **Morph** card and every morphed control shows that source's target instead.

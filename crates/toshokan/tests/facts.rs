@@ -483,6 +483,70 @@ fn values_that_do_not_decode_are_unreadable_and_kept() {
 }
 
 #[test]
+fn a_member_stored_in_other_json_is_removed_by_what_is_stored() {
+    let e = entity(1);
+    let (mut a, mut b) = pair(e);
+    let stored = Raw::new(r#""\u0062""#).unwrap();
+    let add = Op::Add {
+        entity: e,
+        key: "tags".into(),
+        value: stored.clone(),
+        replaces: Vec::new(),
+        take: None,
+    };
+    b.intent(2, vec![add], Vec::new());
+    a.sync(&b);
+    assert_eq!(tags(&a, e), ["a", "b"]);
+    a.commit(plan(intent("").remove(e, TAGS, &"b".into())), 3)
+        .unwrap();
+    assert_eq!(
+        tags(&a, e),
+        ["a", "b"],
+        "its encoding matches no member stored"
+    );
+    a.commit(plan(intent("").remove_stored(e, TAGS, stored)), 4)
+        .unwrap();
+    assert_eq!(tags(&a, e), ["a"]);
+}
+
+#[test]
+fn a_join_carries_keys_the_joining_writers_schema_does_not_declare() {
+    let (e, into) = (entity(2), entity(1));
+    let mut a = Writer::new(0xa);
+    let (made, _) = creating("Add", &[into, e]).create(|_| {});
+    let (made, _) = made.create(|_| {});
+    a.commit(plan(made), 1).unwrap();
+    let mut newer = Writer::new(0xb);
+    newer.sync(&a);
+    let link = Raw::new(r#"{"slot":6}"#).unwrap();
+    let seen = Raw::new("7").unwrap();
+    let ops = vec![
+        Op::Add {
+            entity: e,
+            key: "links".into(),
+            value: link.clone(),
+            replaces: Vec::new(),
+            take: None,
+        },
+        Op::Write {
+            entity: e,
+            key: "seen".into(),
+            value: Some(seen.clone()),
+            replaces: Vec::new(),
+            take: None,
+        },
+    ];
+    newer.intent(2, ops, Vec::new());
+    a.sync(&newer);
+    a.commit(plan(intent("Join").join(e, into)), 3).unwrap();
+    assert!(a.view().entity(e).is_none(), "joined away");
+    assert_eq!(a.folded.members(into, "links"), [link]);
+    let held = a.folded.register(into, "seen").into_iter();
+    let held: Vec<Raw> = held.map(|write| write.value).collect();
+    assert_eq!(held, [seen]);
+}
+
+#[test]
 fn ops_refuse_what_the_schema_or_the_view_does_not_allow() {
     let e = entity(1);
     let (a, _) = pair(e);
@@ -645,6 +709,27 @@ fn a_new_intent_ends_redo() {
     a.commit(plan(intent("").add(e, TAGS, "b".into())), 4)
         .unwrap();
     assert_eq!(a.redo(5).unwrap_err(), Refusal::Nothing);
+}
+
+#[test]
+fn an_intent_committed_as_final_is_no_step_and_leaves_redo() {
+    let e = entity(1);
+    let (mut a, _) = pair(e);
+    a.commit(plan(intent("").set(e, NAME, "second".into())), 2)
+        .unwrap();
+    a.undo(3).unwrap();
+    let kept = a
+        .commit(plan(intent("").add(e, TAGS, "b".into()).as_final()), 4)
+        .unwrap();
+    a.redo(5).unwrap();
+    assert_eq!(name(&a, e), Field::Value("second".into()));
+    assert_eq!(tags(&a, e), ["a", "b"]);
+    a.undo(6).unwrap();
+    let refusal = Refusal::ChangedSince {
+        by: a.id,
+        entry: kept.hash(),
+    };
+    assert_eq!(a.undo(7), Err(refusal), "its writes are another writer's");
 }
 
 #[test]

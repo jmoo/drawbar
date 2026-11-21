@@ -19,14 +19,15 @@ use toshokan::report::{
 };
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
-use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
+use super::keys::{self, Came, LINKS, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
-    Part, Source, Stat, Unwritable, Viewed, Waiting,
+    Part, Relink, Source, Stat, Unwritable, Viewed, Waiting,
 };
+use crate::link::Link;
 use crate::rewrite::{self, Pieces};
 
 /// The most entries a listing of the library's folders looks at: a guard against a
@@ -168,12 +169,12 @@ impl<F: Fs> Keeper<F> {
                 self.made(label, finished, committed, false, answer).await;
             }
             Cmd::Undo => {
-                let (undone, forgot) = self.undone(false).await;
+                let (undone, forgot) = self.undone(false, answer).await;
                 self.made("Undo".to_string(), finished, undone, forgot, answer)
                     .await;
             }
             Cmd::Redo => {
-                let (redone, forgot) = self.undone(true).await;
+                let (redone, forgot) = self.undone(true, answer).await;
                 self.made("Redo".to_string(), finished, redone, forgot, answer)
                     .await;
             }
@@ -661,15 +662,20 @@ impl<F: Fs> Keeper<F> {
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
     /// bound to that it moved for the app to follow. One refused is let go of, which
     /// the second value says.
-    async fn undone(&mut self, again: bool) -> (Result<(Option<Made>, Viewed), String>, bool) {
+    async fn undone(
+        &mut self,
+        again: bool,
+        answer: &mut impl FnMut(Event),
+    ) -> (Result<(Option<Made>, Viewed), String>, bool) {
         let Some(library) = self.library.as_mut() else {
             return (Err("the library is not open".to_string()), false);
         };
+        let before = library.view();
         let committed = match again {
             true => library.redo().await,
             false => library.undo().await,
         };
-        let committed = match committed {
+        let mut committed = match committed {
             Ok(committed) => committed,
             // A step another drawbar changed since, or whose trash item went, can
             // never be taken back; any other refusal may pass once the files are
@@ -683,11 +689,16 @@ impl<F: Fs> Keeper<F> {
             }
             Err(e) => return (Err(told(&e)), false),
         };
+        let mut changes = std::mem::take(&mut committed.changes);
+        match relink(library, &before).await {
+            Ok(relinked) => changes.extend(relinked.into_iter().flat_map(|done| done.changes)),
+            Err(e) => answer(Event::Unlinked(told(&e))),
+        }
         let viewed = Viewed {
             followed: Some(followed(&committed)),
             dirs: folders(library.fs()).await,
             left: shown_paths(&committed.left),
-            ..committed_view(library, &mut self.shown, committed.changes)
+            ..committed_view(library, &mut self.shown, changes)
         };
         (
             Ok((Some((committed.intent, committed.undoable)), viewed)),
@@ -736,13 +747,7 @@ impl<F: Fs> Keeper<F> {
         }
         let changes = match intent {
             Intent::Tag { files, name, make } => {
-                // ⚠️ A file another drawbar made an entity of since the last refresh would
-                // be adopted twice, as two entities the next scan joins. Reading what others
-                // wrote first leaves that only to one that adopts it in the moment between.
-                let mut changes = Vec::new();
-                if files.iter().any(|key| matches!(key, Key::File(_))) {
-                    changes = library.refresh().await.map_err(|e| told(&e))?.changes;
-                }
+                let mut changes = adopting(library, &files).await?;
                 let mut committed = facts(library, label, |built, view| {
                     let built = tag(built, view, &files, &name)?;
                     Ok(match make {
@@ -804,6 +809,21 @@ impl<F: Fs> Keeper<F> {
             Intent::Forget { entity } => {
                 let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
                 Some(forgot.await?)
+            }
+            Intent::Link { files } => {
+                let keys: Vec<Key> = files.iter().map(|relink| relink.file.clone()).collect();
+                let mut changes = adopting(library, &keys).await?;
+                let mut skipped = Vec::new();
+                let linked = |built, view: &View| link(built, view, &files, &mut skipped);
+                let mut committed = facts(library, label, linked).await?;
+                if let Some(why) = skipped.into_iter().next() {
+                    answer(Event::Unlinked(why));
+                }
+                changes.append(&mut committed.changes);
+                Some(toshokan::Committed {
+                    changes,
+                    ..committed
+                })
             }
             Intent::Take { run, changes } => {
                 let view = library.view();
@@ -987,8 +1007,68 @@ fn on_list<'l, F: Fs + 'l>(
     }
 }
 
-/// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`
-/// where another writer made one since the app looked, or a new one that adopts it.
+/// What reading what others wrote changed, read first where an intent may adopt a file of
+/// `files`.
+///
+/// ⚠️ A file another drawbar made an entity of since the last refresh would be adopted
+/// twice, as two entities the next scan joins. Reading what others wrote first leaves that
+/// only to one that adopts it in the moment between.
+async fn adopting<F: Fs>(
+    library: &mut Library<F>,
+    files: &[Key],
+) -> Result<Vec<toshokan::report::Change>, String> {
+    if !files.iter().any(|key| matches!(key, Key::File(_))) {
+        return Ok(Vec::new());
+    }
+    Ok(library.refresh().await.map_err(|e| told(&e))?.changes)
+}
+
+/// The entity of the file `key` names: the one bound to its path in `view` where another
+/// writer made one since the app looked, or a new one that adopts it.
+fn entity_of<'l, F: Fs + 'l>(
+    built: Built<'l, F>,
+    view: &View,
+    key: &Key,
+) -> Result<(Built<'l, F>, toshokan::EntityId), String> {
+    Ok(made(built, holder(view, key)?))
+}
+
+/// What gives the file a [`Key`] names its entity.
+enum Holder {
+    Entity(toshokan::EntityId),
+    Adopt(RelPath, Expect),
+}
+
+/// What gives the file `key` names its entity in `view`, as [`entity_of`] finds it.
+fn holder(view: &View, key: &Key) -> Result<Holder, String> {
+    let path = match key {
+        Key::Entity(entity) => return Ok(Holder::Entity(*entity)),
+        Key::File(path) => path,
+    };
+    let at = relative(path).ok_or_else(|| no_path(path))?;
+    if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
+        return Ok(Holder::Entity(entity));
+    }
+    let listed = view
+        .listed(&at)
+        .ok_or_else(|| format!("{path} is not listed"))?;
+    let expect = Expect::Listed {
+        len: listed.len,
+        modified: listed.modified,
+    };
+    Ok(Holder::Adopt(at, expect))
+}
+
+fn made<'l, F: Fs + 'l>(built: Built<'l, F>, holder: Holder) -> (Built<'l, F>, toshokan::EntityId) {
+    match holder {
+        Holder::Entity(entity) => (built, entity),
+        Holder::Adopt(at, expect) => built.create(|e| {
+            e.adopt(&at, expect);
+        }),
+    }
+}
+
+/// Put a tag on each file of `files`, on its entity ([`entity_of`]).
 fn tag<'l, F: Fs + 'l>(
     mut built: Built<'l, F>,
     view: &View,
@@ -996,32 +1076,99 @@ fn tag<'l, F: Fs + 'l>(
     name: &str,
 ) -> Result<Built<'l, F>, String> {
     for key in files {
-        let path = match key {
-            Key::Entity(entity) => {
-                built = built.add(*entity, TAGS, name.to_string());
-                continue;
-            }
-            Key::File(path) => path,
-        };
-        let at = relative(path).ok_or_else(|| no_path(path))?;
-        if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
-            built = built.add(entity, TAGS, name.to_string());
-            continue;
-        }
-        let listed = view
-            .listed(&at)
-            .ok_or_else(|| format!("{path} is not listed"))?;
-        let expect = Expect::Listed {
-            len: listed.len,
-            modified: listed.modified,
-        };
-        let (next, _) = built.create(|e| {
-            e.adopt(&at, expect).add(TAGS, name.to_string());
-        });
-        built = next;
+        let (next, entity) = entity_of(built, view, key)?;
+        built = next.add(entity, TAGS, name.to_string());
     }
     Ok(built)
 }
+
+/// Give each file of `files` its link on each keyboard named, on its entity
+/// ([`entity_of`]), removing what is stored for that keyboard as it is stored. A file with
+/// no entity to give one is left out, and why goes in `skipped`; an error only when every
+/// file is.
+fn link<'l, F: Fs + 'l>(
+    mut built: Built<'l, F>,
+    view: &View,
+    files: &[Relink],
+    skipped: &mut Vec<String>,
+) -> Result<Built<'l, F>, String> {
+    for relink in files {
+        let (next, entity) = match holder(view, &relink.file) {
+            Ok(holder) => made(built, holder),
+            Err(why) => {
+                skipped.push(why);
+                continue;
+            }
+        };
+        let stored = stored_links(view, entity);
+        built = relink.on.iter().fold(next, |built, (keyboard, link)| {
+            let on = stored.iter().filter(|(_, held)| held.keyboard == *keyboard);
+            let kept = link
+                .as_ref()
+                .and_then(|link| on.clone().find(|(_, held)| held == link));
+            let kept = kept.map(|(raw, _)| raw);
+            let gone = on.filter(|(raw, _)| Some(raw) != kept);
+            let built = gone.fold(built, |built, (raw, _)| {
+                built.remove_stored(entity, LINKS, raw.clone())
+            });
+            match (link, kept) {
+                (Some(link), None) => built.add(entity, LINKS, link.clone()),
+                _ => built,
+            }
+        });
+    }
+    match skipped.len() == files.len() {
+        true => Err(skipped.first().cloned().unwrap_or_default()),
+        false => Ok(built),
+    }
+}
+
+/// The links stored on `entity`, each as it is stored and as this build reads it.
+fn stored_links(view: &View, entity: toshokan::EntityId) -> Vec<(toshokan::Raw, Link)> {
+    let stored = view.folded().members(entity, LINKS.name()).into_iter();
+    let read = stored.filter_map(|raw| Some((raw.clone(), raw.decode().ok()?)));
+    read.collect()
+}
+
+/// Give the links each entity of `before` held to a new entity of its file, where the
+/// change since ended the entity and left its file to none: an undo of the tag that made
+/// an entity of a file takes nothing a link keeps. Final, so redo stays as it was.
+async fn relink<F: Fs>(
+    library: &mut Library<F>,
+    before: &View,
+) -> Result<Option<toshokan::Committed>, Error> {
+    let view = library.view();
+    let ended = before.with(LINKS).into_iter();
+    let ended = ended.filter(|entity| view.entity(*entity).is_none());
+    let left: Vec<(RelPath, Expect, Vec<toshokan::Raw>)> = ended
+        .filter_map(|entity| {
+            let path = before.entity(entity)?.file()?.path;
+            let listed = view.listed(&path).filter(|_| view.is_unbound(&path))?;
+            let expect = Expect::Listed {
+                len: listed.len,
+                modified: listed.modified,
+            };
+            let links = before.folded().members(entity, LINKS.name());
+            Some((path, expect, links))
+        })
+        .collect();
+    if left.is_empty() {
+        return Ok(None);
+    }
+    let built = left
+        .into_iter()
+        .fold(library.intent(RELINK), |built, (path, expect, links)| {
+            let (built, entity) = built.create(|e| {
+                e.adopt(&path, expect);
+            });
+            let links = links.into_iter();
+            links.fold(built, |built, link| built.add_stored(entity, LINKS, link))
+        });
+    built.as_final().commit().await.map(Some)
+}
+
+/// What the history and other writers call the change that keeps links an undo left.
+const RELINK: &str = "Link";
 
 /// Where a write goes, what it expects to find there, and where a new file came from.
 #[derive(Clone, Copy)]
@@ -2427,6 +2574,101 @@ mod tests {
         assert_eq!(answers.iter().filter(|event| refused(event)).count(), FILES);
         assert!((0..FILES).all(|n| root.at(&name(n)).exists()));
         assert_eq!(keeper.trash_now(), []);
+    }
+
+    /// A newer build's member, with a field this one does not read, and an older member
+    /// another writer left beside it, both on one keyboard: a write for that keyboard
+    /// replaces both as they are stored, and leaves another keyboard's alone.
+    #[test]
+    fn a_link_write_replaces_every_member_stored_for_its_keyboard_and_no_other() {
+        use crate::link::{Held, Keyboard, Print};
+        use nord_usb::ObjectClass;
+
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&root);
+        let keyboard = |serial: &str| Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: Some(serial.into()),
+        };
+        let link = |serial, slot| Link {
+            keyboard: keyboard(serial),
+            held: Held::new(
+                ObjectClass::Program,
+                nord_usb::Location { bank: 0, slot },
+                "",
+                Print {
+                    crc: slot,
+                    len: 121,
+                },
+            ),
+        };
+        let raw = |link: &Link| toshokan::Raw::of(link).unwrap();
+        let read = serde_json::to_string(&link("A1", 1)).unwrap();
+        let newer = toshokan::Raw::new(&format!(r#"{{"seen":7,{}"#, &read[1..])).unwrap();
+        let stored = [newer, raw(&link("A1", 2)), raw(&link("B2", 4))];
+        let expect = keeper.listed("Grand.ne5p");
+        let library = keeper.library.as_mut().unwrap();
+        let at = RelPath::new("Grand.ne5p").unwrap();
+        let (made, entity) = library.intent("Link").create(|e| {
+            e.adopt(&at, expect);
+        });
+        let made = stored
+            .into_iter()
+            .fold(made, |made, member| made.add_stored(entity, LINKS, member));
+        nord_usb::block_on(made.commit()).unwrap();
+
+        keeper.run_one(Cmd::Intent(Intent::Link {
+            files: vec![Relink {
+                file: Key::Entity(entity),
+                on: vec![(keyboard("A1"), Some(link("A1", 3)))],
+            }],
+        }));
+        let view = keeper.library.as_ref().unwrap().view();
+        let held = view.folded().members(entity, LINKS.name());
+        let mut kept = vec![raw(&link("A1", 3)), raw(&link("B2", 4))];
+        kept.sort();
+        assert_eq!(held, kept);
+    }
+
+    #[test]
+    fn a_file_whose_link_cannot_be_written_is_left_out_and_the_others_are_written() {
+        use crate::link::{Held, Keyboard, Print};
+        use nord_usb::ObjectClass;
+
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&root);
+        let link = Link {
+            keyboard: Keyboard {
+                model: "Nord Electro 5".into(),
+                serial: None,
+            },
+            held: Held::new(
+                ObjectClass::Program,
+                nord_usb::Location { bank: 0, slot: 1 },
+                "",
+                Print { crc: 1, len: 121 },
+            ),
+        };
+        let on = vec![(link.keyboard.clone(), Some(link.clone()))];
+        let answers = keeper.run_one(Cmd::Intent(Intent::Link {
+            files: ["Gone.ne5p", "Grand.ne5p"]
+                .map(|name| Relink {
+                    file: Key::File(path(name)),
+                    on: on.clone(),
+                })
+                .into(),
+        }));
+        let unlinked: Vec<&Event> = answers
+            .iter()
+            .filter(|event| matches!(event, Event::Unlinked(_)))
+            .collect();
+        assert_eq!(unlinked.len(), 1, "{answers:?}");
+        let view = keeper.library.as_ref().unwrap().view();
+        let grand = view.at(&RelPath::new("Grand.ne5p").unwrap()).unwrap().id();
+        let held = view.folded().members(grand, LINKS.name());
+        assert_eq!(held, [toshokan::Raw::of(&link).unwrap()]);
     }
 
     /// A save to the path of a tagged file deleted outside drawbar writes that entity's

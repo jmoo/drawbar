@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use toshokan::{EntityId, FileState, RelPath, View};
 
-use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
+use super::keys::{Came, LINKS, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::{Key, LibPath, Stat};
+use crate::link::{Keyboard, Link};
 
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Shown {
@@ -24,6 +25,8 @@ pub struct Shown {
     pub came: BTreeMap<EntityId, Came>,
     /// The tags each entity wears.
     pub worn: BTreeMap<EntityId, BTreeSet<String>>,
+    /// The links of each entity that has any: one per keyboard, in order.
+    pub links: BTreeMap<EntityId, Vec<Link>>,
     /// The library's list of tags.
     pub names: BTreeSet<String>,
     /// The lists older drawbars kept that the library took in, by their hashes.
@@ -38,6 +41,7 @@ pub struct Showing {
     lost: Option<LibPath>,
     came: Option<Came>,
     worn: Option<BTreeSet<String>>,
+    links: Option<Vec<Link>>,
 }
 
 /// What an answer's view changed of what the app shows.
@@ -125,6 +129,7 @@ impl Shown {
             self.lost.remove(&entity);
             self.came.remove(&entity);
             self.worn.remove(&entity);
+            self.links.remove(&entity);
         }
     }
 
@@ -135,6 +140,7 @@ impl Shown {
             lost,
             came,
             worn,
+            links,
         } = showing;
         if let Some(entity) = key.entity() {
             if let Some(lost) = lost {
@@ -145,6 +151,9 @@ impl Shown {
             }
             if let Some(worn) = worn {
                 self.worn.insert(entity, worn);
+            }
+            if let Some(links) = links {
+                self.links.insert(entity, links);
             }
         }
         if let Some(other) = other {
@@ -181,15 +190,17 @@ impl Showing {
         }
         showing.came = toshokan::Field::shown(&shown.get(ORIGIN)).copied();
         let joined = view.joined().iter().filter(|joined| joined.into == entity);
-        let joined = joined.filter_map(|joined| view.entity(joined.entity));
+        let joined: Vec<_> = joined
+            .filter_map(|joined| view.entity(joined.entity))
+            .collect();
+        let holders = || std::iter::once(&shown).chain(&joined);
         let (mut worn, mut unreadable) = (BTreeSet::new(), false);
-        for members in std::iter::once(shown)
-            .chain(joined)
-            .map(|e| e.members(TAGS))
-        {
+        for members in holders().map(|e| e.members(TAGS)) {
             unreadable |= !members.unreadable.is_empty();
             worn.extend(members.values);
         }
+        let links = one_per_keyboard(holders().flat_map(|e| e.members(LINKS).values));
+        showing.links = (!links.is_empty()).then_some(links);
         let tagged = !worn.is_empty() || unreadable;
         if !worn.is_empty() {
             showing.worn = Some(worn);
@@ -271,6 +282,33 @@ fn values(view: &View, key: toshokan::Set<String>) -> BTreeSet<String> {
     listed.map(|(value, _)| value).collect()
 }
 
+/// One link per keyboard, in order: of those writers left apart, the latest
+/// ([`later`]).
+fn one_per_keyboard(links: impl Iterator<Item = Link>) -> Vec<Link> {
+    let sorted: BTreeSet<Link> = links.collect();
+    let mut by_keyboard: BTreeMap<Keyboard, Link> = BTreeMap::new();
+    for link in sorted {
+        match by_keyboard.get(&link.keyboard) {
+            Some(held) if later(held, &link) => {}
+            _ => {
+                by_keyboard.insert(link.keyboard.clone(), link);
+            }
+        }
+    }
+    by_keyboard.into_values().collect()
+}
+
+/// Whether `a` is the later of two links on one keyboard: a link over a keep-off, the
+/// one whose slot knew the other's base, or else the greater.
+fn later(a: &Link, b: &Link) -> bool {
+    match (&a.held, &b.held) {
+        (Some(a), Some(b)) if a.knew(b.base.crc) != b.knew(a.base.crc) => a.knew(b.base.crc),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => a > b,
+    }
+}
+
 /// `path` as drawbar shows it: none with a name that starts with a dot.
 fn visible(path: &RelPath) -> Option<LibPath> {
     let path = LibPath::parse(path.as_str())?;
@@ -287,6 +325,37 @@ mod tests {
 
     use super::*;
     use crate::store::keys;
+
+    /// Of two links two writers left on one keyboard, the one whose slot knew the other's
+    /// base is the later, whichever orders first, and any link is later than a keep-off.
+    #[test]
+    fn of_two_links_on_one_keyboard_the_later_shows() {
+        use crate::link::{Held, Print};
+        use nord_usb::ObjectClass;
+
+        let keyboard = Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: None,
+        };
+        let at = |slot, base| {
+            let at = nord_usb::Location { bank: 0, slot };
+            Held::new(ObjectClass::Program, at, "", base)
+        };
+        let older = at(6, Print { crc: 9, len: 121 }).unwrap();
+        let newer = at(1, older.base)
+            .unwrap()
+            .agreed(Print { crc: 2, len: 121 }, "");
+        let link = |held: Option<&Held>| Link {
+            keyboard: keyboard.clone(),
+            held: held.cloned(),
+        };
+        let (older, newer, off) = (link(Some(&older)), link(Some(&newer)), link(None));
+        assert!(newer < older, "the order alone would show the older");
+        let shown = |links: [&Link; 2]| one_per_keyboard(links.into_iter().cloned());
+        assert_eq!(shown([&older, &newer]), std::slice::from_ref(&newer));
+        assert_eq!(shown([&newer, &older]), std::slice::from_ref(&newer));
+        assert_eq!(shown([&off, &older]), [older]);
+    }
 
     /// Until a change joins them, the file two drawbars each tagged before either saw the
     /// other's tag shows the tags of both, and the entity joined into its own shows nothing.

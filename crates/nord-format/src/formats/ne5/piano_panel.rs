@@ -30,10 +30,10 @@ pub struct PianoPanel {
     /// resolve the song → program → piano chain; [`category`](Self::category) and
     /// [`piano_model`](Self::piano_model) are positions.
     ///
-    /// The instrument reports the same id for this program in a USB `DEPENDENCIES`
-    /// reply, so a file on disk can be matched to the library content it needs. The reply
-    /// also carries the piano's name, which the file does not, so resolving an id to a
-    /// name needs the device or a bundle manifest.
+    /// The id is the [`library_id`](crate::components::library_id) of the piano's name,
+    /// so a piano file is matched by hashing the name it is written under. The file does
+    /// not store the name. Where the id is `0`, the instrument plays the piano at the
+    /// dials' position. Confirmed on hardware.
     #[bits(22..=53)]
     pub id: PianoRef,
 }
