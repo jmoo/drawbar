@@ -1,6 +1,6 @@
 # Community
 
-## Clavia's own software
+## Official software
 
 [Nord Sound Manager](https://www.nordkeyboards.com/software-tools/nord-sound-manager)
 is Clavia's app for the keyboard's memory. Use it to make a full backup of the
@@ -28,23 +28,24 @@ uses its MIT-licensed tables to find settings in those files.
 
 ### Prepare recordings
 
-StageLoop by LiveKeyTools is a free, closed-source sample editor for macOS
-and Windows. It trims and normalizes recordings, finds loops and crossfades,
-and maps samples to root keys and zones. It exports a Nord Sample Editor
-project that you can [open in drawbar](drawbar/samples.md#open-an-existing-project).
-[StageLoop](https://livekeytools.com/stageloop).
+[StageLoop](https://livekeytools.com/stageloop) by LiveKeyTools is a free,
+closed-source sample editor for macOS and Windows. It trims and normalizes
+recordings, finds loops and crossfades, and maps samples to root keys and zones.
+It exports a Nord Sample Editor project that you can
+[open in drawbar](drawbar/samples.md#open-an-existing-project).
 
 ### Learn about the formats
 
-Christian Florentz's Nord documentation maps Stage 2, Stage 3 and Lead A1
-program files by comparing saves after changing one control at a time. It was
-the first public decode of the Stage 2 and 3 formats. drawbar uses these
-BSD-3-Clause maps for its Stage 2 and 3 settings.
-[Read the documentation](https://chris55.github.io/nord-documentation/) · [Source and license](https://github.com/Chris55/nord-documentation).
+[Nord documentation](https://chris55.github.io/nord-documentation/) by
+Christian Florentz maps Stage 2, Stage 3 and Lead A1 program files by comparing
+saves after changing one control at a time. It was the first public decode of
+the Stage 2 and 3 formats. drawbar uses these BSD-3-Clause maps for its Stage 2
+and 3 settings. [Source and license](https://github.com/Chris55/nord-documentation).
 
 ---
 
 ## Add your project
 
-If you maintain a project that works with Nord files or instruments, you can
-suggest it by opening a pull request against this page.
+If you maintain a project that works with Nord files or instruments, suggest it
+with a [pull request against this page](https://github.com/jmoo/drawbar/edit/master/docs/src/community.md).
+If you don't use GitHub, send it through the [feedback form](feedback.md).
