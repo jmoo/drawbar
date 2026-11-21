@@ -7,7 +7,7 @@
 | Sending is unavailable or a transfer stopped | [Review the send queue](sending.md#sending) |
 | I can't find my sounds, tags or unsaved edits | [Recover files and edits](recovery.md) |
 | My project says WAVs are missing | [Find the project's audio](samples.md#open-an-existing-project) |
-| I want to try the demo again | [Play your first sound](overview.md) |
+| I want to try the demo again | [Try it without a keyboard](overview.md#try-it-without-a-keyboard) |
 
 ## The activity log
 
