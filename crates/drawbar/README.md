@@ -13,14 +13,11 @@ nix run github:jmoo/drawbar#drawbar
 cargo install drawbar
 ```
 
-On Windows, download it from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases).
-On Linux, download the AppImage from the same release; see
-[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop).
-
-On a Mac with Apple silicon, download the disk image from the same release; see
-[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop) for the first
-open.
+Or download it for [Windows](https://drawbar.app/download/windows),
+[macOS](https://drawbar.app/download/macos) or
+[Linux](https://drawbar.app/download/linux);
+[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop)
+says what each needs.
 
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a

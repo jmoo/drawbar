@@ -32,7 +32,12 @@ nix run github:jmoo/drawbar#drawbar              # the desktop app
 nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 ```
 
-Windows builds of both are attached to their [releases](https://github.com/jmoo/drawbar/releases).
+Download drawbar for [Windows](https://drawbar.app/download/windows),
+[macOS](https://drawbar.app/download/macos) or
+[Linux](https://drawbar.app/download/linux), and `nord` for
+[Windows](https://drawbar.app/download/nord-windows) or Linux
+([x86-64](https://drawbar.app/download/nord-linux-x86_64),
+[ARM64](https://drawbar.app/download/nord-linux-aarch64)).
 
 The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and
