@@ -1,77 +1,76 @@
-# Install
+# Open or install drawbar
+
+[Browser](#in-the-browser) · [Windows](#windows) · [macOS](#macos) ·
+[Linux](#linux) · [The `nord` command](#the-nord-command)
 
 ## In the browser
 
-Open [drawbar.app](https://drawbar.app/). Nothing to install. Your library is
-kept in the browser's storage for the site, which the browser can delete. You can
-[keep a copy](../drawbar/this-computer.md#keeping-a-copy-in-the-browser), or
-[open a folder](../drawbar/this-computer.md#opening-another-folder) on your
-computer instead.
+[Open drawbar](https://drawbar.app/) and choose **Start with a demo** to hear
+a sound right away. Files you import stay in this browser's library. If you
+want to keep your work when you clear browser data or change computers,
+[export a backup](../drawbar/backup.md#keeping-a-copy-in-the-browser).
 
-Files work in any browser. [What is supported](support.md) says which browsers
-can connect to an instrument or hear a MIDI controller.
+Use the [browser comparison](support.md#the-library-in-the-browser) if you want
+to connect a keyboard by USB, play a MIDI controller or open a folder on disk.
 
 ## On the desktop
 
-On Windows, download `drawbar-<version>-x86_64-windows.exe` from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases)
-and run it. It is not signed, so Windows may ask before running it the first
-time.
+Each download below is the latest release. Earlier versions are on the
+[drawbar releases](https://github.com/jmoo/drawbar/releases?q=drawbar-v) page.
 
-On a Mac with Apple silicon and macOS 14 or later, download
-`drawbar-<version>-aarch64-macos.dmg` from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases), open it, and drag
-drawbar to Applications.
+### Windows
 
-On Linux with glibc 2.39 or later, such as Ubuntu 24.04, Debian 13 or Fedora 40,
-download `drawbar-<version>-x86_64-linux.AppImage` from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases), make it executable,
-and run it:
+<a class="button primary" href="https://drawbar.app/download/windows">Download for Windows</a>
+
+Run the downloaded file. The app is unsigned, so Windows may ask before opening
+it for the first time.
+
+### macOS
+
+<a class="button primary" href="https://drawbar.app/download/macos">Download for macOS</a>
+
+For a Mac with Apple silicon running macOS 14 or later. Open the disk image,
+drag **drawbar** into **Applications**, then open it there.
+
+### Linux
+
+<a class="button primary" href="https://drawbar.app/download/linux">Download for Linux</a>
+
+For 64-bit Intel or AMD Linux with glibc 2.39 or later, such as Ubuntu 24.04 or
+Debian 13. In the folder where you downloaded the AppImage, run:
 
 ```sh
 chmod +x drawbar-*-x86_64-linux.AppImage
 ./drawbar-*-x86_64-linux.AppImage
 ```
 
-If it says FUSE is missing, add `--appimage-extract-and-run` to the second line.
-To reach an instrument, Linux also needs [a udev rule](#connecting-on-linux).
+If it reports that FUSE is missing, add `--appimage-extract-and-run` to the
+second command. To connect a keyboard, also [allow USB access](#connecting-on-linux).
 
-Elsewhere, with [Nix](https://nixos.org/download/) and flakes enabled:
-
-```sh
-nix run github:jmoo/drawbar#drawbar
-```
-
-Or build it with Cargo. On Linux this needs the ALSA headers and `pkg-config`.
-
-```sh
-cargo install drawbar
-```
+With Nix and flakes enabled, you can run the desktop app with
+`nix run github:jmoo/drawbar#drawbar`. With Cargo, use `cargo install drawbar`
+(Linux also needs the ALSA headers and `pkg-config`).
+[Build from a checkout](../reference/building.md).
 
 ## The `nord` command
 
-On Linux, download `nord-<version>-x86_64-linux.tar.gz`, or
-`nord-<version>-aarch64-linux.tar.gz` on ARM, from the newest
-[nord-cli release](https://github.com/jmoo/drawbar/releases), unpack it, and put
-`nord` in a folder on your `PATH`. It is statically linked, so it needs no other
-libraries. To reach an instrument, Linux also needs
-[a udev rule](#connecting-on-linux).
+<a class="button" href="https://drawbar.app/download/nord-windows">nord for Windows</a>
+<a class="button" href="https://drawbar.app/download/nord-linux-x86_64">nord for Linux x86-64</a>
+<a class="button" href="https://drawbar.app/download/nord-linux-aarch64">nord for Linux ARM64</a>
 
-On Windows, download `nord-<version>-x86_64-windows.exe` from the same release,
-rename it to `nord.exe`, and put it in a folder on your `PATH`.
+On Windows, rename the download `nord.exe` and put it in a directory on your
+`PATH`. On Linux, choose the archive for your processor, unpack it, and put
+`nord` on your `PATH`. Earlier versions are on the
+[nord-cli releases](https://github.com/jmoo/drawbar/releases?q=nord-cli-v) page.
 
-```sh
-cargo install nord-cli                           # installs `nord`
-nix run github:jmoo/drawbar#nord-cli -- --help   # or run it with Nix
-```
-
-To build either from a source checkout, see
-[Building from source](../reference/building.md).
+With Rust installed, use `cargo install nord-cli`. With Nix and flakes enabled,
+try `nix run github:jmoo/drawbar#nord-cli -- --help`. Once installed, follow
+[Start with the nord command](../nord-cli/overview.md).
 
 ## Connecting on Linux
 
-Linux lets drawbar and `nord` open an instrument only once a udev rule allows it.
-This rule allows whoever is signed in at the computer:
+Linux needs a USB permission rule for drawbar and `nord` to reach an instrument.
+Run these commands once to give access to the user signed in at the computer:
 
 ```sh
 echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0ffc", TAG+="uaccess"' |
@@ -79,18 +78,17 @@ echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0ffc", TAG+="uaccess"' |
 sudo udevadm control --reload
 ```
 
-Then unplug the instrument and plug it in again.
+Unplug the instrument, plug it back in, then [connect in drawbar](../drawbar/instrument.md#connecting).
 
 ## If drawbar does not load
 
-The loading page says which step failed and offers to try again. The usual
-causes:
+The loading page says which step failed and offers to try again.
 
-- The connection dropped, or the download stopped partway. Reload the page.
-- The browser lacks WebAssembly or WebGL2, which drawbar needs. Every current
-  browser has both. If the page says WebGL isn't supported, turn on hardware
-  acceleration in the browser's settings and restart the browser.
-- The browser is too old to keep drawbar's library, and the page says so before
-  downloading anything. [What is supported](support.md#the-library-in-the-browser)
-  says which browsers can.
-- An extension or a content blocker stopped drawbar. Allow this site and reload.
+- **A file could not be downloaded.** Reload the page. If an extension or a
+  content blocker stopped it, allow drawbar.app and reload.
+- **drawbar arrived but could not start.** drawbar needs WebAssembly and WebGL2,
+  which every current browser has. If the page asks for hardware acceleration,
+  turn it on in the browser's settings and restart the browser.
+- **The browser cannot keep drawbar's library.** The page says so before
+  downloading anything. Use a recent browser or the desktop app.
+  [Supported browsers](support.md#the-library-in-the-browser).

@@ -105,6 +105,7 @@
                     src = lib.fileset.toSource {
                       fileset = lib.fileset.unions [
                         ./crates/drawbar/telemetry.json
+                        ./docs/feedback.js
                         ./docs/src/privacy.md
                         ./js/telemetry
                       ];
