@@ -69,12 +69,17 @@ pub use app::DrawbarApp;
 /// the window's app id. eframe names the directory after the app id when one is set.
 pub const APP: &str = "drawbar";
 
-/// Start the app on `canvas`. Called from `index.html` after the wasm module loads.
-#[cfg(target_arch = "wasm32")]
+/// Start the app on `canvas`, with `worker` the URL of the glue of the module the
+/// library's workers run. Called from `index.html` after the wasm module loads.
+#[cfg(all(target_arch = "wasm32", feature = "page"))]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), wasm_bindgen::JsValue> {
+pub async fn start(
+    canvas: web_sys::HtmlCanvasElement,
+    worker: String,
+) -> Result<(), wasm_bindgen::JsValue> {
     let runner = eframe::WebRunner::new();
     telemetry::install();
+    store::Worker::served_by(worker);
     runner
         .start(
             canvas,

@@ -480,6 +480,7 @@
       );
 
       const WASM = "./pkg/drawbar_bg.wasm";
+      const WORKER = "./pkg/drawbar_worker.js";
       const MB = 1024 * 1024;
 
       const FOOTAGE = ["16", "5⅓", "8", "4", "2⅔", "2", "1⅗", "1⅓", "1"];
@@ -700,7 +701,8 @@
         );
         show("starting");
         await init({ module_or_path: module });
-        await start(document.getElementById("drawbar"));
+        const worker = new URL(WORKER, location.href).href;
+        await start(document.getElementById("drawbar"), worker);
         splash.remove();
       } catch (e) {
         const compiling =

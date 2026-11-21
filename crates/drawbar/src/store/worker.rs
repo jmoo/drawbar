@@ -1,8 +1,9 @@
 //! The dedicated worker that keeps a library in the browser, and the page's side of it.
 //!
-//! The page starts the worker from [`BOOTSTRAP`] with the URL of the bundle's glue, the
-//! compiled module and the library. [`serve`] answers `{ready}`, `{failed}`, or
-//! `{failed, outdated}` where the glue would not import. Then:
+//! The page starts the worker from [`BOOTSTRAP`] with the URL of the glue of the module
+//! that serves it, that module where it is the page's own, and the library. [`serve`]
+//! answers `{ready}`, `{failed}`, or `{failed, outdated}` where the glue would not
+//! import. Then:
 //!
 //! - A command `{id, text, attached}` ([`wire::Message`]) is answered by
 //!   `{id, text, attached}` holding every answer it gave, in order, or by `{id, failed}`.
@@ -15,7 +16,7 @@
 //! Started for rescues, the worker keeps no library and serves [`RescueIo`] on one
 //! directory of the origin private file system, which only a worker can write in place.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::rc::Rc;
@@ -44,7 +45,7 @@ use super::wire::{self, Attachment, Message};
 use super::{storage, Cmd, Event};
 use crate::js::{describe, field};
 
-/// The worker's whole script: it loads the page's bundle and hands over to it. A
+/// The worker's whole script: it loads the bundle the page names and hands over to it. A
 /// task's worker ([`crate::work::hand`]) starts from it too.
 pub(crate) const BOOTSTRAP: &str = r#"
 const stopped = (why) => self.postMessage({ failed: String(why?.message ?? why) });
@@ -74,9 +75,22 @@ extern "C" {
     static GLUE: String;
 }
 
-/// The URL of the glue this code was bound by.
-pub(crate) fn glue() -> String {
-    GLUE.with(String::clone)
+thread_local! {
+    /// The URL of the glue of the module that serves the page's workers, as the page
+    /// named it.
+    static SERVED_BY: OnceCell<String> = const { OnceCell::new() };
+}
+
+/// The bundle a worker loads, as its first message names it: this module where it
+/// serves workers, or else the glue the page named, which loads its own module.
+pub(crate) fn bundle() -> Result<[(&'static str, JsValue); 2], String> {
+    if cfg!(feature = "worker") {
+        let glue = GLUE.with(String::clone).into();
+        return Ok([("glue", glue), ("module", wasm_bindgen::module())]);
+    }
+    let glue = SERVED_BY.with(|at| at.get().cloned());
+    let glue = glue.ok_or("the page named no module for drawbar's workers")?;
+    Ok([("glue", glue.into()), ("module", JsValue::UNDEFINED)])
 }
 
 /// What a worker is started for, as its failures name it.
@@ -181,6 +195,14 @@ impl Replies {
 }
 
 impl Worker {
+    /// Have workers load the module whose glue is at `glue`, where this module does not
+    /// serve them itself. The first call holds.
+    pub fn served_by(glue: String) {
+        SERVED_BY.with(|at| {
+            let _ = at.set(glue);
+        });
+    }
+
     /// Start the worker that keeps the library in `folder`, with this install's own state
     /// for it at `local` in the origin private file system, and wait until it is ready.
     pub async fn start(folder: Folder, local: &RelPath) -> Result<Worker, String> {
@@ -194,23 +216,26 @@ impl Worker {
             ("rename", rename.into()),
             ("local", local.as_str().into()),
         ];
-        let glue = GLUE.with(String::clone);
-        let started = Worker::spawn(Role::Library, &glue, &start).await;
+        let started = Worker::spawn(Role::Library, &bundle()?, &start).await;
         started.map_err(|e| e.to_string())
     }
 
     /// Start a worker that writes rescues in `dir` of the origin private file system,
-    /// and wait until it is ready. It fails with [`super::Outdated`] where the page's
-    /// bundle cannot be loaded again.
+    /// and wait until it is ready. It fails with [`super::Outdated`] where the workers'
+    /// bundle cannot be loaded.
     pub async fn rescues(dir: &RelPath) -> io::Result<Worker> {
-        Worker::rescues_from(dir, &GLUE.with(String::clone)).await
+        Worker::rescues_with(dir, &bundle().map_err(io::Error::other)?).await
     }
 
     /// [`Worker::rescues`], loading the bundle's glue from `glue`.
     #[doc(hidden)]
     pub async fn rescues_from(dir: &RelPath, glue: &str) -> io::Result<Worker> {
+        Worker::rescues_with(dir, &[("glue", glue.into())]).await
+    }
+
+    async fn rescues_with(dir: &RelPath, bundle: &[(&str, JsValue)]) -> io::Result<Worker> {
         let start = [("kind", "rescues".into()), ("folder", dir.as_str().into())];
-        Worker::spawn(Role::Rescues, glue, &start).await
+        Worker::spawn(Role::Rescues, bundle, &start).await
     }
 
     /// Do `io` in the directory of a worker started by [`Worker::rescues`].
@@ -222,9 +247,12 @@ impl Worker {
         from_js(&reply).and_then(wire::decode::<Result<bool, String>>)?
     }
 
-    /// Start the worker, with `start` beside the bundle, whose glue is at `glue`, in its
-    /// first message.
-    async fn spawn(role: Role, glue: &str, start: &[(&str, JsValue)]) -> io::Result<Worker> {
+    /// Start the worker, with `start` beside `bundle` in its first message.
+    async fn spawn(
+        role: Role,
+        bundle: &[(&str, JsValue)],
+        start: &[(&str, JsValue)],
+    ) -> io::Result<Worker> {
         let js = |e: JsValue| io::Error::other(js(e));
         let parts = Array::of1(&JsValue::from_str(BOOTSTRAP));
         let kind = BlobPropertyBag::new();
@@ -275,11 +303,7 @@ impl Worker {
         worker.set_onerror(Some(fail.as_ref().unchecked_ref()));
         worker.set_onmessageerror(Some(fail.as_ref().unchecked_ref()));
 
-        let bundle = [
-            ("glue", JsValue::from_str(glue)),
-            ("module", wasm_bindgen::module()),
-        ];
-        let start = object(&[&bundle[..], start].concat());
+        let start = object(&[bundle, start].concat());
         let posted = worker.post_message(&start);
         let worker = Worker {
             worker,
@@ -402,7 +426,8 @@ impl Drop for Worker {
 
 /// The worker's entry point. The script [`Worker::start`] runs in the worker calls it
 /// with the page's first message, once the bundle is instantiated.
-#[wasm_bindgen(js_name = drawbarWorker)]
+#[cfg_attr(feature = "worker", wasm_bindgen(js_name = drawbarWorker))]
+#[cfg_attr(not(feature = "worker"), allow(dead_code))]
 pub async fn serve(start: JsValue) {
     if field(&start, "kind")
         .and_then(|kind| kind.as_string())
