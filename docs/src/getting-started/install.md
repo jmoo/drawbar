@@ -1,5 +1,8 @@
 # Open or install drawbar
 
+[Browser](#in-the-browser) · [Windows](#windows) · [macOS](#macos) ·
+[Linux](#linux) · [The `nord` command](#the-nord-command)
+
 ## In the browser
 
 [Open drawbar](https://drawbar.app/) and choose **Start with a demo** to hear
@@ -12,25 +15,29 @@ to connect a keyboard by USB, play a MIDI controller or open a folder on disk.
 
 ## On the desktop
 
-Find the latest release whose name begins with **drawbar-v** and open its
-**Assets** list. Choose the download for your computer. [drawbar releases](https://github.com/jmoo/drawbar/releases?q=drawbar-v).
+Each download below is the latest release. Earlier versions are on the
+[drawbar releases](https://github.com/jmoo/drawbar/releases?q=drawbar-v) page.
 
 ### Windows
 
-Download the file ending in `-x86_64-windows.exe` and run it. The app is
-unsigned, so Windows may ask before opening it for the first time.
+<a class="button primary" href="https://drawbar.app/download/windows">Download for Windows</a>
+
+Run the downloaded file. The app is unsigned, so Windows may ask before opening
+it for the first time.
 
 ### macOS
 
-On a Mac with Apple silicon running macOS 14 or later, download the file ending
-in `-aarch64-macos.dmg`. Open the disk image, drag **drawbar** into
-**Applications**, then open it there.
+<a class="button primary" href="https://drawbar.app/download/macos">Download for macOS</a>
+
+For a Mac with Apple silicon running macOS 14 or later. Open the disk image,
+drag **drawbar** into **Applications**, then open it there.
 
 ### Linux
 
-On 64-bit Intel or AMD Linux with glibc 2.39 or later (such as Ubuntu 24.04 or
-Debian 13), download the file ending in `-x86_64-linux.AppImage`. In the folder
-where you downloaded it, run:
+<a class="button primary" href="https://drawbar.app/download/linux">Download for Linux</a>
+
+For 64-bit Intel or AMD Linux with glibc 2.39 or later, such as Ubuntu 24.04 or
+Debian 13. In the folder where you downloaded the AppImage, run:
 
 ```sh
 chmod +x drawbar-*-x86_64-linux.AppImage
@@ -47,11 +54,14 @@ With Nix and flakes enabled, you can run the desktop app with
 
 ## The `nord` command
 
-For a terminal, use the latest **nord-cli-v** release. On Linux, download the
-`nord` archive ending in `-x86_64-linux.tar.gz` or `-aarch64-linux.tar.gz`
-for your processor. Unpack it and put `nord` in a directory on your `PATH`.
-On Windows, download the file ending in `-x86_64-windows.exe`, rename it
-`nord.exe`, and put it on your `PATH`. [nord-cli releases](https://github.com/jmoo/drawbar/releases?q=nord-cli-v).
+<a class="button" href="https://drawbar.app/download/nord-windows">nord for Windows</a>
+<a class="button" href="https://drawbar.app/download/nord-linux-x86_64">nord for Linux x86-64</a>
+<a class="button" href="https://drawbar.app/download/nord-linux-aarch64">nord for Linux ARM64</a>
+
+On Windows, rename the download `nord.exe` and put it in a directory on your
+`PATH`. On Linux, choose the archive for your processor, unpack it, and put
+`nord` on your `PATH`. Earlier versions are on the
+[nord-cli releases](https://github.com/jmoo/drawbar/releases?q=nord-cli-v) page.
 
 With Rust installed, use `cargo install nord-cli`. With Nix and flakes enabled,
 try `nix run github:jmoo/drawbar#nord-cli -- --help`. Once installed, follow

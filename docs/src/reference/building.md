@@ -14,6 +14,9 @@ nix build .#docs                  # this guide
 `nix run .#drawbar-web` serves on <http://127.0.0.1:8080/>. Set `DRAWBAR_PORT`
 for another port. `scripts/site.bash` assembles the tree drawbar.app deploys: the
 layout of `nix build .#site`, with the app taken from the latest `drawbar-v*` tag.
+The site's `download/<name>` pages redirect to the release files
+`scripts/assets.tsv` lists, at the latest `drawbar-v*` and `nord-cli-v*` versions;
+`nix build .#site` uses this checkout's versions instead.
 
 ## Checks
 
