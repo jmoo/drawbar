@@ -1,4 +1,4 @@
-# Edit a program or set list
+# Edit a program
 
 A *program* remembers a playable setup, such as a piano and organ split with
 effects. A *song* in a set list remembers which programs you want to call up.
@@ -6,7 +6,7 @@ Changing the order of programs in a song leaves the programs themselves alone.
 
 ## Try a program change
 
-1. Import a program file, or [copy one from your keyboard](instrument.md#copy-a-sound-to-this-computer).
+1. Import a program file, or [copy one from your keyboard](sending.md#copy-a-sound-to-this-computer).
    Double-click the file under **This computer**.
 2. In **Basic**, choose a section at the top to jump to its controls. Try
    dragging a knob up to increase its value, or double-click it to type a
@@ -14,7 +14,7 @@ Changing the order of programs in a song leaves the programs themselves alone.
 3. To keep the new version as a separate file, use **Export…** in the document
    header. To change the library copy, choose **File ▸ Save**. **Revert**
    discards the unsaved edits and returns to the last save.
-4. To hear the edited program on the keyboard, [send it to a slot](instrument.md#sending),
+4. To hear the edited program on the keyboard, [send it to a slot](sending.md#sending),
    then load that slot. **Load on instrument** plays whatever is already stored
    there.
 
@@ -43,25 +43,6 @@ setting toward a second value. Three dots mark a control with a morph. Pick
 the source in the inspector's **Morph** card and set its target value. Choose
 **Panel** or **Back to the panel** when you're ready to edit the starting value
 again.
-
-## Set lists
-
-Double-click a song to see its four program entries in playing order. Drag a
-row to move it earlier or later in the song. To choose a different program,
-enter its bank and slot as shown on the keyboard.
-
-Check the **State** column before rehearsal. An unread bank means drawbar
-hasn't seen what's there yet. A message such as **no program at 1:2** means it
-has checked and the slot is empty. Connect the instrument to see program
-names and check references. To carry a song *and* the sounds it plays to
-another computer, [export a bundle](this-computer.md#bundles).
-
-## Notes
-
-Choose **New ▸ Text note** for lyrics, cues or a set list you just want to
-read. Type, save and tag the note like any other library file. You can also
-open plain text such as a `.txt` or `.md` file up to 256 KiB. Notes stay on
-the computer.
 
 ## The document header
 

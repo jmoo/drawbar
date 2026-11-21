@@ -13,7 +13,7 @@ opening a demo piano and finding your way around. [Open drawbar in your browser]
 |---|---|
 | Set up the desktop app or find out if my keyboard works | [Install drawbar](getting-started/install.md) · [What is supported](getting-started/support.md) |
 | Find my sounds again before rehearsal | [Use folders, tags and search](drawbar/organize.md) |
-| Keep a backup or use my sounds on another computer | [Back up or move a library](drawbar/this-computer.md) |
+| Keep a backup or use my sounds on another computer | [Back up or move a library](drawbar/backup.md) |
 | Copy a sound from my keyboard or put one back | [Connect and transfer](drawbar/instrument.md) |
 | Change a patch or rearrange a song | [Edit programs and set lists](drawbar/editing.md) |
 | Play my own recordings on the keys | [Make a sample instrument](drawbar/samples.md) · [Build a piano from a take](drawbar/recording.md) |

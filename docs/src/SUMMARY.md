@@ -1,32 +1,38 @@
 # Summary
 
-[drawbar user guide](introduction.md)
+[drawbar](introduction.md)
 
 # Getting started
 
-- [Play your first sound](drawbar/overview.md)
-- [Open or install drawbar](getting-started/install.md)
+- [Install](getting-started/install.md)
 - [What is supported](getting-started/support.md)
+- [The window](drawbar/overview.md)
 
-# Using drawbar
+# drawbar
 
-- [Organize your sounds](drawbar/organize.md)
-- [Back up or move your library](drawbar/this-computer.md)
-- [Copy and send sounds over USB](drawbar/instrument.md)
-- [Edit a program or set list](drawbar/editing.md)
-- [Make a sample instrument](drawbar/samples.md)
-- [Trim or build a piano](drawbar/pianos.md)
-- [Make a piano from a recording](drawbar/recording.md)
-- [Recover files and edits](drawbar/recovery.md)
-- [Get help](drawbar/help.md)
+- [Library](drawbar/organize.md)
+  - [Folders and sync](drawbar/folders.md)
+  - [Back up](drawbar/backup.md)
+  - [Bundles](drawbar/bundles.md)
+  - [Recover](drawbar/recovery.md)
+- [Instrument](drawbar/instrument.md)
+  - [Copy and send](drawbar/sending.md)
+- [Editing](drawbar/editing.md)
+  - [Set lists and notes](drawbar/setlists.md)
+- [Building sounds](drawbar/building.md)
+  - [Samples](drawbar/samples.md)
+  - [Pianos](drawbar/pianos.md)
+  - [From a recording](drawbar/recording.md)
+- [Help](drawbar/help.md)
+  - [Shortcuts](drawbar/shortcuts.md)
 
-# Using nord-cli
+# nord
 
-- [Start with the nord command](nord-cli/overview.md)
-- [Inspect files and unpack bundles](nord-cli/files.md)
-- [Edit a file or slot](nord-cli/editing.md)
-- [Work with an instrument](nord-cli/instrument.md)
-- [Work with samples and pianos](nord-cli/libraries.md)
+- [Overview](nord-cli/overview.md)
+- [Files](nord-cli/files.md)
+- [Editing](nord-cli/editing.md)
+- [Instrument](nord-cli/instrument.md)
+- [Samples and pianos](nord-cli/libraries.md)
 
 # Reference
 

@@ -56,7 +56,7 @@ a large one.
 In Safari, seven days of Safari use without a visit to drawbar.app can clear
 the site's library, unless drawbar.app is added to the Home Screen. The Home
 Screen app has storage of its own. Other browsers may clear site data when space is low unless they have
-granted persistent storage. [Back up the library or move it to another browser](../drawbar/this-computer.md#keeping-a-copy-in-the-browser).
+granted persistent storage. [Back up the library or move it to another browser](../drawbar/backup.md#keeping-a-copy-in-the-browser).
 
 ## MIDI controllers
 

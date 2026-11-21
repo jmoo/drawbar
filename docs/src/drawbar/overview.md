@@ -41,7 +41,7 @@ switches between the system, light and dark themes.
 On a Mac, the desktop app's menus are in the system menu bar. On Windows,
 they're at the left of the top bar. On Linux and in a browser, open **☰**.
 The menus show the shortcuts for your platform, and
-[Keyboard shortcuts](help.md#keyboard-shortcuts) lists them.
+[Keyboard shortcuts](shortcuts.md) lists them.
 
 ## MIDI controllers
 

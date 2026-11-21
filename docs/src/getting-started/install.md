@@ -5,7 +5,7 @@
 [Open drawbar](https://drawbar.app/) and choose **Start with a demo** to hear
 a sound right away. Files you import stay in this browser's library. If you
 want to keep your work when you clear browser data or change computers,
-[export a backup](../drawbar/this-computer.md#keeping-a-copy-in-the-browser).
+[export a backup](../drawbar/backup.md#keeping-a-copy-in-the-browser).
 
 Use the [browser comparison](support.md#the-library-in-the-browser) if you want
 to connect a keyboard by USB, play a MIDI controller or open a folder on disk.
