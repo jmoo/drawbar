@@ -4,7 +4,7 @@ drawbar manages the sounds on your Nord keyboard. Copy them to your computer,
 keep them organized and backed up, edit programs and set lists, and build new
 samples and pianos from your own recordings.
 
-![drawbar with an instrument attached and a piano library open in its editor](assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](assets/screenshot.png)
 
 drawbar runs in your browser or as a desktop app.
 

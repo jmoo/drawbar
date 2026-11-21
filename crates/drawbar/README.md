@@ -4,7 +4,7 @@
 instrument side by side, edit programs, samples and pianos, and send them back.
 Runs in the browser or on the desktop.
 
-![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](../../docs/src/assets/screenshot.png)
 
 Open [drawbar.app](https://drawbar.app/), or run the desktop app:
 
