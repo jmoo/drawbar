@@ -66,13 +66,27 @@ pub fn peek(reader: &mut (impl Read + Seek)) -> Result<Peek, Error> {
     let start = reader.stream_position()?;
     let result = (|| {
         let mut head = [0u8; 1];
-        reader.read_exact(&mut head)?;
+        reader.read_exact(&mut head).map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => ParseError::Empty.into(),
+            _ => Error::from(e),
+        })?;
         reader.seek(SeekFrom::Start(start))?;
 
         match head[0] {
-            // 'P': a ZIP local-file header, checked in full so a stray P (or a bare
-            // central directory) is not called an archive.
-            0x50 => expect_magic(reader, b"PK\x03\x04", FileType::Zip),
+            // 'P': a ZIP local-file header, or the end record an archive of no members
+            // starts with, checked in full so a stray P (or a bare central directory) is
+            // not called an archive.
+            0x50 => {
+                let mut head = [0u8; 4];
+                reader.read_exact(&mut head)?;
+                match &head {
+                    b"PK\x03\x04" | b"PK\x05\x06" => Ok(unknown(FileType::Zip)),
+                    _ => Err(ParseError::UnknownFormat(
+                        String::from_utf8_lossy(&head).into_owned(),
+                    )
+                    .into()),
+                }
+            }
 
             0x3c => Ok(unknown(FileType::Xml)),
 
@@ -142,12 +156,22 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_file_is_refused_as_empty() {
+        let refused = peek(&mut Cursor::new(Vec::new()))
+            .err()
+            .expect("nothing to peek");
+        assert_eq!(refused.to_string(), "the file is empty");
+    }
+
+    #[test]
     fn the_non_cbin_magics_classify() {
         for (bytes, want) in [
             (&b"\xf0\x33\x0f\x04\xf7\0\0\0\0\0\0\0\0"[..], "sysex"),
             (&b"MThd\0\0\0\x06\0\0\0\0\0"[..], "midi"),
             (&b"CNE3\x2c\x01\0\0\0\0\0\0\0"[..], "cne3"),
             (&b"SMACEditorProject {\n}\n"[..], "nsmpproj"),
+            (&b"PK\x03\x04"[..], "zip"),
+            (&b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"[..], "zip"),
         ] {
             let mut reader = Cursor::new(bytes.to_vec());
             let peeked = peek(&mut reader).unwrap();

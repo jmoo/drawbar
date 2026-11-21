@@ -28,20 +28,21 @@ impl Bundle {
         Self::default()
     }
 
-    /// Reads a stored ZIP of the shape [`crate::bundle::archive`] accepts, checking every
-    /// member's bytes against its entry. A member that does not decode is skipped, not
-    /// refused.
+    /// Reads a stored ZIP of the shape [`crate::bundle::archive`] accepts, with a manifest
+    /// [`manifest::check`] accepts, checking every member's bytes against its entry. A
+    /// member that does not decode is skipped, not refused.
     pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Bundle, Error> {
         let mut bundle = Bundle::new();
         let directory = Directory::read_from(reader)?;
+        manifest::check(reader, &directory)?;
 
         for member in &directory.members {
             let name = member.entry.name.clone();
-            let mut buffer = try_with_capacity(member.entry.size as usize, "bytes")?;
-            copy_member(reader, member, &mut buffer)?;
             if name == manifest::PATH {
                 continue;
             }
+            let mut buffer = try_with_capacity(member.entry.size as usize, "bytes")?;
+            copy_member(reader, member, &mut buffer)?;
             let mut cursor = std::io::Cursor::new(buffer);
 
             match from_stream(&mut cursor) {
