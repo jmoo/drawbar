@@ -457,7 +457,7 @@ mod tests {
     fn a_strike_just_before_a_marked_hit_is_found() {
         let audio = two_strikes();
         let mono = nord_format::take::plan::mono(&audio);
-        let options = nord_format::take::plan::PlanOptions::new(Vec::new(), 4);
+        let options = nord_format::take::plan::PlanOptions::new(Vec::new(), None);
         let found = nord_format::take::plan::plan(&mono, RATE, &options);
         let regions: Vec<_> = (found.regions().iter())
             .map(|r| take::mark(&r.label, r.start..r.start + r.frames))

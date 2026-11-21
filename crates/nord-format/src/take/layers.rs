@@ -230,16 +230,22 @@ pub enum Choice {
     Replaced { by: usize },
 }
 
+/// The most layers a note gets, whatever is asked: [`v6_values`] names each a value
+/// from 0 to 100, and two layers of one value would clash in the build.
+pub const MOST_LAYERS: usize = 101;
+
 /// What becomes of each of `group`, one note's hits in playing order, as `layers`
-/// layers chosen by `order`. Hits within `min_gap_db` of a louder one kept are
-/// duplicates.
-pub fn pick(group: &[&Hit], layers: usize, order: Order, min_gap_db: f64) -> Vec<Choice> {
+/// layers at most chosen by `order`, or with no most as many as it has hits, up to
+/// [`MOST_LAYERS`]. By loudness, hits within `min_gap_db` of a louder one kept are
+/// duplicates; in playing order, every hit counts.
+pub fn pick(group: &[&Hit], layers: Option<usize>, order: Order, min_gap_db: f64) -> Vec<Choice> {
     let mut choices = vec![Choice::Extra; group.len()];
     match order {
         Order::Played => {
             let mut by_number: Vec<usize> = (0..group.len()).collect();
             by_number.sort_by_key(|&i| group[i].number);
-            for (layer, &i) in by_number.iter().take(layers).enumerate() {
+            let most = layers.unwrap_or(group.len()).min(MOST_LAYERS);
+            for (layer, &i) in by_number.iter().take(most).enumerate() {
                 choices[i] = Choice::Layer(layer);
             }
         }
@@ -257,6 +263,7 @@ pub fn pick(group: &[&Hit], layers: usize, order: Order, min_gap_db: f64) -> Vec
                     _ => kept.push(i),
                 }
             }
+            let layers = layers.unwrap_or(kept.len()).min(MOST_LAYERS);
             if kept.len() > layers && layers > 0 {
                 let (top, bottom) = (
                     group[kept[0]].level_db,
@@ -317,9 +324,13 @@ pub enum Placed {
 /// has each note's neighbors to go by. Sorted by pitch they make no playing line, so no
 /// octave is moved: each file keeps the octave its pitch was read in. A note's files are
 /// its hits, and its layers are chosen from them by level as [`pick`] chooses a take's:
-/// `layers` at most, files within `min_gap_db` of a louder one kept being duplicates, as
-/// round-robins of one dynamic often are.
-pub fn place(struck: &[Option<Hit>], layers: usize, min_gap_db: f64) -> Vec<Option<Placed>> {
+/// `layers` at most, or every one with no most, files within `min_gap_db` of a louder
+/// one kept being duplicates, as round-robins of one dynamic often are.
+pub fn place(
+    struck: &[Option<Hit>],
+    layers: Option<usize>,
+    min_gap_db: f64,
+) -> Vec<Option<Placed>> {
     let mut placed: Vec<Option<Placed>> = vec![None; struck.len()];
     let mut sorted: Vec<Hit> = Vec::new();
     for (i, hit) in struck.iter().enumerate() {
@@ -511,7 +522,7 @@ mod tests {
         let notes = |pitches: &[f64]| -> Vec<u8> {
             let struck: Vec<Option<Hit>> =
                 pitches.iter().map(|&p| Some(hit(0, -10.0, p))).collect();
-            place(&struck, 4, 1.0)
+            place(&struck, Some(4), 1.0)
                 .into_iter()
                 .map(|p| match p {
                     Some(Placed::Layer { note, .. }) => note,
@@ -572,13 +583,50 @@ mod tests {
             .map(|(i, &l)| hit(i + 1, l, 60.0))
             .collect();
         let group: Vec<&Hit> = hits.iter().collect();
-        let choices = pick(&group, 3, Order::Loudness, 2.0);
+        let choices = pick(&group, Some(3), Order::Loudness, 2.0);
         assert_eq!(choices[0], Choice::Layer(0));
         assert_eq!(choices[1], Choice::Duplicate { of: 1 });
         assert_eq!(choices[3], Choice::Layer(1));
         assert_eq!(choices[5], Choice::Layer(2));
         assert_eq!(choices[2], Choice::Extra);
         assert_eq!(choices[4], Choice::Extra);
+    }
+
+    #[test]
+    fn with_no_most_every_hit_is_a_layer() {
+        let hits: Vec<Hit> = (0..6)
+            .map(|i| hit(i + 1, -10.0 - 4.0 * i as f64, 60.0))
+            .collect();
+        let group: Vec<&Hit> = hits.iter().collect();
+        let layers = |choices: Vec<Choice>| {
+            choices
+                .iter()
+                .filter(|c| matches!(c, Choice::Layer(_)))
+                .count()
+        };
+        assert_eq!(layers(pick(&group, None, Order::Loudness, 1.0)), 6);
+        assert_eq!(layers(pick(&group, None, Order::Played, 1.0)), 6);
+        assert_eq!(layers(pick(&group, Some(4), Order::Loudness, 1.0)), 4);
+        let near: Vec<Hit> = [-10.0, -10.5, -20.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| hit(i + 1, l, 60.0))
+            .collect();
+        let group: Vec<&Hit> = near.iter().collect();
+        assert_eq!(
+            layers(pick(&group, None, Order::Loudness, 1.0)),
+            2,
+            "a hit within the gap of a louder one is still a duplicate"
+        );
+        let many: Vec<Hit> = (0..120)
+            .map(|i| hit(i + 1, -0.1 * i as f64, 60.0))
+            .collect();
+        let group: Vec<&Hit> = many.iter().collect();
+        assert_eq!(
+            layers(pick(&group, None, Order::Loudness, 0.0)),
+            MOST_LAYERS,
+            "no more layers than values to name them"
+        );
     }
 
     #[test]
@@ -589,7 +637,7 @@ mod tests {
             hit(2, -10.0, 60.0),
         ];
         let group: Vec<&Hit> = hits.iter().collect();
-        let choices = pick(&group, 2, Order::Played, 2.0);
+        let choices = pick(&group, Some(2), Order::Played, 2.0);
         assert_eq!(choices, [Choice::Extra, Choice::Layer(0), Choice::Layer(1)]);
     }
 
@@ -614,7 +662,7 @@ mod tests {
             Some(hit(0, -20.5, 60.0)),
             Some(no_pitch),
         ];
-        let placed = place(&struck, 4, 2.0);
+        let placed = place(&struck, Some(4), 2.0);
         assert_eq!(
             placed,
             [
@@ -646,7 +694,7 @@ mod tests {
     fn a_set_s_stretched_top_notes_keep_their_names() {
         let pitches = [96.62, 84.3, 88.4, 92.5, 100.75, 80.15];
         let struck: Vec<Option<Hit>> = pitches.iter().map(|&p| Some(hit(0, -10.0, p))).collect();
-        let notes: Vec<u8> = place(&struck, 4, 2.0)
+        let notes: Vec<u8> = place(&struck, Some(4), 2.0)
             .into_iter()
             .map(|p| match p {
                 Some(Placed::Layer { note, .. }) => note,
