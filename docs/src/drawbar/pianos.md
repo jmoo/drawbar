@@ -32,7 +32,7 @@ each segment a recorded note, or *root*. Click a segment to drop that layer
 for just that root. The velocity ranges shown assume the program's **KBD
 Touch** is at 0. The on-screen piano and MIDI preview play the loudest layer
 you've kept for each key. Test the full playing dynamics on your instrument.
-[Send the piano to the keyboard](instrument.md#sending).
+[Send the piano to the keyboard](sending.md#sending).
 
 ## Change how the piano plays
 
@@ -64,7 +64,7 @@ together with WAVs of one stroke each.
    its loop holds steady. For a piano, leave the box clear so the sound fades
    as you hold the key.
 4. Choose **Create**, then try keys on the map and inspect the roots. To use
-   the finished library on the keyboard, [choose a destination and review the send](instrument.md#sending).
+   the finished library on the keyboard, [choose a destination and review the send](sending.md#sending).
 
 A loop marked in an attack WAV repeats while you hold the key. Audio beyond
 the loop end is left out. A release recording plays when you lift the key,

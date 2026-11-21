@@ -44,7 +44,7 @@ privacy questions, contact John Moore at [contact@drawbar.app](mailto:contact@dr
   libraries from drawbar 0.10 and earlier it can also hold sounds, folders and
   tags, and a record of which files and drafts were brought into a library.
 
-Clearing browser storage can delete your work. [Keep a copy of your library](drawbar/this-computer.md#keeping-a-copy-in-the-browser).
+Clearing browser storage can delete your work. [Keep a copy of your library](drawbar/backup.md#keeping-a-copy-in-the-browser).
 
 ## Fields in an anonymous count
 

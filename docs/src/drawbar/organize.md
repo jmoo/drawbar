@@ -13,7 +13,7 @@ wherever you filed them.
 3. Choose **New ▸ Text note** for cues. Type your note, choose **File ▸ Save**,
    and move it into the folder with the sounds.
 
-Already have the files arranged in a folder? [Open the folder as your library](this-computer.md#opening-another-folder)
+Already have the files arranged in a folder? [Open the folder as your library](folders.md#opening-another-folder)
 to work on them where they are. **New** also offers blank sounds by instrument
 family. Some start with every control at zero.
 
@@ -62,4 +62,4 @@ quitting empties that trash.
 
 Choose **Export…** in an open document to save a separate copy. To export
 several, select their rows on this computer and choose **File ▸ Export…**.
-For a song or program that needs other sounds to play, [export a bundle](this-computer.md#bundles).
+For a song or program that needs other sounds to play, [export a bundle](bundles.md).

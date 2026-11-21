@@ -23,7 +23,7 @@ note you recorded, where the instrument plays the sample at its original pitch.
    trigger that zone.
 5. Choose **Build → .nsmp** at the top. The finished sample instrument opens
    in its own tab. Click keys on either side of a zone boundary to hear where
-   the sound changes. [Send the built instrument](instrument.md#sending) when
+   the sound changes. [Send the built instrument](sending.md#sending) when
    you're ready.
 
 The build uses the project and WAVs as they are in drawbar, including unsaved
@@ -39,7 +39,7 @@ after setting the roots.
 Use **File ▸ Open folder…** to open the folder that contains the project and
 its source audio. Pick a common parent folder if the audio lives alongside the project folder.
 This preserves the paths the project uses to find its WAVs.
-[Opening a library folder](this-computer.md#opening-another-folder).
+[Opening a library folder](folders.md#opening-another-folder).
 
 If the build button says **WAVs missing**, hover over it to see the filenames
 and reasons. Check the **Source file** path in each affected zone. It should

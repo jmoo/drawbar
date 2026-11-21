@@ -3,7 +3,7 @@
 drawbar keeps This computer as a folder of real files, so the folder can be
 synced. This page describes what is stored where, how a change is made, and how
 drawbar stays in step with sync and with other programs. What a user sees of it
-is on [Back up or move your library](../drawbar/this-computer.md) and
+is on [Back up or move your library](../drawbar/backup.md) and
 [Recover files and edits](../drawbar/recovery.md).
 
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
@@ -28,7 +28,7 @@ the bytes.
 | Recent picked folders | | IndexedDB, as folder handles |
 
 On the desktop the default library is `library` in drawbar's data folder; the
-paths are on [Back up or move your library](../drawbar/this-computer.md#where-your-library-lives).
+paths are on [Back up or move your library](../drawbar/backup.md#where-your-library-lives).
 In the browser it is the root of the origin private file system. A preference is
 never kept in a library, and a library is never kept in preferences.
 

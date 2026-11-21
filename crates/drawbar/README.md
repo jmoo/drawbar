@@ -43,7 +43,7 @@ open.
   change something, and you can undo what you change while it is open.
 - Keep the library in Dropbox, OneDrive, iCloud Drive or on a network share, and
   use it from every computer that syncs it; see
-  [Back up or move your library](../../docs/src/drawbar/this-computer.md#opening-another-folder).
+  [Open a folder or share it between computers](../../docs/src/drawbar/folders.md#opening-another-folder).
 
 Connecting an instrument from the browser needs Chrome, Edge or Brave.
 

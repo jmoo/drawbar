@@ -21,3 +21,7 @@ preferred-dark-theme = "coal"
 # Turns ```mermaid blocks into <pre class="mermaid">, which mermaid-init.js draws.
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
+
+# Pages that moved, for links made before the move.
+[output.html.redirect]
+"/drawbar/this-computer.html" = "backup.html"
