@@ -16,10 +16,10 @@ cargo install drawbar
 On Windows, download it from the newest
 [drawbar release](https://github.com/jmoo/drawbar/releases).
 On Linux, download the AppImage from the same release; see
-[Install](../../docs/src/getting-started/install.md#on-the-desktop).
+[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop).
 
 On a Mac with Apple silicon, download the disk image from the same release; see
-[Install](../../docs/src/getting-started/install.md#on-the-desktop) for the first
+[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop) for the first
 open.
 
 - Drop Nord files in, or connect an instrument and read what it holds.
@@ -43,11 +43,11 @@ open.
   change something, and you can undo what you change while it is open.
 - Keep the library in Dropbox, OneDrive, iCloud Drive or on a network share, and
   use it from every computer that syncs it; see
-  [Your files](../../docs/src/drawbar/this-computer.md#opening-another-folder).
+  [Back up or move your library](../../docs/src/drawbar/this-computer.md#opening-another-folder).
 
 Connecting an instrument from the browser needs Chrome, Edge or Brave.
 
-Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
+Start with [Play your first sound](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before
 trusting alpha software with sounds you cannot re-create.
 [Building from source](../../docs/src/reference/building.md) covers a checkout.

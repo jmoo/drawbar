@@ -1,13 +1,9 @@
-# Recorded takes
+# Takes
 
-A take is a WAV containing one or more recorded strikes. Preparation identifies
-each hit and marks its attack, loop or fade, and release. Building turns the
-marked regions into strokes in a piano library.
-
-The app's **Detect** works at the WAV's sample rate. The CLI's `nord piano prep`
-resamples first, so their cuts can differ by a few frames on the same recording.
-For the workflow, see [the WAV editor](../drawbar/recording.md) or
-[the prep and build commands](../nord-cli/libraries.md#building-from-a-recorded-take).
+How `nord piano prep` reads a recorded take, and how `nord piano build` turns a
+take's regions into strokes. [Make a piano from a recording](../drawbar/recording.md)
+and [Work with samples and pianos](../nord-cli/libraries.md#building-from-a-recorded-take)
+say how to use them.
 
 ## Finding the strokes
 
@@ -19,25 +15,20 @@ note's hits within `--min-layer-gap` dB of a louder one are dropped, and the res
 spread evenly in dB. With `--order played`, the first hits played are kept, the
 first the loudest.
 
-For a continuous take, the noise floor is the tenth percentile of the levels of
-its 10 ms frames. A single-note file often contains too little silence for that
-measure. For each file in a directory of one-note recordings, `prep` instead looks for a
-half-second rest after the loudest frame. It selects the qualifying interval
-with the lowest median level. A candidate must meet all of these conditions:
-
-- Its halves differ by at most 1 dB.
-- It lies at least 10 dB below the loudest frame.
-- Most of the interval contains a signal above digital silence.
-- No later half-window is more than 6 dB quieter.
-- The interval passes a pitch check. It is rejected as a continuing note if
-  most of the first four harmonics below the Nyquist frequency peak more than
-  6 dB above their neighboring bands.
-
-Only the loudest hit counts. If the file starts at the strike, it can start with
-a hit 15 dB above the rest. Without a measurable rest, the file skips the
-signal-to-noise cutoff and builds without noise cleaning. A file of steady
-noise alone can therefore be mistaken for a held note. Files written by
-`prep` record which floor measurement the build should use.
+A take's floor is the level a tenth of its 10 ms frames are under. A one-note file of
+a folder holds its note for most of its length, so its floor is read on its rest
+instead: of the half seconds after its loudest frame, the quietest by median whose
+halves lie within 1 dB of each other, at least 10 dB under the loudest, mostly not
+digital silence, and with nothing 6 dB quieter after it, so a fade, zero padding, a
+slow decay or a plateau of the release is not taken for it. Nor is a half second that
+still sounds the note: most of the note's first four harmonics peaking 6 dB over the
+bands beside them, as a slow tail cut before it reaches the hiss does and hiss does
+not. Only its loudest hit counts, and it starts with a hit where it is cut at the
+strike, standing 15 dB over its rest where it has one. A file with no rest has no
+floor to read: it is not held to the too-quiet limit, and the build finds no noise in
+it and builds it as recorded. A file of noise alone is as level as a held note, so it
+is taken for one. `prep` notes in each file it writes that its floor is read this
+way, and the build reads its noise the same way before cleaning it.
 
 A folder's hits are sorted by pitch before their notes are named, so a stretched
 note has its neighbors to go by. Each keeps the octave its pitch was read in.
@@ -59,7 +50,8 @@ its start, and the listing warns where the match is under 0.5.
 
 A note that dies into the floor before its key-up, and would finish fading before
 it, gets a fade region instead. The fade starts where the note came within 20 dB of
-the floor, and the attack ends where the fade reaches silence. This keeps background noise at the tail of a note out of the loop.
+the floor, and the attack ends where the fade reaches silence. A loop in the noise of
+a dying note clicked, so a dying note is never looped.
 
 ## Regions
 
@@ -115,3 +107,22 @@ root's loudest attack.
 
 A format 5 library, or one built against a template, plays each stroke's audio at
 its own level, so nothing is raised.
+
+## Layers, trims and loops
+
+In format 6, layers named `l00`, `l01`, … step 20 apart, spanning at least 0 to 50
+and at most 0 to 100, and format 5 uses a fifth of each value.
+
+A format 6 library trims in tenths of a decibel and can also boost a stroke, by up
+to about 10.8 dB together with the instrument gain. A format 5 library trims in
+whole decibels and cannot boost. Without a template, format 6 plays softer layers a
+little louder as the kind's own pianos have them, up to 6 dB for a Wurlitzer. When
+a soft layer or release needs more boost than the instrument gives at its gain, the
+whole library is turned down to fit, but a release from a take just plays quieter.
+A format 5 library, like one built on a template, trims each attack and resonance
+stroke 3 dB more than its layer's value states, and each release stroke 12 dB.
+
+Audio after a loop's end is not used, and the loop's last four samples are replaced
+by the four just before its start, which a seamless loop already has. A loop is
+exact in a WAV at 35,002 Hz. At any other rate its ends move to the nearest frame of
+the resampled audio.

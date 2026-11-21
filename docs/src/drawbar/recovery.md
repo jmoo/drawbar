@@ -55,7 +55,7 @@ temporary.
 | No permission to write | Restore write access, then choose the folder in **File ▸ Open recent**. |
 | A newer drawbar wrote the library | Open it with a current version of drawbar. |
 | A network or USB drive cannot save reliably | Copy the whole folder to a local disk and open the copy. |
-| Too many windows or tabs | Close another window using that library, then reopen the library. |
+| Too many windows or tabs | One library opens in at most 16 windows or tabs. Close another window using that library, then reopen the library. |
 | The library stopped answering | Read the list of recent edits that reopening would lose. When ready, reopen from the prompt or **File ▸ Open recent**. |
 | A browser gives drawbar no storage | Export your files before closing. Use a regular browser window or the desktop app for a lasting library. Without storage, drawbar can send only to empty slots. |
 
@@ -76,8 +76,9 @@ library. **Discard** deletes the recovery copy.
 ## Kept apart
 
 **Kept apart** in the sidebar means drawbar found changes it couldn't apply to
-the shared library. This can happen after restoring a backup or while a sync is
-still bringing files over. Let sync finish first. Changes that were waiting for
+the shared library. This can happen after restoring a backup, while a sync is
+still bringing files over, or when drawbar's own data was copied to a second
+computer or a virtual machine and both copies went on making changes. Let sync finish first. Changes that were waiting for
 earlier ones can then appear on their own.
 
 Open **Kept apart** to see who made each group of changes, when, and which
@@ -94,7 +95,8 @@ taken or left to wait.
 
 drawbar brings files, folders, tags and drafts from version 0.10 and earlier
 into the first library it can write. The activity log tells you how many sounds
-came in. Names get a number if necessary. Look under **View ▸ Show hidden
+came in. **Edit ▸ Undo** does not take this back, so delete the sounds you
+don't want. Names get a number if necessary. Look under **View ▸ Show hidden
 files** for unrecognized files or notes with unusual extensions. If storage
 was full, a draft may appear as a separate file beside its sound.
 

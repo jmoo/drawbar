@@ -54,8 +54,9 @@ files, **Show them** lets you inspect them before you decide.
 **Edit ▸ Undo** names the last library change you can take back. A move, save,
 deletion or tag change affecting several files is one step. **Edit ▸ Redo**
 repeats it. For an edit you haven't saved yet, choose **Revert** in the open
-document. Undo lasts for this window's session with the library. The oldest
-steps can expire when its trash fills.
+document. Undo lasts for this window's session with the library. Deleted and
+overwritten files are kept for Undo up to 1 GiB, the oldest going first, and
+quitting empties that trash.
 
 ## Export files for someone else
 
