@@ -138,23 +138,17 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
         hash.update(&(text.len() as u64).to_le_bytes());
         hash.update(text.as_bytes());
     }
-    let at: BTreeMap<u64, usize> = folders
-        .named
-        .iter()
-        .enumerate()
-        .map(|(at, (id, _))| (*id, at))
-        .collect();
+    let at = folders.named.iter().enumerate();
+    let at: BTreeMap<u64, usize> = at.map(|(at, (id, _))| (*id, at)).collect();
     // A later membership moves the asset, as it did when the list was read back.
     let held: BTreeMap<u64, u64> = folders.members.iter().copied().collect();
     let named: BTreeMap<u64, &String> = tags.named.iter().map(|(id, name)| (*id, name)).collect();
     let assets = assets.into_iter().map(|(id, asset)| {
         let worn = tags.members.iter().filter(|(asset, _)| *asset == id);
+        let worn = worn.filter_map(|(_, tag)| named.get(tag));
         Asset {
             folder: held.get(&id).and_then(|folder| at.get(folder).copied()),
-            tags: worn
-                .filter_map(|(_, tag)| named.get(tag))
-                .map(|name| (*name).clone())
-                .collect(),
+            tags: worn.map(|name| (*name).clone()).collect(),
             ..asset
         }
     });

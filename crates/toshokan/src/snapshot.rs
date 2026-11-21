@@ -27,6 +27,10 @@ pub struct Snapshot {
     pub head: Own,
     pub certified: Certified,
     pub state: Contribution,
+    /// The folded `bind` entries whose file writes `state` holds: binding pins, which
+    /// no user made, as the entries themselves are gone. A read keeps only those that
+    /// made a `pin` write `state` holds.
+    pub binds: BTreeSet<EntryHash>,
     /// Members this build does not know, kept.
     pub unknown: BTreeMap<String, Raw>,
 }
@@ -87,7 +91,7 @@ pub struct NotSnapshot {
     pub cut: bool,
 }
 
-const KNOWN: [&str; 8] = [
+const KNOWN: [&str; 9] = [
     "writer",
     "label",
     "at",
@@ -96,6 +100,7 @@ const KNOWN: [&str; 8] = [
     "head",
     "certified",
     "state",
+    "binds",
 ];
 
 #[derive(Serialize)]
@@ -108,6 +113,8 @@ struct Written<'a> {
     head: EntryHash,
     certified: &'a Certified,
     state: &'a Contribution,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    binds: &'a BTreeSet<EntryHash>,
     #[serde(flatten)]
     unknown: BTreeMap<&'a str, &'a Raw>,
 }
@@ -141,7 +148,8 @@ impl Snapshot {
             take("certified")?,
             take("state")?,
         );
-        let snapshot = Self {
+        let binds = members.remove("binds");
+        let mut snapshot = Self {
             writer: member("writer", &writer)?,
             label: member("label", &label)?,
             at: member("at", &at)?,
@@ -152,9 +160,15 @@ impl Snapshot {
             },
             certified: member("certified", &certified)?,
             state: member("state", &state)?,
+            binds: binds
+                .map(|binds| member("binds", &binds))
+                .transpose()?
+                .unwrap_or_default(),
             unknown: members,
         };
         snapshot.check().map_err(|reason| refuse(reason.into()))?;
+        let pins = snapshot.state.pinned_by();
+        snapshot.binds.retain(|hash| pins.contains(hash));
         Ok(snapshot)
     }
 
@@ -189,6 +203,7 @@ impl Snapshot {
             head: self.head.hash,
             certified: &self.certified,
             state: &self.state,
+            binds: &self.binds,
             unknown,
         })
         .expect("a snapshot is JSON")
@@ -231,6 +246,32 @@ mod tests {
         }
     }
 
+    /// A write of a file register made by entry `n`, a binding's `pin` where `pin`.
+    fn file_write(n: u64, pin: bool) -> crate::contribution::Held {
+        use crate::contribution::{Held, Value};
+        Held {
+            at: own(n),
+            stamp: Hlc {
+                wall_ms: n,
+                counter: 0,
+            },
+            value: Value::File {
+                fact: Some(crate::log::FileFact {
+                    path: crate::path::RelPath::new("a.syx").unwrap(),
+                    identity: crate::ids::Identity::from_u128(1),
+                    len: 1,
+                    modified: None,
+                }),
+                pin,
+            },
+            first: 1,
+        }
+    }
+
+    fn file(entity: u128) -> crate::contribution::FieldKey {
+        crate::contribution::FieldKey::File(crate::ids::EntityId::from_u128(entity))
+    }
+
     fn snapshot() -> Snapshot {
         Snapshot {
             writer: WriterId::from_u128(1),
@@ -250,6 +291,7 @@ mod tests {
                 hashes: [own(7)].into(),
             },
             state: Contribution::default(),
+            binds: BTreeSet::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -263,6 +305,43 @@ mod tests {
         let read = Snapshot::decode(&written.encode()).unwrap();
         assert_eq!(read, written);
         assert_eq!(read.encode(), written.encode());
+    }
+
+    #[test]
+    fn a_snapshot_writes_binding_pins_only_where_it_holds_some() {
+        let none = String::from_utf8(snapshot().encode()).unwrap();
+        assert!(!none.contains("binds"), "{none}");
+        let mut pinned = snapshot();
+        pinned.state.own = [
+            (file(1), file_write(7, true)),
+            (file(2), file_write(3, true)),
+        ]
+        .into();
+        pinned.binds = [own(7).hash, own(3).hash].into();
+        pinned
+            .unknown
+            .insert("later".into(), Raw::new("[1]").unwrap());
+        let read = Snapshot::decode(&pinned.encode()).unwrap();
+        assert_eq!(read, pinned);
+        let earlier = Snapshot::decode(none.as_bytes()).unwrap();
+        assert_eq!(
+            earlier.binds,
+            BTreeSet::new(),
+            "an earlier build wrote none"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_reads_as_binding_pins_only_entries_of_pin_writes_it_holds() {
+        let mut written = snapshot();
+        written.state.own = [
+            (file(1), file_write(7, true)),
+            (file(2), file_write(4, false)),
+        ]
+        .into();
+        written.binds = [own(7).hash, own(4).hash, hash(999)].into();
+        let read = Snapshot::decode(&written.encode()).unwrap();
+        assert_eq!(read.binds, [own(7).hash].into());
     }
 
     #[test]

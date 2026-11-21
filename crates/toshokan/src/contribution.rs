@@ -167,6 +167,18 @@ pub struct Contribution {
     pub later: BTreeMap<String, Raw>,
 }
 
+impl Contribution {
+    /// The entries that made the `pin` writes the contribution holds.
+    pub fn pinned_by(&self) -> BTreeSet<EntryHash> {
+        let pin = |held: &&Held| matches!(held.value, Value::File { pin: true, .. });
+        self.own
+            .values()
+            .filter(pin)
+            .map(|held| held.at.hash)
+            .collect()
+    }
+}
+
 /// The writes, references and takes one op makes, with what else it says.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Said {

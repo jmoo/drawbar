@@ -43,10 +43,8 @@ const CLASSES: [(ObjectClass, u32); 9] = [
 
 /// The code the library keeps for `class`; none for a partition no class names.
 pub fn class_code(class: ObjectClass) -> Option<u32> {
-    let mut known = CLASSES.iter();
-    known
-        .find(|(held, _)| *held == class)
-        .map(|&(_, code)| code)
+    let mut known = CLASSES.into_iter();
+    known.find_map(|(held, code)| (held == class).then_some(code))
 }
 
 /// The class `code` is the code of; a code a newer build gave reads as unknown.
@@ -198,7 +196,7 @@ pub fn layout() -> Layout {
 /// How the volume a library is on compares names: ignoring case where a look at
 /// the volume says it does, and in one normalization form on macOS, whose volumes
 /// take two spellings of an accent for one name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Volume {
     pub folds_case: bool,
     pub folds_form: bool,

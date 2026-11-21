@@ -14,11 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Bindings, Fact, Facts, Scan, Unscanned, Walk};
+use crate::binding::{self, Bindings, Fact, Facts, Scan, Scanned, Unscanned, Walk};
 use crate::contribution;
 use crate::derive::{self, Placed};
-use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
-use crate::env::Env;
+use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, SeenStaged};
+use crate::env::{Env, Names};
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
@@ -29,7 +29,7 @@ use crate::log::{
     Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Ref, Settle,
     Settlement,
 };
-use crate::merge::{side_by_side, Folded, Part};
+use crate::merge::{side_by_side, Folded, Part, Shift, Since};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records};
 use crate::plan::{FactChange, FileChange, Plan};
@@ -37,19 +37,23 @@ use crate::reader::{ReadReport, Reader, Stamp};
 use crate::recovery::{self, Recovery, Resumed, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
-    Local, Mode, Opened, Orphan, Outcome, PathChange, Presence, Refreshed, Rekey, ScanReport,
-    Settled, Start, TrashItem, What, WriterInfo,
+    Local, Mode, Opened, Orphan, Outcome, Presence, Refreshed, Rekey, ScanReport, Settled, Start,
+    TrashItem, What, WriterInfo,
 };
+use crate::rows::{self, Carried, FileId, FileIds, Merges, RowState, Rows};
 use crate::schema::Schema;
 use crate::trash;
 use crate::undo::{self, Before, Entering, History};
-use crate::view::{FileRef, FileState, Listed, Parts, View};
+use crate::view::{FileRef, FileState, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
 pub struct Library {
     layout: Layout,
     schema: Schema,
+    /// Its names forward to `names`.
     env: Env,
+    /// The volume's names, shared with the scans that compare names while they run.
+    names: Rc<dyn Names>,
     /// The folder's.
     capabilities: Capabilities,
     mode: Mode,
@@ -87,9 +91,30 @@ pub struct Library {
     facts: Facts,
     /// The last scan; before the first, the identities `remembered` keeps.
     scan: Scan,
-    /// Each file the last scan listed, as the views show it; `None` until a scan of
-    /// every file has run.
-    listing: Option<Arc<BTreeMap<RelPath, Listed>>>,
+    /// Whether a scan of every file has run, so the views list the last scan.
+    listed: bool,
+    /// The rows the views show, as the last look derived them.
+    rows: Arc<Rows>,
+    /// The binding those rows followed and what was unknown, once a look listed.
+    followed: Option<(Arc<Bindings>, Unscanned)>,
+    /// What this instance's own effects did to the rows since that look.
+    carried: Carried,
+    /// Whether the rows lag the scan, the binding or what is unknown.
+    rows_due: bool,
+    ids: FileIds,
+    /// The rows the latest look merged, and the looks after it.
+    merges: Arc<Merges>,
+    /// Every writer seen, in the order first seen.
+    table: Arc<[WriterId]>,
+    /// The writers whose directories this install's local root holds, as the last
+    /// look at it found them: retired ones and those of other windows.
+    installed: BTreeSet<WriterId>,
+    /// Each file this instance's effects wrote or moved since the operation began,
+    /// with its row.
+    wrote_files: Vec<(RelPath, FileId)>,
+    /// Each file of those its effects put in place rather than only moved, as
+    /// found once written.
+    wrote: Vec<FileFact>,
     /// The directories the last scan of every file could not list, and the files
     /// whose identities it could not read.
     unlisted: Vec<RelPath>,
@@ -103,8 +128,22 @@ pub struct Library {
     unkept: bool,
     /// What a failed scan left unknown, until a scan of every file succeeds.
     unscanned: Unscanned,
-    /// The paths whose file facts a read changed, unknown until a scan lists them.
+    /// The paths whose file facts a read changed, and those this instance's own
+    /// effects moved files from and to, unknown until a scan lists them.
     unrelisted: BTreeSet<RelPath>,
+    /// Each path other writers' entries or snapshots read since the last scan say they
+    /// left a file at, with where the scan before held that file if they moved it
+    /// there: its identity is read once, at the next scan, where it lists the path at
+    /// the length and time held there.
+    owed: BTreeMap<RelPath, Option<RelPath>>,
+    /// The paths another writer's entries left a file at that a scan found at the
+    /// length and time the scan before held, those where a refused commit found other
+    /// than the scan held, and those another file replaced where a commit put its own,
+    /// until a report takes them.
+    rewritten: BTreeSet<RelPath>,
+    /// The writes the merged state lost while it showed them, as their entries
+    /// stopped being read, so that their return is no one's change either.
+    away: Arc<BTreeSet<Ref>>,
     /// A scan of every file that stopped before it finished, to go on with.
     walking: Option<Walk>,
     /// Bound from `facts`, `scan` and `unscanned` unless a binding is due.
@@ -204,12 +243,13 @@ impl Library {
                 (library, report, start)
             })
             .and_then(|(library, report, start)| {
-                flow::run(library.presence_task()).and_then(move |presence| {
+                flow::run(library.presence_task()).and_then(move |pool| {
                     let mut library = library;
+                    library.take_pool(pool);
                     for orphan in &mut library.orphaned {
-                        orphan.live = presence.get(&orphan.writer) == Some(&Presence::SameMachine);
+                        let presence = library.presence.get(&orphan.writer);
+                        orphan.live = presence == Some(&Presence::SameMachine);
                     }
-                    library.presence = presence;
                     library.show();
                     ok((library, report, start))
                 })
@@ -252,10 +292,27 @@ impl Library {
         writer: Option<Writer>,
         remembered: Scan,
     ) -> Self {
+        let Env {
+            clock,
+            random,
+            identify,
+            names,
+            label,
+        } = env;
+        let names: Rc<dyn Names> = names.into();
+        let mut env = Env {
+            clock,
+            random,
+            identify,
+            names: Box::new(Shared(Rc::clone(&names))),
+            label,
+        };
+        let ids = FileIds::from_epoch(env.random.next_u128() as u64);
         Self {
             layout,
             schema,
             env,
+            names,
             capabilities,
             mode: Mode::Writable,
             reader,
@@ -272,13 +329,26 @@ impl Library {
             ahead: BTreeSet::new(),
             facts: Facts::new(),
             scan: remembered.clone(),
-            listing: None,
+            listed: false,
+            rows: Arc::default(),
+            followed: None,
+            carried: Carried::default(),
+            rows_due: false,
+            ids,
+            merges: Arc::default(),
+            table: Arc::from([]),
+            installed: BTreeSet::new(),
+            wrote_files: Vec::new(),
+            wrote: Vec::new(),
             unlisted: Vec::new(),
             walked: None,
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
             unrelisted: BTreeSet::new(),
+            owed: BTreeMap::new(),
+            rewritten: BTreeSet::new(),
+            away: Arc::default(),
             walking: None,
             bindings: Arc::default(),
             bind_due: false,
@@ -287,15 +357,7 @@ impl Library {
             history: History::default(),
             entering: Entering::Step,
             unshown: false,
-            view: View::new(Parts {
-                folded: Folded::default(),
-                bindings: Arc::default(),
-                listing: None,
-                writers: Vec::new(),
-                forks: Vec::new(),
-                gaps: Vec::new(),
-                items: Vec::new(),
-            }),
+            view: View::new(Parts::default()),
             behind: BTreeMap::new(),
         }
     }
@@ -331,6 +393,19 @@ impl Library {
     #[doc(hidden)]
     pub fn refolded(&self) -> Folded {
         self.reader.derive_afresh().folded
+    }
+
+    /// How many paths owe an identity read, as tests check that a scan settles them.
+    #[doc(hidden)]
+    pub fn owed(&self) -> usize {
+        self.owed.len()
+    }
+
+    /// How many writes the merged state lost to entries no longer read, as tests check
+    /// that they are let go of.
+    #[doc(hidden)]
+    pub fn away(&self) -> usize {
+        self.away.len()
     }
 
     /// What this instance binds, and what binding every fact of the view afresh
@@ -407,7 +482,11 @@ impl Library {
     pub fn undo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
             let writer = library.own_id()?;
-            let plan = library.history.plan_undo(writer, &library.view);
+            let writers = &library.reader.derived().writers;
+            let names = &*library.env.names;
+            let plan = library
+                .history
+                .plan_undo(writer, &library.view, writers, names);
             library.resolve(plan.map_err(Error::Refused)?)
         })
     }
@@ -416,7 +495,11 @@ impl Library {
     pub fn redo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
             let writer = library.own_id()?;
-            let plan = library.history.plan_redo(writer, &library.view);
+            let writers = &library.reader.derived().writers;
+            let names = &*library.env.names;
+            let plan = library
+                .history
+                .plan_redo(writer, &library.view, writers, names);
             library.resolve(plan.map_err(Error::Refused)?)
         })
     }
@@ -451,6 +534,8 @@ impl Library {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
+        self.wrote_files.clear();
+        self.wrote.clear();
         settle_first(self)
             .and_then(move |library| match resolve(library) {
                 Ok(resolved) => commit(library, resolved),
@@ -510,6 +595,8 @@ impl Library {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
+        self.wrote_files.clear();
+        self.wrote.clear();
         settle_first(self)
             .and_then(move |library| {
                 let read = pending::read_one(&library.layout, orphan.writer, orphan.record);
@@ -548,9 +635,10 @@ impl Library {
     /// attributed to its writer, or to nobody for outside changes, and what the
     /// folder no longer holds. A sealed segment or snapshot read before is taken
     /// by its name. Of the library's files it scans again only those at the paths
-    /// whose file facts the entries changed, or that entries read before changed
-    /// and no scan listed since, unless no scan of every file has finished since
-    /// the library opened or since a scan failed: then it scans every file. Writes
+    /// whose file facts the entries changed and those other writers' `path` and
+    /// `tree` ops among them name, or that entries read before named so and no
+    /// scan listed since, unless no scan of every file has finished since the
+    /// library opened or since a scan failed: then it scans every file. Writes
     /// nothing in the folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
         self.look(Look::Logs)
@@ -610,6 +698,7 @@ impl Library {
                 library.reshow();
                 ok(Refreshed {
                     changes,
+                    rewritten: std::mem::take(&mut library.rewritten).into_iter().collect(),
                     scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
                     dirs: library.walked.take(),
@@ -622,7 +711,7 @@ impl Library {
     }
 
     /// What changed since the view.
-    fn since_view(&self) -> Vec<Change> {
+    fn since_view(&mut self) -> Vec<Change> {
         let shown = self.view.clone();
         let mut changes = match self.unshown {
             true => self.attribute(shown.folded()),
@@ -657,8 +746,8 @@ impl Library {
     /// machine holds it.
     pub fn others(&mut self) -> Task<'_, Result<Vec<WriterInfo>>> {
         flow::run(self.presence_task())
-            .map_ok(move |presence| {
-                self.presence = presence;
+            .map_ok(move |pool| {
+                self.take_pool(pool);
                 self.show();
                 self.writer_infos()
             })
@@ -788,8 +877,11 @@ impl Library {
         self.facts = Facts::default();
         self.scan = Scan::default();
         self.unrelisted.clear();
+        self.away = Arc::default();
         self.bind_due = false;
         self.bindings = Arc::default();
+        self.rows = Arc::default();
+        self.carried = Carried::default();
         self.history = History::default();
     }
 
@@ -884,15 +976,24 @@ impl Library {
     }
 
     /// The file-register writes that pin the moves this writer found, but for
-    /// entities whose files the intent changes itself.
+    /// entities whose files the intent changes itself, and for those whose file
+    /// fact no writer of this install wrote: that writer may lag what the folder
+    /// here shows.
     fn pins(&mut self, effects: &EffectPlan) -> Vec<Op> {
         self.bind_facts();
         let changed: BTreeSet<EntityId> = effects.files.iter().map(|end| end.entity).collect();
-        let pins = self
-            .pins
-            .iter()
-            .filter(|op| file_of(op).is_none_or(|e| !changed.contains(&e)));
+        let pins = self.pins.iter().filter(|op| match file_of(op) {
+            Some(entity) => !changed.contains(&entity) && self.own_fact(entity),
+            None => true,
+        });
         pins.cloned().collect()
+    }
+
+    /// Whether a writer of this install wrote a live file fact of `entity`.
+    fn own_fact(&self, entity: EntityId) -> bool {
+        let facts = self.facts.get(&entity).into_iter().flatten();
+        let mut refs = facts.flat_map(|fact| &fact.entries);
+        refs.any(|at| self.installs(at.writer))
     }
 
     /// `logged` after the `facts` settling a record adds, with every file op and
@@ -980,13 +1081,14 @@ impl Library {
     /// Keeps an open pending record a failure left behind: this writer's is
     /// settled before its next write is planned; one of a writer it stopped
     /// writing as is an orphan.
-    fn interrupted(&mut self, name: Nonce, record: &PendingRecord) {
+    fn interrupted(&mut self, name: Nonce, record: &PendingRecord, staged: SeenStaged) {
         let own = self.writer.as_ref().map(Writer::id) == Some(record.writer);
         match own {
             true => self.unsettled.push(Settling {
                 record: name,
                 pending: record.clone(),
                 outcome: Outcome::Complete,
+                staged,
             }),
             false => {
                 let ours = self.pooled.contains_key(&record.writer);
@@ -1025,8 +1127,10 @@ impl Library {
             self.clock = self.clock.observe(entry.at());
         }
         self.bind_facts();
+        let seen = undo::seen(&self.reader.derived().writers);
         for (entry, logged) in intents {
-            let before = Before::of(&logged.ops, &self.folded, &self.pins);
+            let (folded, bound) = (&self.folded, &self.bindings.bound);
+            let before = Before::of(&logged.ops, folded, &self.pins, bound, seen.clone());
             let entering = std::mem::take(&mut entering);
             self.history.push(entry, logged.clone(), entering, before);
         }
@@ -1047,17 +1151,96 @@ impl Library {
     }
 
     /// Takes in what a read derived. The library paths the changed file facts
-    /// name, and those where the entities they changed were bound, are unknown
-    /// until a scan lists them.
+    /// name, those where the entities they changed were bound, and those other
+    /// writers' new entries name a file, a tree or a directory at, are unknown until
+    /// a scan lists them.
     fn absorb_read(&mut self, report: &ReadReport) {
         self.lag_read();
         if !report.anything_new() {
             self.follow(Vec::new());
             return;
         }
-        let moved = self.take_derived();
+        let folded = self.reader.derived().folded.clone();
+        let changed = folded.changed(&self.folded);
+        let before = std::mem::replace(&mut self.folded, folded);
+        let moved = self.refile(changed.iter().copied());
         self.unrelisted.extend(moved);
+        let snapshotted = self.snapshot_writes(&before, &changed);
+        let read = self.read_entries(&report.placed);
+        let ops = read
+            .iter()
+            .flat_map(|entry| contribution::ops(entry.kind()));
+        let ops: Vec<&Op> = ops.collect();
+        let named: Vec<RelPath> = ops.iter().copied().flat_map(named_paths).cloned().collect();
+        let (mut owed, mut files) = (self.owed.clone(), BTreeMap::new());
+        let bound = |entity| Some(self.bindings.bound.get(&entity)?.path.clone());
+        let held = |path: &RelPath| self.scan.files.get(path)?.identity;
+        for op in ops {
+            owe(&mut owed, &mut files, op, &bound, &held);
+        }
+        for path in snapshotted {
+            owed.entry(path).or_insert(None);
+        }
+        self.owed = owed;
+        self.unrelisted.extend(named);
         self.follow(self.reader.readings().collect());
+    }
+
+    /// The paths of the files other writers' snapshots say they wrote, of each entity
+    /// of `changed` whose file write a snapshot holds that `before` lacked; binding
+    /// pins are no writes.
+    fn snapshot_writes(&self, before: &Folded, changed: &[EntityId]) -> Vec<RelPath> {
+        let own = self.writer.as_ref().map(Writer::id);
+        let writers = self.reader.derived().writers.iter();
+        let tips = writers
+            .filter(|(writer, _)| Some(**writer) != own)
+            .flat_map(|(writer, placed)| placed.tips.iter().map(move |tip| (*writer, tip)));
+        let tips: Vec<_> = tips.collect();
+        let mut paths = Vec::new();
+        for entity in changed {
+            let field = contribution::FieldKey::File(*entity);
+            for (writer, tip) in &tips {
+                let Some(held) = tip.state.own.get(&field) else {
+                    continue;
+                };
+                let contribution::Value::File {
+                    fact: Some(fact),
+                    pin: false,
+                } = &held.value
+                else {
+                    continue;
+                };
+                let write = Ref {
+                    writer: *writer,
+                    n: held.at.n,
+                    hash: held.at.hash,
+                };
+                let live = |folded: &Folded| {
+                    let writes = folded.file_writes(*entity);
+                    writes.iter().any(|live| live.named() == write)
+                };
+                if live(&self.folded) && !live(before) {
+                    paths.push(fact.path.clone());
+                }
+            }
+        }
+        paths
+    }
+
+    /// The entries of other writers among `placed`, newly merged.
+    fn read_entries(&self, placed: &BTreeMap<WriterId, Vec<EntryHash>>) -> Vec<&Entry> {
+        let own = self.writer.as_ref().map(Writer::id);
+        let writers = &self.reader.derived().writers;
+        let mut read: Vec<&Entry> = Vec::new();
+        for (writer, hashes) in placed.iter().filter(|(writer, _)| Some(**writer) != own) {
+            let Some(merged) = writers.get(writer).map(|placed| &placed.merged) else {
+                continue;
+            };
+            let hashes: BTreeSet<&EntryHash> = hashes.iter().collect();
+            let new = merged.iter().filter(|entry| hashes.contains(&entry.hash()));
+            read.extend(new.map(|entry| &**entry));
+        }
+        read
     }
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
@@ -1178,10 +1361,10 @@ impl Library {
         }
     }
 
-    /// Binds every fact to the scan, blind to what it does not know.
-    fn bind_everything(&mut self) {
-        let names = &*self.env.names;
-        let unknown = match self.unrelisted.is_empty() {
+    /// What no scan has listed since it changed: what a failed scan left unknown,
+    /// and the paths reads changed.
+    fn unknown(&self) -> Cow<'_, Unscanned> {
+        match self.unrelisted.is_empty() {
             true => Cow::Borrowed(&self.unscanned),
             false => Cow::Owned(Unscanned {
                 paths: self
@@ -1192,11 +1375,95 @@ impl Library {
                     .collect(),
                 entities: self.unscanned.entities.clone(),
             }),
-        };
+        }
+    }
+
+    /// Binds every fact to the scan, blind to what it does not know.
+    fn bind_everything(&mut self) {
+        let names = &*self.env.names;
+        let unknown = self.unknown();
         let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &unknown);
         self.pins = pins;
         self.bindings = Arc::new(bindings);
         self.bind_due = false;
+        self.rows_due = true;
+    }
+
+    /// Derives the rows of the scan, the binding and what is unknown from the last
+    /// look's, as this instance's own effects carried them.
+    fn derive_rows(&mut self) {
+        let unknown = self.unknown().into_owned();
+        let look = rows::Look {
+            scan: self.listed.then_some(&self.scan),
+            bindings: &self.bindings,
+            unknown: &unknown,
+            names: &*self.env.names,
+        };
+        let since = self.followed.as_ref();
+        let since = since
+            .filter(|(_, was)| *was == unknown)
+            .map(|(bindings, _)| &**bindings);
+        #[cfg(debug_assertions)]
+        let afresh = since.is_some().then(|| {
+            let mut ids = self.ids.clone();
+            let afresh = self.rows.continued(&self.carried, &look, &mut ids, None);
+            (afresh, ids)
+        });
+        let (rows, merged) = self
+            .rows
+            .continued(&self.carried, &look, &mut self.ids, since);
+        #[cfg(debug_assertions)]
+        if let Some(((afresh, afresh_merged), ids)) = afresh {
+            let same = afresh.iter().eq(rows.iter()) && afresh_merged == merged && ids == self.ids;
+            debug_assert!(
+                same,
+                "rows kept as they were differ from rows derived afresh"
+            );
+        }
+        // A file this instance wrote whose row merged into another, as an entity's, is
+        // named by the row it continues as.
+        for (_, file) in &mut self.wrote_files {
+            if let Some((_, into)) = merged.iter().find(|(from, _)| from == file) {
+                *file = *into;
+            }
+        }
+        self.rows = Arc::new(rows);
+        self.followed = self.listed.then(|| (Arc::clone(&self.bindings), unknown));
+        self.carried = Carried::default();
+        self.rows_due = false;
+        if !merged.is_empty() {
+            self.merges = self.merges.then(merged);
+        }
+    }
+
+    /// Continues the rows `applied`, what this instance's own effects did, moved or
+    /// wrote, before any look lists them.
+    fn carry(&mut self, applied: &Applied) {
+        let files = self.carried.applied(&self.rows, &mut self.ids, applied);
+        self.rows_due |= !self.carried.is_empty();
+        self.wrote_files.extend(files);
+        self.wrote.extend(applied.wrote.iter().cloned());
+        self.rewritten.extend(applied.replaced.iter().cloned());
+    }
+
+    /// Adds to the writer table each writer the reader holds that it lacks.
+    fn table_writers(&mut self) {
+        let writers = self.reader.derived().writers.keys();
+        let new: Vec<WriterId> = writers
+            .filter(|writer| !self.table.contains(writer))
+            .copied()
+            .collect();
+        if !new.is_empty() {
+            self.table = self.table.iter().copied().chain(new).collect();
+        }
+    }
+
+    /// Whether the writer `writer` is one whose directory this install's local root
+    /// holds: none of them lags what this install's folder shows.
+    fn installs(&self, writer: WriterId) -> bool {
+        self.writer.as_ref().map(Writer::id) == Some(writer)
+            || self.pooled.contains_key(&writer)
+            || self.installed.contains(&writer)
     }
 
     /// Takes `scan`, listed as the views show it once a scan of every file ran,
@@ -1204,9 +1471,6 @@ impl Library {
     fn rebind(&mut self, scan: Scan) {
         if !self.bind_due && scan == self.scan {
             return;
-        }
-        if self.listing.is_some() {
-            self.listing = Some(listing(&scan));
         }
         self.scan = scan;
         self.bind_everything();
@@ -1223,7 +1487,7 @@ impl Library {
     fn reshow(&mut self) {
         self.bind_facts();
         let rebound = !Arc::ptr_eq(&self.view.parts().bindings, &self.bindings);
-        if self.unshown || rebound {
+        if self.unshown || rebound || self.rows_due {
             self.show();
         }
     }
@@ -1239,6 +1503,7 @@ impl Library {
             .into_iter()
             .filter_map(|path| Some((path.clone(), *scan.get(&path)?)));
         let remembered = Scan {
+            dirs: BTreeSet::new(),
             files: unchanged
                 .map(|(path, file)| (path.clone(), *file))
                 .chain(read)
@@ -1256,6 +1521,79 @@ impl Library {
         }
     }
 
+    /// The files of `scan` whose identity another writer's entry owes a read: at the
+    /// length and time the scan before listed there or where the entries moved it from,
+    /// where only that scan gives the identity, and that `needed` does not read already.
+    /// Each one's identity is unknown until read.
+    fn owed_reads(&self, scan: &mut Scan, needed: &[(RelPath, u64)]) -> Vec<(RelPath, u64)> {
+        let mut owed = Vec::new();
+        let needed: BTreeSet<&RelPath> = needed.iter().map(|(path, _)| path).collect();
+        for (path, origin) in listed_as(scan, &self.owed, &*self.env.names) {
+            let held = [origin.as_ref(), Some(&path)].map(|at| self.scan.files.get(at?));
+            let Some(file) = scan.files.get_mut(&path) else {
+                continue;
+            };
+            let read = needed.contains(&path);
+            let carried = held.into_iter().flatten().any(|was| {
+                (was.len, was.modified, was.identity) == (file.len, file.modified, file.identity)
+            });
+            if carried && !read {
+                file.identity = None;
+                owed.push((path, file.len));
+            }
+        }
+        owed
+    }
+
+    /// Takes in `scan`, read for what [`Library::owed_reads`] asked, and owes nothing
+    /// more, whatever it found. A file still at the length and time the scan before
+    /// listed may have been rewritten where no length or time shows it, though this
+    /// view's own commits may have read it since, so it is reported rewritten.
+    fn settle_owed(&mut self, scan: &Scan) {
+        let owed = std::mem::take(&mut self.owed);
+        for (path, origin) in listed_as(scan, &owed, &*self.env.names) {
+            let held = [origin.as_ref(), Some(&path)].map(|at| self.scan.files.get(at?));
+            let Some(file) = scan.files.get(&path) else {
+                continue;
+            };
+            let at = |was: &Scanned| (was.len, was.modified) == (file.len, file.modified);
+            if held.into_iter().flatten().any(at) {
+                self.rewritten.insert(path);
+            }
+        }
+    }
+
+    /// Takes in what the precondition of a refused commit read at a path the scan
+    /// lists, under any spelling the volume takes for it, as a listing of that path:
+    /// the length, time and identity the check read, or no file there. Where that
+    /// changed a file, the next report says it was rewritten.
+    fn refused(&mut self, refusal: &Refusal) {
+        let Refusal::Changed(mismatch) = refusal else {
+            return;
+        };
+        let paths = BTreeMap::from([(mismatch.path.clone(), ())]);
+        let Some((path, ())) = listed_as(&self.scan, &paths, &*self.env.names).pop() else {
+            return;
+        };
+        let Some(listed) = mismatch.listed else {
+            self.scan.files.remove(&path);
+            self.bind_due = true;
+            return;
+        };
+        let file = self.scan.files.get_mut(&path).expect("a listed path");
+        let kept = (file.len, file.modified) == (listed.len, listed.modified);
+        let read = Scanned {
+            len: listed.len,
+            modified: listed.modified,
+            identity: mismatch.found.or(file.identity.filter(|_| kept)),
+        };
+        if *file != read {
+            *file = read;
+            self.bind_due = true;
+            self.rewritten.insert(path);
+        }
+    }
+
     /// Forgets each identity `remembered` keeps that a fact contradicts at its
     /// path, length and time. It was read while no fact gave one there, so the
     /// fact is newer: a save at a time the volume did not tell apart, which the
@@ -1264,13 +1602,15 @@ impl Library {
         if self.scan.files.is_empty() {
             return;
         }
-        for fact in self.facts.values().flatten().map(|fact| &fact.value) {
-            let contradicted = self.scan.files.get(&fact.path).is_some_and(|file| {
-                (file.len, file.modified) == (fact.len, fact.modified)
-                    && file.identity != Some(fact.identity)
+        for fact in self.facts.values().flatten() {
+            let value = &fact.value;
+            let contradicted = self.scan.files.get(&value.path).is_some_and(|file| {
+                file.len == value.len
+                    && fact.times.contains(&file.modified)
+                    && file.identity != Some(value.identity)
             });
             if contradicted {
-                self.scan.files.remove(&fact.path);
+                self.scan.files.remove(&value.path);
             }
         }
     }
@@ -1302,9 +1642,36 @@ impl Library {
         }
     }
 
+    /// The paths of the rows whose files the walk did not find in a directory it
+    /// listed, to look for once more before the walk ends those rows: a walk lists
+    /// one directory at a time, so a file can move out of one it has yet to list
+    /// into one it listed.
+    fn vanished(&self, found: &Scan) -> BTreeSet<RelPath> {
+        let Some(walk) = self.walking.as_ref() else {
+            return BTreeSet::new();
+        };
+        let mut found_at = found.files.keys().peekable();
+        let listed = self.rows.listing().filter(|row| {
+            while found_at.next_if(|path| **path < row.path).is_some() {}
+            found_at.peek() != Some(&&row.path)
+        });
+        let unknown = self
+            .rows
+            .absent()
+            .filter(|row| row.state == RowState::Unknown);
+        let unknown = unknown.filter(|row| !found.files.contains_key(&row.path));
+        let rows = listed.chain(unknown);
+        let rows = rows.filter(|row| row.path.parent().is_some_and(|dir| walk.lists(&dir)));
+        rows.map(|row| row.path.clone()).collect()
+    }
+
     /// Rebuilds the view from the library's state.
     fn show(&mut self) {
         self.bind_facts();
+        if self.rows_due {
+            self.derive_rows();
+        }
+        self.table_writers();
         self.unshown = false;
         let derived = self.reader.derived();
         let mut forks = Vec::new();
@@ -1332,7 +1699,10 @@ impl Library {
         let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
-            listing: self.listing.clone(),
+            rows: Arc::clone(&self.rows),
+            merges: Arc::clone(&self.merges),
+            table: Arc::clone(&self.table),
+            away: Arc::clone(&self.away),
             writers: self.writer_infos(),
             forks,
             gaps,
@@ -1381,11 +1751,16 @@ impl Library {
             .collect()
     }
 
+    fn take_pool(&mut self, pool: Pool) {
+        self.presence = pool.presence;
+        self.installed = pool.installed;
+    }
+
     /// Which writers another instance on this machine holds: their locks, tried
     /// and released at once. The locks this instance holds, its own and those of
     /// the idle writers it took up, are not tried: a backend answers that a lock
     /// its process holds is taken, and releasing it would let it go.
-    fn presence_task(&self) -> Task<'static, Result<BTreeMap<WriterId, Presence>>> {
+    fn presence_task(&self) -> Task<'static, Result<Pool>> {
         let own = self.writer.as_ref().map(Writer::genesis);
         let held: BTreeSet<EntryHash> = self.pooled.values().copied().chain(own).collect();
         flow::list(Root::Local, &RelPath::ROOT)
@@ -1395,24 +1770,25 @@ impl Library {
                     .filter(|entry| entry.kind == Kind::Directory)
                     .filter_map(|entry| entry.name.parse::<EntryHash>().ok())
                     .filter(move |genesis| !held.contains(genesis));
-                fold(pool, BTreeMap::new(), |mut presence, genesis| {
+                fold(pool, Pool::default(), |mut pool, genesis| {
                     flow::read_file(Root::Local, &Layout::head(genesis), u64::MAX).and_then(
                         move |head| {
                             let writer = head
                                 .and_then(|bytes| writer::head_record(&bytes))
                                 .map(|(writer, _)| writer);
                             let Some(writer) = writer else {
-                                return ok(presence);
+                                return ok(pool);
                             };
+                            pool.installed.insert(writer);
                             flow::lock(Layout::head(genesis)).and_then(move |lock| match lock {
                                 Lock::Held => {
-                                    presence.insert(writer, Presence::SameMachine);
-                                    ok(presence)
+                                    pool.presence.insert(writer, Presence::SameMachine);
+                                    ok(pool)
                                 }
                                 Lock::Acquired => flow::act(Io::Unlock {
                                     name: Layout::head(genesis),
                                 })
-                                .map_ok(move |()| presence),
+                                .map_ok(move |()| pool),
                             })
                         },
                     )
@@ -1422,14 +1798,68 @@ impl Library {
     }
 
     /// The changes the entries and snapshots read since `before` made, by writer.
-    fn attribute(&self, before: &Folded) -> Vec<Change> {
-        let since = self.folded.since(before).into_iter();
-        distinct(since.map(|(entity, part, writer)| Change {
-            entity,
-            what: what(&part),
-            by: self.by(writer),
-        }))
+    /// What changed since `before`, with who changed it. A write lost because its
+    /// entry is no longer read, that write come back, and an older write back in its
+    /// part for that loss are no one's change.
+    fn attribute(&mut self, before: &Folded) -> Vec<Change> {
+        let since = self.folded.since(before);
+        let lost = |change: &&Since| change.shift != Shift::Gained && !self.reads(change.write);
+        let evicted: Vec<&Since> = since.iter().filter(lost).collect();
+        let mut away = (*self.away).clone();
+        let mut changes = Vec::new();
+        for change in &since {
+            let unread = match change.shift {
+                Shift::Gained => {
+                    self.away.contains(&change.write)
+                        || evicted.iter().any(|lost| change.given_back_by(lost))
+                }
+                Shift::Lost | Shift::Replaced => !self.reads(change.write),
+            };
+            if unread {
+                match change.shift {
+                    Shift::Gained => away.remove(&change.write),
+                    Shift::Lost | Shift::Replaced => away.insert(change.write),
+                };
+            }
+            if !change.causes() {
+                continue;
+            }
+            changes.push(Change {
+                entity: change.entity,
+                what: what(&change.part),
+                by: match unread {
+                    true => By::Outside,
+                    false => self.by(change.write.writer),
+                },
+            });
+        }
+        // A write whose entry is merged again either came back above, or was replaced
+        // meanwhile and has nothing left to explain; one held behind a gap may yet return.
+        away.retain(|write| {
+            let placed = self.reader.derived().writers.get(&write.writer);
+            !placed.is_some_and(|placed| placed.reaches(write.hash))
+        });
+        if away != *self.away {
+            self.away = Arc::new(away);
+        }
+        distinct(changes.into_iter())
     }
+
+    /// Whether the reader holds the entry `write` names.
+    fn reads(&self, write: Ref) -> bool {
+        let writers = &self.reader.derived().writers;
+        let placed = writers.get(&write.writer);
+        placed.is_some_and(|placed| placed.holds(write.hash))
+    }
+}
+
+/// What the local root's pool says of the writers this instance does not hold.
+#[derive(Default)]
+struct Pool {
+    /// The writers another instance on this machine holds.
+    presence: BTreeMap<WriterId, Presence>,
+    /// Every writer whose head the pool holds.
+    installed: BTreeSet<WriterId>,
 }
 
 /// Where `file` was presumed to be: an unscanned file is where its fact says.
@@ -1826,8 +2256,8 @@ fn idle_pool<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 /// have closed or stopped since. Writes nothing in the folder.
 fn repooled(library: &mut Library) -> Fallible<'_, &mut Library> {
     idle_pool(library).and_then(|library| {
-        flow::run(library.presence_task()).map_ok(move |presence| {
-            library.presence = presence;
+        flow::run(library.presence_task()).map_ok(move |pool| {
+            library.take_pool(pool);
             library
         })
     })
@@ -1929,10 +2359,24 @@ fn walk<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 
 /// Binds every file the finished walk listed.
 fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
+    let found = library
+        .borrow()
+        .walking
+        .as_ref()
+        .map(Walk::found)
+        .unwrap_or_default();
+    let vanished = library.borrow().vanished(&found);
+    relist_walked(library, found, vanished).and_then(identify_walked)
+}
+
+/// Binds every file `found`, the walk's files, lists.
+fn identify_walked<'a, L: BorrowMut<Library> + 'a>(
+    (library, mut found): (L, Scan),
+) -> Fallible<'a, L> {
     let known = library.borrow();
-    let mut found = known.walking.as_ref().map(Walk::found).unwrap_or_default();
     let names = &*known.env.names;
-    let needed = binding::resolve(&mut found, &known.facts, &known.scan, names);
+    let mut needed = binding::resolve(&mut found, &known.facts, &known.scan, names);
+    needed.extend(known.owed_reads(&mut found, &needed));
     let identified = binding::identified(found, needed, &known.env.identify);
     identified.map_ok(move |read| (library, read)).and_then(
         move |(library, (scan, read, unreadable))| {
@@ -1943,7 +2387,8 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             let mut unlisted = walk.map(Walk::unlisted).unwrap_or_default();
             unlisted.extend(unreadable.into_iter().map(|(path, _)| path));
             unlisted.sort();
-            known.listing = Some(listing(&scan));
+            known.rows_due |= !known.listed;
+            known.listed = true;
             if !known.unscanned.is_empty() || !unlisted.is_empty() {
                 known.unscanned = Unscanned::default();
                 known.unscanned.add(unlisted.clone(), &known.bindings);
@@ -1953,19 +2398,35 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             known.behind.remove(&Lag::Scan);
             known.bind_due |= !known.unrelisted.is_empty();
             known.unrelisted.clear();
+            known.settle_owed(&scan);
             known.rebind(scan);
             remember(library, read)
         },
     )
 }
 
-/// The files of `scan`, as the views list them.
-fn listing(scan: &Scan) -> Arc<BTreeMap<RelPath, Listed>> {
-    let files = scan.files.iter();
-    Arc::new(
-        files
-            .map(|(path, file)| (path.clone(), Listed::of(file)))
-            .collect(),
+/// `found` with each file of `missed` that listing its directory again finds,
+/// where that listing succeeds.
+fn relist_walked<'a, L: BorrowMut<Library> + 'a>(
+    library: L,
+    found: Scan,
+    missed: BTreeSet<RelPath>,
+) -> Fallible<'a, (L, Scan)> {
+    let dirs: BTreeSet<RelPath> = missed.iter().filter_map(RelPath::parent).collect();
+    let missed = Rc::new(missed);
+    fold(
+        dirs.into_iter(),
+        (library, found),
+        move |(library, found), dir| {
+            let missed = Rc::clone(&missed);
+            flow::list_stat(Root::Folder, &dir).then(move |listed| {
+                let mut found = found;
+                if let Ok(entries) = listed {
+                    found.relisted(&dir, entries, &missed);
+                }
+                ok((library, found))
+            })
+        },
     )
 }
 
@@ -1988,7 +2449,13 @@ fn remember<'a, L: BorrowMut<Library> + 'a>(library: L, read: Vec<RelPath>) -> F
 
 /// Once entries are durable, scans again only `paths`, and binds.
 fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut Library> {
-    let listed = binding::relist(&library.layout, &library.scan, paths.clone()).task();
+    let relisted = binding::relist(
+        &library.layout,
+        &library.scan,
+        paths.clone(),
+        &library.names,
+    );
+    let listed = relisted.task();
     rebind_logged(library, listed, paths)
 }
 
@@ -2022,7 +2489,8 @@ fn rebind_logged<'a>(
         let identified = match listed {
             Ok(mut scan) => {
                 let names = &*library.env.names;
-                let unknown = binding::resolve(&mut scan, &library.facts, &library.scan, names);
+                let mut unknown = binding::resolve(&mut scan, &library.facts, &library.scan, names);
+                unknown.extend(library.owed_reads(&mut scan, &unknown));
                 binding::identified(scan, unknown, &library.env.identify)
             }
             Err(error) => Flow::Done(Err(error)),
@@ -2034,6 +2502,7 @@ fn rebind_logged<'a>(
             match scanned {
                 Ok((scan, read, unreadable)) => match unreadable.into_iter().next() {
                     None => {
+                        library.settle_owed(&scan);
                         library.rebind(scan);
                         remember(library, read)
                     }
@@ -2054,15 +2523,14 @@ fn reidentify(library: &mut Library) -> Fallible<'_, &mut Library> {
     }
 }
 
-/// The library paths `steps` move files from and to.
+/// The library paths `steps` move files from and to, and the directories they
+/// make or remove.
 fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
-    let moves = steps.iter().filter(|step| {
-        !matches!(
-            step,
-            EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. }
-        )
-    });
-    moves.flat_map(EffectStep::library_paths).cloned().collect()
+    steps
+        .iter()
+        .flat_map(EffectStep::library_paths)
+        .cloned()
+        .collect()
 }
 
 /// The directory of a layout newer than this build's, where the library's root holds
@@ -2109,7 +2577,13 @@ fn commit<'a>(
         .and_then(tidy_staging)
         .and_then(move |library| {
             let filed: BTreeSet<EntityId> = facts.iter().filter_map(file_of).collect();
-            let pins = library.pins(&effects).into_iter();
+            // A move the binding holds before an undo may be one the intent it
+            // reverses brought about.
+            let pins = match entering {
+                Entering::Reversing(_) => Vec::new(),
+                Entering::Step | Entering::Final => library.pins(&effects),
+            };
+            let pins = pins.into_iter();
             let pins = pins.filter(|op| file_of(op).is_none_or(|e| !filed.contains(&e)));
             let logged = Logged {
                 label,
@@ -2123,9 +2597,13 @@ fn commit<'a>(
         })
         .and_then(move |(library, entries, ended)| {
             let committed = committed(&entries, created, library.local());
+            let files = std::mem::take(&mut library.wrote_files);
+            let wrote = std::mem::take(&mut library.wrote);
             ok((
                 library,
                 Committed {
+                    files,
+                    wrote,
                     left: ended.left,
                     undoable: committed.undoable && entering != Entering::Final,
                     ..committed
@@ -2141,17 +2619,6 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
     let ops: Vec<&Op> = ops.collect();
-    let paths = ops.iter().filter_map(|op| match op {
-        Op::Path { from, file } => Some(PathChange {
-            from: from.clone(),
-            to: file.as_ref().map(|file| file.path.clone()),
-        }),
-        _ => None,
-    });
-    let trees = ops.iter().filter_map(|op| match op {
-        Op::Tree { from, to } => Some((from.clone(), to.clone())),
-        _ => None,
-    });
     let undoable = match entries.first().map(Entry::kind) {
         Some(EntryKind::Intent(logged)) => undo::is_step(logged.ops.iter()),
         _ => false,
@@ -2161,11 +2628,104 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         undoable,
         created,
         changes: distinct(ops.iter().copied().filter_map(change_of)),
-        paths: paths.collect(),
-        trees: trees.collect(),
+        files: Vec::new(),
+        wrote: Vec::new(),
         local,
         left: Vec::new(),
     }
+}
+
+/// The paths `op` names: of a file, before and after for one no entity is bound to,
+/// of a tree, from and to, and of a directory. A file fact named in passing, as of an
+/// entity made and deleted between two reads, changes no fact the read derives.
+fn named_paths(op: &Op) -> Vec<&RelPath> {
+    match op {
+        Op::Path { from, file } => from
+            .iter()
+            .chain(file.iter().map(|file| &file.path))
+            .collect(),
+        Op::File { file, .. } => file.iter().map(|file| &file.path).collect(),
+        Op::Pin { file, .. } => vec![&file.path],
+        Op::Tree { from, to } => vec![from, to],
+        Op::Dir { path, .. } => vec![path],
+        _ => Vec::new(),
+    }
+}
+
+/// The file `op` leaves at a path: a file effect's, by its identity.
+fn left_file(op: &Op) -> Option<&FileFact> {
+    match op {
+        Op::Path { file, .. } | Op::File { file, .. } => file.as_ref(),
+        _ => None,
+    }
+}
+
+/// Owes a read of the file another writer's `op` leaves at a path, compared with what
+/// the scan before held where it was, as a file written and then moved keeps the length
+/// and time it was written with. A move leaves what was owed where it was, since sync
+/// can keep another file there; one of a file not written since, holding what was
+/// there, is compared where it lands, with the file it replaced. `files` follows where
+/// the ops so far left each entity's file; `bound` gives where the binding before put
+/// it, and `held` the identity the scan before held at a path.
+fn owe(
+    owed: &mut BTreeMap<RelPath, Option<RelPath>>,
+    files: &mut BTreeMap<EntityId, RelPath>,
+    op: &Op,
+    bound: &dyn Fn(EntityId) -> Option<RelPath>,
+    held: &dyn Fn(&RelPath) -> Option<Identity>,
+) {
+    let from = match op {
+        Op::Tree { from, to } => {
+            let under = owed.keys().filter(|path| path.starts_with(from));
+            for path in under.cloned().collect::<Vec<_>>() {
+                let origin = owed[&path].clone().unwrap_or_else(|| path.clone());
+                if let Some(moved) = path.rebase(from, to) {
+                    owed.insert(moved, Some(origin));
+                }
+            }
+            return;
+        }
+        Op::Path { from, .. } => from.clone(),
+        op => op
+            .entity()
+            .and_then(|entity| files.get(&entity).cloned().or_else(|| bound(entity))),
+    };
+    let Some(file) = left_file(op) else {
+        return;
+    };
+    if let Some(entity) = op.entity() {
+        files.insert(entity, file.path.clone());
+    }
+    let origin = match from.filter(|from| *from != file.path) {
+        Some(from) => match owed.get(&from) {
+            Some(origin) => Some(origin.clone().unwrap_or(from)),
+            None if held(&from).is_some_and(|held| held != file.identity) => Some(from),
+            None => owed.remove(&file.path).flatten(),
+        },
+        None => owed.remove(&file.path).flatten(),
+    };
+    owed.insert(file.path.clone(), origin);
+}
+
+/// Each of the keys of `paths` that `scan` lists, under the spelling its directories
+/// hold: the one path the volume takes for it, with its value.
+fn listed_as<'p, V>(
+    scan: &Scan,
+    paths: &'p BTreeMap<RelPath, V>,
+    names: &dyn Names,
+) -> Vec<(RelPath, &'p V)> {
+    let mut keyed = None;
+    let listed = paths.iter().filter_map(|(path, value)| {
+        if scan.files.contains_key(path) {
+            return Some((path.clone(), value));
+        }
+        let keyed = keyed.get_or_insert_with(|| binding::keyed(scan, names));
+        match keyed.get(&names.key(path.as_str()))?.as_slice() {
+            [listed] => Some((listed.clone(), value)),
+            _ => None,
+        }
+    });
+    listed.collect()
 }
 
 /// The entity whose file `op` writes, if it writes one.
@@ -2185,6 +2745,15 @@ fn genesis_of(placed: &derive::Placed) -> Option<EntryHash> {
     })
 }
 
+/// Names that forward to names shared elsewhere.
+struct Shared(Rc<dyn Names>);
+
+impl Names for Shared {
+    fn key(&self, path: &str) -> String {
+        self.0.key(path)
+    }
+}
+
 /// Creates this instance's writer when it has none. Its genesis entry is the
 /// first thing it writes in the folder, so the effects' preconditions are checked
 /// first: an intent they refuse leaves nothing behind.
@@ -2202,6 +2771,7 @@ fn ensure_writer<'a>(
     };
     flow::run(check).and_then(move |refused| {
         if let Some(refusal) = refused {
+            library.refused(&refusal);
             return Flow::Done(Err(Error::Refused(refusal)));
         }
         let at = match library.tick() {
@@ -2282,15 +2852,16 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
     let label = settling.pending.label.clone();
     let record = Rc::new(settling.pending);
     let identify = Rc::clone(&library.env.identify);
-    let settled = recovery::settle(
+    let settled = recovery::settle_seen(
         &library.layout,
         name,
         Rc::clone(&record),
         identify,
         library.capabilities,
+        settling.staged,
     );
     flow::run(settled).then(move |settled| match settled {
-        Ok(Resumed::Applied(applied)) => log_resumed(library, name, record, applied),
+        Ok(Resumed::Applied(applied)) => log_resumed(library, name, record, *applied),
         Ok(Resumed::GivenUp) => stop_writing(library, None)
             .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
         Err(Error::Io { path, error, .. }) => {
@@ -2314,6 +2885,8 @@ fn log_resumed(
     let closed = own.is_some_and(|own| library.closed_records().contains(&(own, name)));
     let mut planned = planned(&record);
     planned.record = Some(name);
+    library.carry(&applied);
+    library.unrelisted.extend(record.paths());
     let file_ops = file_ops(&applied, &record.files);
     let kinds = match closed {
         true => Vec::new(),
@@ -2372,6 +2945,7 @@ fn stop_writing(library: &mut Library, why: Option<Rekey>) -> Flow<'_, (&mut Lib
     let Some(writer) = library.writer.take() else {
         return Flow::Done((library, Ok(())));
     };
+    library.installed.insert(writer.id());
     library.history = History::default();
     library.behind.remove(&Lag::Head);
     library.landed |= why == Some(Rekey::Landed);
@@ -2728,21 +3302,28 @@ fn carry_out<'a>(
             let applied = effects::apply(&layout, name, Rc::clone(&record), 0, identify);
             flow::run(applied).then(move |applied| match applied {
                 Ok(applied) => ok((library, record, applied)),
-                Err(error) => {
-                    if journaled {
-                        library.interrupted(name, &record);
+                Err(stopped) => {
+                    if let Some(applied) = &stopped.applied {
+                        library.carry(applied);
                     }
-                    Flow::Done(Err(error))
+                    library.unrelisted.extend(record.paths());
+                    if journaled {
+                        library.interrupted(name, &record, stopped.staged);
+                    }
+                    Flow::Done(Err(stopped.error))
                 }
             })
         }
-        Ok(Err(refusal)) => Flow::Done(Err(Error::Refused(refusal))),
+        Ok(Err(refusal)) => {
+            library.refused(&refusal);
+            Flow::Done(Err(Error::Refused(refusal)))
+        }
         Err(error) if journaled => {
             let path = layout.pending(id, name);
             flow::stat(Root::Folder, &path).then(move |written| {
                 // A record the folder may hold is settled before the next write.
                 if !matches!(written, Ok(None)) {
-                    library.interrupted(name, &record);
+                    library.interrupted(name, &record, SeenStaged::new());
                 }
                 Flow::Done(Err(error))
             })
@@ -2788,9 +3369,9 @@ fn file_ops(applied: &Applied, ends: &[FileEnd]) -> Vec<Op> {
             from: from.clone(),
             file: file.clone(),
         }));
-    let trees = applied.trees.iter().map(|(from, to)| Op::Tree {
-        from: from.clone(),
-        to: to.clone(),
+    let trees = applied.trees.iter().map(|tree| Op::Tree {
+        from: tree.from.clone(),
+        to: tree.to.clone(),
     });
     let dirs = applied.dirs.iter().map(|(path, made)| Op::Dir {
         path: path.clone(),
@@ -2821,6 +3402,8 @@ fn log_effects<'a>(
     pins: Vec<Op>,
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
+    library.carry(&applied);
+    let staged = applied.staged.clone();
     let file_ops = file_ops(&applied, &record.files);
     let (mut logged, settle) = close(logged, closing);
     logged.ops.extend(file_ops);
@@ -2830,10 +3413,11 @@ fn log_effects<'a>(
     kinds.extend(settle.map(EntryKind::Settle));
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
+    library.unrelisted.extend(touched.iter().cloned());
     appending(library, kinds).then(move |(library, appended)| {
         let retired = library.writer.as_ref().map(Writer::id) != Some(record.writer);
         match (journaled, appended.is_ok(), retired) {
-            (true, false, false) => library.interrupted(name, &record),
+            (true, false, false) => library.interrupted(name, &record, staged),
             (true, false, true) => library.orphan(name, &record, true),
             (false, _, _) | (true, true, _) => {}
         }
@@ -2909,6 +3493,8 @@ fn settle_orphan(
             library.show();
             let committed = Committed {
                 undoable: false,
+                files: std::mem::take(&mut library.wrote_files),
+                wrote: std::mem::take(&mut library.wrote),
                 ..committed(&entries, Vec::new(), library.local())
             };
             library

@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
 use crate::io::IoError;
-use crate::log::Run;
+use crate::log::{FileFact, Run};
 use crate::path::RelPath;
 use crate::plan::FactChange;
+use crate::rows::FileId;
 
 /// What opening found. Opening writes nothing in the folder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -215,15 +216,6 @@ pub struct Joined {
     pub into: EntityId,
 }
 
-/// Where a file no entity is bound to was before a commit and is after it: `from`
-/// alone for a file trashed, `to` alone for a file made, both for one moved or saved
-/// over.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct PathChange {
-    pub from: Option<RelPath>,
-    pub to: Option<RelPath>,
-}
-
 /// A committed intent, its file effects all made. Its entries are durable in the
 /// folder and shown.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -233,11 +225,13 @@ pub struct Committed {
     /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
-    /// Each file no entity is bound to that it made, moved or trashed, in order,
-    /// but for those under a tree it moved.
-    pub paths: Vec<PathChange>,
-    /// Each tree it moved, from and to, in order.
-    pub trees: Vec<(RelPath, RelPath)>,
+    /// Each file its own effects, and those of this writer's it settled first, wrote
+    /// or moved, where it is now, with its row.
+    pub files: Vec<(RelPath, FileId)>,
+    /// Each of those files an effect put in place rather than only moved, with the
+    /// identity of what it staged, or else found there, and the length and time found
+    /// there once it was written, or the staged file's where another file landed there.
+    pub wrote: Vec<FileFact>,
     /// Each directory it was to remove that the folder still holds, as one a
     /// file it did not know of keeps, where moving a tree moves its files one
     /// by one.
@@ -307,6 +301,11 @@ pub struct PartialReport {
 pub struct Refreshed {
     /// What changed since the last view, by its writer or from outside.
     pub changes: Vec<Change>,
+    /// The files another writer's entry or snapshot said it wrote that a scan found at
+    /// the length and time the scan before listed, those a refused commit found other
+    /// than the view held, and those another file replaced where a commit put its own,
+    /// in order: rewrites no length or time may show, which only a read of each tells.
+    pub rewritten: Vec<RelPath>,
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,

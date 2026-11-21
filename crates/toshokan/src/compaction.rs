@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::contribution::FieldKey;
 use crate::error::{Error, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
@@ -340,6 +341,24 @@ pub fn snapshot<'a>(
         .last()
         .map(|entry| entry.at())
         .or(previous.map(|tip| tip.at))?;
+    let bound = since
+        .iter()
+        .filter(|entry| matches!(entry.kind(), EntryKind::Bind(_)));
+    let bound: BTreeSet<EntryHash> = bound
+        .map(|entry| entry.hash())
+        .chain(
+            previous
+                .into_iter()
+                .flat_map(|tip| tip.binds.iter().copied()),
+        )
+        .collect();
+    let files = state
+        .own
+        .iter()
+        .filter(|(field, _)| matches!(field, FieldKey::File(_)));
+    let binds = files
+        .map(|(_, held)| held.at.hash)
+        .filter(|hash| bound.contains(hash));
     Some(Snapshot {
         writer,
         label: previous.map_or(label, |tip| tip.label.clone()),
@@ -347,6 +366,7 @@ pub fn snapshot<'a>(
         genesis,
         head,
         certified,
+        binds: binds.collect(),
         state,
         unknown: previous.map(|tip| tip.unknown.clone()).unwrap_or_default(),
     })

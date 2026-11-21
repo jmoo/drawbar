@@ -131,8 +131,17 @@ fn write_state(name: &str, machine: &Machine, readme: &str) {
 }
 
 fn readme(name: &str, seeds: &str, what: &str) -> String {
+    written(name, seeds, what, &format!("by toshokan {VERSION}"))
+}
+
+/// As [`readme`], for a state only a build after the published `VERSION` writes.
+fn readme_after(name: &str, seeds: &str, what: &str) -> String {
+    written(name, seeds, what, &format!("after toshokan {VERSION}"))
+}
+
+fn written(name: &str, seeds: &str, what: &str, by: &str) -> String {
     format!(
-        "# {name}\n\n{what}\n\nWritten by toshokan {VERSION} with \
+        "# {name}\n\n{what}\n\nWritten {by} with \
          `cargo test -p toshokan --test format -- --ignored --exact generate::fixtures`, \
          from `tests/format/generate.rs`: {seeds}, a `TestClock` from 1000 ms, \
          `PrefixIdentity` over 64 KiB and the layout `.t`.\n"
@@ -302,6 +311,16 @@ fn one_writer() {
             "The history of `one-writer-open`, compacted into a snapshot, then one more \
              intent in a segment sealed at close, whose compaction failed to stage its \
              snapshot.",
+        ),
+    );
+    write_state(
+        "one-writer-compacted-binds",
+        &compacted,
+        &readme_after(
+            "one-writer-compacted-binds",
+            "seed 1",
+            "As `one-writer-compacted`, by a build whose snapshot lists in `binds` the \
+             folded `bind` entries whose pins it holds.",
         ),
     );
 }

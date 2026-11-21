@@ -63,6 +63,10 @@ What the live writes show:
   settles it in favor of the entity. An entity with no live existence write,
   which only a forgotten basis or a lost write leaves, shows its live fields.
 - **Files** are a register per entity whose writes are `file` and `pin` ops.
+  Writes that name one path, identity and length are one value, whatever
+  modification time each gives, since a move that copies gives a file a new
+  one; the value keeps every write's reference, which a write replacing it
+  names. Builds before this rule show such a register as a conflict.
 - **Trash items** are kept per writer and item from the `displaced` lists, and
   **settled records** from the `settle` entries.
 - **Unknown** entries and ops are kept with the entry that holds them. An entry
@@ -164,6 +168,12 @@ taken as the last read found it, or as not arrived yet, and reported and read
 again next time; until then no orphan is reported or settled, since the entry
 closing its record may be in that file. Where the file is in the directory of
 the writer this instance writes as, opening or refreshing fails instead.
+
+What a refresh reports as changed, and what a view says changed a row (see
+Rows), names the writer of each write the merged state gained or lost, but no
+writer for a write it lost because its entry is no longer read, as when a sync
+client evicts it or cuts its file short, nor for that write's return, nor for an
+older write in its part, of any writer, that the loss gives back.
 
 Per writer, from the files it reads, a reader derives:
 
@@ -275,82 +285,184 @@ a function of the merged file registers, the library files a reader sees and
 their identities. After any change to the file facts or to the files a reader
 sees, every fact is bound again:
 
-1. A scan lists every library file with its length and modification time. It
-   reads an identity only where it decides a binding: for a file at the path of
-   a file fact of its length, and for a file of the length of a fact of an
-   entity that may have moved. Such an entity is one none of whose file facts'
-   paths holds a file that no other entity's fact names too, paths compared
-   under the volume's rules for case and Unicode normalization. It reads none
-   when a fact, earlier scan or `identities.json` gives the identity for that
-   path, length and time. The install keeps in `identities.json` the identities
-   its scans read while their files keep their length and time; a scan that
-   cannot write them does not fail, and the next scan writes them. A fact gives
-   the identity over an earlier scan of a path its writer has just written, and
-   over `identities.json` at open: a file written twice within the volume's time
-   resolution keeps its length and time, and the fact is the newer. A file rewritten
-   outside toshokan to the same length and the same modification time, as a
-   coarse clock or a tool that sets the time back allows, keeps the identity read
-   before until its length or time moves: a binding can then take it for what it
-   held. A precondition is never fooled, since it reads the identity at the
-   check. After a commit, only the paths its file effects moved files from and to
-   are listed again. Identities are read by the same rule, of every file whose
-   identity is unread and now decides a binding, such as a file of the length of
-   a file fact the commit wrote whose file is not at its path: that file may be
-   the entity's, moved. A refresh scans again only the paths named by the file facts
-   the entries it read changed, before and after, and the paths those entities
-   were bound to, with the same identity reads. Until a scan lists such a path,
-   as when the refresh stops first, no file there is bound or pinned, and the
-   next refresh scans it. Such a path is found only under
-   the spelling its directories list, since a volume that ignores case finds a
-   file by any spelling of its name. A rescan, which the app asks for
-   once a library opens and when something outside may have changed the folder,
-   scans every file. Opening scans none: until a scan of every file succeeds,
-   every library path is unknown. A scan that fails once a commit's entries are
-   durable does not fail the commit. Until a scan of every file succeeds, the
-   paths it would have scanned and what is under them are unknown: no file there
-   is bound, reported or a candidate for a move. The entities bound there before
-   the commit, and those whose file facts name such a path, are bound to no file
-   and shown at their logged path as unscanned. Nothing about them is pinned, and
-   each refresh scans every file until a scan of every file succeeds.
-   A scan of every file lists one directory at a time and keeps what it listed,
-   and the refresh that finishes it reports every directory it listed.
-   A directory it cannot list is left out, as is every directory it has not
-   reached once it has listed 1,000,000 entries: what is under them is unknown,
-   as after a failed scan, and the scan reports them. So is a file whose identity
-   it needs and cannot read for any reason but its absence: the file is unknown,
-   as after a failed scan, and the scan reports it with those directories. A layout that hides leaves
-   out every name that starts with a dot. Every listing leaves out symbolic
-   links, special files and names that are not valid UTF-8. A view lists no
-   file until a scan of every file has run.
-   One that stops before every directory is listed binds nothing; the next goes
-   on where it stopped, listing again each directory holding a path a commit or
-   refresh scanned meanwhile, and each directory at or under such a path. A
-   change outside the app to a directory already listed shows at the next scan
-   of every file, or of its path.
+1. A scan lists every library file with its length and modification time, and every
+   directory below the root, empty ones included. It reads an identity only where it
+   decides a binding: for a file at the path of a file fact of its length, and for a
+   file of the length of a fact of an entity that may have moved. Such an entity is
+   one none of whose file facts' paths holds a file that no other entity's fact
+   names too, paths compared under the volume's rules for case and Unicode
+   normalization. It reads none when a fact, earlier scan or `identities.json` gives
+   the identity for that path, length and time; facts that give two give none. The
+   install keeps in `identities.json` the identities its scans read while their
+   files keep their length and time; a scan that cannot write them does not fail,
+   and the next scan writes them. A fact gives the identity over an earlier scan of
+   a path its writer has just written, and over `identities.json` at open: a file
+   written twice within the volume's time resolution keeps its length and time, and
+   the fact is the newer. A file rewritten outside toshokan to the same length and
+   the same modification time, as a coarse clock or a tool that sets the time back
+   allows, keeps the identity read before until its length or time moves: a binding
+   can then take it for what it held. A precondition naming an identity is never
+   fooled, since it reads the identity at the check; one naming a length and time
+   compares only those. A refresh that reads another writer's `path` or `file` op
+   leaving a file at a path, or its snapshot holding a write of an entity's file
+   this view did not hold, other than a binding's pin, reads that file's identity
+   once, at the next scan, where it lists the path, under any spelling the volume
+   takes for it, at the length and time the scan before listed there, or at those it
+   listed where the entries read moved the file from, after writing it or while it
+   held other than the identity this view held there. Where a fact gives that file
+   another identity than the scan before read, it reads none and the binding takes
+   the fact's. A move leaves that read owed where the file was too, since sync can
+   keep another file there. The refresh reports the file rewritten, since what the
+   app read of it before may not be what the other writer left, though this view may
+   have read it since, and owes nothing more, whatever the read found. Another
+   writer's rewrite at the same length and time whose file arrives after the scan of
+   the refresh that read its entry is seen at that file's next change, or at a
+   commit naming the identity this view held there. That commit is refused, since
+   its precondition reads the file. Where the view lists that path, under any
+   spelling the volume takes for it, it takes the length, time and identity the
+   check read, or no file, as that listing, and the next report says a file it took
+   so was rewritten. A commit naming only a length and time passes over it. A commit
+   logs each file it puts in place from staging with the identity of its staged
+   file, read before it goes into place, and takes the file then at the path for it
+   where the length matches, and the time too where moves rename; another file, a
+   directory or nothing there is reported rewritten, and the next scan shows what is
+   there. A file of the same length landing over it at the same time passes for it,
+   and where moves copy, at any time. A record this instance resumes keeps what it
+   read of its staged files; one a later instance resumes reads each file it had put
+   in place where it landed, and takes another file there by then for it. Files of
+   one fixed length, as instrument programs are, need only the same time inside one
+   clock tick for this. After a commit, only the paths its file effects moved files
+   from and to, and the directories they made or removed, are listed again.
+   Identities are read by the same rule, of every file whose identity is unread and
+   now decides a binding, such as a file of the length of a file fact the commit
+   wrote whose file is not at its path: that file may be the entity's, moved. A
+   refresh scans again only the paths named by the file facts the entries it read
+   changed, before and after, the paths those entities were bound to, the paths
+   other writers' `path` and `tree` ops among them name, from and to, and those
+   their `file`, `pin` and `dir` ops name, with the same identity reads. A scan of
+   some paths lists every directory at and under each, and keeps each directory
+   holding one it found. Until a scan lists such a path, as when the refresh stops
+   first, no file there is bound or pinned, and the next refresh scans it. Such a
+   path is found under the spelling its directories list, the name they hold that
+   the volume's rules take for it, since a volume that ignores case or normalization
+   finds a file by any spelling of its name. A rescan, which the app asks for once a
+   library opens and when something outside may have changed the folder, scans every
+   file. Opening scans none: until a scan of every file succeeds, every library path
+   is unknown. A scan that fails once a commit's entries are durable does not fail
+   the commit. Until a scan of every file succeeds, the paths it would have scanned
+   and what is under them are unknown: no file there is bound, reported or a
+   candidate for a move. The entities bound there before the commit, and those whose
+   file facts name such a path, are bound to no file and shown at their logged path
+   as unscanned. Nothing about them is pinned, and each refresh scans every file
+   until a scan of every file succeeds. A scan of every file lists one directory at
+   a time and keeps what it listed, and the refresh that finishes it reports every
+   directory it listed. Before it ends a row (see Rows) whose path it did not find,
+   it lists that path's directory once more and takes from that listing only such
+   paths, since a file can move out of a directory not listed yet into one listed
+   already. A directory it cannot list is left out, as is every directory it has not
+   reached once it has listed 1,000,000 entries: what is under them is unknown, as
+   after a failed scan, and the scan reports them. So is a file whose identity it
+   needs and cannot read for any reason but its absence: the file is unknown, as
+   after a failed scan, and the scan reports it with those directories. A layout
+   that hides leaves out every name that starts with a dot. Every listing leaves out
+   symbolic links, special files and names that are not valid UTF-8. A view lists no
+   file until a scan of every file has run. One that stops before every directory is
+   listed binds nothing; the next goes on where it stopped, listing again each
+   directory holding a path a commit or refresh scanned meanwhile, and each
+   directory at or under such a path. A change outside the app to a directory
+   already listed shows at the next scan of every file, or of its path.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
-   time), else changed outside. Paths compare under the volume's rules for case
-   and Unicode normalization. When several entities name one file, the lowest
-   by id of those whose facts it holds gets it, in sync, and the others whose
-   facts it holds are **joined** into that one, so readers of the same facts pick
-   the same entity: two writers can each adopt one file before either sees the
-   other's entity. A joined entity is bound to no file and is not missing; the
-   scan reports it with the entity it joined, and a view shows it without a file
-   until an intent joins it (see Intents). The others naming the file, or all when
-   it holds no one's facts, go on to step 3.
-3. An entity whose path holds nothing is bound to the one unbound file holding
-   its identity: a move. With no such file it is missing; with several, or when
-   one file could be several entities', nothing is bound and the candidates are
-   reported.
+   time), else changed outside. Of a conflicted file register whose writes name
+   several paths files are at, the latest write whose file holds its fact names
+   the entity's file, else the latest write, so every reader of the same facts
+   binds the same file; the files the others name go on as files no fact names.
+   Paths compare under the volume's rules for case and Unicode normalization.
+   When several entities name one file, the lowest by id of those whose facts it
+   holds gets it, in sync, and the others whose facts it holds are **joined** into
+   that one, so readers of the same facts pick the same entity: two writers can
+   each adopt one file before either sees the other's entity. A joined entity is
+   bound to no file and is not missing; the scan reports it with the entity it
+   joined, and a view shows it without a file until an intent joins it (see
+   Intents). When it holds no one's facts and all their facts name one file, the
+   same path under the volume's rules, identity and length, the lowest gets it,
+   changed outside, and the others are **alike**: bound to no file, not missing,
+   not reported, and shown on its row. Facts that have not seen another writer's
+   move can name one file for two entities, so only a file holding both facts
+   joins them. The others naming the file, or all when it holds no one's facts
+   and theirs name several files, go on to step 3.
+3. An entity whose path holds nothing is bound to the one unbound file holding its
+   identity: a move. With no such file it is missing; with several, or when one file
+   could be several entities', nothing is bound and the candidates are reported. Of
+   several naming one file that holds none's facts, the one left missing once this
+   step bound every other elsewhere is bound to that file, changed outside, unless
+   this step bound it to another. An identity is a file's contents, so a different
+   file saved with the moved file's bytes is taken for it. Of the entities left
+   missing whose facts name one file, the lowest is reported and the others are
+   alike.
 4. Every other file is unbound, a copy of a bound entity's file included: it
    has no entity until an intent says something about it.
 
-Every commit pins the moves this writer holds that its facts do not say yet: each
-file in sync at another path, as a `pin` op in a `bind` entry. A path the
+Every commit but an undo or redo pins the moves this writer holds that its facts
+do not say yet, since one the binding holds before an undo may be one the intent
+it reverses brought about: each
+file in sync at another path, as a `pin` op in a `bind` entry, of an entity whose
+file fact a writer of this install wrote: this writer, or one whose directory the
+local root holds, as one retired or another window's. Another install's fact may
+name a move whose file has not arrived here yet, so a move of its entity's file
+stays unpinned until that install runs; until then binding finds it by identity.
+A pin replaces every write of the fact. A path the
 volume takes for the logged one, under its rules for case and Unicode
 normalization, is not another. A new modification time alone is not logged; it
 only spares a scan reading an identity. Conflicted file registers, changed files
-and missing ones are left for the user. A scan writes nothing in the folder.
+and missing ones are not pinned. A scan writes nothing in the folder.
+
+## Rows
+
+A reader shows every library file as a row with a FileId, a number of its own that
+names the file across its looks and is never written. A row is a file the listing
+holds, an entity's file binding finds nowhere (`Missing`, at its logged path), or
+a path under one no scan can list now (`Unknown`): a directory left out, a failed
+scan, a file whose identity cannot be read, or a path a read changed and no scan
+has listed since. A row's entity is the one binding binds its file to. At each
+look a row continues by the first of these that applies:
+
+1. This instance's own effect moved or wrote its file: its row is at the path the
+   effect left it at, as the listing spells it. A row `Missing` or `Unknown` with an
+   entity continues only as that entity's file: another file an effect leaves at
+   its path gets a row of its own. A commit names each such file
+   with its FileId, or, where its row meets an entity's, the one it ends merged into,
+   and each a step put in place, staged or from the trash, with the identity of what
+   it staged, or else found there, and the length and time found there once written,
+   or the staged file's where another file landed there.
+   A tree move moves the rows of files no entity is bound to that
+   it moved: those listed, and every one under a directory it moved whole.
+2. Its entity is bound: its row is where binding puts the entity's file, `Missing`
+   where binding finds none, and `Unknown` where binding leaves it unscanned. The
+   row of an entity joined into another, or alike to it, is that one's row.
+3. Its path is listed again, under the volume's rules for case and Unicode
+   normalization: there, at another length or time `Changed`.
+
+A row under a path no scan can list is `Unknown`, before binding looks for its file
+elsewhere, and continues by the rules above once its path is listed again. Every
+other row ends, and the file at a new path gets a new FileId: a file no entity is
+bound to that another program or writer renamed, a copy, a move that edited the
+file. A file never has two FileIds: where rows meet on one file, the row of the
+entity bound to it survives, else the row there, and the others end merged into
+it. An open pending record hides no row.
+
+A view says what changed of each row since an earlier one of the same library: it
+appeared, moved, changed, went, merged into another, became `Present`, `Unknown`
+or `Missing`, gained or lost an entity, and its directories made and removed. Of
+a row with an entity, before or after, it says who changed it, this writer,
+another or a scan with no entry behind it, as the merged state names each write,
+and how where that is known: a row that went is trashed only by a delete whose
+entry moved a file from the row's path into the trash or a file write leaving the
+entity no file, and moved by a file write giving another path, though no file is
+there yet. A delete that trashes no file from the row's path, as an undo of
+tagging it, takes its tags off. The row of an entity whose state did not change,
+which another's row showed, changed as that row did, by that entity's write. Writers
+are numbered in the order first seen, alike in every view of one library.
 
 ## Intents
 
@@ -427,26 +539,33 @@ path, without making it an entity: a file nothing is said about stays without
 one. Each is refused where an entity's file is, under the volume's rules. The
 intent logs a `path` op for each such file as the folder shows it afterwards,
 with where it was: `from` alone for a file trashed, `file` alone for a file
-made, both for a file renamed or saved over. A commit reports each `path` op it
-logged, an undo's and a redo's included.
+made, both for a file renamed or saved over.
 
 A tree move is refused unless what it moves is still there: a directory at its
-source, or a file where the last scan listed one, and, moving file by file, a
-file at each path under it the last scan listed. A tree move logs a `tree` op,
-and a `file` op for each entity whose file it moves; the files under it no
-entity is bound to have no facts, and it logs no `path` op for them. A commit
-reports each tree it moved, and each directory it was to remove that the
-folder still holds: moving file by file, it moves only the files the last scan
-listed, and a file put there since keeps its directory. Undo moves the tree back
-as a tree move of its own, with a precondition on the identity of each entity's
-file the move carried, in place of renaming each file back: a single `rename`
-where directories rename, file by file elsewhere, which then removes each
-directory under `to`, and `to`, left holding nothing. A file no entity is bound
-to goes back with the tree as it is, and so does a file put in the tree after
-the move. The move back logs a `tree` op, so a redo
-moves the tree again.
-A `path` op changes no fact; undo reads it to rename the file back,
-bring its displaced bytes back from the trash, or trash the file it made.
+source, or a file where the last scan listed one, and, moving file by file, a file
+at each path under it the last scan listed. A tree move logs a `tree` op, and a
+`file` op for each entity whose file it moves; the files under it no entity is bound
+to have no facts, and it logs no `path` op for them. A commit reports each directory
+it was to remove that the folder still holds: moving file by file, it moves only the
+files the last scan listed, and a file put there since keeps its directory. Undo
+moves the tree back as a tree move of its own, with a precondition on the identity
+of each entity's file the move carried, in place of renaming each file back: a
+single `rename` where directories rename, file by file elsewhere, which then removes
+each directory under `to`, and `to`, left holding nothing. A file no entity is bound
+to goes back with the tree as it is, and so does a file put in the tree after the
+move. The move back logs a `tree` op, so a redo moves the tree again. A `path` op
+changes no fact; undo reads it to rename the file back, bring its displaced bytes
+back from the trash, or trash the file it made. Where the file it left is now an
+entity's, undo renames it back as that entity's file. It brings bytes back over it
+as that entity's file where the entity's file fact names it, as this writer's
+adoption or a binding's pin does; elsewhere the binding found the entity in it by
+its identity alone, so the bytes come back as no entity's file and the entity is
+missing again. It trashes it as that entity's file and leaves the entity's file fact
+as it was, so the entity is missing. It is refused, naming the writer and entry of
+the latest write of that fact other than a binding's pin, where the entity is not in
+sync with the file the op left, or where that write is another writer's and the undo
+would bring bytes back over the file or trash it: another writer's entity holds the
+file now.
 
 ## File effects and pending records
 
@@ -554,28 +673,29 @@ A pending record is a JSON object:
 {"writer":"<w>","entry":<entry>,"label":"Save","steps":[<step>,…],"files":[{"entity":"<e>","path":"a/b.syx","done_after":2}]}
 ```
 
-`entry` is the intent's entry as planned, without its `file`, `path`, `tree`
-and `dir` ops and `displaced`, whose `prev` is the writer's head when the record
-was written.
-`"moves":"copy"`, omitted otherwise, says the steps move files by copying.
-`"final":true`, omitted otherwise, says the intent is final (see Undo and redo),
-as a settlement is, so that it is no step of undo when a later session logs it.
-`files` says where each entity's file is once the first `done_after` steps are
-done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
-as it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when
-empty, holds the references the entity's `file` or `pin` op replaces: the writes
-of its file register the intent's writer knew of when it planned it. A record
-without `replaces` replaces nothing, so its file ops stand beside every write of
-the register they change. `unbound`, `trees` and `dirs`, each omitted when empty,
-say the same of what no entity owns, for the `path`, `tree` and `dir` ops:
-`unbound` holds `{"from":…,"path":…,"done_after":n}` for a file no entity is
-bound to, with `from` or `path` omitted for no file; `trees` holds
+`entry` is the intent's entry as planned, without its `file`, `path`, `tree` and
+`dir` ops and `displaced`, whose `prev` is the writer's head when the record was
+written. `"moves":"copy"`, omitted otherwise, says the steps move files by copying.
+`"final":true`, omitted otherwise, says the intent is final (see Undo and redo), as
+a settlement is, so that it is no step of undo when a later session logs it. `files`
+says where each entity's file is once the first `done_after` steps are done; a
+`path` of `null` is no file, and `leaves`, omitted otherwise, then holds the file
+fact the entity's `file` op logs all the same, a file nowhere, as an undo of a save
+that gave the entity its file logs. `"pin":true` marks a file the intent adopts as
+it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when empty,
+holds the references the entity's `file` or `pin` op replaces: the writes of its
+file register the intent's writer knew of when it planned it. A record without
+`replaces` replaces nothing, so its file ops stand beside every write of the
+register they change. `unbound`, `trees` and `dirs`, each omitted when empty, say
+the same of what no entity owns, for the `path`, `tree` and `dir` ops: `unbound`
+holds `{"from":…,"path":…,"done_after":n}` for a file no entity is bound to, with
+`from` or `path` omitted for no file; `trees` holds
 `{"from":…,"to":…,"done_after":n}` for a tree moved whole; and `dirs` holds
 `{"path":…,"made":true,"done_after":n}` for a directory made, or removed where
 `made` is `false`. `held`, omitted when empty, holds `[p,expect]` for each
 `to_trash` source `p` whose contents the intent checked: `{"holds":"<identity>"}`,
-or `{"listed":{"len":n,"modified":t}}` with `t` `null` for no time. A reader
-reads at most 16 MiB of a record.
+or `{"listed":{"len":n,"modified":t}}` with `t` `null` for no time. A reader reads
+at most 16 MiB of a record.
 
 ### Recovery
 
@@ -699,15 +819,16 @@ still dismiss the record, and a folder that renames directories can settle it.
 ## Undo and redo
 
 Each instance undoes only the intents it committed since it opened, most recent
-first, by committing a compensating intent. A redo reverses the latest undo
-while the instance has committed nothing else since. Undo history is not logged:
-it ends when the instance closes. Each intent is kept with what it replaced, as
-the merged state showed it when it committed, and with where the binding found
-each file it changed or whose entity it deleted, so a file moved outside the app
-that no commit had pinned yet goes back where it was moved to. An intent that only
-dismisses runs or joins entities, or settles another writer's record, is final: it
-is not kept and leaves redo as it was, so an undo after it reverses the intent
-before it. Undo takes what a join or a settlement wrote for another writer's.
+first, by committing a compensating intent. A redo reverses the latest undo while
+the instance has committed nothing else since. Undo history is not logged: it ends
+when the instance closes. Each intent is kept with what it replaced, as the merged
+state showed it when it committed, and with where the binding found each file it
+changed or whose entity it deleted, so a file moved outside the app that no commit
+had pinned yet goes back where it was moved to; one moved back outside to where the
+undo puts it stays, and only its fact is written. An intent that only dismisses runs
+or joins entities, or settles another writer's record, is final: it is not kept and
+leaves redo as it was, so an undo after it reverses the intent before it. Undo takes
+what a join or a settlement wrote for another writer's.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.
@@ -716,9 +837,11 @@ before it. Undo takes what a join or a settlement wrote for another writer's.
   the register values, members and file the delete ended.
 - A `file` op is reversed by putting back what it changed: the displaced bytes
   from the trash, under a precondition on what the path holds now; the old name;
-  or the trash, for a file the intent added. A save over a file that was gone
-  before it could go to the trash displaced nothing, so its undo leaves the saved
-  file.
+  or the trash, for a file the intent added. A save for an entity whose file the
+  binding found nowhere added one: its undo trashes it and writes back the fact
+  it replaced, so the entity is missing again, and its redo puts the file back
+  from the trash where it was. A save over a file that was gone before it could
+  go to the trash displaced nothing, so its undo leaves the saved file.
 - `pin` ops are left alone, so undoing an adoption leaves the file.
 - A `dir` op is reversed by removing the directory it made or making the one it
   removed.
@@ -730,12 +853,42 @@ then files, whatever order the intent made them in.
 
 An undo or redo is refused, naming the writer and entry, where another writer
 changed the same thing since: a register no longer holds only what the intent
-left, another writer added or removed the same value, a delete of the entity is
-live, or another writer wrote to an entity being uncreated. A file register holds
-what the intent left while every live write of it names the same path and
-identity, whatever modification time it gives, since putting a file back where
-moves copy gives it a new one. It is refused when the trash no longer holds the
-bytes it needs.
+left, another writer added or removed the same value, a live delete of the entity saw
+the intent, so none of the intent's writes on it is live and no later write of this
+writer's on it is, or
+another writer wrote to an entity being uncreated. It is refused too where an entry
+of another writer with a later clock reading changes what the intent's file effects
+left:
+
+- for a `path` op, the path it left the file at, or trashed it from: by a `path`
+  op from or to it, a `pin` or `file` op naming it, or a `tree` op moving it;
+- for a `file` op, each path it names, before and after, the same way, by an op
+  of another entity or of none;
+- for a `tree` op's `to` and a `dir` op's path, the tree there: by a `path` op
+  from or to a path in it, a `pin` or `file` op naming one, a `tree` op moving
+  it, a tree in it or one holding it, or a `dir` op in it.
+
+These refusals see only entries the reader still holds: once another writer folds
+such an entry into a snapshot, which keeps no `path`, `tree` or `dir` op, the undo
+checks only what the folder holds, so it carries that writer's file along with a
+tree and never removes, trashes or writes over it.
+
+Paths compare under the volume's rules for case and Unicode normalization. A
+`bind` entry's pins never refuse an undo or redo: a pin records where binding found
+a file, which is no one's change, and pins are never undone. A snapshot that folds
+the entry names it in `binds`, so its pins still refuse nothing; a snapshot an
+earlier build wrote names none, and its pins refuse as an intent's do.
+
+An undo or redo of a `path` op is refused, too, where the file at the path it left
+the file at is now an entity's by another writer's file write, other than a
+binding's pin, the instance had not read when it committed the intent: two writers
+made it so at once.
+
+A file register holds what the intent left while every live write of it but a `bind`
+entry's pin, named in a snapshot's `binds` once folded, names the same path and
+identity, whatever modification time it gives, since putting a file back where moves
+copy gives it a new one. It is refused when the trash no longer holds the bytes it
+needs.
 
 ## Trash
 

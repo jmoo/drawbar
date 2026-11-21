@@ -199,6 +199,16 @@ impl<B: Backend> Library<B> {
     }
 
     #[doc(hidden)]
+    pub fn owed(&self) -> usize {
+        self.core.owed()
+    }
+
+    #[doc(hidden)]
+    pub fn away(&self) -> usize {
+        self.core.away()
+    }
+
+    #[doc(hidden)]
     pub fn rebound(&mut self) -> [(crate::binding::Bindings, Vec<crate::log::Op>); 2] {
         self.core.rebound()
     }
@@ -257,6 +267,12 @@ impl<B: Backend> Library<B> {
     /// as [`undo`](Self::undo) is.
     pub fn redo(&mut self) -> Result<Committed> {
         run(&mut self.backend, self.core.redo())
+    }
+
+    /// Lets go of what the next undo would reverse, as once its undo is refused: the
+    /// next undo reaches this session's intent before it.
+    pub fn forget_undo(&mut self) {
+        self.core.forget_undo();
     }
 
     /// Settles another writer's unfinished effect, with the user's consent, in this

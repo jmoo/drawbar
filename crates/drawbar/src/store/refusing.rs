@@ -124,7 +124,7 @@ impl Refusing {
                         label,
                         made: None,
                         undoable: false,
-                        forgot: false,
+                        refused_step: None,
                         finished: None,
                         waiting: Waiting::Earlier,
                         result: Err(why.to_string()),

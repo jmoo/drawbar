@@ -141,6 +141,8 @@ with `DRAWBAR_TEST_FOLDER` giving the test folders what a browser's can do:
 `browser` renames files but no folder and flushes nothing, as a browser's own
 storage or a folder picked in Chrome, and `copying` renames nothing, as a folder
 picked in Brave. The default, `desktop`, does what the disk reports.
+`DRAWBAR_WALK_SEEDS=1..=500` runs drawbar's seeded walks of the library from each
+seed in the range, and reports every walk that failed.
 
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
