@@ -15,7 +15,8 @@ recordings are worth the space for the part you'll play.
    piano only with your right hand, try narrowing **Keys** to that range.
    To keep the full keyboard, try removing **Pedal resonance**, **Release
    samples** or a velocity layer instead. The meter suggests a cut that would
-   free enough space.
+   free enough space. Until the piano fits it can't be queued, and **Queue
+   send** reads as a warning such as `Won't fit · 70 MB over`.
 3. Click keys across the range you'll play, especially at its ends. A hatched
    range is silent. You can switch a layer back on or widen the range while
    you try different cuts.
@@ -50,7 +51,8 @@ you've kept for each key. Test the full playing dynamics on your instrument.
 
 If you've recorded several notes into **one long WAV**, start with
 [Make a piano from a recording](recording.md). If you already have **one WAV
-per recording**, build the library directly:
+per recording**, build the library directly. Takes build on their own, not
+together with WAVs of one stroke each.
 
 1. Choose **New ▸ Piano library (.npno)…**. Select your WAVs. Use 16-bit PCM,
    mono or stereo, at any sample rate.

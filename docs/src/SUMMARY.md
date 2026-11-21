@@ -32,7 +32,7 @@
 
 - [Building from source](reference/building.md)
 - [File formats](reference/file-formats.md)
-- [Recorded takes](reference/takes.md)
+- [Takes](reference/takes.md)
 - [Library data model](reference/data-model.md)
 - [USB protocol](reference/usb-protocol.md)
 - [Testing](reference/testing.md)

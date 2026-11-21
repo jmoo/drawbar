@@ -37,7 +37,7 @@ nord edit marimba.nsmpproj --fields
 A song's four fields hold program slot addresses. For a sample, you can change
 a zone's root and top notes, and its lower limit in formats that store it.
 Note names use C4 for middle C. To rename a sample, check that its fields include
-`name`. The original sample format stores no name.
+`name`. Instruments from the original Sample Library store no name.
 
 ## Edit an instrument slot
 

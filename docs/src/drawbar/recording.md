@@ -27,7 +27,8 @@ note dies away quickly enough to get a fade. You can
    Each strike is a *hit*. The whole recording is the *take*.
 3. Drop the WAV on drawbar and double-click it under **This computer**.
    The top waveform shows the whole take. Choose **Play** to hear it.
-4. Choose **Detect**. This replaces any existing note marks in the take.
+4. Choose **Detect**. This replaces any existing note marks in the take and
+   keeps up to four layers of each note.
    A box appears around each marked hit. A label such as **C4 v22** gives
    its note and layer. The message above the waveform tells you how many
    hits were marked or skipped.
@@ -51,6 +52,8 @@ while you hold the key, and the **release** sounds when you lift your finger.
 | The note as it would sound held and released | Hold **Play hit**, then let go. A quick click plays through it once. |
 | Whether a loop clicks where it repeats | **Loop wrap**. Click again to stop. |
 | Just the sound of lifting the key | **Release** |
+
+The fades you hear are close to the instrument's, not exact.
 
 Use the left and right arrows below the hit to check its neighbors. If the
 release is hard to see, use **+** beside the waveform to make quiet sounds

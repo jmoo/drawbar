@@ -10,7 +10,7 @@ tables below to check your file, your USB connection and your browser separately
 |---|---|
 | Electro 5 programs, live slots, songs and settings | View, edit and transfer. Tested on the Electro 5. |
 | Stage 2, 3 and 4 programs and live slots, and Stage 3 and 4 presets | View and edit. Support comes from documentation and specimen files. These edits have yet to be tested on the instruments. |
-| Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Listen, edit zones, extract WAVs and transfer. The app builds v2 files from WAVs or Sample Editor projects. V2 playback has been tested. The CLI can encode v3 and v4, whose playback is unconfirmed. |
+| Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Listen, edit zones, extract WAVs and transfer. The app builds v2 files from WAVs or Sample Editor projects. V2 playback has been tested. Files encoded as v3 or v4 have not been played on an instrument. |
 | Piano libraries (`.npno`) | Listen, trim, rename, tune, map keys and build from WAVs, including loops. The CLI can also split and re-encode libraries. [Hardware playback results](#piano-libraries) |
 | Electro 5 program and song bundles (`.ne5pbundle`, `.ne5tbundle`) | Import and export uncompressed bundles in the form Nord Sound Manager writes. Sound Manager opens drawbar's bundles and sends them to the instrument. Bundles from the instrument match those made by nord-cli. Sending a drawbar-built piano or sample *inside* a bundle remains untested. |
 | Other recognized Nord files | Keep and copy the original file byte for byte. Editing depends on the format. |
@@ -24,14 +24,18 @@ Notes stay on the computer.
 | Instrument | Confirmed on hardware |
 |---|---|
 | Electro 5 | Reading and writing programs, set lists, live slots, settings, samples and pianos from macOS, Linux and the browser. Moving, deleting, renaming, duplicating and selecting slots from macOS. The [write safeguards](../drawbar/instrument.md#safety) have also been tested here. |
-| Stage 4 | Connected and listed storage from Windows, including organ, piano and synth preset folders. File reads and writes on this model remain untested. |
+| Stage 4 | Connected and listed storage from Windows. File reads and writes on this model remain untested. |
 | Other models | No USB connection has been tested. |
 
 Windows builds pass the protocol tests. Writing from Windows has yet to be
-tried on hardware. Both the app and the CLI warn before writing to a model
-other than the Electro 5. A storage folder drawbar doesn't recognize, such as
-the Stage 4's piano pedal sounds, appears under the instrument's own name and
-is read-only.
+tried on hardware. Writing to a model other than the Electro 5 follows what the
+Electro 5 does and has not been tried, so the app and the CLI warn before every
+such write.
+
+Another model's folders show what it keeps in them: the Stage 4's organ, piano
+and synth presets get folders of their own. A storage folder drawbar doesn't
+recognize, such as the Stage 4's piano pedal sounds, appears under the
+instrument's own name and is read-only.
 
 ## The library in the browser
 
@@ -46,10 +50,12 @@ drawbar.app. Choose a browser by what else you want to connect.
 | Safari | No | No | No |
 
 To open a folder in Brave, enable `brave://flags/#file-system-access-api`.
+Outside Chrome, moving a file in that folder copies it, which takes longer for
+a large one.
 
 In Safari, seven days of Safari use without a visit to drawbar.app can clear
-the site's library. Adding the app to the Home Screen gives it separate
-storage. Other browsers may clear site data when space is low unless they have
+the site's library, unless drawbar.app is added to the Home Screen. The Home
+Screen app has storage of its own. Other browsers may clear site data when space is low unless they have
 granted persistent storage. [Back up the library or move it to another browser](../drawbar/this-computer.md#keeping-a-copy-in-the-browser).
 
 ## MIDI controllers

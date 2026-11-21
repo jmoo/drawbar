@@ -70,7 +70,8 @@ Hover over an icon or status for details. **Basic** shows the playing controls.
 In **Advanced**, **Every field** includes settings the panel view leaves out.
 **Raw** shows the saved value. Type a new one under **Writes**. Changed fields
 are marked with a pencil. If drawbar recognizes a file but has no editor for
-it, **Advanced** lets you inspect its contents.
+it, **Advanced** lets you inspect its contents. It can still be sent, copied
+and tagged, and goes back to the instrument byte for byte.
 
 Audio files have their own controls. See [sample instruments](samples.md),
 [piano libraries](pianos.md) and [WAV recordings](recording.md).

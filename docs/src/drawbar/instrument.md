@@ -20,7 +20,7 @@ or [USB permissions on Linux](../getting-started/install.md#connecting-on-linux)
 To refresh the listing after changes on the keyboard, choose **Instrument ▸
 Read everything**.
 
-![A connected keyboard below This computer in the left panel, with bank folders expanded. The Room panel on the right shows how much space is available for each kind of sound.](../assets/screenshot.png)
+![drawbar with an instrument attached. Its folders are in the left panel below This computer, a piano library is open in the center, and Room on the right shows the space left for each kind of sound.](../assets/screenshot.png)
 
 ## Copy a sound to this computer
 
@@ -44,14 +44,16 @@ changes locally and review them later, work on the copy under **This computer**.
    take it out of the queue.
 3. Choose **Send all** when the destinations are right. Store any unsaved
    changes on the keyboard's panel first. Writing settings or the slot you're
-   currently playing reloads the panel.
+   currently playing reloads the panel. drawbar warns you before writing
+   settings.
 4. Once the write finishes, load the program on the keyboard to hear it.
    **Load on instrument** in a linked document plays the version currently in
    the slot.
 
 If several library sounds differ from their original slots, **Queue** beside
 **Send** adds them together. If a transfer is refused, check the activity log.
-The remaining sounds stay queued. Disconnecting also keeps the queue. Review
+The remaining sounds stay queued. A sound that changed on disk is not sent
+until you have looked at it. Disconnecting also keeps the queue. Review
 the destinations again after reconnecting.
 
 ## Slots

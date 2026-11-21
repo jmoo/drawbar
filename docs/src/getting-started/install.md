@@ -72,11 +72,13 @@ Unplug the instrument, plug it back in, then [connect in drawbar](../drawbar/ins
 
 ## If drawbar does not load
 
-Check the message on the loading screen.
+The loading page says which step failed and offers to try again.
 
-- **Download interrupted.** Reload the page. If a content blocker stopped the
-  download, allow drawbar.app and try again.
-- **WebGL unavailable.** Turn on graphics or hardware acceleration in the
-  browser's settings and restart the browser.
-- **Browser too old.** Update to a recent browser with WebAssembly, WebGL2
-  and storage for the library, or use the desktop app. [Supported browsers](support.md#the-library-in-the-browser).
+- **A file could not be downloaded.** Reload the page. If an extension or a
+  content blocker stopped it, allow drawbar.app and reload.
+- **drawbar arrived but could not start.** drawbar needs WebAssembly and WebGL2,
+  which every current browser has. If the page asks for hardware acceleration,
+  turn it on in the browser's settings and restart the browser.
+- **The browser cannot keep drawbar's library.** The page says so before
+  downloading anything. Use a recent browser or the desktop app.
+  [Supported browsers](support.md#the-library-in-the-browser).

@@ -7,11 +7,10 @@ formats and their bytes.
 
 ## Round trips
 
-For writable formats, reading a file and writing it back without edits must
-reproduce its bytes exactly. Decoded fields are views over the original data.
-An edit changes only the bits owned by that field. Read-only archive entities
-are described under [The support map](#the-support-map).
-[Round-trip and field-isolation tests](testing.md#nord-format).
+Whatever the library reads, it writes back byte for byte. Regions it does not
+decode are kept as raw bytes, and decoded values are views over them, so a file
+survives a round trip even where its meaning is not fully known.
+[Testing](testing.md) says how this is checked.
 
 ## The support map
 

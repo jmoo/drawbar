@@ -65,6 +65,11 @@ Keep the folder in the same place to pick up unsaved edits next time.
 In a browser, reopen it from **Open recent**. If you want to move or rename
 the folder, save your edits first.
 
+In the browser, and on a desktop disk that cannot refuse to move a file onto one
+already there, drawbar checks that a name is free before a saved, copied or
+moved file takes it. A file another program makes at that name in the instant
+between is replaced, and what it held is lost.
+
 ## Share a folder between computers
 
 Open the same synced folder on each computer. Sync the hidden `.drawbar` folder
