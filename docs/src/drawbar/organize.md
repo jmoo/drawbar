@@ -1,8 +1,9 @@
 # Your library
 
 Your library holds the sounds, songs, samples and notes you keep in drawbar. It
-appears as **This computer** in the sidebar. It is a folder of ordinary files,
-so you can back it up, sync it, or use a folder you already have instead.
+appears as **This computer** in the sidebar. On the desktop it is a folder of
+ordinary files, so you can back it up, sync it, or use a folder you already have
+instead. In a browser it lives in the browser's storage unless you open a folder.
 
 <div class="cards">
 <div class="card">

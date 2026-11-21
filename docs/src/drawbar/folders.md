@@ -27,9 +27,9 @@ Save your edits before you move or rename the folder.
 A sync service such as Dropbox, OneDrive or iCloud Drive can keep one library on
 several computers.
 
-1. Put the library in a folder the service syncs. To bring the library you
-   already have, save your edits, copy the
-   [library folder](backup.md#where-your-library-lives) there, and use the copy.
+1. Put the library in a folder the service syncs. To use the library you
+   already have, save your edits, then move the
+   [library folder](backup.md#where-your-library-lives) there.
 2. Make sure the service syncs the hidden `.drawbar` folder with the sounds. It
    holds your tags and which instrument slots the sounds came from. Without it,
    they stay behind.
@@ -47,9 +47,10 @@ If a file or tag looks missing during a sync, let the sync finish before you
 remove or redo anything. If drawbar asks which version of an edit to keep, or
 shows **Kept apart** in the sidebar, see [Recover](recovery.md).
 
-Set drawbar up on each computer by opening the synced folder. If drawbar's own
-data is copied to a second computer or virtual machine and both copies go on
-making changes, [Kept apart](recovery.md#kept-apart) can appear.
+Open the synced folder on each computer, and leave drawbar's own data where
+each computer keeps it. If that data is copied to a second computer or virtual
+machine and both copies go on making changes,
+[Kept apart](recovery.md#kept-apart) can appear.
 
 </details>
 
