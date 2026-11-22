@@ -72,7 +72,7 @@ struct Edited {
 #[derive(Clone, PartialEq, Debug)]
 enum Step {
     Library(Logged),
-    Edit(Edited),
+    Edit(Box<Edited>),
 }
 
 impl Step {
@@ -215,7 +215,7 @@ impl Timeline {
             before,
             after,
         };
-        if self.keep(Step::Edit(step)) && gesture != Gesture::Over {
+        if self.keep(Step::Edit(Box::new(step))) && gesture != Gesture::Over {
             self.open = Some(gesture);
         }
     }
@@ -1009,10 +1009,13 @@ mod tests {
     /// redo, and the file each document was saved as.
     #[derive(Default, Clone, PartialEq, Debug)]
     struct Library {
-        done: Vec<(String, Option<(u64, Working, Working)>)>,
-        undone: Vec<(String, Option<(u64, Working, Working)>)>,
+        done: Vec<Commit>,
+        undone: Vec<Commit>,
         files: BTreeMap<u64, Working>,
     }
+
+    /// A step's label, and the document it saved with its file before and after.
+    type Commit = (String, Option<(u64, Working, Working)>);
 
     impl Library {
         fn commit(&mut self, label: String, saved: Option<(u64, Working)>) {
