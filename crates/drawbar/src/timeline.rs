@@ -70,6 +70,7 @@ struct Edited {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Step {
     Library(Logged),
     Edit(Edited),
@@ -1031,10 +1032,14 @@ mod tests {
 
     /// The library as the timeline must keep in step with it: what it would undo and
     /// redo, and the file each document was saved as.
+    /// A step the library logged, with the document it saved, and its file before and
+    /// after.
+    type Entry = (String, Option<(u64, Working, Working)>);
+
     #[derive(Default, Clone, PartialEq, Debug)]
     struct Library {
-        done: Vec<(String, Option<(u64, Working, Working)>)>,
-        undone: Vec<(String, Option<(u64, Working, Working)>)>,
+        done: Vec<Entry>,
+        undone: Vec<Entry>,
         files: BTreeMap<u64, Working>,
     }
 
