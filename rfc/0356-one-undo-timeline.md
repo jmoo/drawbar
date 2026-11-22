@@ -501,6 +501,8 @@ What holds bodies today, and what each becomes:
 The last row is the one with no file in the library to rest in. What the
 instrument sent is written once to the install's own state, where drafts already
 go, and the document rests in that file and is read by range.
+[Where unsaved work is kept](#where-unsaved-work-is-kept) says why there, and
+how such files are let go.
 
 None of this is in toshokan's log, and none of it needs toshokan to change. The
 install's own state is reached through toshokan's file layer, as `unsaved/` is
@@ -510,6 +512,59 @@ file is made without reading it whole. The store has an intent for each.
 A document that moves from `Body` to `Edit` also moves from rule 2 to rule 3 for
 its saves. It trades undo across a save for memory until edits over files meet
 rule 2.
+
+### Where unsaved work is kept
+
+Unsaved edits are kept today so that they outlive a restart. They go in
+`unsaved/` in the install's own state for the library, which is never synced and
+never in the library folder. In the browser that is the site's private storage.
+This RFC keeps that, and puts the bytes of a slot view beside them.
+
+**Why the install's own state.** The library folder is shared truth: it syncs,
+and every device sees what is in it. An unsaved edit is local truth.
+
+- Edits are kept every few seconds. In the folder, a sync service would upload
+  each keep, and a body is written whole each time.
+- Two computers could each keep an edit of one sound. Their files would arrive
+  side by side with clocks that do not compare, and choosing between them is a
+  merge of unsaved work. A save is where two computers meet.
+- Everything in the folder is a file the user named or toshokan's record of a
+  change. A kept edit is neither, and every version of drawbar that opens the
+  folder would have to know it.
+- A read-only library keeps unsaved edits today. In the folder it could not.
+
+The folder would give two things. An unsaved edit would follow the user to
+another computer. And where the browser has a folder the user picked, kept work
+would be on the user's disk, out of reach of the browser's limit on a site's
+storage and of its right to delete it. drawbar asks the browser to keep the
+site's storage, and the browser may decline.
+
+**How kept files are let go.** Nothing sweeps `unsaved/` by age or by size. A
+kept file lives as long as its edit:
+
+- Each keep is a new file. The instance that made it then removes the files of
+  that edit it kept or read before.
+- When the edit ends, as by a save or a revert, its files are removed. A removal
+  that fails is tried again before each later command and at close.
+- A file another window kept is removed by this one only after reading it, when
+  this one keeps or ends the same edit.
+- At open, every kept edit of a sound in the library is read, and the newest of
+  each is the edit. A file a crash left behind stays until its edit is next kept
+  or ended.
+
+So `unsaved/` holds about one file per unsaved edit. What bounds it is how many
+sounds have unsaved edits.
+
+**What large documents need of it.**
+
+- Opening reads each kept file whole to find the newest of each edit. Kept edits
+  become small, so that stays cheap. A slot view's bytes are a file of their own,
+  named by the hash a kept slot edit already carries, and are read by range.
+- A slot view's bytes are let go when the view closes with no edit over them,
+  and with the edit when it ends.
+- An edit kept over a slot is read only when that slot is viewed again. One
+  never viewed again stays, and its megabytes would stay with it. That needs an
+  end it does not have today.
 
 ### Text fields
 
@@ -668,10 +723,43 @@ grows its own, as the take editor did.
 
 ### Earlier work here
 
-The take editor's history kept a step per edit of the open WAV, stamped from a
-clock shared with the library's history, and ⌘Z took whichever side was stamped
-later. Review of [jmoo/drawbar#321](https://github.com/jmoo/drawbar/pull/321)
-found four faults, and each has a counterpart here:
+The take editor had its own Undo and Redo while
+[jmoo/drawbar#321](https://github.com/jmoo/drawbar/pull/321) was in review. It
+was taken out before the merge so that a history for the whole app could be
+designed on its own. The commits stay in that pull request's history:
+
+| Commit | What it did |
+|---|---|
+| [`3f96b14f`](https://github.com/jmoo/drawbar/commit/3f96b14fac171de8fc7cec69b97612e2200cdb6b) | Undo for the open WAV |
+| [`b5f3c533`](https://github.com/jmoo/drawbar/commit/b5f3c5337b32571683c5d23f20c6ef537a200083) | One Undo and Redo across the library and the open WAV |
+| [`c7822762`](https://github.com/jmoo/drawbar/commit/c782276281fc5ff7f753b4cfecbbc4ba21694ceb) | The WAV's history outlives a trip to another tab |
+| [`3e446854`](https://github.com/jmoo/drawbar/commit/3e446854113facecf4820c354aab26e5da05dc4a) | The removal |
+
+Its design had four parts:
+
+- **A step held settings, not samples.** A step was the gain, the marks and the
+  settings the take had before the edit, with a label such as "gain +3.0 dB".
+  Undo made the bytes again from the take's samples at no gain and the step
+  (`wav::restored`). A step's size did not grow with the take's length.
+- **Two histories and one clock.** The library kept its history and the open
+  document its own. Each step on either side was stamped from one counter
+  (`timeline::tick`). Undo went to the side stamped later. Redo went to the side
+  undone later, unless the other side had changed since.
+- **Undo was an edit.** Undo and Redo reached the document as sets with reserved
+  paths, through the queue that edits use.
+- **The history was editor state.** It lived with the open WAV's state, which
+  was parked when another tab came to the front.
+
+This RFC takes the first part. It is the `Edit` that
+[Large documents](#large-documents) gives a WAV take, with the file in place of
+samples held in memory, and its labels answer the question about labels under
+[Unresolved questions](#unresolved-questions).
+
+It does not take the second. Two histories need a rule about each other, which
+`timeline::redoes` was, and each further history needs one against all the
+rest. In one timeline a new step ends the redo, whichever kind it is.
+
+Review of the pull request found four faults, and each has a counterpart here:
 
 | Fault found | Here |
 |---|---|
@@ -760,6 +848,9 @@ Sources:
   and the limit on files read whole may weigh more than working copies, and
   neither is touched here. A heap profile of a session should order the rows of
   the Large documents table against them.
+- **Kept slot views.** What lets go of an edit kept over a slot that is never
+  viewed again, and of the bytes behind it: an age, a size, or a list the user
+  can clear?
 - **The wheel.** A wheel has no end the app can see, so each tick is a step. Is
   that too many?
 - **Notes.** Is one step per visit to a note too coarse? The note editor could
