@@ -237,9 +237,12 @@ mod tests {
             .id;
         let mut edited = published().remove(0).1;
         edited.push(0);
-        bench
-            .workspace
-            .replace_bytes(tine, edited.clone(), &mut bench.log);
+        bench.workspace.replace_bytes(
+            tine,
+            edited.clone(),
+            crate::workspace::Cause::User,
+            &mut bench.log,
+        );
         bench.workspace.mark_saved(tine);
 
         assert_eq!(filing(&mut bench), 1);

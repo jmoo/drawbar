@@ -1031,7 +1031,7 @@ mod tests {
         let (revision, layout) = (workspace.revision(), workspace.layout());
         let mut louder = testing::wav_bytes();
         *louder.last_mut().unwrap() ^= 1;
-        workspace.replace_bytes(wavs[100], louder, &mut log);
+        workspace.replace_bytes(wavs[100], louder, crate::workspace::Cause::User, &mut log);
         assert!(workspace.revision() > revision && workspace.layout() == layout);
         let (listed, keys) = keyed(&mut located, &workspace);
         assert_eq!(
@@ -1042,7 +1042,7 @@ mod tests {
 
         let edited = Project::new("Marimba", &zones, 1).unwrap();
         let edited = nord_format::to_bytes(&Entity::SampleProject(edited)).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
         workspace.read_now([id], &mut log);
         assert!(workspace.layout() == layout);
         let (listed, keys) = keyed(&mut located, &workspace);

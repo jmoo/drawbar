@@ -2181,7 +2181,8 @@ mod tests {
         )
         .unwrap()
         .1;
-        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace
+            .replace_bytes(id, edited, crate::workspace::Cause::User, &mut app.log);
 
         app.open_library(&ctx, second.0.clone(), false);
         let (title, answers) = app.browser.asking().expect("a question");
@@ -2216,7 +2217,8 @@ mod tests {
         )
         .unwrap()
         .1;
-        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace
+            .replace_bytes(id, edited, crate::workspace::Cause::User, &mut app.log);
         let unsaved = |app: &DrawbarApp| app.workspace.listed().any(|entity| entity.is_unsaved());
 
         let reopen = vec![browser::Act::ReopenLibrary];

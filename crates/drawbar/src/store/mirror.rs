@@ -29,7 +29,8 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::tags::Asked;
 use crate::workspace::{
-    library_filename, precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
+    library_filename, precious, Cause, Content, FileAsk, Leaving, LocalEntity, Origin, Saved,
+    Workspace,
 };
 
 /// How far opening has got.
@@ -794,7 +795,7 @@ impl Store {
             return browser.ask_kept_slot_edit(id, entity, bytes);
         }
         let changed = base != view.base;
-        workspace.replace_bytes(id, bytes, log);
+        workspace.replace_bytes(id, bytes, Cause::Follow, log);
         let Some(entity) = workspace.get(id) else {
             return;
         };
@@ -922,8 +923,8 @@ impl Store {
                 .is_none_or(|entity| blake3::hash(entity.saved.bytes()) != held),
         };
         match draft {
-            Draft::Bytes(bytes) => workspace.replace_bytes(id, bytes, log),
-            Draft::Edit(edit) => workspace.hold_edit(id, Some(edit)),
+            Draft::Bytes(bytes) => workspace.replace_bytes(id, bytes, Cause::Follow, log),
+            Draft::Edit(edit) => workspace.hold_edit(id, Some(edit), Cause::Follow),
         }
         let Some(entity) = workspace.get(id) else {
             return;
@@ -3085,7 +3086,7 @@ impl Store {
             let opened = placed.iter().filter(|(_, path)| super::opens(path.leaf()));
             for ((at, path), id) in opened.zip(edited) {
                 let asset = &list.assets[*at];
-                workspace.replace_bytes(id, asset.saved.clone(), log);
+                workspace.replace_bytes(id, asset.saved.clone(), Cause::Follow, log);
                 let Some((copy, name)) = edit_apart(asset, &path.parent(), workspace, browser, log)
                 else {
                     continue;

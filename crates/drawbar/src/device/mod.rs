@@ -2529,7 +2529,7 @@ mod tests {
         let body = nord_format::crc::crc32(&edited[v1.body_start() as usize..]);
         let stored = v1.checksum_range(edited.len()).unwrap();
         edited[stored].copy_from_slice(&body.to_le_bytes());
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), crate::workspace::Cause::User, &mut log);
         workspace.mark_saved(id);
         assert!(!workspace.get(id).unwrap().is_unsaved());
 
@@ -2848,7 +2848,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
         workspace.mark_saved(id);
         let now = workspace.get(id).unwrap().saved.crc32().unwrap();
         assert_ne!(now, crc, "the edit changed the body");
@@ -3099,7 +3099,7 @@ mod tests {
 
         let (_, edited) = crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())])
             .expect("the registry takes the set");
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), crate::workspace::Cause::User, &mut log);
 
         device.pretend(DeviceEvent::Sent {
             id,

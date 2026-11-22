@@ -1606,6 +1606,55 @@ pub enum FileAsk {
     Delete { id: u64, path: LibPath },
 }
 
+/// What the editor holds of a document. It is all of the document's content: a body is
+/// whole, and an edit names the baseline it is over.
+#[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum Working {
+    /// The whole body.
+    Body(Bytes),
+    /// An edit over the saved baseline stamped `over`, or none, where the document holds
+    /// what that baseline does.
+    Edit { over: u64, edit: Option<Edit> },
+}
+
+impl Working {
+    /// About how many bytes it holds.
+    pub fn size(&self) -> usize {
+        match self {
+            Working::Body(bytes) => bytes.len(),
+            Working::Edit { edit, .. } => edit.as_ref().map_or(0, Edit::size),
+        }
+    }
+
+    /// Whether both are bodies held in one allocation.
+    pub fn shares(&self, other: &Working) -> bool {
+        match (self, other) {
+            (Working::Body(mine), Working::Body(theirs)) => mine.shares(theirs),
+            _ => false,
+        }
+    }
+}
+
+/// Why a working copy changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cause {
+    /// The user changed it: a step Undo takes back.
+    User,
+    /// It takes what a file, a kept draft or an undo gives it: no step.
+    Follow,
+}
+
+/// What a document held before the user first changed it in a frame
+/// ([`Workspace::take_notes`]).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Note {
+    pub id: u64,
+    pub before: Working,
+    /// Whether a revert changed it.
+    pub revert: bool,
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// The changes to files asked for and not yet taken.
@@ -1689,6 +1738,8 @@ pub struct Workspace {
     on_file: std::collections::BTreeMap<u64, Baseline>,
     /// The baseline each save the store has sent, and not heard back on, carries.
     sent: std::collections::BTreeMap<u64, Baseline>,
+    /// What each document the user changed held first, since they were last taken.
+    notes: Vec<Note>,
     /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
     frame: u64,
 }
@@ -1799,6 +1850,7 @@ impl Workspace {
             edits: Default::default(),
             on_file: Default::default(),
             sent: Default::default(),
+            notes: Vec::new(),
             frame: 1,
         }
     }
@@ -2105,7 +2157,7 @@ impl Workspace {
     /// ⚠️ Only for an asset with nothing unsaved. Over an unsaved edit, see
     /// [`Workspace::rebase`].
     pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        self.replace_bytes(id, bytes, log);
+        self.replace_bytes(id, bytes, Cause::Follow, log);
         self.settle_saved(id);
         self.forget_saves(id);
     }
@@ -3048,7 +3100,7 @@ impl Workspace {
         from: Option<u64>,
         log: &mut Log,
     ) -> Option<u64> {
-        self.replace_bytes(id, bytes, log);
+        self.replace_bytes(id, bytes, Cause::Follow, log);
         let unsaved = self.get(id).filter(|entity| entity.is_unsaved());
         let Some(stamp) = unsaved.map(|entity| entity.stamp) else {
             return from;
@@ -3436,9 +3488,70 @@ impl Workspace {
         });
     }
 
+    /// What an asset holds, where the workspace holds it: `None` for one unread.
+    pub fn working(&self, id: u64) -> Option<Working> {
+        let entity = self.get(id).filter(|entity| !entity.unread())?;
+        Some(match entity.rests() {
+            Some(_) => Working::Edit {
+                over: entity.saved.stamp,
+                edit: self.edit(id).cloned(),
+            },
+            None => Working::Body(entity.bytes.clone()),
+        })
+    }
+
+    /// Put back what an asset held, and return whether it holds exactly that now. An edit
+    /// over another baseline than the asset's is refused.
+    pub fn hold(&mut self, id: u64, working: &Working, log: &mut Log) -> bool {
+        match working {
+            Working::Body(bytes) => self.put_bytes(id, bytes.clone(), Cause::Follow, log),
+            Working::Edit { over, edit } => {
+                let Some(entity) = self.get(id).filter(|entity| entity.saved.stamp == *over) else {
+                    return false;
+                };
+                let file = entity.saved.file().cloned();
+                if let Some(file) = file.filter(|_| entity.rests().is_none()) {
+                    self.rest(id, file, *over);
+                }
+                self.hold_edit(id, edit.clone(), Cause::Follow);
+            }
+        }
+        self.working(id).as_ref() == Some(working)
+    }
+
+    /// Note what an asset holds before the user changes it, unless it was noted since the
+    /// notes were last taken. `revert` marks the note as a revert's.
+    fn noted(&mut self, id: u64, cause: Cause, revert: bool) {
+        if cause == Cause::Follow {
+            return;
+        }
+        if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
+            note.revert |= revert;
+            return;
+        }
+        if let Some(before) = self.working(id) {
+            self.notes.push(Note { id, before, revert });
+        }
+    }
+
+    /// Note `before` as what a document held before the user changed it, where its editor
+    /// holds what the workspace does not, unless it was noted since the notes were last
+    /// taken.
+    pub fn note(&mut self, id: u64, before: Working) {
+        if !self.notes.iter().any(|note| note.id == id) {
+            let revert = false;
+            self.notes.push(Note { id, before, revert });
+        }
+    }
+
+    /// What each document the user changed held before, since the last call.
+    pub fn take_notes(&mut self) -> Vec<Note> {
+        std::mem::take(&mut self.notes)
+    }
+
     /// [`Workspace::drop_edits`], and say so where it changed anything.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
-        if !self.drop_edits(id) {
+        if !self.drop_edits(id, Cause::User) {
             return;
         }
         if let Some(entity) = self.get(id) {
@@ -3451,7 +3564,8 @@ impl Workspace {
     ///
     /// ⚠️ A pending edit has not reached the bytes, so restoring them changes nothing.
     /// Reverting a piano library's plan only clears the flag.
-    pub fn drop_edits(&mut self, id: u64) -> bool {
+    pub fn drop_edits(&mut self, id: u64, cause: Cause) -> bool {
+        self.noted(id, cause, true);
         let Some(entity) = self.get(id) else {
             return false;
         };
@@ -3500,7 +3614,8 @@ impl Workspace {
     ///
     /// ⚠️ A save already sent carries on with the edit it was sent with, and an edit
     /// made since is made again over the file it writes.
-    pub fn hold_edit(&mut self, id: u64, edit: Option<Edit>) {
+    pub fn hold_edit(&mut self, id: u64, edit: Option<Edit>, cause: Cause) {
+        self.noted(id, cause, false);
         let save = self.edits.get(&id).map_or(Save::No, |held| held.save);
         let Some(edit) = edit else {
             if !matches!(save, Save::Sent(_)) {
@@ -3798,8 +3913,20 @@ impl Workspace {
     /// Swap in edited bytes, keeping the entity's identity.
     ///
     /// The decode and the verify run again, as they do for a file from disk.
-    pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        let Some(verify) = self.respell(id, bytes.into()) else {
+    pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, cause: Cause, log: &mut Log) {
+        self.put_bytes(id, bytes.into(), cause, log);
+    }
+
+    /// Put bytes derived from an asset's working copy under it, which change nothing the
+    /// user holds: [`Workspace::replace_bytes`], noting nothing.
+    pub fn lay_out(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+        self.put_bytes(id, bytes.into(), Cause::Follow, log);
+    }
+
+    /// [`Workspace::replace_bytes`] with bytes that may share another's allocation.
+    fn put_bytes(&mut self, id: u64, bytes: Bytes, cause: Cause, log: &mut Log) {
+        self.noted(id, cause, false);
+        let Some(verify) = self.respell(id, bytes) else {
             return;
         };
         let formatless = self.get(id).is_some_and(LocalEntity::has_no_format);
@@ -4247,6 +4374,161 @@ mod tests {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
     }
 
+    /// A workspace holding one program whole.
+    fn program() -> (Workspace, u64, Log) {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = workspace.ingest("Grand.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        (workspace, id, log)
+    }
+
+    /// `bytes` with `tail` after them.
+    fn and(bytes: &[u8], tail: u8) -> Vec<u8> {
+        [bytes, &[tail]].concat()
+    }
+
+    fn body(workspace: &Workspace, id: u64) -> Vec<u8> {
+        workspace.get(id).unwrap().bytes.to_vec()
+    }
+
+    fn renamed(name: &str) -> Edit {
+        Edit::Sample(vec![("name".into(), name.into())])
+    }
+
+    #[test]
+    fn an_asset_held_whole_works_on_its_body() {
+        let (workspace, id, _) = program();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        assert_eq!(workspace.working(id), Some(Working::Body(bytes)));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_asset_resting_in_its_file_works_on_an_edit_over_its_baseline() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let over = workspace.get(id).unwrap().saved.stamp();
+        let edit = None;
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
+
+        workspace.hold_edit(id, Some(renamed("Vibes")), Cause::User);
+        let edit = Some(renamed("Vibes"));
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
+    }
+
+    #[test]
+    fn a_users_change_notes_what_the_asset_held_first_in_a_frame() {
+        let (mut workspace, id, mut log) = program();
+        let before = workspace.working(id).unwrap();
+        let bytes = body(&workspace, id);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::User, &mut log);
+        workspace.replace_bytes(id, and(&bytes, 2), Cause::User, &mut log);
+        let revert = false;
+        assert_eq!(workspace.take_notes(), [Note { id, before, revert }]);
+        assert_eq!(workspace.take_notes(), [], "the notes were taken");
+    }
+
+    #[test]
+    fn a_change_that_follows_notes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = and(&body(&workspace, id), 1);
+        workspace.replace_bytes(id, bytes, Cause::Follow, &mut log);
+        assert_eq!(workspace.take_notes(), []);
+    }
+
+    #[test]
+    fn a_reverts_note_says_it_is_a_revert() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = and(&body(&workspace, id), 1);
+        workspace.replace_bytes(id, bytes, Cause::Follow, &mut log);
+        let before = workspace.working(id).unwrap();
+        workspace.revert(id, &mut log);
+        let revert = true;
+        assert_eq!(workspace.take_notes(), [Note { id, before, revert }]);
+    }
+
+    #[test]
+    fn holding_a_body_puts_back_its_allocation_and_notes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = body(&workspace, id);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::Follow, &mut log);
+        let held = workspace.working(id).unwrap();
+        workspace.replace_bytes(id, and(&bytes, 2), Cause::Follow, &mut log);
+
+        assert!(workspace.hold(id, &held, &mut log));
+        assert!(
+            workspace.working(id).unwrap().shares(&held),
+            "one allocation"
+        );
+        assert_eq!(workspace.take_notes(), []);
+    }
+
+    #[test]
+    fn holding_what_an_asset_works_on_changes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let held = workspace.working(id).unwrap();
+        let stamp = workspace.get(id).unwrap().stamp;
+        assert!(workspace.hold(id, &held, &mut log));
+        assert_eq!(workspace.working(id), Some(held));
+        assert_eq!(workspace.get(id).unwrap().stamp, stamp);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holding_an_edit_over_another_baseline_is_refused() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let held = workspace.working(id);
+        let over = workspace.get(id).unwrap().saved.stamp() + 1;
+        let edit = Some(renamed("Vibes"));
+
+        assert!(!workspace.hold(id, &Working::Edit { over, edit }, &mut log));
+        assert_eq!(workspace.working(id), held);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holding_no_edit_while_a_save_of_the_edit_is_sent_is_refused() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let unedited = workspace.working(id).unwrap();
+        workspace.hold_edit(id, Some(renamed("Vibes")), Cause::User);
+        assert!(workspace.save_edit(id));
+        workspace.send_edit(id).expect("the store takes it");
+
+        assert!(!workspace.hold(id, &unedited, &mut log));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_body_over_a_file_and_the_file_are_held_in_turn() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::Follow, &mut log);
+        let whole = workspace.working(id).unwrap();
+        workspace.revert(id, &mut log);
+        let resting = workspace.working(id).unwrap();
+        assert!(matches!(resting, Working::Edit { edit: None, .. }));
+
+        assert!(workspace.hold(id, &whole, &mut log), "the body back");
+        assert_eq!(workspace.working(id).as_ref(), Some(&whole));
+        assert!(workspace.hold(id, &resting, &mut log), "the file again");
+        assert_eq!(workspace.working(id).as_ref(), Some(&resting));
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn an_edit_made_during_its_save_is_kept_over_the_file_the_save_wrote() {
@@ -4261,10 +4543,10 @@ mod tests {
                 .map(|name| ("name".to_string(), name.to_string()));
             Edit::Sample(sets.collect())
         };
-        workspace.hold_edit(id, Some(named(&["Vibes"])));
+        workspace.hold_edit(id, Some(named(&["Vibes"])), Cause::User);
         assert!(workspace.save_edit(id));
         let (from, rewrite) = workspace.send_edit(id).expect("the store takes it");
-        workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])));
+        workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])), Cause::User);
 
         let (out, _) = crate::testing::streamed(&rewrite.pieces(&from).unwrap(), &bytes);
         std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
@@ -4533,7 +4815,7 @@ mod tests {
         let id = workspace.ingest("held".into(), Origin::Fresh, b"Set 1\n".to_vec(), &mut log);
         assert!(workspace.get(id).expect("held").is_text());
 
-        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], &mut log);
+        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], Cause::User, &mut log);
         let held = workspace.get(id).expect("held");
         assert!(!held.is_text(), "these bytes are no longer words");
         assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
@@ -4575,7 +4857,7 @@ mod tests {
 
         // Edited, it stays a view; kept, it stops being one and keeps its edit.
         let edited = workspace.get(viewed).unwrap().bytes.to_vec();
-        workspace.replace_bytes(viewed, [edited, vec![]].concat(), &mut log);
+        workspace.replace_bytes(viewed, [edited, vec![]].concat(), Cause::User, &mut log);
         assert!(workspace.is_view(viewed));
         workspace.keep(viewed, &mut log);
         assert!(!workspace.is_view(viewed));
@@ -4631,7 +4913,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
 
         workspace.revert(id, &mut log);
@@ -4688,7 +4970,7 @@ mod tests {
         let untouched = view(&mut workspace, 2, &mut log);
 
         let bytes = workspace.get(edited).unwrap().bytes.to_vec();
-        workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
+        workspace.replace_bytes(edited, [bytes, vec![0]].concat(), Cause::User, &mut log);
         let mut queue = Queue::default();
         crate::queue::enqueue(
             &workspace,
@@ -4860,7 +5142,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         let second = stamp(&workspace);
         assert_ne!(second, first);
 
@@ -4889,7 +5171,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         assert!(unsaved(&workspace));
         assert_eq!(*workspace.get(id).unwrap().saved.bytes(), opened);
 
@@ -4902,7 +5184,7 @@ mod tests {
         // Reverting moves the bytes back onto the baseline, which stays where it is.
         let (_, again) =
             crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
-        workspace.replace_bytes(id, again, &mut log);
+        workspace.replace_bytes(id, again, Cause::User, &mut log);
         assert!(unsaved(&workspace));
         workspace.revert(id, &mut log);
         assert!(!unsaved(&workspace));
@@ -4911,9 +5193,9 @@ mod tests {
         // An edit undone by hand is back at the baseline too.
         let (_, away) =
             crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
-        workspace.replace_bytes(id, away, &mut log);
+        workspace.replace_bytes(id, away, Cause::User, &mut log);
         assert!(unsaved(&workspace));
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert!(!unsaved(&workspace), "it holds what it was saved as again");
     }
 
@@ -4964,7 +5246,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         workspace.landed(id, ObjectClass::Program, at, sent.clone());
         assert!(
             workspace.get(id).unwrap().is_unsaved(),
@@ -5119,7 +5401,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
         assert!(workspace.get(id).unwrap().is_unsaved());
 
@@ -5739,7 +6021,7 @@ mod tests {
         let opened = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         workspace.landed(id, ObjectClass::Program, at, edited.clone());
         let entity = workspace.get(id).unwrap();
         assert!(!entity.is_unsaved());

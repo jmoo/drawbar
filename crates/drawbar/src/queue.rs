@@ -1764,7 +1764,7 @@ mod tests {
         let bytes = workspace.get(id).expect("it is in memory").bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, log);
     }
 
     /// Identical means the instrument holds the same bytes. A body whose declared fields
@@ -2339,7 +2339,7 @@ mod tests {
             let held = workspace.get(id).unwrap().bytes.to_vec();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), gain.into())]).unwrap();
-            workspace.replace_bytes(id, edited, &mut log);
+            workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
             follow(&workspace, &mut device, &mut queue, &mut log);
         }
 

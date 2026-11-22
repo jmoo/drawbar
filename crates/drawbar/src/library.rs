@@ -1987,7 +1987,7 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
 
@@ -2229,7 +2229,7 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
         assert!(workspace.get(id).unwrap().is_unsaved());
         assert_ne!(
             workspace
@@ -2344,7 +2344,7 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
         workspace.mark_saved(id);
         device.relink(&mut workspace);
 
@@ -2744,7 +2744,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
 
         let said = draw(&mut library, &mut browser, &workspace);
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");

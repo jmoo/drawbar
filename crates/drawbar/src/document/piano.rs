@@ -310,6 +310,22 @@ impl Plan {
             }
     }
 
+    /// About how many bytes it holds.
+    pub fn size(&self) -> usize {
+        fn entries<T>(len: usize) -> usize {
+            len * std::mem::size_of::<T>()
+        }
+        let names = [&self.name, &self.variant].into_iter().flatten();
+        std::mem::size_of::<Plan>()
+            + names.map(String::len).sum::<usize>()
+            + entries::<Bank>(self.banks.len())
+            + entries::<u8>(self.layers.len())
+            + entries::<((u8, u8), bool)>(self.roots.len())
+            + entries::<(u8, i8)>(self.fine_tune.len())
+            + entries::<((u8, u8, u8), i16)>(self.trims.len())
+            + entries::<(u8, Option<u8>)>(self.key_roots.len())
+    }
+
     /// Whether one root keeps one layer: its own exception, or what the switch says.
     fn keeps_layer(&self, root: u8, layer: u8) -> bool {
         match self.roots.get(&(root, layer)) {
@@ -4727,7 +4743,7 @@ mod tests {
                 .as_ref()
                 .expect("the library lays out")
                 .clone();
-            self.workspace.replace_bytes(self.id, made, &mut self.log);
+            self.workspace.lay_out(self.id, made, &mut self.log);
             applied
         }
 

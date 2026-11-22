@@ -9,7 +9,7 @@ use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
 use crate::testing::{Bench, Temp};
-use crate::workspace::{Fresh, Origin, VerifyState};
+use crate::workspace::{Cause, Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
 /// One run of the app over a library: the store, and the state it mirrors.
@@ -445,7 +445,7 @@ fn a_library_only_read_is_never_losing() {
     let id = unread[0];
     let edited = with_gain(&session.bytes(id), "96");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, edited, log);
+    workspace.replace_bytes(id, edited, Cause::User, log);
     assert!(losing(&session), "an unsaved edit");
 }
 
@@ -464,7 +464,7 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
     } = &mut session.bench;
     assert!(session.store.sync(workspace, browser, Pass::Files));
     let edited = with_gain(&workspace.get(id).unwrap().bytes, "96");
-    workspace.replace_bytes(id, edited.clone(), log);
+    workspace.replace_bytes(id, edited.clone(), Cause::User, log);
     workspace.mark_saved(id);
     assert!(
         !session.store.sync(workspace, browser, Pass::Files),
@@ -489,9 +489,9 @@ fn a_settled_library_let_go_without_waiting_keeps_its_save() {
     let saved = with_gain(&session.bytes(id), "96");
     let edited = with_gain(&saved, "12");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.replace_bytes(id, saved.clone(), Cause::User, log);
     workspace.mark_saved(id);
-    workspace.replace_bytes(id, edited.clone(), log);
+    workspace.replace_bytes(id, edited.clone(), Cause::User, log);
     assert!(!session.settled(), "the save is in flight");
     while !session.settled() {
         assert!(session.next(), "the save answered");
@@ -521,9 +521,9 @@ fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
     let saved = with_gain(&first.bytes(id), "96");
     let edited = with_gain(&saved, "12");
     let Bench { workspace, log, .. } = &mut first.bench;
-    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.replace_bytes(id, saved.clone(), Cause::User, log);
     workspace.mark_saved(id);
-    workspace.replace_bytes(id, edited.clone(), log);
+    workspace.replace_bytes(id, edited.clone(), Cause::User, log);
     first.close();
     assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
 
@@ -658,7 +658,10 @@ fn a_save_over_a_listed_file_is_refused_only_where_its_contents_changed() {
     fs::write(root.at("Grand.ne5p"), &theirs).unwrap();
     let mine = with_gain(&program, "96");
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     assert_eq!(
@@ -677,7 +680,10 @@ fn a_save_over_a_listed_file_is_refused_only_where_its_contents_changed() {
     session.sync();
     fs::write(again.at("Grand.ne5p"), &program).unwrap();
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     assert_eq!(
@@ -699,7 +705,7 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
     session
         .bench
         .workspace
-        .replace_bytes(id, mine.clone(), &mut session.bench.log);
+        .replace_bytes(id, mine.clone(), Cause::User, &mut session.bench.log);
     fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
 
     session.refocus();
@@ -741,7 +747,7 @@ fn keep_both_writes_only_the_new_file() {
     session
         .bench
         .workspace
-        .replace_bytes(id, mine.clone(), &mut session.bench.log);
+        .replace_bytes(id, mine.clone(), Cause::User, &mut session.bench.log);
     fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
     let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
     fs::File::options()
@@ -826,7 +832,10 @@ fn an_edit_over_a_file_whose_time_alone_changed_asks_nothing() {
     session.sync();
     let mine = with_gain(&session.bytes(id), "96");
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), Cause::User, log);
     touch(&root, "untitled.ne5p");
     session.refocus();
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
@@ -848,7 +857,10 @@ fn a_save_over_a_file_changed_since_it_was_read_is_refused() {
     // Saved before any rescan could see theirs.
     let mine = with_gain(&saved, "96");
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
 
@@ -874,7 +886,7 @@ impl Session {
     /// Make `bytes` what `id` holds.
     fn put(&mut self, id: u64, bytes: &[u8]) {
         let Bench { workspace, log, .. } = &mut self.bench;
-        workspace.replace_bytes(id, bytes.to_vec(), log);
+        workspace.replace_bytes(id, bytes.to_vec(), Cause::User, log);
     }
 
     /// Make `bytes` what `id` holds, and save them.
@@ -1379,7 +1391,10 @@ fn a_write_that_fails_leaves_the_file_as_it_was() {
     mode(0o555);
     let edited = with_gain(&file, "96");
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, edited, log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, edited, Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     mode(0o755);
@@ -1405,7 +1420,10 @@ fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart()
         .store
         .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, new.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     assert_eq!(session.said("was not saved"), 1, "the save failed");
@@ -1450,7 +1468,10 @@ fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_ag
         .store
         .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, new.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     fs::write(root.at("untitled.ne5p"), b"theirs").unwrap();
@@ -1466,7 +1487,7 @@ fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_ag
     session
         .bench
         .workspace
-        .replace_bytes(id, later.clone(), log);
+        .replace_bytes(id, later.clone(), Cause::User, log);
     session.close();
 
     fs::rename(root.at("untitled.ne5p"), root.local().join("theirs")).unwrap();
@@ -1494,7 +1515,10 @@ fn a_save_the_next_change_finishes_can_be_undone_after_it() {
         .store
         .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, new.clone(), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     session.make_tag("Sunday");
@@ -1520,7 +1544,7 @@ fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     session
         .bench
         .workspace
-        .replace_bytes(id, with_gain(&old, "96"), log);
+        .replace_bytes(id, with_gain(&old, "96"), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     session
@@ -1567,7 +1591,10 @@ fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
     let id = again.named("untitled.ne5p");
     let edit = with_gain(&old, "12");
     let log = &mut again.bench.log;
-    again.bench.workspace.replace_bytes(id, edit.clone(), log);
+    again
+        .bench
+        .workspace
+        .replace_bytes(id, edit.clone(), Cause::User, log);
     again.close();
 
     fs::remove_file(root.at("b.ne5p")).unwrap();
@@ -2253,7 +2280,7 @@ fn a_rename_inside_a_refused_rename_of_the_same_pass_lands_where_the_folder_is()
 
     let edited = with_gain(&program, "12");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(b, edited.clone(), log);
+    workspace.replace_bytes(b, edited.clone(), Cause::User, log);
     workspace.mark_saved(b);
     session.sync();
     assert!(root.read("Outer/Gig2/b.ne5p") == edited, "the save landed");
@@ -2523,7 +2550,7 @@ fn a_read_past_the_budget_lets_go_of_the_assets_needed_least_recently() {
         log,
         ..
     } = &mut session.bench;
-    workspace.replace_bytes(b, with_gain(&program, "96"), log);
+    workspace.replace_bytes(b, with_gain(&program, "96"), Cause::User, log);
     device.pretend_attached();
     let slot = Location { bank: 0, slot: 0 };
     crate::queue::enqueue(workspace, device, queue, log, c, ObjectClass::Program, slot);
@@ -2685,7 +2712,7 @@ fn a_clean_asset_holds_its_bytes_once() {
     assert_eq!(held(&session), (true, len));
 
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, with_gain(&program, "96"), log);
+    workspace.replace_bytes(id, with_gain(&program, "96"), Cause::User, log);
     assert_eq!(held(&session), (false, 2 * len));
 
     let Bench { workspace, log, .. } = &mut session.bench;
@@ -3320,7 +3347,7 @@ impl Session {
     fn rename_resting(&mut self, id: u64, name: &str) {
         let workspace = &mut self.bench.workspace;
         let sets = vec![("name".to_string(), name.to_string())];
-        workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
+        workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)), Cause::User);
         assert!(workspace.save_edit(id));
     }
 }
@@ -3415,7 +3442,7 @@ fn a_plan_over_a_resting_piano_is_saved_through_its_file() {
 
     let workspace = &mut session.bench.workspace;
     let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
-    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)));
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)), Cause::User);
     assert!(workspace.save_edit(id));
     session.sync();
 
@@ -3654,7 +3681,7 @@ fn an_overwrite_waits_for_its_own_save_and_not_the_one_before() {
     let mut session = Session::open(&root);
     let (kept, moved) = (session.named("Kept.ne5p"), session.named("Moved.ne5p"));
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(kept, with_gain(&program, "40"), log);
+    workspace.replace_bytes(kept, with_gain(&program, "40"), Cause::User, log);
     workspace.mark_saved(kept);
     assert!(!session.settled(), "the save before is in flight");
 
@@ -3754,7 +3781,7 @@ fn an_overwrite_keeps_its_source_where_it_was_edited_meanwhile() {
     session.bench.act(acts);
     let meanwhile = with_gain(&program, "40");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(moved, meanwhile.clone(), log);
+    workspace.replace_bytes(moved, meanwhile.clone(), Cause::User, log);
     session.sync();
     session.let_go();
     session.sync();
@@ -3861,7 +3888,11 @@ fn planned_piano(root: &Temp) -> (Session, u64, crate::document::piano::Plan) {
     let id = session.only();
     let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
     let workspace = &mut session.bench.workspace;
-    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan.clone())));
+    workspace.hold_edit(
+        id,
+        Some(crate::rewrite::Edit::Piano(plan.clone())),
+        Cause::User,
+    );
     assert!(workspace.get(id).unwrap().is_unsaved());
     (session, id, plan)
 }
@@ -3958,7 +3989,7 @@ fn a_sample_edit_that_no_longer_applies_to_its_changed_file_is_kept() {
     let sets = vec![("zone3.root_key".to_string(), "C5".to_string())];
     let edit = crate::rewrite::Edit::Sample(sets);
     let workspace = &mut session.bench.workspace;
-    workspace.hold_edit(id, Some(edit.clone()));
+    workspace.hold_edit(id, Some(edit.clone()), Cause::User);
     assert!(
         workspace.edit_of(id).is_some(),
         "the edit applies to the file"
@@ -4005,7 +4036,7 @@ fn a_piano_plan_their_file_already_holds_is_let_go_without_asking() {
     let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
     let theirs = crate::document::piano::rebuild(&bytes, &plan).unwrap();
     let workspace = &mut session.bench.workspace;
-    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)));
+    workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan)), Cause::User);
     assert!(workspace.edit_of(id).is_some(), "the plan applies");
     fs::write(root.at("Grand.npno"), &theirs).unwrap();
 
@@ -4288,7 +4319,7 @@ fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
     let made = root.read("untitled.ne5p");
     let saved = with_gain(&made, "96");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.replace_bytes(id, saved.clone(), Cause::User, log);
     workspace.mark_saved(id);
     session.sync();
     let renamed = LibPath::root().join("Renamed.ne5p");
@@ -4410,7 +4441,7 @@ impl Session {
     fn edit(&mut self, id: u64, gain: &str) -> Vec<u8> {
         let edited = with_gain(&self.bytes(id), gain);
         let Bench { workspace, log, .. } = &mut self.bench;
-        workspace.replace_bytes(id, edited.clone(), log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, log);
         edited
     }
 
@@ -5010,7 +5041,10 @@ fn an_edit_of_a_resting_sample_comes_back_as_an_edit() {
     let (mut first, id, _) = resting_sample(&root);
     let sets = vec![("name".to_string(), "Vibes".to_string())];
     let edit = crate::rewrite::Edit::Sample(sets);
-    first.bench.workspace.hold_edit(id, Some(edit.clone()));
+    first
+        .bench
+        .workspace
+        .hold_edit(id, Some(edit.clone()), Cause::User);
     first.close();
 
     let (second, id, _) = resting_sample_again(&root);
@@ -6587,7 +6621,7 @@ fn a_save_that_can_no_longer_be_finished_is_asked_about_and_rolls_back() {
     session
         .bench
         .workspace
-        .replace_bytes(id, with_gain(&old, "96"), log);
+        .replace_bytes(id, with_gain(&old, "96"), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     let writers = root.at(".drawbar/library/writers.2");
@@ -6644,7 +6678,7 @@ fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
     session
         .bench
         .workspace
-        .replace_bytes(id, with_gain(&program, "96"), log);
+        .replace_bytes(id, with_gain(&program, "96"), Cause::User, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
     let writers = root.at(".drawbar/library/writers.2");
@@ -8754,7 +8788,7 @@ fn a_gain_edit_reverts_and_saves_like_any_edit() {
         let sets = [(crate::document::wav::GAIN.to_string(), "6.0".to_string())];
         let (gained, _) = crate::document::wav::apply(&wav, &wav, &sets).unwrap();
         let Bench { workspace, log, .. } = &mut session.bench;
-        workspace.replace_bytes(id, gained.clone(), log);
+        workspace.replace_bytes(id, gained.clone(), Cause::User, log);
         assert!(workspace.get(id).unwrap().is_unsaved());
         gained
     };
@@ -8967,7 +9001,7 @@ fn a_build_encodes_a_wavs_unsaved_gain() {
     let mut session = Session::open(&root);
     let wav = session.named("c3.wav");
     let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(wav, gained.clone(), log);
+    workspace.replace_bytes(wav, gained.clone(), Cause::User, log);
     let id = session.named("Marimba.nsmpproj");
     session.build(id);
     let made = session.named("Marimba.nsmp");

@@ -18,7 +18,7 @@ use crate::queue::Queue;
 use crate::rewrite::Edit;
 use crate::strings;
 use crate::tags::Tags;
-use crate::workspace::{LocalEntity, VerifyState, Workspace};
+use crate::workspace::{Cause, LocalEntity, VerifyState, Working, Workspace};
 
 mod adding;
 mod advanced;
@@ -662,7 +662,7 @@ impl Document {
                 // A library resting in its file is saved by writing the plan through it.
                 if resting {
                     let edit = (!plan.is_empty()).then_some(Edit::Piano(plan));
-                    workspace.hold_edit(id, edit);
+                    workspace.hold_edit(id, edit, Cause::User);
                 }
             }
             Err(why) => {
@@ -703,7 +703,7 @@ impl Document {
             return;
         }
         if let Some(sets) = self.samples.unheld(id) {
-            workspace.hold_edit(id, Some(Edit::Sample(sets)));
+            workspace.hold_edit(id, Some(Edit::Sample(sets)), Cause::User);
         }
     }
 
@@ -714,6 +714,22 @@ impl Document {
     /// [`LocalEntity::is_unsaved`]. Call this wherever a plan is committed or laid out.
     fn note_pending(&self, id: u64, workspace: &mut Workspace) -> bool {
         workspace.mark_pending(id, self.pends(id))
+    }
+
+    /// What the editor holds of the document `id`.
+    pub fn working(&self, workspace: &Workspace, id: u64) -> Option<Working> {
+        workspace.working(id)
+    }
+
+    /// Put back a working copy the document held, and return whether it holds it now.
+    pub fn hold(
+        &mut self,
+        id: u64,
+        working: &Working,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> bool {
+        workspace.hold(id, working, log)
     }
 
     /// Let go of what is kept about an asset that has left the workspace.
@@ -861,7 +877,7 @@ impl Document {
         match applied.made {
             Some(Ok(bytes)) => {
                 self.refused(None);
-                workspace.replace_bytes(applied.id, bytes, log);
+                workspace.lay_out(applied.id, bytes, log);
                 self.note_pending(applied.id, workspace);
             }
             Some(Err(why)) => {
@@ -1382,7 +1398,7 @@ impl Document {
             }
             self.refused(None);
             if !self.samples.pending(id) {
-                workspace.hold_edit(id, None);
+                workspace.hold_edit(id, None, Cause::User);
             }
             self.follow_sample(id, workspace);
             return Ok(());
@@ -1429,7 +1445,7 @@ impl Document {
         // `replace_bytes` decides whether the bytes changed; it is the only place two
         // bodies are compared.
         if let Some(out) = made {
-            workspace.replace_bytes(id, out, log);
+            workspace.replace_bytes(id, out, Cause::User, log);
         }
         if let (Some(db), Some(held)) = (gained, workspace.get(id)) {
             let stamp = held.stamp;
@@ -1870,7 +1886,8 @@ mod tests {
                 .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
                 .collect();
             let (_, edited) = fields::apply(&bytes, &sets).expect("the sets are legal");
-            self.workspace.replace_bytes(self.id, edited, &mut self.log);
+            self.workspace
+                .replace_bytes(self.id, edited, Cause::User, &mut self.log);
         }
 
         /// One frame, and every word it put on screen.
@@ -4114,7 +4131,8 @@ mod tests {
         // decoded from the old bytes is dropped.
         let edited =
             sample::apply(&open.entity().bytes, &[("name".into(), "Vibes".into())]).unwrap();
-        open.workspace.replace_bytes(id, edited, &mut open.log);
+        open.workspace
+            .replace_bytes(id, edited, Cause::User, &mut open.log);
         let stamp = open.entity().stamp;
         open.document.audio.follow(id, stamp);
         assert!(
@@ -4300,7 +4318,8 @@ mod tests {
             &[("zone1.top_note".into(), "C6".into())],
         )
         .unwrap();
-        open.workspace.replace_bytes(open.id, edited, &mut open.log);
+        open.workspace
+            .replace_bytes(open.id, edited, Cause::User, &mut open.log);
 
         // Switch to another document and back, as the tab strip does.
         let elsewhere = open.workspace.ingest(
