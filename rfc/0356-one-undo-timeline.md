@@ -402,10 +402,7 @@ them.
   baseline when it is asked for, before the library answers, and a refused save
   leaves it moved under a new stamp. With Undo able to bring back equal bytes, the
   document would read saved over a file that does not hold them. A refused save
-  puts the baseline back. Refusing a save over a file rewritten at the same
-  length and time, as
-  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) proposes, makes
-  refused saves more common and this more pressing.
+  puts the baseline back.
 - **A save's own file is told by identity.** When the file is read back after a
   save, its undo or its redo, rule 2 applies only if the file is the one that
   commit left. Any other file is a change from outside, and rule 3 applies. The
@@ -441,17 +438,12 @@ under rule 3.
 
 ### Order of work
 
-This lands after [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300),
-if that merges. #300 rewrites the mirror functions rule 2 changes: the one that
-takes a file read back under a document, the one that takes a save's answer, and
-the one that takes a commit's view. It also supplies what rule 2 builds on. A
-commit reports the identity of each file it wrote, and an unsaved document
-already keeps its edit, unasked, when this session's own undo changes its file.
-Rule 2 extends that to the saved document, which adopts the file today.
-
-#300 adds ways a document's file changes with no edit: two files found to be
-one, an unsaved copy going back onto a file, and a file that ends while its
-document holds work. Each takes cause `Follow`.
+Rule 2 builds on [jmoo/drawbar#357](https://github.com/jmoo/drawbar/pull/357).
+With it, an unsaved document keeps its edit, unasked, when this session's own
+undo or redo changes its file, and tells that file from an outside change by the
+length and time the step left it at. Rule 2 extends that to the saved document,
+which adopts the file today. It tells the file by identity, so a commit has to
+report the identity of each file it wrote, which it does not yet.
 
 In order:
 
@@ -617,8 +609,9 @@ showed; under rule 3, it shows the file.
   steadiest name a document has. An asset that leaves and returns, as when a
   delete is undone, gets a new id, and the edit steps made before it left are
   let go. The file ids proposed in
-  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) would not help:
-  one is drawn anew when a file returns, and a view of a slot has none.
+  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300), which was
+  closed, would not have helped: one was drawn anew when a file returned, and a
+  view of a slot had none.
 - Rule 2 changes how the workspace takes its own saves, and needs the baseline
   fixed after a refused save.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
