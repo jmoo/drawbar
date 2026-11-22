@@ -1,8 +1,8 @@
-# RFC-0000: One undo timeline for files and edits
+# RFC-0356: One undo timeline for files and edits
 
 - Start date: 2026-11-22
 - Authors: jmoo
-- RFC PR: [jmoo/drawbar#0000](https://github.com/jmoo/drawbar/pull/0000)
+- RFC PR: [jmoo/drawbar#356](https://github.com/jmoo/drawbar/pull/356)
 - Tracking issue: none yet
 
 ## Summary
