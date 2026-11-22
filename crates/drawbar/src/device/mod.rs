@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use nord_format::accept::{Acceptance, Family};
+use nord_usb::error::OpenStep;
 use nord_usb::op::Received;
 use nord_usb::wire::{AllocationUnit, Bank, Dependency, ProgramInfo, Status};
 use nord_usb::{Location, ObjectClass};
@@ -405,10 +406,48 @@ pub struct Fetched {
     pub len: u64,
 }
 
+/// A connection that did not start.
+pub struct ConnectFault {
+    /// What telemetry calls the step that failed.
+    pub kind: &'static str,
+    /// The reason, for the log.
+    pub why: String,
+}
+
+impl ConnectFault {
+    /// No device to open was found.
+    pub fn find(why: impl Into<String>) -> Self {
+        Self {
+            kind: "connect-find",
+            why: why.into(),
+        }
+    }
+
+    /// The transport would not open.
+    pub fn open(e: &nord_usb::Error) -> Self {
+        let kind = match e {
+            nord_usb::Error::Open { step, .. } => match step {
+                OpenStep::Device => "connect-open",
+                OpenStep::Configuration => "connect-configure",
+                OpenStep::Interface => "connect-interface",
+                OpenStep::Endpoint => "connect-endpoint",
+                OpenStep::Claim => "connect-claim",
+            },
+            _ => "connect-failed",
+        };
+        Self {
+            kind,
+            why: e.to_string(),
+        }
+    }
+}
+
 /// What the worker reports back.
 pub enum DeviceEvent {
     Connected(DeviceCard),
-    ConnectFailed(String),
+    /// The browser's device chooser closed with nothing picked.
+    ConnectDismissed,
+    ConnectFailed(ConnectFault),
     Disconnected {
         /// The connection was lost to a cable or transport failure, not released on
         /// request.
@@ -1777,9 +1816,14 @@ impl Device {
                     self.forget(workspace);
                     self.pending.clear();
                 }
-                DeviceEvent::ConnectFailed(why) => {
-                    crate::telemetry::fault("usb", "connect-failed");
-                    log.error(why);
+                DeviceEvent::ConnectDismissed => {
+                    crate::telemetry::fault("usb", "connect-dismissed");
+                    log.say("No instrument was chosen.");
+                    self.state.connection = Connection::Disconnected;
+                }
+                DeviceEvent::ConnectFailed(fault) => {
+                    crate::telemetry::fault("usb", fault.kind);
+                    log.error(fault.why);
                     log.trouble("No instrument could be opened.");
                     self.state.connection = Connection::Disconnected;
                 }
@@ -2152,6 +2196,64 @@ mod tests {
             "a connection that cannot start must not be left looking"
         );
         assert_eq!(log.status(), (crate::log::Level::Error, NO_USB));
+    }
+
+    fn after_connecting(event: DeviceEvent) -> (Device, Log) {
+        let ctx = egui::Context::default();
+        let mut workspace = Workspace::new(ctx.clone());
+        let mut device = Device::new(ctx);
+        let mut log = Log::default();
+        device.state.connection = Connection::Connecting;
+        device.pretend(event);
+        device.poll(
+            &mut log,
+            &mut workspace,
+            &mut Tabs::default(),
+            &mut Queue::default(),
+        );
+        (device, log)
+    }
+
+    #[test]
+    fn closing_the_chooser_stops_looking_without_an_error() {
+        let (device, log) = after_connecting(DeviceEvent::ConnectDismissed);
+
+        assert!(matches!(device.state.connection, Connection::Disconnected));
+        assert_eq!(
+            log.status(),
+            (crate::log::Level::Info, "No instrument was chosen.")
+        );
+        assert_eq!(
+            crate::telemetry::recent(),
+            vec!["usb: connect-dismissed".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_connection_that_fails_names_the_step_that_stopped_it() {
+        let refused = nord_usb::Error::Open {
+            step: OpenStep::Claim,
+            why: "claiming the vendor interface".into(),
+        };
+        let (device, log) =
+            after_connecting(DeviceEvent::ConnectFailed(ConnectFault::open(&refused)));
+
+        assert!(matches!(device.state.connection, Connection::Disconnected));
+        assert_eq!(
+            log.status(),
+            (crate::log::Level::Error, "No instrument could be opened.")
+        );
+        assert_eq!(
+            crate::telemetry::recent(),
+            vec!["usb: connect-claim".to_string()]
+        );
+    }
+
+    #[test]
+    fn finding_no_device_and_an_unnamed_open_failure_have_their_own_kinds() {
+        let unplugged = nord_usb::Error::Transport("bulk read".into());
+        assert_eq!(ConnectFault::find("none attached").kind, "connect-find");
+        assert_eq!(ConnectFault::open(&unplugged).kind, "connect-failed");
     }
 
     /// The unit a count is measured in is the partition's own, so it arrives with the

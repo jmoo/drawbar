@@ -19,7 +19,7 @@ use web_sys::{Usb, UsbConnectionEvent, UsbDevice, UsbDeviceFilter, UsbDeviceRequ
 
 use super::scratch::Scratch;
 use super::worker::{self, Emit, Flow};
-use super::{DeviceCard, DeviceCmd, DeviceEvent};
+use super::{ConnectFault, DeviceCard, DeviceCmd, DeviceEvent};
 use crate::js;
 
 /// Where the connection stands, as one value: the device is in exactly one place.
@@ -119,7 +119,10 @@ impl Link {
         let request = match request_device() {
             Ok(request) => request,
             Err(e) => {
-                self.emit.send(DeviceEvent::ConnectFailed(js::describe(&e)));
+                self.emit
+                    .send(DeviceEvent::ConnectFailed(ConnectFault::find(
+                        js::describe(&e),
+                    )));
                 return;
             }
         };
@@ -142,10 +145,13 @@ impl Link {
             let chosen = match JsFuture::from(request).await {
                 Ok(chosen) => chosen,
                 Err(e) => {
-                    emit.send(DeviceEvent::ConnectFailed(format!(
-                        "no device chosen: {}",
-                        js::describe(&e)
-                    )));
+                    emit.send(match dismissed(&e) {
+                        true => DeviceEvent::ConnectDismissed,
+                        false => DeviceEvent::ConnectFailed(ConnectFault::find(format!(
+                            "asking for a device: {}",
+                            js::describe(&e)
+                        ))),
+                    });
                     return;
                 }
             };
@@ -184,7 +190,7 @@ impl Link {
                         false => retire(&inner, &emit, device, flow, generation).await,
                     }
                 }
-                Err(e) => emit.send(DeviceEvent::ConnectFailed(e.to_string())),
+                Err(e) => emit.send(DeviceEvent::ConnectFailed(ConnectFault::open(&e))),
             }
             pump(&inner, &scratch, &emit);
         });
@@ -318,6 +324,15 @@ fn request_device() -> Result<Promise<UsbDevice>, JsValue> {
     let filter = UsbDeviceFilter::new();
     filter.set_vendor_id(VENDOR_ID);
     Ok(usb.request_device(&UsbDeviceRequestOptions::new(&[filter])))
+}
+
+/// Whether a rejected `requestDevice()` means the chooser closed with nothing picked.
+/// The WebUSB specification rejects with `NotFoundError` then.
+fn dismissed(e: &JsValue) -> bool {
+    js::field(e, "name")
+        .and_then(|name| name.as_string())
+        .as_deref()
+        == Some("NotFoundError")
 }
 
 /// `bcdDevice`, which WebUSB splits into a byte and two nibbles.
