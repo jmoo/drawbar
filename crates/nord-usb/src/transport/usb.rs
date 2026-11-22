@@ -11,7 +11,7 @@ use nusb::{DeviceInfo, Interface};
 use super::record::Recorder;
 use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
 use crate::deadline::with_timeout;
-use crate::error::{Error, Result};
+use crate::error::{Error, OpenStep, Result};
 
 pub use super::{PRODUCT_ID_ELECTRO5, VENDOR_ID};
 // Re-exported so callers can name a control recipient without depending on `nusb`.
@@ -40,7 +40,7 @@ fn open_error(e: std::io::Error) -> Error {
     } else {
         String::new()
     };
-    Error::Transport(format!("opening device: {e}{hint}"))
+    OpenStep::Device.failed(format!("opening device: {e}{hint}"))
 }
 
 /// Every attached Clavia device.
@@ -84,16 +84,17 @@ impl UsbTransport {
             .find(|i| i.class() == CLASS_VENDOR_SPECIFIC)
             .map(|i| i.interface_number())
             .ok_or_else(|| {
-                Error::Transport(
-                    "device exposes no vendor-specific interface; is this a Nord?".into(),
-                )
+                OpenStep::Interface
+                    .failed("device exposes no vendor-specific interface; is this a Nord?")
             })?;
 
         let device = info.open().map_err(open_error)?;
-        let interface = device.claim_interface(iface_num).map_err(map_err(
-            "claiming the vendor interface (another application holding it, such as Nord \
-             Sound Manager or a WebUSB page, blocks this)",
-        ))?;
+        let interface = device.claim_interface(iface_num).map_err(|e| {
+            OpenStep::Claim.failed(format!(
+                "claiming the vendor interface (another application holding it, such as \
+                 Nord Sound Manager or a WebUSB page, blocks this): {e}"
+            ))
+        })?;
 
         let out_packet = interface
             .descriptors()
@@ -104,7 +105,7 @@ impl UsbTransport {
             })
             .filter(|size| *size > 0)
             .ok_or_else(|| {
-                Error::Transport(format!(
+                OpenStep::Endpoint.failed(format!(
                     "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
                 ))
             })?;
