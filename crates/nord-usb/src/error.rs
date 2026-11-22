@@ -50,10 +50,14 @@ pub enum Error {
     #[error("bank {bank} cannot be scanned completely within {limit} slots")]
     ScanLimit { bank: u32, limit: u32 },
 
-    /// The byte pipe failed: a USB transfer error, a missing device, a refused claim.
-    /// Errors about message content do not belong here.
+    /// The byte pipe failed: a USB transfer error or a missing device. Errors about
+    /// message content do not belong here.
     #[error("transport: {0}")]
     Transport(String),
+
+    /// A transport could not be opened: `step` is where it stopped.
+    #[error("transport: {why}")]
+    Open { step: OpenStep, why: String },
 
     /// The `CBIN` file around an entity body is wrong: bad magic, a checksum that does
     /// not match the body, a malformed format tag, no body, or bytes that changed while
@@ -76,6 +80,31 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// The steps of opening a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenStep {
+    /// Opening the device itself.
+    Device,
+    /// Selecting a configuration on a device the platform left unconfigured.
+    Configuration,
+    /// Finding the vendor-specific interface.
+    Interface,
+    /// Finding the bulk OUT endpoint on that interface.
+    Endpoint,
+    /// Claiming the interface, which another application holding it blocks.
+    Claim,
+}
+
+impl OpenStep {
+    /// An [`Error::Open`] at this step.
+    pub(crate) fn failed(self, why: impl Into<String>) -> Error {
+        Error::Open {
+            step: self,
+            why: why.into(),
+        }
+    }
 }
 
 impl Error {
@@ -101,6 +130,7 @@ impl Error {
             | Error::LengthMismatch { .. }
             | Error::BadCrc { .. }
             | Error::Transport(_)
+            | Error::Open { .. }
             | Error::Envelope(_)
             | Error::InvalidArgument(_)
             | Error::NoPartition(_)

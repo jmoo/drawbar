@@ -14,7 +14,7 @@ use nord_usb::transport::{usb, UsbTransport};
 
 use super::scratch::Scratch;
 use super::worker::{self, Emit, Flow};
-use super::{DeviceCard, DeviceCmd, DeviceEvent};
+use super::{ConnectFault, DeviceCard, DeviceCmd, DeviceEvent};
 
 /// How often [`Link::join`] looks at a worker it is waiting for.
 const SETTLE: Duration = Duration::from_millis(10);
@@ -61,8 +61,8 @@ impl Link {
                     emit.send(DeviceEvent::Connected(card));
                     device
                 }
-                Err(why) => {
-                    emit.send(DeviceEvent::ConnectFailed(why));
+                Err(fault) => {
+                    emit.send(DeviceEvent::ConnectFailed(fault));
                     return;
                 }
             };
@@ -121,14 +121,13 @@ impl Link {
 }
 
 /// The first attached Clavia, with the descriptor facts the card shows.
-fn open() -> Result<(DeviceCard, Device<UsbTransport>), String> {
-    let devices = usb::list().map_err(|e| e.to_string())?;
-    let info = devices
-        .into_iter()
-        .next()
-        .ok_or("no Clavia device found. Is the instrument awake and on a data cable?")?;
+fn open() -> Result<(DeviceCard, Device<UsbTransport>), ConnectFault> {
+    let devices = usb::list().map_err(|e| ConnectFault::find(e.to_string()))?;
+    let info = devices.into_iter().next().ok_or_else(|| {
+        ConnectFault::find("no Clavia device found. Is the instrument awake and on a data cable?")
+    })?;
 
-    let transport = UsbTransport::open(&info).map_err(|e| e.to_string())?;
+    let transport = UsbTransport::open(&info).map_err(|e| ConnectFault::open(&e))?;
     // Endpoint 0 is outside sessions. A failure here loses the identity details but
     // leaves the bulk transport usable.
     let identity = transport.identity().ok();
