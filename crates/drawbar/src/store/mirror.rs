@@ -228,7 +228,9 @@ pub struct Store {
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
     /// Assets whose file this session's undo or redo of a save left as the file of this
-    /// identity, each read again until that read answers.
+    /// identity, each read again, whatever its length and time say, once nothing defers it.
+    /// A read in flight when the answer comes ran after the undo, as every command runs
+    /// in the order sent.
     expected: BTreeMap<u64, toshokan::Identity>,
     /// A change of this session's own failed partway and waits for the next change to
     /// finish it. An undo or a redo would reverse that change, not the step it names.
@@ -1473,6 +1475,12 @@ impl Store {
         }
     }
 
+    /// How many assets' files an undo or a redo of a save left to be read again.
+    #[cfg(test)]
+    pub fn expecting(&self) -> usize {
+        self.expected.len()
+    }
+
     /// Whether a rescan is waiting for its answer.
     #[cfg(test)]
     pub fn scanning(&self) -> bool {
@@ -1656,8 +1664,6 @@ impl Store {
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, timeline, log);
-                        let rechecking = &self.rechecking;
-                        self.expected.retain(|id, _| rechecking.contains(id));
                     }
                     Err(why) => match forgotten {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
@@ -2361,6 +2367,11 @@ impl Store {
             browser.folders.others = shown.others();
         }
         let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
+        // An expectation waits for a read in flight, or for a projection that no longer
+        // defers its asset.
+        let (rechecking, deferred) = (&self.rechecking, &self.deferred);
+        self.expected
+            .retain(|id, _| rechecking.contains(id) || deferred.contains(id));
         if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }

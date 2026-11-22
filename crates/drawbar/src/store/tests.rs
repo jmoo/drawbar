@@ -4658,6 +4658,80 @@ fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
         session.bench.browser.asking().is_some(),
         "the user is asked"
     );
+    assert_eq!(session.store.expecting(), 0);
+}
+
+#[test]
+fn a_file_the_undo_of_a_save_left_that_cannot_be_read_is_followed_as_one_gone_outside() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    let edit = session.edit(id, "12");
+
+    session.press(false);
+    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.decided();
+    session.settle();
+
+    assert_eq!(session.said("is missing from the library folder"), 1);
+    assert_eq!(session.bytes(id), edit);
+    assert_eq!(session.store.expecting(), 0);
+}
+
+#[test]
+fn a_read_in_flight_when_the_undo_of_a_save_answers_moves_only_the_baseline() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    let held = session.bench.workspace.working(id);
+    touch(&root, "untitled.ne5p");
+    session.store.rescan();
+    session.press(false);
+    assert!(session.next(), "the rescan answered, and its read is sent");
+    assert!(session.store.changing(), "behind the undo");
+
+    session.decided();
+    session.settle();
+
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert_eq!(session.bench.workspace.working(id), held);
+    assert!(entity.is_unsaved());
+    assert_eq!(session.bench.browser.asking(), None);
+    assert_eq!(session.store.expecting(), 0);
+}
+
+/// A save sent behind the undo of the save before it expects the file that undo
+/// replaced, and is refused. It says so, and the document stays unsaved over the file
+/// the undo left, which no question asks about.
+#[test]
+fn a_save_sent_behind_the_undo_of_a_save_is_refused_and_leaves_the_file_as_the_undo_did() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+
+    session.press(false);
+    let again = session.edit(id, "12");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.decided();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(session.bytes(id), again);
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+    assert_eq!(session.bench.browser.asking(), None);
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+    assert_eq!(session.store.expecting(), 0);
 }
 
 #[test]
