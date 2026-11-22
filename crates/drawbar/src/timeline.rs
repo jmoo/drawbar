@@ -203,7 +203,7 @@ impl Timeline {
                 if open.id == id && open.after == before {
                     self.bytes = self.bytes - open.after.size() + after.size();
                     open.after = after;
-                    return;
+                    return self.extended();
                 }
             }
         }
@@ -218,6 +218,23 @@ impl Timeline {
         if self.keep(Step::Edit(Box::new(step))) && gesture != Gesture::Over {
             self.open = Some(gesture);
         }
+    }
+
+    /// The open step took a further change. One back where it began is no step, and one
+    /// grown too large to keep cuts the timeline as a new one would.
+    fn extended(&mut self) {
+        let Some(Step::Edit(open)) = self.done.back() else {
+            return;
+        };
+        if open.before == open.after {
+            return self.let_go(self.done.len() - 1);
+        }
+        if open.before.size() + open.after.size() > BYTES {
+            self.done.clear();
+            self.open = None;
+            return self.count();
+        }
+        self.limit();
     }
 
     /// The frame ended with `gesture` going on. A step another gesture opened closes,
@@ -330,10 +347,20 @@ impl Timeline {
     /// end of the list it left.
     pub fn put_back(&mut self, asked: Asked) {
         match asked {
-            Asked::Undo(taken) => self.done.push_back(Step::Library(taken.step)),
-            Asked::Redo(taken) => self.undone.push(Step::Library(taken.step)),
-            Asked::Change { .. } | Asked::Lasting => {}
+            Asked::Undo(taken) => self.logged(taken.step),
+            // A step recorded since the redo was asked ended redo, this one included.
+            Asked::Redo(taken) if taken.recorded == self.recorded => {
+                self.undone.push(Step::Library(taken.step));
+            }
+            Asked::Redo(_) | Asked::Change { .. } | Asked::Lasting => {}
         }
+    }
+
+    /// Put a library step at the end of `done`, above a step no longer open.
+    fn logged(&mut self, step: Logged) {
+        self.close();
+        self.done.push_back(Step::Library(step));
+        self.limit();
     }
 
     /// Follow the library's answer to `asked`. Returns what can no longer be done with
@@ -385,10 +412,10 @@ impl Timeline {
                 }));
             }
             Asked::Undo(_) => {}
-            Asked::Redo(taken) => self.done.push_back(Step::Library(Logged {
+            Asked::Redo(taken) => self.logged(Logged {
                 entry,
                 ..taken.step
-            })),
+            }),
         }
     }
 
@@ -420,20 +447,16 @@ impl Timeline {
         self.count();
     }
 
-    /// Close the open step, so the next change is a step of its own. One that left its
-    /// document as it found it goes.
+    /// Close the open step, so the next change is a step of its own.
     pub fn close(&mut self) {
-        if self.open.take().is_none() {
-            return;
-        }
-        if let Some(Step::Edit(step)) = self.done.back() {
-            if step.before == step.after {
-                self.let_go(self.done.len() - 1);
-            }
-        }
+        self.open = None;
     }
 
+    /// Let go of the step at `at`, which is no longer open if it was.
     fn let_go(&mut self, at: usize) {
+        if at + 1 == self.done.len() {
+            self.open = None;
+        }
         self.bytes -= self.done.remove(at).map_or(0, |step| step.size());
     }
 
@@ -455,10 +478,18 @@ impl Timeline {
         }
         self.done.push_back(step);
         self.bytes += size;
-        while self.done.len() > STEPS || self.bytes > BYTES {
+        self.limit();
+        true
+    }
+
+    /// Let the oldest steps go while there are more than the limits allow.
+    fn limit(&mut self) {
+        while self.done.len() + self.undone.len() > STEPS || self.bytes > BYTES {
+            if self.done.is_empty() {
+                break;
+            }
             self.let_go(0);
         }
-        true
     }
 
     fn count(&mut self) {
@@ -690,6 +721,19 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_back_where_it_began_is_not_offered_while_it_goes_on() {
+        let mut session = Session::default();
+        session.edit(1, 9, Gesture::Dragging);
+        session.edit(1, 0, Gesture::Dragging);
+        assert_eq!(session.undo_reads(), None);
+
+        session.edit(1, 5, Gesture::Dragging);
+        session.undo();
+        assert_eq!(session.holds(1), body(0));
+        assert_eq!(session.undo(), None, "the drag is one step");
+    }
+
+    #[test]
     fn a_gesture_on_another_document_is_a_step_of_its_own() {
         let mut session = Session::default();
         session.edit(1, 1, Gesture::Dragging);
@@ -811,6 +855,43 @@ mod tests {
 
         assert_eq!(session.undo().as_deref(), Some("Rename “1”"));
         assert_eq!(session.undo().as_deref(), Some("Edit “1”"));
+    }
+
+    #[test]
+    fn a_refused_redo_stays_ended_by_an_edit_made_while_it_was_asked() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        session.undo();
+        let Went::Library(taken) = session.timeline.redo(&mut session.held) else {
+            panic!("the rename is redone by the library");
+        };
+        session.click(1, 3);
+
+        session
+            .timeline
+            .answered(Some(Asked::Redo(taken)), refused());
+
+        assert_eq!(session.redo_reads(), None, "the edit ended redo");
+        assert_eq!(session.undo_reads(), Some("Edit “1”"));
+    }
+
+    #[test]
+    fn a_refused_undo_closes_the_drag_made_while_it_was_asked() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the rename is undone by the library");
+        };
+        session.edit(1, 3, Gesture::Dragging);
+        session
+            .timeline
+            .answered(Some(Asked::Undo(taken)), refused());
+        assert_eq!(session.undo().as_deref(), Some("Rename “1”"));
+
+        session.edit(1, 4, Gesture::Dragging);
+
+        session.undo();
+        assert_eq!(session.holds(1), body(3), "the later drag is its own step");
     }
 
     #[test]
@@ -1017,6 +1098,43 @@ mod tests {
             2,
             "each step holds two fifths of the limit"
         );
+    }
+
+    #[test]
+    fn a_step_its_gesture_grows_keeps_within_the_bytes() {
+        let sized = |len: usize| Working::Body(vec![1; len].into());
+        let mut timeline = Timeline::default();
+        for len in [1, 2] {
+            let (before, after) = (sized(len), sized(len + 1));
+            timeline.record(len as u64, "Edit".to_string(), before, after, Gesture::Over);
+        }
+        let (small, grown) = (sized(BYTES / 4), sized(BYTES / 2));
+        timeline.record(
+            9,
+            "Edit".to_string(),
+            sized(8),
+            small.clone(),
+            Gesture::Dragging,
+        );
+
+        timeline.record(
+            9,
+            "Edit".to_string(),
+            small,
+            grown.clone(),
+            Gesture::Dragging,
+        );
+        assert!(timeline.bytes <= BYTES);
+        assert_eq!(timeline.done.len(), 3, "the limit is not reached");
+
+        let larger = sized(BYTES);
+        timeline.record(9, "Edit".to_string(), grown, larger, Gesture::Dragging);
+        assert_eq!(
+            timeline.done.len(),
+            0,
+            "a step too large to keep cuts the timeline"
+        );
+        assert_eq!((timeline.bytes, timeline.open), (0, None));
     }
 
     #[test]
