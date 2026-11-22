@@ -18,6 +18,7 @@ use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
+use crate::timeline::Timeline;
 use crate::workspace::Workspace;
 use crate::zoom::{Room, Zoom};
 
@@ -188,6 +189,8 @@ pub struct DrawbarApp {
     /// The library open in this window. `None` where the system names no folder for
     /// the default one.
     pub(crate) store: Option<Store>,
+    /// The steps Undo and Redo take, the library's among them.
+    pub(crate) timeline: Timeline,
     /// The libraries opened lately.
     #[cfg(not(target_arch = "wasm32"))]
     recent: crate::libraries::Recent,
@@ -310,6 +313,7 @@ impl DrawbarApp {
             #[cfg(target_os = "macos")]
             menubar: None,
             store,
+            timeline: Timeline::default(),
             #[cfg(not(target_arch = "wasm32"))]
             recent: cc
                 .storage
@@ -765,9 +769,11 @@ impl DrawbarApp {
                 &mut self.workspace,
                 &mut self.browser,
                 &self.queue,
+                &mut self.timeline,
                 &mut self.log,
             );
         }
+        self.timeline.forget_library();
         let gone = self.workspace.close_library();
         let unqueued = gone.iter().filter(|id| self.queue.holds(**id)).count();
         for id in gone {
@@ -899,6 +905,7 @@ impl DrawbarApp {
                         last => (last.unwrap_or(Root::Private), None),
                     };
                     self.store = Some(library(ctx, root));
+                    self.timeline.forget_library();
                     self.opened();
                     if let Some(denied) = denied {
                         let name = denied.name().unwrap_or_default();
@@ -1045,6 +1052,7 @@ impl eframe::App for DrawbarApp {
                 &mut self.workspace,
                 &mut self.browser,
                 &self.queue,
+                &mut self.timeline,
                 &mut self.log,
             );
         }
@@ -1093,6 +1101,7 @@ impl eframe::App for DrawbarApp {
                     &mut self.workspace,
                     &mut self.browser,
                     &self.queue,
+                    &mut self.timeline,
                     &mut self.log,
                 );
                 self.shell.filter.keep_tags(&self.browser.tags);
@@ -2073,21 +2082,25 @@ mod tests {
         let (ctx, mut app) = opened_over(&root);
         app.platform = crate::platform::Platform::Web;
         app.browser.tags.make("Live").expect("a new tag");
-        let until = |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&Store) -> bool| {
-            let mut window = eframe::Frame::_new_kittest();
-            let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
-            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
-            for _ in 0..500 {
-                if app.store.as_ref().is_some_and(done) {
-                    return true;
+        let until =
+            |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&DrawbarApp) -> bool| {
+                let mut window = eframe::Frame::_new_kittest();
+                let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
+                crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+                for _ in 0..500 {
+                    if done(app) {
+                        return true;
+                    }
+                    frame(&ctx, app);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                frame(&ctx, app);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            false
-        };
-        let undoable = |store: &Store| store.undo_label().is_some();
-        let redoable = |store: &Store| store.redo_label().is_some();
+                false
+            };
+        fn undoes(app: &DrawbarApp) -> bool {
+            app.store.as_ref().is_some_and(Store::undoes)
+        }
+        let undoable = |app: &DrawbarApp| app.timeline.next_undo().is_some() && undoes(app);
+        let redoable = |app: &DrawbarApp| app.timeline.next_redo().is_some() && undoes(app);
         assert!(until(&mut app, Vec::new(), undoable), "the tag is made");
         let key = |modifiers| egui::Event::Key {
             key: egui::Key::Z,
@@ -2100,9 +2113,11 @@ mod tests {
         assert!(until(&mut app, vec![key(command)], redoable), "⌘Z undid it");
         let shift = command.plus(egui::Modifiers::SHIFT);
         assert!(
-            until(&mut app, vec![key(shift)], |store| store
-                .redo_label()
-                .is_none()),
+            until(&mut app, vec![key(shift)], |app| app
+                .timeline
+                .next_redo()
+                .is_none()
+                && undoes(app)),
             "⇧⌘Z redid it"
         );
     }

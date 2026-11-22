@@ -28,6 +28,7 @@ use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
 use crate::tags::Asked;
+use crate::timeline::{self, Taken, Timeline};
 use crate::workspace::{
     library_filename, precious, Cause, Content, FileAsk, Leaving, LocalEntity, Origin, Saved,
     Workspace,
@@ -125,6 +126,9 @@ struct Batch {
     /// The take of the asks they came in.
     take: u64,
     parts: Vec<Intent>,
+    /// The parts that save a document from its body over a file that existed, each with
+    /// the identity of that file.
+    saves: Vec<(u64, toshokan::Identity)>,
 }
 
 /// The take-in of the list an older drawbar kept, sent and not answered: the assets it
@@ -223,8 +227,12 @@ pub struct Store {
     finishing: BTreeSet<LibPath>,
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
-    /// This session's changes, as the Edit menu names them.
-    history: History,
+    /// Assets whose file this session's undo or redo of a save left as the file of this
+    /// identity, each read again until that read answers.
+    expected: BTreeMap<u64, toshokan::Identity>,
+    /// A change of this session's own failed partway and waits for the next change to
+    /// finish it. An undo or a redo would reverse that change, not the step it names.
+    waits: bool,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
@@ -379,7 +387,8 @@ impl Store {
             quietly: BTreeSet::new(),
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
-            history: History::default(),
+            expected: BTreeMap::new(),
+            waits: false,
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
@@ -1045,13 +1054,14 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> bool {
         self.ask(workspace, browser, queue, log);
         self.ask_tags(workspace, browser, log);
         let mut released = false;
         while let Some(event) = self.backend.try_recv() {
-            released |= self.react(event, workspace, browser, queue, log);
+            released |= self.react(event, workspace, browser, queue, timeline, log);
         }
         self.tell_unfinished(workspace.ctx(), browser, log);
         self.watch(browser);
@@ -1167,13 +1177,14 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> bool {
         self.ask_tags(workspace, browser, log);
         let Some(event) = self.backend.recv() else {
             return false;
         };
-        self.react(event, workspace, browser, queue, log);
+        self.react(event, workspace, browser, queue, timeline, log);
         browser.folders.place = Some(self.place());
         true
     }
@@ -1384,8 +1395,9 @@ impl Store {
         let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
             if self.rechecking.remove(&id) {
+                let expected = self.expected.remove(&id);
                 match answer {
-                    Ok(found) => self.changed(id, found, workspace, browser, log),
+                    Ok(found) => self.changed(id, found, expected, workspace, browser, log),
                     Err(_) => self.rescan(),
                 }
                 continue;
@@ -1507,13 +1519,14 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> bool {
         for kind in event.faults() {
             crate::telemetry::fault("library", kind);
         }
         let released = match self.hold(event) {
-            Some(event) => self.fold(event, workspace, browser, queue, log),
+            Some(event) => self.fold(event, workspace, browser, queue, timeline, log),
             None => false,
         };
         self.unwritten(workspace);
@@ -1560,10 +1573,13 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> bool {
         match event {
-            Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, queue, log),
+            Event::Opened(Ok(opened)) => {
+                self.begin(opened, workspace, browser, queue, timeline, log)
+            }
             Event::Opened(Err(why)) => {
                 log.error(format!("opening the library: {why}"));
                 log.trouble(format!(
@@ -1574,7 +1590,7 @@ impl Store {
             }
             Event::Scanned(Ok(viewed)) => {
                 let whole = viewed.dirs.is_some();
-                let moved = self.viewed(viewed, workspace, browser, queue, log);
+                let moved = self.viewed(viewed, workspace, browser, queue, timeline, log);
                 self.moved.extend(moved);
                 self.first_scan = false;
                 if whole && !self.listed {
@@ -1601,19 +1617,20 @@ impl Store {
             } => {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
-                let step = self.answering.pop_front().map(|sent| sent.step);
-                self.history.waited(finished, waiting, step.as_ref());
-                let forgotten = match (&step, forgot) {
-                    (Some(step), true) => self.history.forget(step),
-                    _ => None,
-                };
-                match (made, step, undoable) {
-                    (Some(entry), Some(step), true)
-                    | (Some(entry), Some(step @ Step::Lasting), _) => {
-                        self.history.took(step, entry)
-                    }
-                    _ => {}
+                self.waits = waiting != Waiting::Nothing;
+                let sent = self.answering.pop_front();
+                if landed {
+                    self.expected.extend(sent.iter().flat_map(Sent::leaves));
                 }
+                let asked = sent.map(Sent::asked);
+                let answer = timeline::Answer {
+                    made,
+                    undoable,
+                    forgot,
+                    finished,
+                    waiting,
+                };
+                let forgotten = timeline.answered(asked, answer);
                 let told = std::mem::take(&mut self.turned_read_only);
                 // A take-in that failed partway lands once its change is finished.
                 let refused = match self.taking_in.take_if(|_| label == TAKE_IN) {
@@ -1623,7 +1640,9 @@ impl Store {
                         true
                     }
                     Some(taking) if landed || waiting == Waiting::This => {
-                        self.follow_take_in(taking, landed, workspace, browser, queue, log);
+                        self.follow_take_in(
+                            taking, landed, workspace, browser, queue, timeline, log,
+                        );
                         false
                     }
                     Some(taking) => {
@@ -1636,7 +1655,9 @@ impl Store {
                 let failed = result.is_err();
                 match result {
                     Ok(viewed) => {
-                        self.viewed(viewed, workspace, browser, queue, log);
+                        self.viewed(viewed, workspace, browser, queue, timeline, log);
+                        let rechecking = &self.rechecking;
+                        self.expected.retain(|id, _| rechecking.contains(id));
                     }
                     Err(why) => match forgotten {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
@@ -1674,11 +1695,12 @@ impl Store {
                 self.answering.pop_front();
                 // The look below finds whether it landed, as it finds each of its files.
                 if let Some(taking) = self.taking_in.take_if(|_| label == TAKE_IN) {
-                    self.follow_take_in(taking, false, workspace, browser, queue, log);
+                    self.follow_take_in(taking, false, workspace, browser, queue, timeline, log);
                 }
                 // Whether the library took a step is not known, so the Edit menu offers
                 // none it holds until the next one it hears of.
-                self.history = History::default();
+                timeline.forget_library();
+                self.expected.clear();
                 log.say(format!(
                     "drawbar lost the library's answer to “{label}”, so it looks at the \
                      folder to see what changed."
@@ -1717,7 +1739,7 @@ impl Store {
                 self.rewritten(id, path, result, workspace, browser, log)
             }
             Event::Trimmed(entries) => {
-                if let Some(change) = self.history.trim(&entries) {
+                if let Some(change) = timeline.trim(&entries) {
                     log.say(format!(
                         "Undo no longer reaches “{change}” or what came before it: \
                          drawbar keeps at most 1 GiB of what your changes replaced."
@@ -1754,7 +1776,8 @@ impl Store {
             }
             Event::Unkept(why) => self.say_unkept(&why, log),
             Event::Restarted => {
-                self.history = History::default();
+                timeline.forget_library();
+                self.expected.clear();
                 // What waited to be finished never will be, but as the user settles it.
                 self.awaiting.clear();
                 log.say(
@@ -1835,64 +1858,67 @@ impl Store {
         }
     }
 
-    /// Send a change to the files.
-    fn write(&mut self, intent: Intent) {
+    /// Send a change to the files, which does nothing but save each of `saving` where it
+    /// names any.
+    fn write(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
         self.sent += 1;
-        self.commit(intent);
+        self.commit(intent, saving);
     }
 
     /// Send a change to the facts.
-    fn commit(&mut self, intent: Intent) {
+    fn commit(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
         let step = match intent.lasting() {
-            true => Step::Lasting,
-            false => Step::Change(intent.describe()),
+            true => timeline::Asked::Lasting,
+            false => change(intent.describe()),
         };
-        self.awaits(step, intent.doing());
+        let doing = intent.doing();
+        self.awaits(Sent {
+            step,
+            doing,
+            saving,
+        });
         self.send(Cmd::Intent(intent));
     }
 
-    /// Wait for the answer to `step`, which says `doing` until it comes.
-    fn awaits(&mut self, step: Step, doing: String) {
+    /// Wait for the answer to `sent`.
+    fn awaits(&mut self, sent: Sent) {
         self.committing += 1;
-        self.answering.push_back(Sent { step, doing });
+        self.answering.push_back(sent);
     }
 
-    /// Undo this session's last change not undone.
-    pub fn undo(&mut self) {
-        let Some((change, _)) = self.history.done.last().filter(|_| self.undoes()) else {
-            return;
-        };
-        let doing = format!("Undoing {change}…");
-        self.awaits(Step::Undo, doing);
+    /// Ask the library to undo the step `taken`, which is its last, unless Undo may not
+    /// go now ([`Store::undoes`]), when the step comes back.
+    pub fn undo(&mut self, taken: Taken) -> Result<(), Taken> {
+        if !self.undoes() {
+            return Err(taken);
+        }
+        let doing = format!("Undoing {}…", taken.label());
+        self.awaits(Sent::of(timeline::Asked::Undo(taken), doing));
         self.send(Cmd::Undo);
+        Ok(())
     }
 
-    /// Redo the change undone last.
-    pub fn redo(&mut self) {
-        let Some((change, _)) = self.history.undone.last().filter(|_| self.undoes()) else {
-            return;
-        };
-        let doing = format!("Redoing {change}…");
-        self.awaits(Step::Redo, doing);
+    /// Ask the library to make again the step `taken`, which it undid last, unless Redo
+    /// may not go now, when the step comes back.
+    pub fn redo(&mut self, taken: Taken) -> Result<(), Taken> {
+        if !self.undoes() {
+            return Err(taken);
+        }
+        let doing = format!("Redoing {}…", taken.label());
+        self.awaits(Sent::of(timeline::Asked::Redo(taken), doing));
         self.send(Cmd::Redo);
+        Ok(())
     }
 
-    /// What Undo takes back now, as the Edit menu names it.
-    pub fn undo_label(&self) -> Option<String> {
-        let (last, _) = self.history.done.last().filter(|_| self.undoes())?;
-        Some(format!("Undo {last}"))
+    /// Whether Undo and Redo may ask the library now: it is open, every change to it was
+    /// sent and answered, and none waits to be finished.
+    pub fn undoes(&self) -> bool {
+        self.opened() && self.committing == 0 && self.asks.is_empty() && !self.waits
     }
 
-    /// What Redo makes again now, as the Edit menu names it.
-    pub fn redo_label(&self) -> Option<String> {
-        let (last, _) = self.history.undone.last().filter(|_| self.undoes())?;
-        Some(format!("Redo {last}"))
-    }
-
-    /// Whether Undo and Redo may go now: the library is open, and every change to it was
-    /// sent and answered.
-    fn undoes(&self) -> bool {
-        self.opened() && self.committing == 0 && self.asks.is_empty()
+    /// Whether a change, an undo or a redo was sent and not answered.
+    pub fn changing(&self) -> bool {
+        !self.answering.is_empty()
     }
 
     /// What the library is doing for the oldest change, undo or redo not answered yet:
@@ -1951,6 +1977,7 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) {
         const ROUNDS: usize = 8;
@@ -1964,7 +1991,7 @@ impl Store {
         browser.tags.named();
         self.ask_tags(workspace, browser, log);
         for _ in 0..ROUNDS {
-            if !self.answered(workspace, browser, queue, log) {
+            if !self.answered(workspace, browser, queue, timeline, log) {
                 break;
             }
             let sent = self.sent;
@@ -1977,7 +2004,7 @@ impl Store {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.backend.finish() {
             while let Some(event) = self.backend.try_recv() {
-                self.react(event, workspace, browser, queue, log);
+                self.react(event, workspace, browser, queue, timeline, log);
             }
             self.name_lost(workspace, log);
         }
@@ -2006,6 +2033,7 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> bool {
         while self.saving() || !self.moving.is_empty() || self.committing > 0 {
@@ -2015,7 +2043,7 @@ impl Store {
                 // deletion, and nothing needs it now.
                 Some(Event::Scanned(_)) => self.scan = Scan::Idle,
                 Some(event) => {
-                    self.react(event, workspace, browser, queue, log);
+                    self.react(event, workspace, browser, queue, timeline, log);
                     self.ask_tags(workspace, browser, log);
                 }
             }
@@ -2030,9 +2058,10 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) {
-        self.close(workspace, browser, queue, log);
+        self.close(workspace, browser, queue, timeline, log);
     }
 
     /// A held send goes ahead unless something waiting to be sent changed on disk.
@@ -2073,6 +2102,7 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) {
         let Opened {
@@ -2111,7 +2141,7 @@ impl Store {
                 Phase::Unfinished(why)
             }
         };
-        self.viewed(viewed, workspace, browser, queue, log);
+        self.viewed(viewed, workspace, browser, queue, timeline, log);
         self.drafts_found = drafts;
         if self.opened() {
             self.first_scan = true;
@@ -2210,7 +2240,7 @@ impl Store {
             return;
         }
         let intent = Intent::Take { run, changes };
-        self.awaits(Step::Change(intent.describe()), intent.doing());
+        self.awaits(Sent::of(change(intent.describe()), intent.doing()));
         self.send(Cmd::Intent(intent));
     }
 
@@ -2220,7 +2250,7 @@ impl Store {
             return;
         }
         let intent = Intent::Dismiss { run };
-        self.awaits(Step::Change(intent.describe()), intent.doing());
+        self.awaits(Sent::of(change(intent.describe()), intent.doing()));
         self.send(Cmd::Intent(intent));
     }
 
@@ -2281,9 +2311,9 @@ impl Store {
             return;
         }
         let verb = settling(how);
-        let change = format!("{} “{}”", verb.label, orphan.label);
+        let label = format!("{} “{}”", verb.label, orphan.label);
         let doing = format!("{} “{}”…", verb.doing, orphan.label);
-        self.awaits(Step::Change(change), doing);
+        self.awaits(Sent::of(change(label), doing));
         self.send(Cmd::Settle { orphan, how });
     }
 
@@ -2295,6 +2325,7 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) -> BTreeSet<u64> {
         let Viewed {
@@ -2348,7 +2379,8 @@ impl Store {
         self.project_tags(&shown, browser);
         browser.forget_gone(workspace);
         if retired {
-            self.history = History::default();
+            timeline.forget_library();
+            self.expected.clear();
             self.awaiting.clear();
             log.say(
                 "drawbar's own data for this library was copied and used elsewhere too, so \
@@ -2510,7 +2542,8 @@ impl Store {
                 continue;
             };
             let known = record.fingerprint.map(|print| print.stat());
-            if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
+            let expected = self.expected.contains_key(&id);
+            if let Some(stat) = stat.filter(|stat| expected || known != Some(*stat)) {
                 touched.insert(id);
                 if self.quiet {
                     self.quietly.insert(id);
@@ -2723,7 +2756,7 @@ impl Store {
                     let asked = self.asked.remove(0);
                     self.tell_untagged(&asked, workspace, log);
                     if let Some(intent) = intent {
-                        self.commit(intent);
+                        self.commit(intent, Vec::new());
                     }
                 }
             }
@@ -3233,6 +3266,7 @@ impl Store {
 
     /// Follow a take-in that wrote what it brings, or may have: each part that did not
     /// land is answered as it would be alone, and the user is told where it `landed`.
+    #[allow(clippy::too_many_arguments)]
     fn follow_take_in(
         &mut self,
         taking: TakingIn,
@@ -3240,10 +3274,11 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
+        timeline: &mut Timeline,
         log: &mut Log,
     ) {
         for event in taking.held {
-            self.fold(event, workspace, browser, queue, log);
+            self.fold(event, workspace, browser, queue, timeline, log);
         }
         if landed {
             log.say(taking.said);
@@ -3430,11 +3465,14 @@ impl Store {
     }
 
     /// A file drawbar knew now holds something else. One drawbar has not read is only
-    /// looked at again: what it holds is not known, and nothing shows it.
+    /// looked at again: what it holds is not known, and nothing shows it. Where it is the
+    /// file of identity `expected`, as this session's undo or redo of a save left it, an
+    /// asset holding its body keeps it, and only what it was saved as moves.
     fn changed(
         &mut self,
         id: u64,
         found: Found,
+        expected: Option<toshokan::Identity>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
@@ -3459,7 +3497,12 @@ impl Store {
         let holds = found.holds();
         // A copy, or a browser's move, gives a file a new time over the same bytes.
         let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
-        match (unsaved, found.bytes, found.file) {
+        let own = expected.is_some()
+            && expected == found.identity
+            && found.bytes.is_some()
+            && !entity.unread()
+            && entity.rests().is_none();
+        match (unsaved || own, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
             (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
@@ -3468,9 +3511,9 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now, and one that file already holds leaves nothing to choose between.
-        match !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        match !own && !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
-            false if quietly || same => {}
+            false if own || quietly || same => {}
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
@@ -3541,6 +3584,10 @@ impl Store {
         log: &mut Log,
     ) {
         self.deleted_with(id, result.is_ok());
+        let identity = result.as_ref().ok().and_then(|print| print.identity);
+        if let (Some(after), Some(sent)) = (identity, self.answering.front_mut()) {
+            sent.saved(id, after);
+        }
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -4043,11 +4090,15 @@ impl Store {
     /// for none but the new files it saves.
     fn send_batch(&mut self) {
         let mut parts = std::mem::take(&mut self.batch.parts);
+        let mut saving = std::mem::take(&mut self.batch.saves);
         self.absorb_tag(&mut parts);
+        if saving.len() != parts.len() {
+            saving.clear();
+        }
         match parts.len() {
             0 => {}
-            1 => self.write(parts.remove(0)),
-            _ => self.write(Intent::Batch(parts)),
+            1 => self.write(parts.remove(0), saving),
+            _ => self.write(Intent::Batch(parts), saving),
         }
     }
 
@@ -4161,6 +4212,9 @@ impl Store {
         record.saving = true;
         record.path = Some(at.clone());
         let over = !matches!(expect, toshokan::Expect::Absent);
+        if let (toshokan::Expect::Holds(before), None) = (expect, workspace.overwritten_from(id)) {
+            self.batch.saves.push((id, before));
+        }
         self.part(Intent::Save {
             id,
             path: at,
@@ -4352,99 +4406,60 @@ fn settling(how: toshokan::log::Settlement) -> super::Verb {
 /// A change, an undo or a redo sent and not answered yet, and what drawbar says while it
 /// runs.
 struct Sent {
-    step: Step,
+    step: timeline::Asked,
     doing: String,
+    /// The documents a change that does nothing else saves from their bodies, each with
+    /// the identity of the file it replaces.
+    saving: Vec<(u64, toshokan::Identity)>,
 }
 
-/// One answer of the library this session's undo history follows.
-#[derive(Clone, PartialEq, Debug)]
-enum Step {
-    /// A change, as the Edit menu names it.
-    Change(String),
-    /// A change no undo takes back.
-    Lasting,
-    Undo,
-    Redo,
-}
-
-/// This session's changes the library made: those an undo takes back, last last, and
-/// those a redo makes again, each as the Edit menu names it, with the entry the undo
-/// or the redo reverses.
-#[derive(Default)]
-struct History {
-    done: Vec<(String, toshokan::EntryHash)>,
-    undone: Vec<(String, toshokan::EntryHash)>,
-    /// The step that failed partway and waits for the next write to finish it.
-    waiting: Option<Step>,
-}
-
-impl History {
-    /// Follow what became of the step that waited, which the change `step` finished
-    /// first where `finished` logged it, and which step waits now.
-    fn waited(
-        &mut self,
-        finished: Option<toshokan::EntryHash>,
-        waiting: Waiting,
-        step: Option<&Step>,
-    ) {
-        let earlier = self.waiting.take();
-        if let (Some(entry), Some(earlier)) = (finished, earlier.clone()) {
-            self.took(earlier, entry);
-        }
-        self.waiting = match waiting {
-            Waiting::Nothing => None,
-            Waiting::Earlier => earlier,
-            Waiting::This => step.cloned(),
-        };
-    }
-
-    /// Follow a step the library made, which `entry` logged.
-    fn took(&mut self, step: Step, entry: toshokan::EntryHash) {
-        match step {
-            Step::Change(change) => {
-                self.done.push((change, entry));
-                self.undone.clear();
-            }
-            // Logging any step ends the library's redo, as a change does.
-            Step::Lasting => self.undone.clear(),
-            Step::Undo => {
-                if let Some((change, _)) = self.done.pop() {
-                    self.undone.push((change, entry));
-                }
-            }
-            Step::Redo => {
-                if let Some((change, _)) = self.undone.pop() {
-                    self.done.push((change, entry));
-                }
-            }
+impl Sent {
+    fn of(step: timeline::Asked, doing: String) -> Sent {
+        Sent {
+            step,
+            doing,
+            saving: Vec::new(),
         }
     }
 
-    /// Let go of the step a refused undo or redo `step` would have reversed, and say
-    /// what can no longer be done with it.
-    fn forget(&mut self, step: &Step) -> Option<String> {
-        let (steps, cannot) = match step {
-            Step::Undo => (&mut self.done, "cannot be undone"),
-            Step::Redo => (&mut self.undone, "cannot be made again"),
-            Step::Change(_) | Step::Lasting => return None,
-        };
-        let (change, _) = steps.pop()?;
-        Some(format!("{change} {cannot}"))
+    /// The file an undo or a redo of a save leaves each document it saved as.
+    fn leaves(&self) -> Vec<(u64, toshokan::Identity)> {
+        match &self.step {
+            timeline::Asked::Undo(taken) => {
+                taken.saved().iter().map(|s| (s.id, s.before)).collect()
+            }
+            timeline::Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
+            timeline::Asked::Change { .. } | timeline::Asked::Lasting => Vec::new(),
+        }
     }
 
-    /// Let go of the steps whose undo or redo needs what `entries` displaced, and of
-    /// every step behind them. Returns the latest change Undo no longer reaches.
-    fn trim(&mut self, entries: &[toshokan::EntryHash]) -> Option<String> {
-        let cut = |steps: &mut Vec<(String, toshokan::EntryHash)>| {
-            let at = steps
-                .iter()
-                .rposition(|(_, entry)| entries.contains(entry))?;
-            let kept = steps.split_off(at + 1);
-            let gone = std::mem::replace(steps, kept);
-            gone.last().map(|(change, _)| change.clone())
-        };
-        cut(&mut self.undone);
-        cut(&mut self.done)
+    /// Note that the change saved the document `id` as the file of identity `after`.
+    fn saved(&mut self, id: u64, after: toshokan::Identity) {
+        let before = self.saving.iter().find(|(saving, _)| *saving == id);
+        if let (Some(&(_, before)), timeline::Asked::Change { saved, .. }) =
+            (before, &mut self.step)
+        {
+            saved.push(timeline::Saved { id, before, after });
+        }
+    }
+
+    /// What the library was asked. A change names the documents it saved only where it
+    /// saved every one it was sent to.
+    fn asked(self) -> timeline::Asked {
+        match self.step {
+            timeline::Asked::Change { label, saved } if saved.len() != self.saving.len() => {
+                change(label)
+            }
+            step => step,
+        }
+    }
+}
+
+/// What the library is asked by a change the Edit menu calls `label`.
+fn change(label: String) -> timeline::Asked {
+    timeline::Asked::Change {
+        label,
+        saved: Vec::new(),
     }
 }
 
@@ -4811,12 +4826,6 @@ fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> S
 mod tests {
     use super::*;
 
-    fn entry(n: u128) -> toshokan::EntryHash {
-        toshokan::EntryHash::from_u128(n)
-    }
-
-    /// A step whose undo needs what the trash let go goes, with every step behind it,
-    /// and the Edit menu names the latest change it no longer reaches.
     fn change(
         entity: u128,
         what: &str,
@@ -4932,59 +4941,6 @@ mod tests {
         assert!(title("drawbar", 2).starts_with("Another drawbar made 2 changes on a branch"));
         assert!(title("drawbar on MacBook", 1).starts_with("drawbar on MacBook made 1 change on"));
         assert!(title("drawbar", 0).starts_with("Another drawbar made changes on"));
-    }
-
-    #[test]
-    fn a_trimmed_step_and_every_one_behind_it_leave_the_history() {
-        let mut history = History::default();
-        for (n, change) in ["Save “a”", "Save “b”", "Rename “c”"]
-            .into_iter()
-            .enumerate()
-        {
-            history.took(Step::Change(change.to_string()), entry(n as u128));
-        }
-        history.took(Step::Undo, entry(9));
-        assert_eq!(history.trim(&[entry(5)]), None, "nothing needed it");
-        assert_eq!(
-            history.trim(&[entry(1)]).as_deref(),
-            Some("Save “b”"),
-            "the latest change no longer reached"
-        );
-        assert!(history.done.is_empty());
-        assert_eq!(history.undone.len(), 1, "the redo needs none of it");
-    }
-
-    #[test]
-    fn an_undo_a_later_write_finishes_is_undone_and_can_be_redone() {
-        let mut history = History::default();
-        history.took(Step::Change("Save “a”".to_string()), entry(0));
-        history.took(Step::Change("Save “b”".to_string()), entry(1));
-        history.waited(None, Waiting::This, Some(&Step::Undo));
-        history.waited(Some(entry(2)), Waiting::Nothing, None);
-        let names = |steps: &[(String, toshokan::EntryHash)]| {
-            steps
-                .iter()
-                .map(|(change, _)| change.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(names(&history.done), ["Save “a”"]);
-        assert_eq!(names(&history.undone), ["Save “b”"]);
-        assert_eq!(history.undone[0].1, entry(2), "the redo reverses the undo");
-    }
-
-    #[test]
-    fn a_step_that_waits_stays_while_the_next_change_is_not_tried_and_goes_where_it_never_landed() {
-        let mut history = History::default();
-        let save = Step::Change("Save “a”".to_string());
-        history.waited(None, Waiting::This, Some(&save));
-        history.waited(None, Waiting::Earlier, Some(&Step::Undo));
-        assert_eq!(history.waiting, Some(save));
-        history.waited(None, Waiting::Nothing, None);
-        assert_eq!(history.waiting, None);
-        assert!(
-            history.done.is_empty(),
-            "a step that never landed is not undone"
-        );
     }
 
     #[test]

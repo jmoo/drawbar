@@ -9,12 +9,14 @@ use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
 use crate::testing::{Bench, Temp};
-use crate::workspace::{Cause, Fresh, Origin, VerifyState};
+use crate::timeline::{Asked, Documents, Timeline, Went};
+use crate::workspace::{Cause, Fresh, Origin, VerifyState, Working};
 use nord_usb::{Location, ObjectClass};
 
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
+    timeline: Timeline,
     bench: Bench,
 }
 
@@ -44,6 +46,7 @@ impl Session {
         let backend = Backend::start(&bench.ctx, root.0.clone(), local.to_path_buf());
         let mut session = Session {
             store: Store::start(backend),
+            timeline: Timeline::default(),
             bench,
         };
         session.opened();
@@ -55,7 +58,11 @@ impl Session {
         let bench = Bench::new();
         let mut store = Store::start(crate::testing::backend(&bench.ctx, root));
         store.budget(budget);
-        let mut session = Session { store, bench };
+        let mut session = Session {
+            store,
+            timeline: Timeline::default(),
+            bench,
+        };
         session.opened();
         session
     }
@@ -155,7 +162,8 @@ impl Session {
             log,
             ..
         } = &mut self.bench;
-        self.store.poll(workspace, browser, queue, log);
+        self.store
+            .poll(workspace, browser, queue, &mut self.timeline, log);
     }
 
     fn next(&mut self) -> bool {
@@ -166,7 +174,8 @@ impl Session {
             log,
             ..
         } = &mut self.bench;
-        self.store.next(workspace, browser, queue, log)
+        self.store
+            .next(workspace, browser, queue, &mut self.timeline, log)
     }
 
     /// Wait for the answer to everything sent so far: a rescan runs after all of it.
@@ -247,7 +256,8 @@ impl Session {
                 ..
             } = &mut self.bench;
             self.store.sync(workspace, browser, Pass::Files);
-            self.store.poll(workspace, browser, queue, log);
+            self.store
+                .poll(workspace, browser, queue, &mut self.timeline, log);
             if !self.store.deciding() {
                 return;
             }
@@ -266,14 +276,49 @@ impl Session {
 
     /// Undo this session's last change to the facts, and wait until it is committed.
     fn undo(&mut self) {
-        self.store.undo();
+        self.press(false);
         self.decided();
     }
 
     /// Redo the change to the facts undone last, and wait until it is committed.
     fn redo(&mut self) {
-        self.store.redo();
+        self.press(true);
         self.decided();
+    }
+
+    /// Press Undo, or Redo where `again`, as the Edit menu does, with no edit step
+    /// recorded, and send what it asks of the library without waiting for it.
+    fn press(&mut self, again: bool) {
+        if !self.store.undoes() {
+            return;
+        }
+        let mut documents = Unrecorded;
+        let went = match again {
+            false => self.timeline.undo(&mut documents),
+            true => self.timeline.redo(&mut documents),
+        };
+        let crate::timeline::Went::Library(taken) = went else {
+            return;
+        };
+        let refused = match again {
+            false => self.store.undo(taken).err().map(Asked::Undo),
+            true => self.store.redo(taken).err().map(Asked::Redo),
+        };
+        refused
+            .into_iter()
+            .for_each(|asked| self.timeline.put_back(asked));
+    }
+
+    /// What the Edit menu's Undo item says now.
+    fn undo_label(&self) -> Option<String> {
+        let next = self.timeline.next_undo().filter(|_| self.store.undoes())?;
+        Some(format!("Undo {}", next.label()))
+    }
+
+    /// What the Edit menu's Redo item says now.
+    fn redo_label(&self) -> Option<String> {
+        let next = self.timeline.next_redo().filter(|_| self.store.undoes())?;
+        Some(format!("Redo {}", next.label()))
     }
 
     /// Read what other drawbars wrote to the library since.
@@ -364,6 +409,19 @@ impl Session {
             .iter()
             .filter(|entry| entry.text.contains(words))
             .count()
+    }
+}
+
+/// The documents of a timeline that records no edit step.
+struct Unrecorded;
+
+impl Documents for Unrecorded {
+    fn holds(&self, _: u64, _: &mut Working) -> bool {
+        false
+    }
+
+    fn hold(&mut self, _: u64, _: &Working) -> bool {
+        false
     }
 }
 
@@ -1110,6 +1168,7 @@ fn a_rescue_cut_short_by_a_crash_is_deleted_and_never_reaches_the_library() {
     let store = Store::start(crate::testing::backend(&bench.ctx, &root));
     let mut session = Session {
         store: store.shelving(Some(shelf.0.clone())),
+        timeline: Timeline::default(),
         bench,
     };
     session.opened();
@@ -1316,6 +1375,7 @@ fn every_rescue_left_goes_into_the_library_that_opens() {
     let store = Store::start(crate::testing::backend(&bench.ctx, &root));
     let mut session = Session {
         store: store.shelving(Some(shelf.0.clone())),
+        timeline: Timeline::default(),
         bench,
     };
     session.opened();
@@ -1526,7 +1586,7 @@ fn a_save_the_next_change_finishes_can_be_undone_after_it() {
     session.undo();
     assert!(session.tag_names().is_empty(), "the tag is undone");
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Save “untitled.ne5p”")
     );
     session.undo();
@@ -1556,8 +1616,36 @@ fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     session.undo();
     assert!(session.tag_names().is_empty(), "the tag is undone");
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo New “untitled.ne5p”")
+    );
+}
+
+#[test]
+fn undo_waits_while_a_change_that_failed_partway_waits_to_be_finished() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.make_tag("Sunday");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(
+        session.undo_label(),
+        None,
+        "the library would undo the save"
+    );
+
+    session.make_tag("Monday");
+    session.undo();
+    assert_eq!(session.tag_names(), ["Sunday"]);
+    assert_eq!(
+        session.undo_label().as_deref(),
+        Some("Undo Save “untitled.ne5p”")
     );
 }
 
@@ -1658,7 +1746,11 @@ fn a_picked_folder_that_opens_read_only_is_named_in_the_message() {
     let (root, _) = newer_drawbar_wrote();
     let bench = Bench::new();
     let store = Store::start(crate::testing::backend(&bench.ctx, &root)).named("Sounds".into());
-    let mut session = Session { store, bench };
+    let mut session = Session {
+        store,
+        timeline: Timeline::default(),
+        bench,
+    };
     session.opened();
     assert_eq!(session.said("The library “Sounds” opened read-only: "), 1);
     assert_eq!(session.said("This computer's library"), 0);
@@ -4357,6 +4449,299 @@ fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
 }
 
 impl Session {
+    /// The documents the step Undo takes next saved from their bodies, and did nothing
+    /// else.
+    fn saved_by_next_undo(&mut self) -> Vec<crate::timeline::Saved> {
+        let Went::Library(taken) = self.timeline.undo(&mut Unrecorded) else {
+            panic!("the library's step is next");
+        };
+        let saved = taken.saved().to_vec();
+        self.timeline.put_back(Asked::Undo(taken));
+        saved
+    }
+}
+
+fn identity(path: &str, bytes: &[u8]) -> toshokan::Identity {
+    identity_of_bytes(&LibPath::parse(path).unwrap(), bytes).expect("a library file")
+}
+
+#[test]
+fn a_save_step_names_the_document_with_the_file_it_replaced_and_the_file_it_left() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a new file is no save");
+    let made = root.read("untitled.ne5p");
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    let saved = crate::timeline::Saved {
+        id,
+        before: identity("untitled.ne5p", &made),
+        after: identity("untitled.ne5p", &edited),
+    };
+    assert_eq!(session.saved_by_next_undo(), [saved]);
+}
+
+#[test]
+fn a_save_of_several_files_names_each_and_one_with_another_change_names_none() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    for id in [a, b] {
+        session.edit(id, "96");
+        session.bench.workspace.mark_saved(id);
+    }
+    session.sync();
+    let saved = session.saved_by_next_undo();
+    let ids: Vec<u64> = saved.iter().map(|saved| saved.id).collect();
+    assert_eq!(ids, [a, b], "Save 2 files");
+
+    session.edit(a, "12");
+    session.bench.workspace.mark_saved(a);
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(b, renamed);
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a save and a rename");
+}
+
+#[test]
+fn a_save_over_another_sound_or_through_a_resting_file_names_none() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Kept.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Moved.ne5p"), with_gain(&program, "96")).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "an overwrite");
+
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    session.rename_resting(id, "Vibes");
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a rewrite");
+}
+
+/// The documents of a session, as the timeline puts back what they held.
+struct Held<'a>(&'a mut Bench);
+
+impl Documents for Held<'_> {
+    fn holds(&self, id: u64, working: &mut Working) -> bool {
+        self.0.workspace.working(id).as_ref() == Some(working)
+    }
+
+    fn hold(&mut self, id: u64, working: &Working) -> bool {
+        let Bench { workspace, log, .. } = &mut self.0;
+        workspace.hold(id, working, log)
+    }
+}
+
+impl Session {
+    /// A program made, written, then edited to `gain` and saved: its id, and the file's
+    /// bytes before and after the save.
+    fn saved_once(&mut self, gain: &str) -> (u64, Vec<u8>, Vec<u8>) {
+        let id = self.create();
+        self.sync();
+        let made = self.bytes(id);
+        let edited = self.edit(id, gain);
+        self.bench.workspace.mark_saved(id);
+        self.sync();
+        (id, made, edited)
+    }
+
+    /// Record the edits made since the last call as one step each, as a frame ends.
+    fn record(&mut self) {
+        for note in self.bench.workspace.take_notes() {
+            let after = self.bench.workspace.working(note.id).expect("held");
+            let label = format!("Edit “{}”", note.id);
+            let gesture = crate::timeline::Gesture::Over;
+            self.timeline
+                .record(note.id, label, note.before, after, gesture);
+        }
+    }
+}
+
+#[test]
+fn a_save_its_undo_and_its_redo_change_what_the_document_holds_nowhere() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    let held = session.bench.workspace.working(id);
+
+    session.undo();
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), made, "the file is as it was");
+    assert_eq!(session.bench.workspace.working(id), held);
+    assert!(
+        session.unsaved(id),
+        "the document holds what the file does not"
+    );
+
+    session.redo();
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), edited);
+    assert_eq!(session.bench.workspace.working(id), held);
+    assert!(!session.unsaved(id));
+    assert_eq!(session.said("changed on disk"), 0);
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+}
+
+#[test]
+fn undoing_a_save_under_an_unsaved_edit_asks_nothing_and_keeps_the_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    let edit = session.edit(id, "12");
+
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.bytes(id), edit);
+    assert!(session.unsaved(id));
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn a_save_undone_at_its_files_length_and_time_still_moves_what_the_document_was_saved_as() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+    let made = root.read("untitled.ne5p");
+    let edited = session.edit(id, "96");
+    assert_eq!(made.len(), edited.len());
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+
+    session.undo();
+    session.settle();
+
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+}
+
+#[test]
+fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    session.edit(id, "12");
+    let theirs = with_gain(&edited, "40");
+
+    session.press(false);
+    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.decided();
+    session.settle();
+
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), theirs);
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "the user is asked"
+    );
+}
+
+#[test]
+fn a_save_asked_while_its_undo_is_read_leaves_the_document_unsaved_over_the_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+
+    session.press(false);
+    while session.store.changing() {
+        assert!(session.next(), "the undo answered");
+    }
+    let again = session.edit(id, "12");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.bytes(id), again);
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn undo_takes_an_edit_from_beneath_a_save_and_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.record();
+    let before = session.bench.workspace.working(id);
+    let edited = session.edit(id, "96");
+    session.record();
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    let went = session.timeline.undo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    assert_eq!(root.read("untitled.ne5p"), edited, "the file is as saved");
+    assert_eq!(session.bench.workspace.working(id), before);
+    assert!(session.unsaved(id));
+
+    let went = session.timeline.redo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    assert_eq!(session.bytes(id), edited);
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn an_edit_made_while_the_library_undoes_a_step_ends_its_redo_and_is_undone_first() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.record();
+    session.tag(&[id], "A");
+    session.tag(&[id], "B");
+
+    session.press(false);
+    session.edit(id, "96");
+    session.record();
+    session.decided();
+    assert_eq!(session.worn(id), ["A"]);
+    assert_eq!(session.redo_label(), None, "the edit ended redo");
+
+    let went = session.timeline.undo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    session.undo();
+    assert_eq!(session.worn(id), Vec::<String>::new());
+    session.redo();
+    assert_eq!(
+        session.worn(id),
+        ["A"],
+        "the library redoes its own last undo"
+    );
+}
+
+impl Session {
     /// The names of the library's tags, sorted.
     fn tag_names(&self) -> Vec<String> {
         let tags = self.bench.browser.tags.all().iter();
@@ -4576,7 +4961,9 @@ fn a_library_that_stops_answering_is_asked_about_and_let_go() {
         log,
         ..
     } = &mut session.bench;
-    session.store.close(workspace, browser, queue, log);
+    session
+        .store
+        .close(workspace, browser, queue, &mut session.timeline, log);
     let said = session.said("could not be written, since the library stopped answering");
     assert_eq!(said, 1, "the edit is named");
 }
@@ -4604,7 +4991,9 @@ fn a_library_whose_thread_stops_says_so_and_is_let_go() {
         log,
         ..
     } = &mut session.bench;
-    session.store.close(workspace, browser, queue, log);
+    session
+        .store
+        .close(workspace, browser, queue, &mut session.timeline, log);
     let said = session.said("could not be written, since the library stopped answering");
     assert_eq!(said, 1, "the edit is named");
 }
@@ -5604,10 +5993,7 @@ fn a_selection_deleted_together_is_one_undo_step() {
     let acts = ids[..2].iter().map(|id| crate::browser::Act::Remove(*id));
     session.bench.act(acts.collect());
     session.sync();
-    assert_eq!(
-        session.store.undo_label().as_deref(),
-        Some("Undo Delete 2 files")
-    );
+    assert_eq!(session.undo_label().as_deref(), Some("Undo Delete 2 files"));
     session.bench.act(vec![crate::browser::Act::Remove(ids[2])]);
     session.sync();
     assert_eq!(root.names(""), [".drawbar"]);
@@ -5688,12 +6074,12 @@ fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
     }]);
     second.decided();
     first.refresh();
-    let refused = first.store.undo_label().expect("a change to undo");
+    let refused = first.undo_label().expect("a change to undo");
     first.undo();
     let change = refused.trim_start_matches("Undo ");
     let told = format!("{change} cannot be undone: another drawbar has changed it since.");
     assert_eq!(first.said(&told), 1);
-    assert_ne!(first.store.undo_label(), Some(refused));
+    assert_ne!(first.undo_label(), Some(refused));
     first.undo();
     assert!(tagged(&first).is_empty());
 }
@@ -5715,10 +6101,7 @@ fn a_selection_moved_together_is_one_undo_step() {
     session.bench.act(acts.collect());
     session.sync();
     assert_eq!(root.names("Gig").len(), 2, "both moved");
-    assert_eq!(
-        session.store.undo_label().as_deref(),
-        Some("Undo Move 2 files")
-    );
+    assert_eq!(session.undo_label().as_deref(), Some("Undo Move 2 files"));
     session.undo();
     session.settle();
     assert_eq!(root.names("Gig"), Vec::<String>::new(), "both moved back");
@@ -5737,10 +6120,7 @@ fn files_dropped_together_are_one_undo_step() {
     session.bench.act(dropped.into());
     session.sync();
     assert_eq!(root.names(""), [".drawbar", "a.ne5p", "b.ne5p"]);
-    assert_eq!(
-        session.store.undo_label().as_deref(),
-        Some("Undo New 2 files")
-    );
+    assert_eq!(session.undo_label().as_deref(), Some("Undo New 2 files"));
     session.undo();
     assert_eq!(root.names(""), [".drawbar"], "both taken back");
 }
@@ -5790,7 +6170,7 @@ fn a_tag_on_a_slot_view_is_one_undo_step() {
     session.decided();
     assert_eq!(session.worn(id), ["Sunday"]);
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo New “Grand.ne5p”")
     );
     session.undo();
@@ -5924,7 +6304,7 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     session.sync();
     assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Remove folder “Gig”"),
         "named by the gesture"
     );
@@ -5967,7 +6347,7 @@ fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
     };
     assert_eq!(others(&session), ["Set/cover.jpg", "notes.pdf"]);
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Remove folder “Gig”")
     );
     session.undo();
@@ -6076,7 +6456,7 @@ fn a_deleted_hidden_file_goes_to_the_trash_and_undo_brings_it_back() {
     assert_eq!(root.names("Gig"), Vec::<String>::new());
     assert!(session.bench.browser.folders.others.is_empty());
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Delete “notes.pdf”")
     );
     session.undo();
@@ -6098,7 +6478,7 @@ fn a_new_tag_named_on_a_selection_is_one_undo_step() {
     let mut session = Session::open(&root);
     let ids = [session.create(), session.create()];
     session.sync();
-    let before = session.store.undo_label();
+    let before = session.undo_label();
     session
         .bench
         .act(vec![crate::browser::Act::NewTag(ids.to_vec())]);
@@ -6112,14 +6492,14 @@ fn a_new_tag_named_on_a_selection_is_one_undo_step() {
     assert_eq!(session.worn(ids[0]), ["Sunday"]);
     assert_eq!(session.worn(ids[1]), ["Sunday"]);
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo New tag “Sunday”")
     );
     session.undo();
     assert_eq!(session.worn(ids[0]), Vec::<String>::new());
     assert_eq!(session.worn(ids[1]), Vec::<String>::new());
     assert_eq!(session.tag_names(), Vec::<String>::new(), "out of the list");
-    assert_eq!(session.store.undo_label(), before, "one step");
+    assert_eq!(session.undo_label(), before, "one step");
 }
 
 /// Quitting while a new tag's name is still being typed keeps the tag, on the assets
@@ -6210,35 +6590,35 @@ fn every_tag_asked_for_before_a_library_is_let_go_unwaited_is_put_on() {
 fn undo_and_redo_say_what_they_take_back() {
     let root = Temp::new();
     let mut session = Session::open(&root);
-    assert_eq!(session.store.undo_label(), None);
+    assert_eq!(session.undo_label(), None);
     let id = session.create();
     session.sync();
     session.tag(&[id], "Sunday");
     session.place_at(id, "Grand.ne5p");
     session.sync();
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Rename “untitled.ne5p”")
     );
     session.undo();
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo New tag “Sunday”"),
         "a tag made and put on is one change"
     );
     assert_eq!(
-        session.store.redo_label().as_deref(),
+        session.redo_label().as_deref(),
         Some("Redo Rename “untitled.ne5p”")
     );
     session.redo();
-    assert_eq!(session.store.redo_label(), None);
+    assert_eq!(session.redo_label(), None);
 
     fs::write(root.at("Grand.ne5p"), b"changed outside").unwrap();
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.remove(id, log);
     session.sync();
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo Rename “untitled.ne5p”"),
         "the refused delete is no step"
     );
@@ -6805,6 +7185,7 @@ impl Session {
         let backend = Backend::start(&bench.ctx, root.0.clone(), local.0.clone());
         let mut session = Session {
             store: Store::start(backend),
+            timeline: Timeline::default(),
             bench,
         };
         session.opened();
@@ -7427,7 +7808,9 @@ fn an_edit_sent_to_be_kept_behind_a_fault_is_named_as_lost() {
         log,
         ..
     } = &mut session.bench;
-    session.store.close(workspace, browser, queue, log);
+    session
+        .store
+        .close(workspace, browser, queue, &mut session.timeline, log);
     let said = session.said("could not be written, since the library stopped answering");
     assert_eq!(said, 1, "the edit is named");
 }
@@ -8017,13 +8400,9 @@ fn undo_after_a_dismissal_takes_back_the_change_before_it() {
     here.take_kept(theirs.run, Vec::new());
     assert_eq!(here.worn(at_here), ["New", "There"]);
     let ours = here.kept("gains the tag “Here”");
-    let taken = here.store.undo_label();
+    let taken = here.undo_label();
     here.dismiss_kept(ours.run);
-    assert_eq!(
-        here.store.undo_label(),
-        taken,
-        "the Edit menu offers the take"
-    );
+    assert_eq!(here.undo_label(), taken, "the Edit menu offers the take");
     here.undo();
     assert_eq!(here.worn(at_here), ["New"], "the take is undone");
     let kept = here.bench.browser.folders.kept();
@@ -8043,18 +8422,13 @@ fn a_change_whose_answers_are_lost_leaves_undo_to_the_next_change() {
     let id = session.create();
     session.sync();
     session.tag(&[id], "A");
-    assert!(session.store.undo_label().is_some());
+    assert!(session.undo_label().is_some());
     session.store.fault(Fault::Unread);
     session.tag(&[id], "B");
     session.settle();
-    assert_eq!(
-        session.store.undo_label(),
-        None,
-        "no step it may not have taken"
-    );
+    assert_eq!(session.undo_label(), None, "no step it may not have taken");
     session.tag(&[id], "C");
     assert!(session
-        .store
         .undo_label()
         .is_some_and(|label| label.contains("“C”")));
     session.undo();
@@ -8145,7 +8519,7 @@ fn a_rescue_taken_in_survives_an_undo_and_a_close() {
     let mut session = Session::open(&root);
     session.sync();
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-    assert_eq!(session.store.undo_label(), None, "Undo offers no rescue");
+    assert_eq!(session.undo_label(), None, "Undo offers no rescue");
     session.undo();
     session.close();
     assert_eq!(
@@ -8493,7 +8867,8 @@ impl Session {
             log,
             ..
         } = &mut self.bench;
-        self.store.close(workspace, browser, queue, log);
+        self.store
+            .close(workspace, browser, queue, &mut self.timeline, log);
     }
 }
 
@@ -8506,7 +8881,7 @@ fn a_take_in_survives_an_undo_and_a_close() {
     let list = older_list(&kept);
     let mut session = Session::open(&root);
     session.take_in(&mut kept);
-    assert_eq!(session.store.undo_label(), None, "Undo offers no take-in");
+    assert_eq!(session.undo_label(), None, "Undo offers no take-in");
     session.undo();
     session.close();
 
@@ -8526,7 +8901,7 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
     let ids = [session.create(), session.create()];
     session.sync();
     assert!(
-        session.store.undo_label().is_some(),
+        session.undo_label().is_some(),
         "the new files can be undone"
     );
     assert_eq!(session.store.doing(), None);
@@ -8545,8 +8920,8 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
     } = &mut session.bench;
     session.store.sync(workspace, browser, Pass::Files);
     assert_eq!(session.store.doing(), Some("Moving 2 files…"));
-    assert_eq!(session.store.undo_label(), None);
-    assert_eq!(session.store.redo_label(), None);
+    assert_eq!(session.undo_label(), None);
+    assert_eq!(session.redo_label(), None);
 
     // A change counts as stalled only once the library's thread has taken it.
     session.store.patience(std::time::Duration::ZERO);
@@ -8555,7 +8930,7 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
         session.store.doing().is_none()
     });
     assert!(stalled, "a stall is asked about instead");
-    assert_eq!(session.store.undo_label(), None);
+    assert_eq!(session.undo_label(), None);
     session.let_go_stalled();
 }
 
@@ -8569,25 +8944,18 @@ fn an_undo_pressed_while_a_delete_is_in_flight_does_nothing() {
     let a = session.named("a.ne5p");
     session.create();
     session.sync();
-    assert!(
-        session.store.undo_label().is_some(),
-        "the new file can be undone"
-    );
+    assert!(session.undo_label().is_some(), "the new file can be undone");
     session.bench.act(vec![crate::browser::Act::Remove(a)]);
     let Bench {
         workspace, browser, ..
     } = &mut session.bench;
     session.store.sync(workspace, browser, Pass::Files);
-    assert_eq!(
-        session.store.undo_label(),
-        None,
-        "Undo waits for the delete"
-    );
-    session.store.undo();
+    assert_eq!(session.undo_label(), None, "Undo waits for the delete");
+    session.press(false);
     session.decided();
     assert!(!root.at("a.ne5p").exists(), "the delete stands");
 
-    let label = session.store.undo_label();
+    let label = session.undo_label();
     assert_eq!(label.as_deref(), Some("Undo Delete “a.ne5p”"));
     session.undo();
     assert!(root.at("a.ne5p").exists(), "the delete was undone");
@@ -8648,11 +9016,11 @@ fn a_take_in_the_next_change_finishes_survives_an_undo_and_a_close() {
     session.take_in(&mut kept);
     session.make_tag("Sunday");
     assert_eq!(
-        session.store.undo_label().as_deref(),
+        session.undo_label().as_deref(),
         Some("Undo New tag “Sunday”")
     );
     session.undo();
-    assert_eq!(session.store.undo_label(), None, "Undo offers no take-in");
+    assert_eq!(session.undo_label(), None, "Undo offers no take-in");
     session.undo();
     session.close();
 
@@ -8674,7 +9042,7 @@ fn a_rescue_the_next_change_finishes_survives_an_undo_and_a_close() {
     session.make_tag("Sunday");
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     session.undo();
-    assert_eq!(session.store.undo_label(), None, "Undo offers no rescue");
+    assert_eq!(session.undo_label(), None, "Undo offers no rescue");
     session.undo();
     session.close();
     assert_eq!(
@@ -8732,12 +9100,9 @@ fn a_take_in_after_an_undo_leaves_nothing_to_redo() {
     let mut session = Session::open(&root);
     session.make_tag("Sunday");
     session.undo();
-    assert!(
-        session.store.redo_label().is_some(),
-        "the tag can be made again"
-    );
+    assert!(session.redo_label().is_some(), "the tag can be made again");
     session.take_in(&mut kept);
-    assert_eq!(session.store.redo_label(), None);
+    assert_eq!(session.redo_label(), None);
 }
 
 /// A `.wav` is an asset like any file drawbar opens: listed unread, of its kind by its
@@ -8906,7 +9271,8 @@ impl Session {
                 log,
                 ..
             } = &mut self.bench;
-            self.store.poll(workspace, browser, queue, log);
+            self.store
+                .poll(workspace, browser, queue, &mut self.timeline, log);
             workspace.poll(log);
             builds.poll(workspace, &browser.folders, tabs, log);
             if !builds.running(id) {
