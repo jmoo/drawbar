@@ -255,6 +255,12 @@ impl Timeline {
         }
     }
 
+    /// Changes whenever a step is recorded or either list gains or loses one, which is
+    /// whenever what Undo and Redo name may have.
+    pub fn shown(&self) -> (u64, usize, usize) {
+        (self.recorded, self.done.len(), self.undone.len())
+    }
+
     pub fn next_undo(&self) -> Option<Next<'_>> {
         self.undoes().map(|at| next(&self.done[at]))
     }
