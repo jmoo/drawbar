@@ -16,8 +16,10 @@ pub struct PlanOptions {
     /// The notes played, as MIDI notes, in playing order. Empty, they are found from the
     /// hits' pitches: see [`layers::notes_of`].
     pub notes: Vec<u8>,
-    /// The layers each note gets.
-    pub layers: usize,
+    /// The most layers each note gets; none, every hit it keeps, up to
+    /// [`layers::MOST_LAYERS`]. [`PlanOptions::min_snr_db`] leaves out quiet hits, and by
+    /// loudness [`PlanOptions::min_layer_gap_db`] leaves out near-duplicates.
+    pub layers: Option<usize>,
     pub order: Order,
     /// Hits to leave out, by their number in the take.
     pub skip: Vec<usize>,
@@ -52,7 +54,7 @@ pub struct SetLayer {
 pub const MIN_SNR_DB: f64 = 54.0;
 
 impl PlanOptions {
-    pub fn new(notes: Vec<u8>, layers: usize) -> PlanOptions {
+    pub fn new(notes: Vec<u8>, layers: Option<usize>) -> PlanOptions {
         PlanOptions {
             notes,
             layers,
@@ -348,7 +350,7 @@ mod tests {
             (13.0, 55.0, -75.0, 15.0),
         ];
         let x = take(rate, 16.5, &notes, -110.0);
-        let plan = plan(&x, rate, &PlanOptions::new(vec![48, 55], 2));
+        let plan = plan(&x, rate, &PlanOptions::new(vec![48, 55], Some(2)));
         let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
         assert_eq!(fates.len(), 5, "{fates:?}");
         assert!(
@@ -380,7 +382,7 @@ mod tests {
 
         let lenient = PlanOptions {
             min_snr_db: 25.0,
-            ..PlanOptions::new(vec![48, 55], 2)
+            ..PlanOptions::new(vec![48, 55], Some(2))
         };
         let fates: Vec<Fate> = super::plan(&x, rate, &lenient)
             .hits
@@ -399,7 +401,7 @@ mod tests {
         let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
         let options = PlanOptions {
             one_note: true,
-            ..PlanOptions::new(Vec::new(), 1)
+            ..PlanOptions::new(Vec::new(), Some(1))
         };
         let plan = plan(&x, rate, &options);
         assert_eq!(plan.hits.len(), 1, "{:?}", plan.hits);
@@ -419,7 +421,7 @@ mod tests {
         let rate = 35_002;
         let options = PlanOptions {
             one_note: true,
-            ..PlanOptions::new(Vec::new(), 1)
+            ..PlanOptions::new(Vec::new(), Some(1))
         };
         for (what, seconds, up, floor_db) in [
             ("0.4 s", 0.4, 10.0, -80.0),
@@ -438,10 +440,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn with_no_most_a_note_keeps_every_hit_as_a_layer() {
+        let rate = 35_002;
+        let notes: Vec<(f64, f64, f64, f64)> = (0..6)
+            .map(|i| {
+                (
+                    1.0 + 3.0 * f64::from(i),
+                    48.0,
+                    -12.0 - 5.0 * f64::from(i),
+                    3.0 * f64::from(i) + 3.0,
+                )
+            })
+            .collect();
+        let x = take(rate, 19.5, &notes, -110.0);
+        let values = |most: Option<usize>| -> Vec<u8> {
+            let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), most));
+            (plan.hits.iter())
+                .filter_map(|p| match p.fate {
+                    Fate::Kept { value, .. } => Some(value),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(values(None), layers::v6_values(6));
+        assert_eq!(values(Some(4)).len(), 4);
+    }
+
     fn one_note() -> PlanOptions {
         PlanOptions {
             one_note: true,
-            ..PlanOptions::new(Vec::new(), 1)
+            ..PlanOptions::new(Vec::new(), Some(1))
         }
     }
 
@@ -527,7 +556,7 @@ mod tests {
     fn a_take_that_starts_mid_note_has_no_hit_at_its_start() {
         let rate = 35_002;
         let x = take(rate, 6.0, &[(0.0, 60.0, -12.0, 4.0)], -110.0);
-        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), 1));
+        let plan = plan(&x, rate, &PlanOptions::new(Vec::new(), Some(1)));
         assert!(plan.hits.is_empty(), "{:?}", plan.hits);
     }
 
@@ -542,8 +571,8 @@ mod tests {
             (13.0, 55.0, -75.0, 15.0),
         ];
         let x = take(rate, 16.5, &notes, -110.0);
-        let given = plan(&x, rate, &PlanOptions::new(vec![48, 55], 2));
-        let found = plan(&x, rate, &PlanOptions::new(Vec::new(), 2));
+        let given = plan(&x, rate, &PlanOptions::new(vec![48, 55], Some(2)));
+        let found = plan(&x, rate, &PlanOptions::new(Vec::new(), Some(2)));
         assert_eq!(found.notes, [48, 55]);
         assert_eq!(given.notes, [48, 55]);
         let fates = |plan: &Plan| plan.hits.iter().map(|p| p.fate.clone()).collect::<Vec<_>>();
@@ -563,7 +592,7 @@ mod tests {
             (7.0, 55.0, -14.0, 9.0),
         ];
         let x = take(rate, 10.5, &notes, -110.0);
-        let mut options = PlanOptions::new(vec![48, 55], 4);
+        let mut options = PlanOptions::new(vec![48, 55], Some(4));
         options.set = Some(SetLayer { layer: 1, of: 3 });
         let plan = plan(&x, rate, &options);
         let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
@@ -580,7 +609,7 @@ mod tests {
         let rate = 35_002;
         for len in [0, 1, 349] {
             let x = vec![0.1; len];
-            let plan = plan(&x, rate, &PlanOptions::new(vec![48], 4));
+            let plan = plan(&x, rate, &PlanOptions::new(vec![48], Some(4)));
             assert!(plan.hits.is_empty(), "{len} samples");
             assert_eq!(plan.missing, [48]);
             assert_eq!(plan.hum, Err(NoHum::NoQuiet));

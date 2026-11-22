@@ -20,7 +20,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{UsbDevice, UsbDirection, UsbTransferStatus};
 
 use super::{needs_terminator, Transport, CLASS_VENDOR_SPECIFIC, EP_IN, EP_OUT};
-use crate::error::{Error, Result};
+use crate::error::{Error, OpenStep, Result};
 
 /// WebUSB addresses an endpoint by its number, without the direction bit that a
 /// descriptor address carries: [`EP_IN`] `0x82` is endpoint 2, [`EP_OUT`] `0x03` is
@@ -46,6 +46,10 @@ fn describe(err: &JsValue) -> String {
 
 fn map_err(what: &str) -> impl FnOnce(JsValue) -> Error + '_ {
     move |e| Error::Transport(format!("{what}: {}", describe(&e)))
+}
+
+fn open_err(step: OpenStep, what: &str) -> impl FnOnce(JsValue) -> Error + '_ {
+    move |e| step.failed(format!("{what}: {}", describe(&e)))
 }
 
 fn check_status(status: UsbTransferStatus, what: &str) -> Result<()> {
@@ -129,18 +133,22 @@ impl WebUsbTransport {
     pub async fn open(device: UsbDevice) -> Result<Self> {
         JsFuture::from(device.open())
             .await
-            .map_err(map_err("opening the device"))?;
+            .map_err(open_err(OpenStep::Device, "opening the device"))?;
 
         // An unconfigured device uses configuration 1.
         // Inferred from specimens; not confirmed on hardware.
         if device.configuration().is_none() {
             JsFuture::from(device.select_configuration(1))
                 .await
-                .map_err(map_err("selecting configuration 1"))?;
+                .map_err(open_err(
+                    OpenStep::Configuration,
+                    "selecting configuration 1",
+                ))?;
         }
 
         let configuration = device.configuration().ok_or_else(|| {
-            Error::Transport("device reports no active configuration after selecting one".into())
+            OpenStep::Configuration
+                .failed("device reports no active configuration after selecting one")
         })?;
 
         let interface_number = configuration
@@ -149,20 +157,20 @@ impl WebUsbTransport {
             .find(|iface| iface.alternate().interface_class() == CLASS_VENDOR_SPECIFIC)
             .map(|iface| iface.interface_number())
             .ok_or_else(|| {
-                Error::Transport(
-                    "device exposes no vendor-specific interface; is this a Nord?".into(),
-                )
+                OpenStep::Interface
+                    .failed("device exposes no vendor-specific interface; is this a Nord?")
             })?;
 
         let out_packet = out_packet(&device).ok_or_else(|| {
-            Error::Transport(format!(
+            OpenStep::Endpoint.failed(format!(
                 "the vendor interface reports no bulk OUT endpoint at {EP_OUT:#04x}"
             ))
         })?;
 
         JsFuture::from(device.claim_interface(interface_number))
             .await
-            .map_err(map_err(
+            .map_err(open_err(
+                OpenStep::Claim,
                 "claiming the vendor interface (another application holding it, such as \
                  Nord Sound Manager, blocks this)",
             ))?;

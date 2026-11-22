@@ -78,7 +78,7 @@ Click a box to pick its hit. Click where no box is to mark a place, such as a
 strike the file does not mark yet.
 
 **Detect** finds the take's hits as `nord piano prep` does: it names each by its
-pitch, chooses up to four layers of each note by level, and marks each hit's
+pitch, makes a note's hits its layers by level, and marks each hit's
 attack, its loop or fade, and its release, in place of the take's regions.
 **Skip hits** sets how far over the take's noise a hit must stand to be kept:
 the build raises every layer to one level, so a quiet hit's hiss would rise with
