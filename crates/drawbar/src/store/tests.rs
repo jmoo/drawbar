@@ -12,6 +12,8 @@ use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
+mod walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
@@ -42,6 +44,20 @@ impl Session {
     fn listed_at(root: &Temp, local: &std::path::Path) -> Session {
         let bench = Bench::new();
         let backend = Backend::start(&bench.ctx, root.0.clone(), local.to_path_buf());
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session
+    }
+
+    /// Open the library with this install's own state at `local`, telling the time and
+    /// drawing ids as `ambient` does.
+    fn ambient(root: &Temp, local: &std::path::Path, ambient: super::native::Ambient) -> Session {
+        let bench = Bench::new();
+        let (root, local) = (root.0.clone(), local.to_path_buf());
+        let backend = Backend::start_with(&bench.ctx, root, local, ambient);
         let mut session = Session {
             store: Store::start(backend),
             bench,

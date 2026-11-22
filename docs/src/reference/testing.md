@@ -142,6 +142,16 @@ with `DRAWBAR_TEST_FOLDER` giving the test folders what a browser's can do:
 storage or a folder picked in Chrome, and `copying` renames nothing, as a folder
 picked in Brave. The default, `desktop`, does what the disk reports.
 
+drawbar's walks put two or three drawbars on one library folder, or on copies that a
+simulated sync keeps in step, and take seeded random steps. After each step they
+check that every drawbar shows what is on disk and what a fresh open shows, that
+Undo and Redo put the folder back, and more. `UNHELD` in
+`crates/drawbar/src/store/tests/walk.rs` lists the checks the library does not pass
+yet: a walk notes their failures and goes on. `DRAWBAR_WALK_SEEDS=1..=500` runs the
+walks from each seed in the range, and the ignored test
+`every_unheld_check_still_fails_in_some_walk` names a listed check that no walk
+fails.
+
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
 corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
