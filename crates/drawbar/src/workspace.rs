@@ -803,10 +803,11 @@ impl LocalEntity {
         matches!(self.verify, VerifyState::Reading) && self.stamp == self.saved.stamp
     }
 
-    /// Count it saved as `saved` from now on, keeping what it says of its own bytes.
-    fn resave(&mut self, saved: Baseline) {
+    /// Count it saved as `saved` from now on, keeping what it says of its own bytes, and
+    /// return what it was saved as.
+    fn resave(&mut self, saved: Baseline) -> Baseline {
         self.verify = self.verify();
-        self.saved = saved;
+        std::mem::replace(&mut self.saved, saved)
     }
 
     /// What a read of its file found before it was let go of for room: its kind, tag,
@@ -1683,6 +1684,11 @@ pub struct Workspace {
     /// The edit an editor made of each asset resting in its file, made over the file it
     /// rests in. See [`Workspace::hold_edit`].
     edits: std::collections::BTreeMap<u64, Held>,
+    /// What the file of each asset is known to hold while a save of it is unanswered,
+    /// where a save moved its saved baseline away from that.
+    on_file: std::collections::BTreeMap<u64, Baseline>,
+    /// The baseline each save the store has sent, and not heard back on, carries.
+    sent: std::collections::BTreeMap<u64, Baseline>,
     /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
     frame: u64,
 }
@@ -1791,6 +1797,8 @@ impl Workspace {
             decoding: Vec::new(),
             flying: Default::default(),
             edits: Default::default(),
+            on_file: Default::default(),
+            sent: Default::default(),
             frame: 1,
         }
     }
@@ -2099,12 +2107,21 @@ impl Workspace {
     pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
         self.replace_bytes(id, bytes, log);
         self.settle_saved(id);
+        self.forget_saves(id);
     }
 
     /// [`Workspace::adopt`] for a file left on disk: the asset rests in it.
     pub fn adopt_file(&mut self, id: u64, file: Arc<OnDisk>) {
         let stamp = self.stamp();
         self.rest(id, file, stamp);
+        self.forget_saves(id);
+    }
+
+    /// Let go of what is kept of an asset's saves unanswered: its saved baseline is what a
+    /// read of its file found, whatever they answer, or it is gone.
+    fn forget_saves(&mut self, id: u64) {
+        self.on_file.remove(&id);
+        self.sent.remove(&id);
     }
 
     /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
@@ -2118,6 +2135,7 @@ impl Workspace {
         if let Some(entity) = self.get_mut(id) {
             entity.resave(Baseline::read(theirs.into(), stamp));
         }
+        self.forget_saves(id);
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
@@ -2130,15 +2148,72 @@ impl Workspace {
             entity.resave(Baseline::on_disk(theirs.clone(), stamp));
         }
         self.check(id, theirs);
+        self.forget_saves(id);
     }
 
-    /// Count an asset as unsaved again, because the save it was counted saved by did not
-    /// land. One resting in its file holds what the file holds, and an edit held over it
-    /// stays unsaved.
-    pub fn unsave(&mut self, id: u64) {
-        self.edit_not_saved(id);
-        if !self.apart(id) {
+    /// Note that the store sends a save of an asset's saved baseline: over its file, or,
+    /// without `over`, as a file where none is known.
+    pub(crate) fn send_save(&mut self, id: u64, over: bool) {
+        let Some(saved) = self.get(id).map(|entity| entity.saved.clone()) else {
             return;
+        };
+        self.sent.insert(id, saved);
+        if !over {
+            self.on_file.remove(&id);
+        }
+    }
+
+    /// The store writes nothing for a save asked of an asset: its file holds the saved
+    /// baseline already, or it has no file to write.
+    pub(crate) fn skip_save(&mut self, id: u64) {
+        if !self.sent.contains_key(&id) {
+            self.on_file.remove(&id);
+        }
+    }
+
+    /// A save of an asset landed. A newer saved baseline still to be written leaves its
+    /// file known to hold what that save carried.
+    pub fn save_landed(&mut self, id: u64) {
+        let Some(sent) = self.sent.remove(&id) else {
+            return;
+        };
+        match self.newer_than(id, &sent) {
+            true => self.on_file.insert(id, sent),
+            false => self.on_file.remove(&id),
+        };
+    }
+
+    /// How many assets something is kept of for saves not answered.
+    #[cfg(test)]
+    pub(crate) fn saves_unanswered(&self) -> usize {
+        let mut ids: std::collections::BTreeSet<&u64> = self.on_file.keys().collect();
+        ids.extend(self.sent.keys());
+        ids.len()
+    }
+
+    /// Whether an asset's saved baseline has moved on from `sent`.
+    fn newer_than(&self, id: u64, sent: &Baseline) -> bool {
+        self.get(id)
+            .is_some_and(|entity| entity.saved.stamp != sent.stamp)
+    }
+
+    /// A save of an asset did not land, and returns whether a save of a newer saved
+    /// baseline still waits, which goes ahead. Otherwise its saved baseline is what its
+    /// file is known to hold again, or, where nothing is known of the file, the asset
+    /// counts as unsaved. One resting in its file holds what the file holds, and an edit
+    /// held over it stays unsaved.
+    pub fn unsave(&mut self, id: u64) -> bool {
+        self.edit_not_saved(id);
+        let sent = self.sent.remove(&id);
+        if sent.is_some_and(|sent| self.newer_than(id, &sent)) {
+            return true;
+        }
+        if let Some(on_file) = self.on_file.remove(&id) {
+            self.resave_as(id, on_file);
+            return false;
+        }
+        if !self.apart(id) {
+            return false;
         }
         let stamp = self.stamp();
         if let Some(entity) = self.get_mut(id) {
@@ -2146,6 +2221,32 @@ impl Workspace {
                 entity.resave(Baseline::new(entity.saved.content.clone(), stamp));
             }
         }
+        false
+    }
+
+    /// Count an asset saved as `saved`, which its file holds. One whose bytes are those
+    /// takes their stamp, or rests in the file, as a revert would leave it.
+    ///
+    /// ⚠️ Compares two bodies, so it runs only when a save is refused.
+    fn resave_as(&mut self, id: u64, saved: Baseline) {
+        if !self.apart(id) {
+            return;
+        }
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        let same = saved.holds(&entity.bytes);
+        entity.resave(saved);
+        let stamp = entity.saved.stamp;
+        match (same, entity.saved.file().cloned()) {
+            (false, _) => {}
+            (true, Some(file)) => self.rest(id, file, stamp),
+            (true, None) => {
+                entity.bytes = entity.saved.bytes().clone();
+                entity.stamp = stamp;
+            }
+        }
+        self.revision += 1;
     }
 
     /// Whether an asset's bytes stand apart from what it was saved as, so that its saved
@@ -3566,30 +3667,35 @@ impl Workspace {
     /// ⚠️ The bytes do not change, so the stamp stays and caches over them stay valid.
     /// The list revision moves, so the store is written again without the unsaved copy.
     pub fn mark_saved(&mut self, id: u64) {
-        if !self.settle_saved(id) {
-            return;
+        if let Some(displaced) = self.settle_saved(id) {
+            self.ask_save(id, displaced);
         }
+    }
+
+    /// Ask for a write of an asset's file with its saved baseline, which moved from
+    /// `displaced`, where it is kept and has a file.
+    fn ask_save(&mut self, id: u64, displaced: Baseline) {
         let kept = self.get(id).filter(|entity| entity.kept);
         if kept.is_some_and(|entity| entity.path.is_some()) {
             self.file_asks.push(FileAsk::Save(id));
+            // One kept already is older, and still what the file holds.
+            self.on_file.entry(id).or_insert(displaced);
         }
     }
 
     /// [`Workspace::mark_saved`] for bytes the asset's file already holds, asking for no
-    /// write. Returns whether the baseline moved.
-    fn settle_saved(&mut self, id: u64) -> bool {
-        let Some(entity) = self.get_mut(id) else {
-            return false;
-        };
+    /// write. Returns the baseline it moved from, where it moved.
+    fn settle_saved(&mut self, id: u64) -> Option<Baseline> {
+        let entity = self.get_mut(id)?;
         // Resting in its file, it holds what it was saved as, and only an editor's pending
         // edit, which the bytes do not hold, can make it unsaved.
         if !entity.is_unsaved() || entity.rests().is_some() {
-            return false;
+            return None;
         }
         let saved = entity.baseline();
-        entity.resave(saved);
+        let displaced = entity.resave(saved);
         self.revision += 1;
-        true
+        Some(displaced)
     }
 
     /// Record a write that reached a slot: the bytes it carried become the saved
@@ -3633,12 +3739,10 @@ impl Workspace {
         // ⚠️ Where the asset rests in a file that already holds `sent` and its check has
         // not answered, its bytes are empty, so this saves it as empty bytes: its size
         // reads 0, and the file it rests in is dropped.
-        entity.resave(Baseline::read(sent, stamp));
+        let displaced = entity.resave(Baseline::read(sent, stamp));
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
-        if entity.kept && entity.path.is_some() {
-            self.file_asks.push(FileAsk::Save(id));
-        }
+        self.ask_save(id, displaced);
         self.revision += 1;
     }
 
@@ -3795,6 +3899,7 @@ impl Workspace {
         self.moving_over.remove(&id);
         self.saving_over.remove(&id);
         self.edits.remove(&id);
+        self.forget_saves(id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
         if let (true, Some(path)) = (gone.kept, &gone.path) {
@@ -3824,6 +3929,8 @@ impl Workspace {
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
         self.edits.retain(|id, _| held(*id));
+        self.on_file.retain(|id, _| held(*id));
+        self.sent.retain(|id, _| held(*id));
         self.moving_over.retain(|id, _| held(*id));
         self.saving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));

@@ -863,6 +863,164 @@ fn a_save_over_a_file_changed_since_it_was_read_is_refused() {
     assert!(entity.is_unsaved());
 }
 
+/// The first write of a save's bytes, before anything is put in place, fails.
+fn a_refused_save() -> Fault {
+    Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Write { path, .. } if path.as_str().contains("/tmp/")),
+    )
+}
+
+impl Session {
+    /// Make `bytes` what `id` holds.
+    fn put(&mut self, id: u64, bytes: &[u8]) {
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.replace_bytes(id, bytes.to_vec(), log);
+    }
+
+    /// Make `bytes` what `id` holds, and save them.
+    fn save(&mut self, id: u64, bytes: &[u8]) {
+        self.put(id, bytes);
+        self.bench.workspace.mark_saved(id);
+    }
+
+    fn revert(&mut self, id: u64) {
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.revert(id, log);
+    }
+
+    /// Send what waits to be written, and wait until it has answered.
+    fn written(&mut self) {
+        while !self.settled() {
+            assert!(self.next(), "the library answered");
+        }
+    }
+
+    fn unsaved(&self, id: u64) -> bool {
+        self.bench.workspace.get(id).expect("held").is_unsaved()
+    }
+}
+
+#[test]
+fn a_refused_save_leaves_the_asset_saved_as_its_file_holds() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let file = root.read("untitled.ne5p");
+    let mine = with_gain(&file, "96");
+    session.store.fault(a_refused_save());
+    session.save(id, &mine);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(root.read("untitled.ne5p"), file, "the file is untouched");
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(*entity.saved.bytes(), file, "saved as the file holds");
+    assert!(session.unsaved(id), "mine is unsaved");
+
+    session.edit(id, "12");
+    session.put(id, &mine);
+    assert!(
+        session.unsaved(id),
+        "the bytes the save was refused are unsaved"
+    );
+    session.put(id, &file);
+    assert!(!session.unsaved(id), "the file's bytes put back are saved");
+
+    session.put(id, &mine);
+    session.revert(id);
+    assert_eq!(session.bytes(id), file, "a revert gives the file's bytes");
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn a_save_waiting_behind_a_refused_one_is_written() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let refused = with_gain(&root.read("untitled.ne5p"), "96");
+    let later = with_gain(&refused, "12");
+    session.store.fault(a_refused_save());
+    session.save(id, &refused);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.save(id, &later);
+    session.written();
+    assert_eq!(
+        session.said("was not saved"),
+        1,
+        "the first save was refused"
+    );
+    assert_eq!(root.read("untitled.ne5p"), later, "the second save landed");
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn a_refused_save_after_one_that_landed_leaves_what_that_one_wrote() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let landed = with_gain(&root.read("untitled.ne5p"), "96");
+    let refused = with_gain(&landed, "12");
+    session.store.fault(Fault::Next(Box::new(a_refused_save())));
+    session.save(id, &landed);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.save(id, &refused);
+    session.written();
+    assert_eq!(
+        session.said("was not saved"),
+        1,
+        "the second save was refused"
+    );
+    assert_eq!(root.read("untitled.ne5p"), landed, "the first save landed");
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(
+        *entity.saved.bytes(),
+        landed,
+        "saved as the first save wrote"
+    );
+    assert!(session.unsaved(id));
+    session.revert(id);
+    assert_eq!(session.bytes(id), landed);
+}
+
+#[test]
+fn saves_answered_keep_nothing_of_what_their_files_held() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let saved = with_gain(&root.read("untitled.ne5p"), "96");
+    session.save(id, &saved);
+    session.written();
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0, "one landed");
+    session.store.fault(a_refused_save());
+    session.save(id, &with_gain(&saved, "12"));
+    session.written();
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0, "one refused");
+}
+
+#[test]
+fn saves_where_nothing_may_be_written_keep_nothing_of_what_their_files_held() {
+    let (root, _) = newer_drawbar_wrote();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(session.store.read_only().is_some());
+    let grand = session.named("Grand.ne5p");
+    for gain in ["12", "34"] {
+        session.edit(grand, gain);
+        session.bench.workspace.mark_saved(grand);
+        session.autosave();
+    }
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+}
+
 /// `count` programs in three folders of `root`.
 fn programs(root: &Temp, count: usize) {
     let program = Fresh::Program.bytes().unwrap();

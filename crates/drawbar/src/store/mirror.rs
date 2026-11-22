@@ -1511,9 +1511,24 @@ impl Store {
         for kind in event.faults() {
             crate::telemetry::fault("library", kind);
         }
-        match self.hold(event) {
+        let released = match self.hold(event) {
             Some(event) => self.fold(event, workspace, browser, queue, log),
             None => false,
+        };
+        self.unwritten(workspace);
+        released
+    }
+
+    /// Let the workspace forget what its files held before each save asked for, where
+    /// none will be written: the library may not be written, or did not open.
+    fn unwritten(&self, workspace: &mut Workspace) {
+        if matches!(self.phase, Phase::Opening | Phase::Open) {
+            return;
+        }
+        for (ask, _) in &self.asks {
+            if let FileAsk::Save(id) = ask {
+                workspace.skip_save(*id);
+            }
         }
     }
 
@@ -3542,6 +3557,7 @@ impl Store {
                 record.missing = false;
                 record.holds = Holds::Whole;
                 browser.folders.missing.remove(&id);
+                workspace.save_landed(id);
                 self.saved_draft(id, workspace);
                 return;
             }
@@ -3562,8 +3578,11 @@ impl Store {
             // it may.
             Err(Failure::Unheard) => None,
         };
-        workspace.unsave(id);
-        if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
+        // A newer baseline waiting is written still, since the file holds neither.
+        let waits = workspace.unsave(id);
+        if let (Some(record), Some(entity), false) =
+            (self.records.get_mut(&id), workspace.get(id), waits)
+        {
             record.saved = entity.saved.stamp();
         }
         let Some(why) = why else {
@@ -4016,6 +4035,7 @@ impl Store {
         }
         let take = self.passes;
         self.asks.extend(asks.into_iter().map(|ask| (ask, take)));
+        self.unwritten(workspace);
     }
 
     /// Send the changes gathered from one gesture as one change, with a tag waiting
@@ -4079,8 +4099,9 @@ impl Store {
     /// Write an asset's file with what it was saved as: a new file where it has none, and
     /// nothing where the file holds it already. `false` while a write over the file waits
     /// for the one before it.
-    fn save(&mut self, id: u64, workspace: &Workspace, held: &[(LibPath, LibPath)]) -> bool {
+    fn save(&mut self, id: u64, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) -> bool {
         let Some(entity) = workspace.get(id).filter(|entity| entity.kept) else {
+            workspace.skip_save(id);
             return true;
         };
         // An arriving asset's file is its copy's, and one with no file yet is asked for
@@ -4090,6 +4111,7 @@ impl Store {
             .clone()
             .filter(|_| workspace.arriving(id).is_none())
         else {
+            workspace.skip_save(id);
             return true;
         };
         let stamp = entity.saved.stamp();
@@ -4110,6 +4132,7 @@ impl Store {
                 expect: toshokan::Expect::Absent,
                 came: Came::of(&entity.origin),
             });
+            workspace.send_save(id, false);
             return true;
         };
         if record.saving {
@@ -4122,9 +4145,11 @@ impl Store {
         // A baseline resting in its file is what the file holds, and needs no write.
         if entity.saved.file().is_some() {
             record.saved = stamp;
+            workspace.skip_save(id);
             return true;
         }
         if record.saved == stamp && !record.missing {
+            workspace.skip_save(id);
             return true;
         }
         let expect = match (record.missing, record.fingerprint) {
@@ -4134,6 +4159,7 @@ impl Store {
         record.saved = stamp;
         record.saving = true;
         record.path = Some(at.clone());
+        let over = !matches!(expect, toshokan::Expect::Absent);
         self.part(Intent::Save {
             id,
             path: at,
@@ -4141,6 +4167,7 @@ impl Store {
             expect,
             came: None,
         });
+        workspace.send_save(id, over);
         self.delete_with(id, workspace);
         true
     }
