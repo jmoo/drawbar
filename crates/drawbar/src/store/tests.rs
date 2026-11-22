@@ -1622,6 +1622,34 @@ fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
 }
 
 #[test]
+fn undo_waits_while_a_change_that_failed_partway_waits_to_be_finished() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.make_tag("Sunday");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(
+        session.undo_label(),
+        None,
+        "the library would undo the save"
+    );
+
+    session.make_tag("Monday");
+    session.undo();
+    assert_eq!(session.tag_names(), ["Sunday"]);
+    assert_eq!(
+        session.undo_label().as_deref(),
+        Some("Undo Save “untitled.ne5p”")
+    );
+}
+
+#[test]
 fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
     let root = Temp::new();
     let mut session = Session::open(&root);

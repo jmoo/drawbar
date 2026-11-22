@@ -230,6 +230,9 @@ pub struct Store {
     /// Assets whose file this session's undo or redo of a save left as the file of this
     /// identity, each read again until that read answers.
     expected: BTreeMap<u64, toshokan::Identity>,
+    /// A change of this session's own failed partway and waits for the next change to
+    /// finish it. An undo or a redo would reverse that change, not the step it names.
+    waits: bool,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
@@ -385,6 +388,7 @@ impl Store {
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
             expected: BTreeMap::new(),
+            waits: false,
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
@@ -1613,6 +1617,7 @@ impl Store {
             } => {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
+                self.waits = waiting != Waiting::Nothing;
                 let sent = self.answering.pop_front();
                 if landed {
                     self.expected.extend(sent.iter().flat_map(Sent::leaves));
@@ -1905,10 +1910,10 @@ impl Store {
         Ok(())
     }
 
-    /// Whether Undo and Redo may ask the library now: it is open, and every change to it
-    /// was sent and answered.
+    /// Whether Undo and Redo may ask the library now: it is open, every change to it was
+    /// sent and answered, and none waits to be finished.
     pub fn undoes(&self) -> bool {
-        self.opened() && self.committing == 0 && self.asks.is_empty()
+        self.opened() && self.committing == 0 && self.asks.is_empty() && !self.waits
     }
 
     /// Whether a change, an undo or a redo was sent and not answered.
