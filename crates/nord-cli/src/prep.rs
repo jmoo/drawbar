@@ -234,8 +234,8 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
 
 /// Preps a folder of one-note files, a sample set, as one library: each file's loudest
 /// hit, its floor read on its quietest stretch, named and layered across the set as
-/// [`layers::place`] says. Each file placed is written into `args.out` with its
-/// regions, at its path under `dir`.
+/// [`nord_format::take::layers::place`] says. Each file placed is written into
+/// `args.out` with its regions, at its path under `dir`.
 fn prep_set(ui: &Ui, dir: &Path, args: &PrepArgs, layers: Option<usize>) -> Result<(), String> {
     for (given, flag) in [
         (!args.notes.is_empty(), "--notes"),
