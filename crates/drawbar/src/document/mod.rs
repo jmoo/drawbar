@@ -628,10 +628,7 @@ impl Document {
             }
         }
         if act.revert {
-            workspace.revert(id, log);
-            self.piano.forget(id);
-            // Reopened on the next frame, because every box holds a reverted edit.
-            self.open = None;
+            self.revert(id, workspace, log);
             return wants;
         }
         // The take's cards in the dock ran earlier this frame.
@@ -798,6 +795,26 @@ impl Document {
         self.holds(workspace, id, &mut working.clone())
     }
 
+    /// Drop every edit of `id`, in its editors and its bytes, as the user's revert, noted
+    /// as the document held it.
+    fn revert(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
+        if let Some(before) = self.working(workspace, id) {
+            workspace.note(id, before, true);
+        }
+        self.let_go(id, workspace);
+        workspace.revert(id, log);
+        self.note_pending(id, workspace);
+    }
+
+    /// Let go of every edit of `id` its editors hold, which the workspace drops too.
+    fn let_go(&mut self, id: u64, workspace: &Workspace) {
+        self.samples.forget(id);
+        if let Some(entity) = workspace.get(id) {
+            self.piano.adopt(entity, None);
+        }
+        self.replaced(id);
+    }
+
     /// Make the editors that mirror an edit the workspace holds take up the one it holds
     /// of `id` now, or none.
     fn take_up(&mut self, id: u64, workspace: &mut Workspace) {
@@ -865,18 +882,19 @@ impl Document {
         }
         let mut out = Vec::new();
         for act in acts {
-            // Whatever the gesture's source, the saved bytes are about to be restored or
-            // removed, and an edit over them would edit nothing.
-            if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
-                self.piano.forget(*id);
-                self.parked.remove(id);
-                self.samples.forget(*id);
-            }
-            // Reopened on the next frame, because every box holds a reverted edit.
-            if let crate::browser::Act::Revert(id) = &act {
-                if self.open.as_ref().is_some_and(|open| open.id == *id) {
-                    self.open = None;
+            match act {
+                crate::browser::Act::Revert(id) => {
+                    self.revert(id, workspace, log);
+                    continue;
                 }
+                // The saved bytes are about to be removed, and an edit over them would
+                // edit nothing.
+                crate::browser::Act::Remove(id) => {
+                    self.piano.forget(id);
+                    self.parked.remove(&id);
+                    self.samples.forget(id);
+                }
+                _ => {}
             }
             let carried = act.carries(queue);
             if let Some(act) = self.save_first(act, &carried, workspace, log) {
@@ -885,6 +903,13 @@ impl Document {
         }
         out.extend(self.saved(workspace, log));
         out.extend(self.released(ctx, workspace, log));
+        // Keep both takes the edit to a copy and the asset back to its file, so no editor
+        // goes on holding it.
+        for act in &out {
+            if let crate::browser::Act::KeepBoth(id) = act {
+                self.let_go(*id, workspace);
+            }
+        }
         out
     }
 
@@ -4696,23 +4721,8 @@ mod tests {
             &open.queue,
             &mut open.log,
         );
-        assert!(
-            matches!(acts.as_slice(), [crate::browser::Act::Revert(id)] if *id == open.id),
-            "the revert itself still runs",
-        );
+        assert!(acts.is_empty(), "the document reverts it");
         assert!(!open.document.pends(open.id), "the revert drops the plan");
-
-        crate::browser::apply(
-            &mut crate::browser::Browser::default(),
-            &mut crate::shell::Shell::default(),
-            acts,
-            &mut open.workspace,
-            &mut open.device,
-            &mut crate::tabs::Tabs::default(),
-            &mut open.queue,
-            &mut open.builds,
-            &mut open.log,
-        );
         assert!(
             !open.entity().is_unsaved(),
             "the asset is back to its saved bytes",
@@ -5140,5 +5150,146 @@ mod tests {
                 held.push(working);
             }
         }
+    }
+
+    /// Each revert drops the edit from the editor and the bytes alike, and notes, once,
+    /// what the document held before it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_revert_from_the_document_or_the_menu_notes_what_the_document_held() {
+        for from_menu in [false, true] {
+            let dir = testing::Temp::new();
+            let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+            let edited = open.working();
+            open.workspace.take_notes();
+            let ctx = open.ctx.clone();
+            let id = open.id;
+            let Open {
+                document,
+                workspace,
+                queue,
+                log,
+                ..
+            } = &mut open;
+            match from_menu {
+                true => {
+                    let acts = vec![crate::browser::Act::Revert(id)];
+                    assert_eq!(document.settle(&ctx, acts, workspace, queue, log), []);
+                }
+                false => document.revert(id, workspace, log),
+            }
+            let noted = workspace.take_notes();
+            assert!(
+                matches!(noted.as_slice(), [note] if note.before == edited && note.revert),
+                "{noted:?}"
+            );
+            assert!(!open.document.pends(id) && !open.entity().is_unsaved());
+            open.frame(Vec::new());
+            assert_eq!(
+                open.document.instrument_name(id, &open.workspace),
+                "Marimba"
+            );
+            assert_eq!(open.state().name, "Marimba");
+        }
+    }
+
+    #[test]
+    fn a_revert_of_a_piano_held_whole_notes_its_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        renamed_piano(&mut open);
+        let planned = open.working();
+        open.workspace.take_notes();
+        let Open {
+            document,
+            workspace,
+            log,
+            id,
+            ..
+        } = &mut open;
+        document.revert(*id, workspace, log);
+        let noted = open.workspace.take_notes();
+        assert!(
+            matches!(noted.as_slice(), [note] if note.before == planned && note.revert),
+            "{noted:?}"
+        );
+        open.frame(Vec::new());
+        assert!(!renames(&open) && !open.document.pends(open.id));
+        assert!(!open.entity().is_unsaved());
+    }
+
+    /// Keep both moves the edit to a copy: the asset takes its file as it is, which no
+    /// undo takes back, and no editor goes on holding the edit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keep_both_leaves_the_asset_at_its_file_and_notes_nothing() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        open.workspace.take_notes();
+        open.act(vec![crate::browser::Act::KeepBoth(open.id)]);
+        assert_eq!(open.workspace.take_notes(), []);
+        assert!(open.workspace.edit(open.id).is_none());
+        assert!(!open.document.pends(open.id) && !open.entity().is_unsaved());
+        assert_eq!(
+            open.workspace.arrivals().count(),
+            1,
+            "the copy is on its way"
+        );
+        open.frame(Vec::new());
+        assert_eq!(open.state().name, "Marimba");
+    }
+
+    /// A copy of a piano library held whole waits for its plan to be laid out, so the
+    /// copy holds the edit the asset lets go of.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keep_both_of_a_piano_held_whole_copies_its_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        renamed_piano(&mut open);
+        let ctx = open.ctx.clone();
+        let mut acts = vec![crate::browser::Act::KeepBoth(open.id)];
+        let released = loop {
+            let Open {
+                document,
+                workspace,
+                queue,
+                log,
+                ..
+            } = &mut open;
+            let out = document.settle(&ctx, std::mem::take(&mut acts), workspace, queue, log);
+            if !out.is_empty() {
+                break out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let Open {
+            workspace,
+            device,
+            queue,
+            builds,
+            log,
+            ..
+        } = &mut open;
+        crate::browser::apply(
+            &mut crate::browser::Browser::default(),
+            &mut crate::shell::Shell::default(),
+            released,
+            workspace,
+            device,
+            &mut crate::tabs::Tabs::default(),
+            queue,
+            builds,
+            log,
+        );
+        let copy = open
+            .workspace
+            .listed()
+            .find(|entity| entity.id != open.id)
+            .expect("the copy");
+        let named = piano::snapshot(copy.entity.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(named.name.contains('X'), "{}", named.name);
+        open.frame(Vec::new());
+        assert!(!renames(&open) && !open.entity().is_unsaved());
     }
 }

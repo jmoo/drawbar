@@ -1308,7 +1308,7 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         let copy = workspace.ingest(name.clone(), origin, mine, log);
         workspace.place(copy, dir.join(&name));
     }
-    workspace.drop_edits(id, Cause::User);
+    workspace.drop_edits(id, Cause::Follow);
     log.say(format!("Your edits are kept as “{name}”."));
 }
 
