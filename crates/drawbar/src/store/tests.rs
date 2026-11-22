@@ -9,7 +9,7 @@ use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
 use crate::testing::{Bench, Temp};
-use crate::timeline::{Asked, Documents, Timeline};
+use crate::timeline::{Asked, Documents, Timeline, Went};
 use crate::workspace::{Cause, Fresh, Origin, VerifyState, Working};
 use nord_usb::{Location, ObjectClass};
 
@@ -4418,6 +4418,90 @@ fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
     for outside in ["outside drawbar", "changed on disk", "appeared"] {
         assert_eq!(session.said(outside), 0, "{outside}");
     }
+}
+
+impl Session {
+    /// The documents the step Undo takes next saved from their bodies, and did nothing
+    /// else.
+    fn saved_by_next_undo(&mut self) -> Vec<crate::timeline::Saved> {
+        let Went::Library(taken) = self.timeline.undo(&mut Unrecorded) else {
+            panic!("the library's step is next");
+        };
+        let saved = taken.saved().to_vec();
+        self.timeline.put_back(Asked::Undo(taken));
+        saved
+    }
+}
+
+fn identity(path: &str, bytes: &[u8]) -> toshokan::Identity {
+    identity_of_bytes(&LibPath::parse(path).unwrap(), bytes).expect("a library file")
+}
+
+#[test]
+fn a_save_step_names_the_document_with_the_file_it_replaced_and_the_file_it_left() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a new file is no save");
+    let made = root.read("untitled.ne5p");
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    let saved = crate::timeline::Saved {
+        id,
+        before: identity("untitled.ne5p", &made),
+        after: identity("untitled.ne5p", &edited),
+    };
+    assert_eq!(session.saved_by_next_undo(), [saved]);
+}
+
+#[test]
+fn a_save_of_several_files_names_each_and_one_with_another_change_names_none() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    for id in [a, b] {
+        session.edit(id, "96");
+        session.bench.workspace.mark_saved(id);
+    }
+    session.sync();
+    let saved = session.saved_by_next_undo();
+    let ids: Vec<u64> = saved.iter().map(|saved| saved.id).collect();
+    assert_eq!(ids, [a, b], "Save 2 files");
+
+    session.edit(a, "12");
+    session.bench.workspace.mark_saved(a);
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(b, renamed);
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a save and a rename");
+}
+
+#[test]
+fn a_save_over_another_sound_or_through_a_resting_file_names_none() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Kept.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Moved.ne5p"), with_gain(&program, "96")).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "an overwrite");
+
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    session.rename_resting(id, "Vibes");
+    session.sync();
+    assert_eq!(session.saved_by_next_undo(), [], "a rewrite");
 }
 
 impl Session {

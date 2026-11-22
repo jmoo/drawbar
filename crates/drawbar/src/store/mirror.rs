@@ -126,6 +126,9 @@ struct Batch {
     /// The take of the asks they came in.
     take: u64,
     parts: Vec<Intent>,
+    /// The parts that save a document from its body over a file that existed, each with
+    /// the identity of that file.
+    saves: Vec<(u64, toshokan::Identity)>,
 }
 
 /// The take-in of the list an older drawbar kept, sent and not answered: the assets it
@@ -1605,7 +1608,7 @@ impl Store {
             } => {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
-                let asked = self.answering.pop_front().map(|sent| sent.step);
+                let asked = self.answering.pop_front().map(Sent::asked);
                 let answer = timeline::Answer {
                     made,
                     undoable,
@@ -1837,27 +1840,32 @@ impl Store {
         }
     }
 
-    /// Send a change to the files.
-    fn write(&mut self, intent: Intent) {
+    /// Send a change to the files, which does nothing but save each of `saving` where it
+    /// names any.
+    fn write(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
         self.sent += 1;
-        self.commit(intent);
+        self.commit(intent, saving);
     }
 
     /// Send a change to the facts.
-    fn commit(&mut self, intent: Intent) {
-        let asked = match intent.lasting() {
+    fn commit(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
+        let step = match intent.lasting() {
             true => timeline::Asked::Lasting,
             false => change(intent.describe()),
         };
-        self.awaits(asked, intent.doing());
+        let doing = intent.doing();
+        self.awaits(Sent {
+            step,
+            doing,
+            saving,
+        });
         self.send(Cmd::Intent(intent));
     }
 
-    /// Wait for the answer to what the library was `asked`, which says `doing` until it
-    /// comes.
-    fn awaits(&mut self, asked: timeline::Asked, doing: String) {
+    /// Wait for the answer to `sent`.
+    fn awaits(&mut self, sent: Sent) {
         self.committing += 1;
-        self.answering.push_back(Sent { step: asked, doing });
+        self.answering.push_back(sent);
     }
 
     /// Ask the library to undo the step `taken`, which is its last, unless Undo may not
@@ -1867,7 +1875,7 @@ impl Store {
             return Err(taken);
         }
         let doing = format!("Undoing {}…", taken.label());
-        self.awaits(timeline::Asked::Undo(taken), doing);
+        self.awaits(Sent::of(timeline::Asked::Undo(taken), doing));
         self.send(Cmd::Undo);
         Ok(())
     }
@@ -1879,7 +1887,7 @@ impl Store {
             return Err(taken);
         }
         let doing = format!("Redoing {}…", taken.label());
-        self.awaits(timeline::Asked::Redo(taken), doing);
+        self.awaits(Sent::of(timeline::Asked::Redo(taken), doing));
         self.send(Cmd::Redo);
         Ok(())
     }
@@ -2214,7 +2222,7 @@ impl Store {
             return;
         }
         let intent = Intent::Take { run, changes };
-        self.awaits(change(intent.describe()), intent.doing());
+        self.awaits(Sent::of(change(intent.describe()), intent.doing()));
         self.send(Cmd::Intent(intent));
     }
 
@@ -2224,7 +2232,7 @@ impl Store {
             return;
         }
         let intent = Intent::Dismiss { run };
-        self.awaits(change(intent.describe()), intent.doing());
+        self.awaits(Sent::of(change(intent.describe()), intent.doing()));
         self.send(Cmd::Intent(intent));
     }
 
@@ -2287,7 +2295,7 @@ impl Store {
         let verb = settling(how);
         let label = format!("{} “{}”", verb.label, orphan.label);
         let doing = format!("{} “{}”…", verb.doing, orphan.label);
-        self.awaits(change(label), doing);
+        self.awaits(Sent::of(change(label), doing));
         self.send(Cmd::Settle { orphan, how });
     }
 
@@ -2728,7 +2736,7 @@ impl Store {
                     let asked = self.asked.remove(0);
                     self.tell_untagged(&asked, workspace, log);
                     if let Some(intent) = intent {
-                        self.commit(intent);
+                        self.commit(intent, Vec::new());
                     }
                 }
             }
@@ -3548,6 +3556,10 @@ impl Store {
         log: &mut Log,
     ) {
         self.deleted_with(id, result.is_ok());
+        let identity = result.as_ref().ok().and_then(|print| print.identity);
+        if let (Some(after), Some(sent)) = (identity, self.answering.front_mut()) {
+            sent.saved(id, after);
+        }
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -4050,11 +4062,15 @@ impl Store {
     /// for none but the new files it saves.
     fn send_batch(&mut self) {
         let mut parts = std::mem::take(&mut self.batch.parts);
+        let mut saving = std::mem::take(&mut self.batch.saves);
         self.absorb_tag(&mut parts);
+        if saving.len() != parts.len() {
+            saving.clear();
+        }
         match parts.len() {
             0 => {}
-            1 => self.write(parts.remove(0)),
-            _ => self.write(Intent::Batch(parts)),
+            1 => self.write(parts.remove(0), saving),
+            _ => self.write(Intent::Batch(parts), saving),
         }
     }
 
@@ -4168,6 +4184,9 @@ impl Store {
         record.saving = true;
         record.path = Some(at.clone());
         let over = !matches!(expect, toshokan::Expect::Absent);
+        if let (toshokan::Expect::Holds(before), None) = (expect, workspace.overwritten_from(id)) {
+            self.batch.saves.push((id, before));
+        }
         self.part(Intent::Save {
             id,
             path: at,
@@ -4361,6 +4380,40 @@ fn settling(how: toshokan::log::Settlement) -> super::Verb {
 struct Sent {
     step: timeline::Asked,
     doing: String,
+    /// The documents a change that does nothing else saves from their bodies, each with
+    /// the identity of the file it replaces.
+    saving: Vec<(u64, toshokan::Identity)>,
+}
+
+impl Sent {
+    fn of(step: timeline::Asked, doing: String) -> Sent {
+        Sent {
+            step,
+            doing,
+            saving: Vec::new(),
+        }
+    }
+
+    /// Note that the change saved the document `id` as the file of identity `after`.
+    fn saved(&mut self, id: u64, after: toshokan::Identity) {
+        let before = self.saving.iter().find(|(saving, _)| *saving == id);
+        if let (Some(&(_, before)), timeline::Asked::Change { saved, .. }) =
+            (before, &mut self.step)
+        {
+            saved.push(timeline::Saved { id, before, after });
+        }
+    }
+
+    /// What the library was asked. A change names the documents it saved only where it
+    /// saved every one it was sent to.
+    fn asked(self) -> timeline::Asked {
+        match self.step {
+            timeline::Asked::Change { label, saved } if saved.len() != self.saving.len() => {
+                change(label)
+            }
+            step => step,
+        }
+    }
 }
 
 /// What the library is asked by a change the Edit menu calls `label`.
