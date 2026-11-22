@@ -218,6 +218,9 @@ pub struct Store {
     /// Assets read again after an undo or redo changed their files, which take what the
     /// files hold now without a word.
     quietly: BTreeSet<u64>,
+    /// The length and time this session's undo or redo left each such file at. An unsaved
+    /// edit stays over a file still at them, unasked.
+    stepped: BTreeMap<u64, Stat>,
     /// The paths a change of drawbar's own names that its next change finishes.
     finishing: BTreeSet<LibPath>,
     /// Assets whose file waits for such a change, which take what it leaves.
@@ -376,6 +379,7 @@ impl Store {
             deleting_with: BTreeMap::new(),
             quiet: false,
             quietly: BTreeSet::new(),
+            stepped: BTreeMap::new(),
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
             history: History::default(),
@@ -2498,6 +2502,7 @@ impl Store {
                 touched.insert(id);
                 if self.quiet {
                     self.quietly.insert(id);
+                    self.stepped.insert(id, stat);
                 }
                 self.recheck(id, path.clone(), stat, workspace);
             }
@@ -3424,6 +3429,7 @@ impl Store {
         log: &mut Log,
     ) {
         let quietly = self.quietly.remove(&id);
+        let stepped = self.stepped.remove(&id) == Some(found.stat);
         if !found.read() {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
@@ -3452,7 +3458,8 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now, and one that file already holds leaves nothing to choose between.
-        match !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        let edited = unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved);
+        match !same && !stepped && edited {
             true => conflict(id, workspace, browser, log),
             false if quietly || same => {}
             false => log.say(format!(

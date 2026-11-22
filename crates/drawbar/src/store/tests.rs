@@ -6087,6 +6087,59 @@ fn a_folder_rename_undone_leaves_no_folder_behind() {
     assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
 }
 
+/// An undo of a save under an unsaved edit puts the file back as it was and keeps the
+/// edit over it, asking nothing.
+#[test]
+fn an_undo_of_a_save_keeps_the_unsaved_edit_over_it_without_asking() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.bench.act(vec![crate::browser::Act::SaveDoc(grand)]);
+    session.sync();
+    let edited = session.edit(grand, "34");
+    session.undo();
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), program, "the save is undone");
+    assert!(session.bytes(grand) == edited, "the edit stays");
+    assert!(session.bench.workspace.get(grand).unwrap().is_unsaved());
+    assert_eq!(session.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(session.said("changed on disk"), 0);
+}
+
+/// A file changed outside after an undo of its save put it back, and before drawbar read
+/// it again, is asked about under an unsaved edit.
+#[test]
+fn an_outside_change_right_after_an_undo_of_a_save_is_asked_about_under_an_unsaved_edit() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.bench.act(vec![crate::browser::Act::SaveDoc(grand)]);
+    session.sync();
+    let edited = session.edit(grand, "34");
+    session.store.undo();
+    while fs::read(root.at("Grand.ne5p")).ok().as_ref() != Some(&program) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // The undo's answer, which says what it left the file at, is on its way by now.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    fs::write(root.at("Grand.ne5p"), with_gain(&program, "56")).unwrap();
+    touch(&root, "Grand.ne5p");
+    session.decided();
+    session.sync();
+    assert!(session.bytes(grand) == edited, "the edit stays");
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "{}",
+        session.bench.log.transcript()
+    );
+}
+
 /// An unsaved edit of a file in a folder renamed, and the rename undone, follows the
 /// file: the asset keeps its id, and the edit comes back at the file's name after a
 /// quit.
