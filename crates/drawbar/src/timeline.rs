@@ -916,6 +916,30 @@ mod tests {
     }
 
     #[test]
+    fn an_undo_a_later_write_finished_is_redone_by_the_entry_that_finished_it() {
+        let mut session = Session::default();
+        session.log(change("Save “a”"));
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the save is undone by the library");
+        };
+        let partway = Answer {
+            waiting: Waiting::This,
+            ..refused()
+        };
+        session.timeline.answered(Some(Asked::Undo(taken)), partway);
+        let finishing = Answer {
+            finished: Some(entry(8)),
+            ..refused()
+        };
+        session.timeline.answered(None, finishing);
+
+        assert_eq!(session.timeline.trim(&[entry(1)]), None);
+        assert_eq!(session.redo_reads(), Some("Save “a”"));
+        session.timeline.trim(&[entry(8)]);
+        assert_eq!(session.redo_reads(), None);
+    }
+
+    #[test]
     fn a_change_that_failed_partway_is_a_step_only_once_it_is_finished() {
         let mut session = Session::default();
         let partway = Answer {

@@ -18,7 +18,8 @@ use crate::platform::{written, Platform};
 use crate::shell::Dock;
 use crate::strings::folder;
 use crate::tabs::Spot;
-use crate::workspace::Fresh;
+use crate::timeline::{Asked, Documents, Went};
+use crate::workspace::{Fresh, Working};
 use crate::zoom::Step;
 
 /// Everything a menu item can do.
@@ -113,6 +114,19 @@ impl Offer {
             checked: None,
             hint: hint(command),
         }
+    }
+}
+
+/// The documents of a timeline that records no edit step.
+struct Unrecorded;
+
+impl Documents for Unrecorded {
+    fn holds(&self, _: u64, _: &mut Working) -> bool {
+        false
+    }
+
+    fn hold(&mut self, _: u64, _: &Working) -> bool {
+        false
     }
 }
 
@@ -586,13 +600,13 @@ impl DrawbarApp {
                 }
             }
             Command::Undo | Command::Redo => {
-                let store = self.store.as_ref();
-                let label = match command {
-                    Command::Undo => store.and_then(crate::store::Store::undo_label),
-                    _ => store.and_then(crate::store::Store::redo_label),
+                let undoes = self.store.as_ref().is_some_and(crate::store::Store::undoes);
+                let next = match command {
+                    Command::Undo => self.timeline.next_undo(),
+                    _ => self.timeline.next_redo(),
                 };
-                match label {
-                    Some(label) => relabeled(label),
+                match next.filter(|_| undoes) {
+                    Some(next) => relabeled(format!("{} {}", label(command), next.label())),
                     None => Offer {
                         enabled: false,
                         ..plain
@@ -657,6 +671,27 @@ impl DrawbarApp {
         })
     }
 
+    /// Undo the step the timeline names next, or redo it `again`: a library step is asked
+    /// of the library.
+    fn undo(&mut self, again: bool) {
+        let Some(store) = self.store.as_mut().filter(|store| store.undoes()) else {
+            return;
+        };
+        let mut documents = Unrecorded;
+        let went = match again {
+            false => self.timeline.undo(&mut documents),
+            true => self.timeline.redo(&mut documents),
+        };
+        let asked = match went {
+            Went::Library(taken) if again => store.redo(taken).err().map(Asked::Redo),
+            Went::Library(taken) => store.undo(taken).err().map(Asked::Undo),
+            Went::Edit(_) | Went::Nowhere => None,
+        };
+        if let Some(asked) = asked {
+            self.timeline.put_back(asked);
+        }
+    }
+
     /// Do what `command` names, now.
     ///
     /// ⚠️ Listening to MIDI starts here, inside the click: a browser tab may ask for MIDI
@@ -671,8 +706,7 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Import => acts.push(Act::OpenFiles),
-            Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
-            Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
+            Command::Undo | Command::Redo => self.undo(command == Command::Redo),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }

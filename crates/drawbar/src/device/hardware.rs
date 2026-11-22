@@ -25,6 +25,7 @@ use crate::queue::Diff;
 use crate::store::Store;
 use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
+use crate::timeline::Timeline;
 
 /// The prefix of every name this suite writes to a slot, and the only names it deletes.
 const MARK: &str = "drawbar-hw-";
@@ -411,6 +412,7 @@ impl Sending {
 struct Rig {
     library: Temp,
     store: Store,
+    timeline: Timeline,
     bench: Bench,
 }
 
@@ -426,6 +428,7 @@ impl Rig {
         let mut rig = Rig {
             library,
             store,
+            timeline: Timeline::default(),
             bench,
         };
         let names: Vec<String> = files.iter().map(|(name, _)| name.to_string()).collect();
@@ -465,7 +468,9 @@ impl Rig {
         for id in listed {
             workspace.hurry(id);
         }
-        let released = self.store.poll(workspace, browser, queue, log);
+        let released = self
+            .store
+            .poll(workspace, browser, queue, &mut self.timeline, log);
         device.poll(log, workspace, tabs, queue);
         if !device.take_kept().is_empty() {
             self.store.rescue_due();
@@ -667,6 +672,12 @@ impl Rig {
         self.bench.log.iter().any(|entry| entry.text.contains(text))
     }
 
+    /// What the Edit menu's Undo takes back now.
+    fn undo_label(&self) -> Option<String> {
+        let next = self.timeline.next_undo().filter(|_| self.store.undoes());
+        next.map(|next| next.label().to_string())
+    }
+
     /// The same library opened again, as the next start of the app opens it, with the
     /// instrument let go.
     fn reopen(mut self) -> Rig {
@@ -678,6 +689,7 @@ impl Rig {
         let mut rig = Rig {
             library,
             store,
+            timeline: Timeline::default(),
             bench,
         };
         rig.until("the library opens", ATTACH_LIMIT, |rig| {
@@ -1471,7 +1483,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
     let name = rescues[0].0.clone();
     let rescue = kept_in.join(&name);
     fs::set_permissions(&rescue, mode(0o644)).expect("readable again");
-    let undoable = rig.store.undo_label();
+    let undoable = rig.undo_label();
     // As the app's next frame with the instrument idle does.
     rig.take_in_rescues();
     let landed = |rig: &Rig| {
@@ -1483,7 +1495,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
             && !rescue.exists()
     };
     rig.until("the rescue lands in the library", SEND_LIMIT, landed);
-    assert_eq!(rig.store.undo_label(), undoable, "Undo offers no rescue");
+    assert_eq!(rig.undo_label(), undoable, "Undo offers no rescue");
 
     let rig = rig.reopen();
     let kept = rig.asset(&name);
