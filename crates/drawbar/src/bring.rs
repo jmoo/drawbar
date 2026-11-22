@@ -200,14 +200,6 @@ impl Blocked {
             Blocked::Unsaved => " · save first",
         }
     }
-
-    /// What a hover on its direction says.
-    pub fn hint(self) -> &'static str {
-        match self {
-            Blocked::Library => "Copy it to this computer instead.",
-            Blocked::Unsaved => "Save your edits first.",
-        }
-    }
 }
 
 /// Every row, and each file's mark and words, as one calculation.
@@ -566,10 +558,9 @@ pub enum Opened {
 pub struct Sheet {
     pub opened: Opened,
     pub picked: Option<u64>,
-    /// The ways the user picked, for this showing only.
-    ways: BTreeMap<RowKey, Way>,
-    /// The rows the user left out of this Sync.
-    skipped: BTreeSet<RowKey>,
+    /// Where the user turned a row from its own way, for this showing only: to the way
+    /// held, or out of this Sync where it holds none.
+    picks: BTreeMap<RowKey, Option<Way>>,
     /// The plan Sync was pressed on, until it runs.
     accepted: Option<Vec<Step>>,
     /// How the picked row's file differs from its slot, once the slot is read.
@@ -596,8 +587,7 @@ impl Sheet {
         Sheet {
             opened,
             picked,
-            ways: BTreeMap::new(),
-            skipped: BTreeSet::new(),
+            picks: BTreeMap::new(),
             accepted: None,
             shown: None,
         }
@@ -627,25 +617,36 @@ impl Sheet {
     /// The way Sync takes `row`: the one the user picked, or else its own. A move goes
     /// only with every move it depends on: a swap or a rotation goes whole or not at all.
     pub fn way(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> Option<Way> {
-        if self.skipped.contains(&key(row)) {
-            return None;
-        }
         if matches!(row.change, Change::Moved { .. }) && !self.moving(rows).contains(&row.id) {
             return None;
         }
         let ways = row.ways(workspace);
-        let picked = self
-            .ways
-            .get(&key(row))
-            .filter(|way| ways.allowed.contains(way));
-        picked.copied().or(ways.taken)
+        match self.picks.get(&key(row)) {
+            Some(None) => None,
+            Some(Some(way)) if ways.allowed.contains(way) => Some(*way),
+            Some(Some(_)) | None => ways.taken,
+        }
+    }
+
+    /// Whether `row` waits for the user: it goes no way, and the user did not leave it
+    /// out.
+    pub fn waits(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> bool {
+        self.way(row, rows, workspace).is_none() && self.picks.get(&key(row)) != Some(&None)
+    }
+
+    /// Whether `row` can be turned to `way`: it may go that way, and every move it goes
+    /// only with is listed.
+    pub fn takes(&self, row: &Row, way: Way, rows: &[Row], workspace: &Workspace) -> bool {
+        row.ways(workspace).allowed.contains(&way) && Sheet::with(row, rows).is_some()
     }
 
     /// The files whose moves go: the largest set of moves not left out in which every
     /// move onto another file's slot has that file's move too, so a swap or a rotation
     /// goes whole or not at all.
     fn moving(&self, rows: &[Row]) -> BTreeSet<u64> {
-        let moves = rows.iter().filter(|row| !self.skipped.contains(&key(row)));
+        let moves = rows
+            .iter()
+            .filter(|row| self.picks.get(&key(row)) != Some(&None));
         let moves: Vec<(u64, Option<u64>)> = moves
             .filter_map(|row| match row.change {
                 Change::Moved { with, .. } => Some((row.id, with)),
@@ -664,21 +665,44 @@ impl Sheet {
         }
     }
 
-    /// Turn `row` to its next way.
-    pub fn flip(&mut self, row: &Row, rows: &[Row], workspace: &Workspace) {
-        let ways = row.ways(workspace).allowed;
-        let next = match self.way(row, rows, workspace) {
-            Some(way) => ways.iter().find(|it| **it != way).copied(),
-            None => ways.first().copied(),
+    /// `row` and each move it goes only with, in turn. `None` where one of them is not
+    /// listed, so the row cannot go.
+    fn with<'r>(row: &'r Row, rows: &'r [Row]) -> Option<Vec<&'r Row>> {
+        let mut found = vec![row];
+        while let Some(Change::Moved {
+            with: Some(with), ..
+        }) = found.last().map(|row| &row.change)
+        {
+            if found.iter().any(|it| it.id == *with) {
+                break;
+            }
+            let moved = |it: &&Row| it.id == *with && matches!(it.change, Change::Moved { .. });
+            found.push(rows.iter().find(moved)?);
+        }
+        Some(found)
+    }
+
+    /// Turn `row` to `way`, with every move it goes only with, or out of this Sync where
+    /// it went that way already.
+    pub fn turn(&mut self, row: &Row, way: Way, rows: &[Row], workspace: &Workspace) {
+        let Some(with) = Sheet::with(row, rows).filter(|_| self.takes(row, way, rows, workspace))
+        else {
+            return;
         };
-        self.skipped.remove(&key(row));
-        if let Some(next) = next {
-            self.ways.insert(key(row), next);
+        if self.way(row, rows, workspace) == Some(way) {
+            return self.pick(row, None, workspace);
+        }
+        for row in with {
+            self.pick(row, Some(way), workspace);
         }
     }
 
-    pub fn skip(&mut self, row: &Row) {
-        self.skipped.insert(key(row));
+    /// Keep `pick` for `row` where it is not the row's own way.
+    fn pick(&mut self, row: &Row, pick: Option<Way>, workspace: &Workspace) {
+        match pick == row.ways(workspace).taken {
+            true => self.picks.remove(&key(row)),
+            false => self.picks.insert(key(row), pick),
+        };
     }
 
     /// Sync, pressed on `plan`: [`apply`] runs it.
@@ -690,10 +714,6 @@ impl Sheet {
     /// the sheet takes no more choices.
     pub fn pressed(&self) -> Option<usize> {
         self.accepted.as_ref().map(Vec::len)
-    }
-
-    pub fn left_out(&self, row: &Row) -> bool {
-        self.skipped.contains(&key(row))
     }
 }
 
@@ -1313,18 +1333,25 @@ mod tests {
         bench.land();
     }
 
-    /// Turn `id`'s row in the open sheet until it goes `way`.
+    /// Turn `id`'s row in the open sheet to `way`, as a click on that arrow does.
     fn pick(bench: &mut Bench, id: u64, way: Way) {
         let all = rows(&bench.device.state, &bench.workspace, &bench.queue);
         let row = row(bench, id);
         let sheet = bench.device.asks.sheet.as_mut().expect("open");
-        for _ in 0..3 {
-            if sheet.way(&row, &all, &bench.workspace) == Some(way) {
-                return;
-            }
-            sheet.flip(&row, &all, &bench.workspace);
+        if sheet.way(&row, &all, &bench.workspace) != Some(way) {
+            sheet.turn(&row, way, &all, &bench.workspace);
         }
-        panic!("{row:?} cannot go {way:?}");
+        let goes = sheet.way(&row, &all, &bench.workspace);
+        assert_eq!(goes, Some(way), "{row:?}");
+    }
+
+    /// Click the lit arrow of `id`'s row in the open sheet, which leaves it out.
+    fn turn_off(bench: &mut Bench, id: u64) {
+        let all = rows(&bench.device.state, &bench.workspace, &bench.queue);
+        let row = row(bench, id);
+        let sheet = bench.device.asks.sheet.as_mut().expect("open");
+        let lit = sheet.way(&row, &all, &bench.workspace).expect("a way");
+        sheet.turn(&row, lit, &all, &bench.workspace);
     }
 
     fn pulls(bench: &Bench) -> Vec<Location> {
@@ -1722,8 +1749,11 @@ mod tests {
         let both = linked(&mut bench, "A.ne5p", gained("50"), 1, &body());
         let skipped = linked(&mut bench, "B.ne5p", body(), 2, &body());
         open_read(&mut bench);
-        let left_out = row(&bench, skipped);
-        bench.device.asks.sheet.as_mut().unwrap().skip(&left_out);
+        turn_off(&mut bench, skipped);
+        let all = rows(&bench.device.state, &bench.workspace, &bench.queue);
+        let sheet = bench.device.asks.sheet.as_ref().unwrap();
+        let waits = [both, skipped].map(|id| sheet.waits(&row(&bench, id), &all, &bench.workspace));
+        assert_eq!(waits, [true, false], "only the row with no way waits");
         bench.press();
         assert_eq!((written(&bench), pulls(&bench)), (vec![], vec![]));
         assert_eq!(standing(&bench, both), Some(Standing::Both));
@@ -2377,8 +2407,7 @@ mod tests {
         let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
         let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
         open_read(&mut bench);
-        let left_out = row(&bench, second);
-        bench.device.asks.sheet.as_mut().unwrap().skip(&left_out);
+        turn_off(&mut bench, second);
         let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
         let sheet = bench.device.asks.sheet.as_ref().unwrap();
         let mine = row(&bench, first);
@@ -2392,26 +2421,98 @@ mod tests {
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }
 
+    #[test]
+    fn turning_one_move_of_a_swap_back_on_takes_the_other() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(&mut bench, &[Some(("B", crc(&b))), Some(("A", crc(&a)))]);
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        open_read(&mut bench);
+        turn_off(&mut bench, second);
+        pick(&mut bench, first, Way::Down);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        let sheet = bench.device.asks.sheet.as_ref().unwrap();
+        let ways = [first, second].map(|id| {
+            let row = row(&bench, id);
+            sheet.way(&row, &sync.list, &bench.workspace)
+        });
+        assert_eq!(ways, [Some(Way::Down); 2]);
+    }
+
+    /// A file with unsaved edits whose slot changed on the keyboard may only go up.
+    #[test]
+    fn a_row_with_one_way_is_turned_on_and_off_by_the_same_arrow() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40")))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let log = &mut bench.log;
+        bench.workspace.replace_bytes(id, gained("60"), log);
+        open_read(&mut bench);
+        let all = rows(&bench.device.state, &bench.workspace, &bench.queue);
+        let row = row(&bench, id);
+        let workspace = &bench.workspace;
+        let sheet = bench.device.asks.sheet.as_mut().unwrap();
+        assert!(sheet.waits(&row, &all, workspace));
+
+        sheet.turn(&row, Way::Down, &all, workspace);
+        assert_eq!(sheet.way(&row, &all, workspace), None, "it may not go down");
+        sheet.turn(&row, Way::Up, &all, workspace);
+        assert_eq!(sheet.way(&row, &all, workspace), Some(Way::Up));
+        assert!(!sheet.waits(&row, &all, workspace));
+        sheet.turn(&row, Way::Up, &all, workspace);
+        assert_eq!(sheet.way(&row, &all, workspace), None);
+        assert!(sheet.waits(&row, &all, workspace), "it waits again");
+    }
+
+    /// One frame of the sheet, given `events`, as the text it painted.
+    fn frame(bench: &mut Bench, events: Vec<eframe::egui::Event>) -> Vec<crate::testing::Word> {
+        use crate::testing::{painted, run, screen};
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        let input = screen(eframe::egui::vec2(1280.0, 800.0), events);
+        let output = run(&bench.ctx, input, |ctx| {
+            let (device, queue) = (&mut bench.device, &bench.queue);
+            crate::queue::sheet(
+                ctx,
+                device,
+                (queue, &sync),
+                &bench.workspace,
+                &mut Vec::new(),
+            );
+        });
+        painted(&output)
+    }
+
     /// Every string the sheet paints, after a frame to settle its layout.
     fn painted_sheet(bench: &mut Bench) -> Vec<String> {
-        use crate::testing::{run, screen, words};
-        let mut said = Vec::new();
-        for _ in 0..2 {
-            let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
-            let input = screen(eframe::egui::vec2(1280.0, 800.0), Vec::new());
-            let output = run(&bench.ctx, input, |ctx| {
-                let (device, queue) = (&mut bench.device, &bench.queue);
-                crate::queue::sheet(
-                    ctx,
-                    device,
-                    (queue, &sync),
-                    &bench.workspace,
-                    &mut Vec::new(),
-                );
-            });
-            said = words(&output);
-        }
-        said
+        frame(bench, Vec::new());
+        let said = frame(bench, Vec::new());
+        said.into_iter().map(|word| word.text).collect()
+    }
+
+    /// A file with unsaved edits whose slot changed on the keyboard may only go up: its
+    /// `↓` takes no click, and its `↑` is a switch.
+    #[test]
+    fn the_one_arrow_of_a_waiting_row_lights_on_a_click_and_goes_out_on_the_next() {
+        use crate::testing::{click, where_};
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40")))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        let log = &mut bench.log;
+        bench.workspace.replace_bytes(id, gained("60"), log);
+        open_read(&mut bench);
+        frame(&mut bench, Vec::new());
+        let said = frame(&mut bench, Vec::new());
+        let (up, down) = (where_(&said, "↑").center(), where_(&said, "↓").center());
+        let shown = |bench: &mut Bench, at| {
+            frame(bench, click(at));
+            let said = painted_sheet(bench);
+            let has = |text: &str| said.iter().any(|it| it == text);
+            (has("!"), has("Sync 1"))
+        };
+        assert_eq!(shown(&mut bench, down), (true, false), "it may not go down");
+        assert_eq!(shown(&mut bench, up), (false, true), "lit, and counted");
+        assert_eq!(shown(&mut bench, up), (true, false), "it waits again");
     }
 
     /// A file has one row with a way: placed by hand on another slot while its own slot
@@ -2446,8 +2547,8 @@ mod tests {
         assert_eq!(listed(&bench), [(id, Change::Placed { waits: None })]);
     }
 
-    /// A move onto the slot of a file that is not moving back has no way: its control
-    /// paints `!`, and the footer counts what Sync runs.
+    /// A move onto the slot of a file that is not moving back has no way: its row is
+    /// marked `!`, and the footer counts what Sync runs.
     #[test]
     fn a_move_onto_a_file_that_stays_paints_no_way_and_is_not_counted() {
         let mut bench = Bench::new();
@@ -2493,8 +2594,7 @@ mod tests {
         let first = linked(&mut bench, "A.ne5p", gained("40"), 1, &body());
         let second = linked(&mut bench, "B.ne5p", gained("41"), 2, &body());
         open_read(&mut bench);
-        let left_out = row(&bench, second);
-        bench.device.asks.sheet.as_mut().unwrap().skip(&left_out);
+        turn_off(&mut bench, second);
         let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
         accept(&mut bench.device, &sync, &bench.workspace);
         let said = painted_sheet(&mut bench);
@@ -2524,8 +2624,7 @@ mod tests {
             ];
             open_read(&mut bench);
             if leave_out {
-                let third = row(&bench, files[2]);
-                bench.device.asks.sheet.as_mut().unwrap().skip(&third);
+                turn_off(&mut bench, files[2]);
             }
             let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
             let sheet = bench.device.asks.sheet.as_ref().unwrap();

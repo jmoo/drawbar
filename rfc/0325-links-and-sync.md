@@ -62,12 +62,14 @@ Sync with Nord Electro 5
 ↑  Upright      new · “Tine” plays it
 ```
 
-`↑` writes the file to its slot. `↓` brings the slot's version into the file. The
-arrow is a control: clicking it turns the row. A `!` row does nothing until the user
-picks a direction (both changed, removed on the keyboard). A sound moved on the
-keyboard takes its link along, and one replaced there offers `Unlink`; neither row
-changes a sound. Nothing is written or brought in until the sheet's button is pressed.
-When a keyboard attaches and its side has changed, the sheet opens by itself.
+`↑` writes the file to its slot. `↓` brings the slot's version into the file. Each
+row has a button for each way it may go, and the lit one is the way Sync takes it:
+clicking the other turns the row, and clicking the lit one leaves the row out. A `!`
+row has none lit until the user picks one (both changed, removed on the keyboard). A
+sound moved on the keyboard takes its link along, and one replaced there offers
+`Unlink`; neither row changes a sound. Nothing is written or brought in until the
+sheet's button is pressed. When a keyboard attaches and its side has changed, the
+sheet opens by itself.
 
 Links are made without asking:
 

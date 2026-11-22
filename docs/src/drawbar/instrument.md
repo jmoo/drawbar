@@ -46,8 +46,9 @@ Drag to move things:
 
 Nothing is written until you sync. **Sync** in the top bar, or **Instrument ▸
 Sync…** (⇧⌘S), reads the instrument and lists what differs. `↑` writes a sound to
-the keyboard, `↓` brings one to this computer; click the arrow to turn it. A `!`
-row waits for your pick. When an instrument attaches with changes of its own, the
+the keyboard, `↓` brings one to this computer. The lit arrow is the way a row goes:
+click the other to turn it, or the lit one to leave that sound out. A `!` row has
+none lit until you pick. When an instrument attaches with changes of its own, the
 list opens by itself.
 
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes

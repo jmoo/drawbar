@@ -418,10 +418,8 @@ fn sync_with(rig: &mut Rig, id: u64, way: Way) {
     let row = all.iter().find(|row| row.id == id).cloned();
     let row = row.unwrap_or_else(|| panic!("{id} has no row: {all:?}"));
     let sheet = bench.device.asks.sheet.as_mut().expect("open");
-    for _ in 0..3 {
-        if sheet.way(&row, &all, &bench.workspace) != Some(way) {
-            sheet.flip(&row, &all, &bench.workspace);
-        }
+    if sheet.way(&row, &all, &bench.workspace) != Some(way) {
+        sheet.turn(&row, way, &all, &bench.workspace);
     }
     assert_eq!(
         sheet.way(&row, &all, &bench.workspace),

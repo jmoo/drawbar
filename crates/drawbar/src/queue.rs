@@ -748,11 +748,7 @@ fn foot(
         n => format!("Sync {n}"),
     };
     let live = read && !plan.is_empty();
-    let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live)
-        .on_disabled_hover_text(match pressed {
-            Some(_) => SYNCING,
-            None => "Pick a direction for a row first.",
-        });
+    let sync = crate::panel::accent_button(&mut bar, Glyph::RefreshCw, &label, live);
     let up = plan.iter().filter(|step| step.way == Way::Up);
     let up = up.filter_map(|step| Some((step.row.class, drawn.workspace.get(step.row.id)?)));
     let warnings = crate::browser::send_warnings(up, drawn.device);
@@ -832,20 +828,6 @@ fn body(ui: &mut egui::Ui, sheet: &mut Sheet, drawn: &Drawn, acts: &mut Vec<Act>
     let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(pane.shrink(10.0)));
     let words = row.said(drawn.workspace, drawn.queue);
     title(&mut pane, &entity.name, &words);
-    let way = sheet.way(row, &drawn.rows, drawn.workspace);
-    let said = match (way, &row.change) {
-        (None, _) => "! pick a direction".to_string(),
-        (Some(Way::Up), _) => "↑ to the keyboard".to_string(),
-        (Some(Way::Down), Change::Moved { to, .. }) => format!("link follows to {}", shown(*to)),
-        (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink".to_string(),
-        (Some(Way::Down), _) => "↓ to this computer".to_string(),
-    };
-    let ink = match way {
-        Some(_) => warn(pane.visuals()),
-        None => bad(pane.visuals()),
-    };
-    pane.label(egui::RichText::new(said).color(ink));
-    pane.add_space(4.0);
     let shown = sheet.shown.as_ref().filter(|it| it.id == row.id);
     let (Some(shown), Some(at)) = (shown, row.at) else {
         return;
@@ -942,7 +924,8 @@ fn summary(
     }
 }
 
-/// One row: what it is, where, the way it goes, and what Sync does with it.
+/// One row: what it is, where, the ways it may go, and what Sync does with it. A row
+/// that waits for the user is marked `!` before its name, as the library marks its file.
 ///
 /// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a
 /// label allocates a hover rect that wins the hit test over the row, so a click would
@@ -972,34 +955,36 @@ fn item(
             egui::vec2(width, SMALL + 4.0),
         )
     };
-    let leave = ui.interact(
-        box_(rect.right() - PAD, SMALL),
-        ui.id().with(("leave", row.id)),
-        egui::Sense::click(),
-    );
-    let leaving = match leave.hovered() {
-        true => visuals.text_color(),
-        false => visuals.weak_text_color(),
-    };
-    painted(
-        ui,
-        Glyph::X,
-        box_(rect.right() - PAD, SMALL).shrink(2.0),
-        cell_ink(selected, leaving, &visuals),
-    );
     let placed = placed(row, drawn.queue);
-    if leave.on_hover_text("leave out of Sync").clicked() {
-        match placed {
-            Some(_) => acts.push(Act::Unqueue(row.id)),
-            None => sheet.skip(row),
+    let key = (row.id, row.at.map(|at| (at.bank, at.slot)));
+    if placed.is_some() {
+        let leave = ui.interact(
+            box_(rect.right() - PAD, SMALL),
+            ui.id().with(("leave", key)),
+            egui::Sense::click(),
+        );
+        let leaving = match leave.hovered() {
+            true => visuals.text_color(),
+            false => visuals.weak_text_color(),
+        };
+        painted(
+            ui,
+            Glyph::X,
+            box_(rect.right() - PAD, SMALL).shrink(2.0),
+            cell_ink(selected, leaving, &visuals),
+        );
+        if leave.on_hover_text("leave out of Sync").clicked() {
+            acts.push(Act::Unqueue(row.id));
         }
     }
-    let right = way_control(
+    let waits = sheet.waits(row, &drawn.rows, drawn.workspace);
+    let right = ways_control(
         ui,
         row,
         sheet,
         drawn,
-        box_(rect.right() - PAD - SMALL - GAP, WAY),
+        (rect.right() - PAD - SMALL - GAP, line.center().y),
+        selected,
     );
     let right = match (&row.change, placed, row.at) {
         (_, Some(held), _) => destination(
@@ -1026,11 +1011,24 @@ fn item(
         ink,
     );
     let name_at = left + GLYPH + GAP;
+    let marked = match waits {
+        true => {
+            let mark = painter.text(
+                egui::pos2(name_at, line.center().y),
+                egui::Align2::LEFT_CENTER,
+                "!",
+                egui::FontId::proportional(NAME),
+                cell_ink(selected, bad(&visuals), &visuals),
+            );
+            mark.right() + 4.0
+        }
+        false => name_at,
+    };
     cut(
         &painter,
-        name_at,
+        marked,
         line.center().y,
-        right - name_at,
+        right - marked,
         crate::strings::display_name(&entity.name),
         egui::TextFormat::simple(egui::FontId::proportional(NAME), ink),
     );
@@ -1071,71 +1069,120 @@ fn placed<'a>(row: &Row, queue: &'a Queue) -> Option<&'a Queued> {
 /// What the sheet says while the plan Sync was pressed on waits to run.
 const SYNCING: &str = "Syncing…";
 
-/// The way control's width.
-const WAY: f32 = 44.0;
+/// The least width of one way's button, and the space between two.
+const WAY: f32 = 20.0;
+const WAY_GAP: f32 = 2.0;
 
-/// What the arrows mean, wherever one is drawn.
-const ARROWS: &str = "↑ to the keyboard · ↓ to this computer";
+/// How a way's button reads on a row of `change`. Down is the keyboard's side, which for
+/// a replaced or removed sound is its link alone.
+fn way_sign(way: Way, change: &Change) -> &'static str {
+    match (way, change) {
+        (Way::Up, _) => "↑",
+        (Way::Down, Change::Removed | Change::Replaced { .. }) => "Unlink",
+        (Way::Down, _) => "↓",
+    }
+}
 
-/// A row's way, at the right of its first line: `↑`, `↓` or `Unlink`, or `!` where it
-/// has none yet; a click turns it where it can go more than one way. Returns the left
-/// edge of the space it took.
-fn way_control(
+/// What a way's arrow does, on hover.
+fn way_hint(way: Way, change: &Change) -> Option<&'static str> {
+    match (way, change) {
+        (Way::Up, _) => Some("to the keyboard"),
+        (Way::Down, Change::Moved { .. }) => Some("the link follows"),
+        (Way::Down, Change::Removed | Change::Replaced { .. }) => None,
+        (Way::Down, _) => Some("to this computer"),
+    }
+}
+
+/// A row's ways, right-aligned to `right` on the line centered at `middle`: the
+/// keyboard's side, then `↑`. The lit one is the way Sync takes. A click on it leaves the
+/// row out, and a click on the other turns the row. A way the row is kept from is faint,
+/// and one its kind of row never goes is not drawn. Returns the left edge of the space
+/// they took.
+fn ways_control(
     ui: &mut egui::Ui,
     row: &Row,
     sheet: &mut Sheet,
     drawn: &Drawn,
-    box_: egui::Rect,
+    (right, middle): (f32, f32),
+    selected: bool,
 ) -> f32 {
-    let way = sheet.way(row, &drawn.rows, drawn.workspace);
-    let ways = row.ways(drawn.workspace);
-    let text = match (way, &row.change) {
-        (None, _) => "!",
-        (Some(Way::Up), _) => "↑",
-        (Some(Way::Down), Change::Removed | Change::Replaced { .. }) => "Unlink",
-        (Some(Way::Down), _) => "↓",
-    };
-    let free = way.is_none() && (ways.taken.is_none() || sheet.left_out(row));
-    let turns = ways.allowed.len() > 1 || (free && !ways.allowed.is_empty());
-    let response = ui.interact(box_, ui.id().with(("way", row.id)), egui::Sense::click());
-    let visuals = ui.visuals();
-    if turns && response.hovered() {
-        ui.painter()
-            .rect_filled(box_, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    let lit = sheet.way(row, &drawn.rows, drawn.workspace);
+    let allowed = row.ways(drawn.workspace).allowed;
+    let kept_from = matches!(row.change, Change::Ahead | Change::Theirs | Change::Both);
+    let key = (row.id, row.at.map(|at| (at.bank, at.slot)));
+    let font = egui::FontId::proportional(NAME);
+    let mut left = right;
+    for way in [Way::Up, Way::Down] {
+        let offered = allowed.contains(&way) || (way == Way::Down && kept_from);
+        let sign = way_sign(way, &row.change);
+        let faint = crate::app::unlit(ui.visuals());
+        let galley = ui
+            .painter()
+            .layout_no_wrap(sign.to_string(), font.clone(), faint);
+        let width = match offered {
+            true => chip_size(&galley).x.max(WAY),
+            false => WAY,
+        };
+        let box_ = egui::Rect::from_center_size(
+            egui::pos2(left - width / 2.0, middle),
+            egui::vec2(width, CHIP),
+        );
+        left = box_.left() - WAY_GAP;
+        if !offered {
+            continue;
+        }
+        if !sheet.takes(row, way, &drawn.rows, drawn.workspace) {
+            let at = box_.center() - galley.size() / 2.0;
+            ui.painter().galley(at, galley, faint);
+            continue;
+        }
+        let id = ui.id().with(("way", key, way == Way::Up));
+        let chip = way_chip(ui, box_, id, sign, lit == Some(way), selected);
+        let chip = match way_hint(way, &row.change) {
+            Some(hint) => chip.on_hover_text(hint),
+            None => chip,
+        };
+        if chip.clicked() {
+            sheet.turn(row, way, &drawn.rows, drawn.workspace);
+        }
     }
-    let ink = match way {
-        Some(_) => warn(visuals),
-        None => bad(visuals),
+    left + WAY_GAP - GAP
+}
+
+/// One way's button: `sign` in `box_`, solid while `lit`.
+fn way_chip(
+    ui: &mut egui::Ui,
+    box_: egui::Rect,
+    id: egui::Id,
+    sign: &str,
+    lit: bool,
+    selected: bool,
+) -> egui::Response {
+    let response = ui.interact(box_, id, egui::Sense::click());
+    let visuals = ui.visuals();
+    let (fill, ink) = match (lit, response.hovered(), selected) {
+        (true, _, true) => (
+            Some(visuals.selection.stroke.color),
+            visuals.selection.bg_fill,
+        ),
+        (true, _, false) => (Some(warn(visuals)), visuals.panel_fill),
+        (false, true, _) => (
+            Some(visuals.widgets.hovered.weak_bg_fill),
+            cell_ink(selected, visuals.text_color(), visuals),
+        ),
+        (false, false, _) => (None, cell_ink(selected, visuals.weak_text_color(), visuals)),
     };
+    if let Some(fill) = fill {
+        ui.painter().rect_filled(box_, 4.0, fill);
+    }
     ui.painter().text(
         box_.center(),
         egui::Align2::CENTER_CENTER,
-        text,
+        sign,
         egui::FontId::proportional(NAME),
         ink,
     );
-    let both = matches!(row.change, Change::Ahead | Change::Theirs | Change::Both);
-    let blocked = row.down_blocked(drawn.workspace).filter(|_| both);
-    let partner = match row.change {
-        Change::Moved {
-            with: Some(with), ..
-        } if way.is_none() => drawn.workspace.get(with),
-        _ => None,
-    };
-    let hover = match (way, blocked.map(crate::bring::Blocked::hint)) {
-        _ if partner.is_some() => {
-            let name = partner.map_or("", |it| display_name(&it.name));
-            format!("Moves only with “{name}”.")
-        }
-        (None, Some(why)) => format!("click to pick a direction\n{ARROWS}\n{why}"),
-        (None, None) => format!("click to pick a direction\n{ARROWS}"),
-        (Some(_), Some(why)) => format!("{ARROWS}\n{why}"),
-        (Some(_), None) => ARROWS.to_string(),
-    };
-    if response.on_hover_text(hover).clicked() && turns {
-        sheet.flip(row, &drawn.rows, drawn.workspace);
-    }
-    box_.left() - GAP
+    response
 }
 
 /// A row's address, painted right-aligned to `right`. Returns its left edge.
@@ -1860,7 +1907,7 @@ mod tests {
             let sheet = device.asks.sheet.as_mut().expect("open");
             let placed = sync.list.iter().find(|row| row.id == program).unwrap();
             if skip {
-                sheet.skip(placed);
+                sheet.turn(placed, Way::Up, &sync.list, &workspace);
             }
             let steps = plan(sheet, &sync.list, &device.state, &workspace);
             let shown = sync
