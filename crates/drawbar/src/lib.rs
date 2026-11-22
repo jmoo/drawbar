@@ -56,6 +56,7 @@ pub mod summary;
 pub mod tabs;
 pub mod tags;
 pub mod telemetry;
+pub mod timeline;
 #[cfg(test)]
 mod testing;
 mod when;
