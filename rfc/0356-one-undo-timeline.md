@@ -10,12 +10,13 @@
 Undo and Redo reach the edits made in a document as well as the changes made to
 files and tags. drawbar keeps one timeline for the session, with two kinds of
 step. A library step is an entry toshokan logged, undone by toshokan as today. An
-edit step holds what the editor held of a document before and after one gesture,
-and is undone in memory. An edit changes what the editor holds and no file. A
-save of a sound held whole changes the file and nothing the editor holds.
+edit step holds what the editor held of one document before and after one
+gesture, and is undone in memory. An edit changes what the editor holds and no
+file. A save of a sound held whole changes the file and nothing the editor holds.
 Because the two are independent, no step carries state for another, and Undo can
-take back an edit made before a save and leave the save alone. toshokan does not
-change.
+take back an edit made before a save and leave the save alone. An edit step
+applies only where its document still holds exactly what the step recorded, and
+that one check is the whole safety argument. toshokan does not change.
 
 ## Motivation
 
@@ -47,7 +48,8 @@ It has to hold these:
 1. It composes with toshokan and does not change it.
 2. It works for every document type, including sample instruments and piano
    libraries edited as a plan over a file too large to hold.
-3. It adds no per-frame work, no I/O per edit, and no copy of a document body.
+3. It adds no I/O per edit and no copy of a document body, and a frame with no
+   edit does nothing that grows with the document.
 4. It is the same code in the browser and on the desktop.
 5. It grows with nothing: its memory is bounded, and it writes nothing.
 6. The design rules out a wrong undo, without care at each call site.
@@ -70,8 +72,7 @@ Redo makes again what Undo took back, last first. Doing anything new ends Redo,
 as it does today.
 
 One gesture is one step. Dragging a knob from 3 to 8 is one step, however many
-values it passed through. One visit to a text box is one step. An action on
-several sounds at once is one step.
+values it passed through. One visit to a text box is one step.
 
 Saving a program, set list, note or other sound held whole does not end or
 shorten what Undo can reach. ⌘Z after a save takes back the last edit, as it
@@ -81,7 +82,8 @@ unsaved until you save again or redo.
 **Undo Save** puts a file back as it was before a save. It shows when the next
 thing to undo is the save itself: what lies behind it is a change to files, or
 nothing. In the table above, after the knob is undone, Undo reads **Undo Save
-“b3.ne5p”**, then **Undo Rename “c3.ne5p”**.
+“b3.ne5p”**, then **Undo Rename “c3.ne5p”**. The sound keeps what it shows, and
+reads unsaved where that differs from the file.
 
 A sample instrument or a piano library edited in its file is different. There
 the old file is the only thing that holds what a save replaced. **Undo Save**
@@ -94,56 +96,61 @@ While you type in a text box, Undo and Redo belong to that box, as they do now.
 When you leave the box, what you typed becomes one step.
 
 Undo reaches back to when the window opened the library, and no further than a
-fixed number of steps. When a sound's file is changed from outside drawbar, the
-edits made to that sound before the change can no longer be undone. The activity
-log says so when Undo reaches one.
+fixed number of steps. When a sound takes what its file holds, as after a change
+from outside drawbar, the edits made to it before can no longer be undone, and
+Undo no longer offers them.
 
-Sending a sound to the instrument is not a step, and undoing an edit sends
+Sending a sound to the instrument is not undone, and undoing an edit sends
 nothing.
 
 ## Reference-level explanation
 
 ### The design in one paragraph
 
-A document's state has two halves with two owners. The library owns its file.
-The editor owns its *working copy*: the body it holds, or the edit it holds over
-the file. drawbar keeps one list of steps for the session. A library step names
-the entry toshokan logged, and toshokan undoes it. An edit step names a document
-and holds its working copy before and after, and undoing it puts the earlier one
-back, but only if the document still holds the later one. A save of a body
-moves the file and leaves the working copy, so a save and an edit need to know
-nothing of each other. The list lives in memory, is bounded by a count and a
-size, and ends with the session.
+A document's state has two halves with two owners. The library owns its file,
+and the baseline is what the file is known to hold. The editor owns its *working
+copy*: the body it holds, or the edit it holds over a baseline it names. A
+working copy is all of the document's content. drawbar keeps one list of steps
+for the session. A library step names the entry toshokan logged, and toshokan
+undoes it. An edit step names one document and holds its working copy before and
+after, and undoing it puts the earlier one back, but only if the document holds
+exactly the later one. A save of a body moves the file and the baseline and
+leaves the working copy, so a save and an edit need to know nothing of each
+other. The list lives in memory, is bounded by a count and a size, and ends with
+the session.
 
 ### Three rules
 
 Everything below follows from three rules.
 
 1. **An edit changes the working copy and no file.** This holds today.
-2. **A save changes the file and no working copy.** It writes the file from the
-   working copy and leaves the editor holding what it held. Its undo and its
-   redo do the same in reverse: the file and the baseline move, and the document
-   keeps its working copy.
-3. **Any other change to a document's file is followed, and ends the document's
-   edit steps.** The document takes the file as it does today, and the steps
-   recorded before are let go. This covers a change from outside drawbar, this
-   session writing one sound over another, the undo and redo of that, and a
-   document whose body the workspace no longer holds.
+2. **A save of a body changes the file and no working copy.** It writes the file
+   from the working copy and moves the baseline. Its undo and its redo do the
+   same in reverse: the file and the baseline move, and the document keeps what
+   it holds.
+3. **A step applies only where its document holds what the step recorded.**
+   Anything else that replaces a working copy records no step: a document taking
+   a file changed from outside, a kept draft restored, one sound written over
+   another, a baseline moving under an edit made over it. The steps recorded
+   before it no longer match, and are let go.
 
 Rule 2 is the one that changes behavior. Today a saved document adopts whatever
 its file becomes, including what this session's own undo of a save put back.
 
 With rule 2, a save and the edits around it are independent. Undoing a save
 moves the file and the baseline. The document shows what it showed and reads
-unsaved. No working copy is carried through the save, nothing waits for a file
-to be read back, and the order in which the library answers does not matter.
+unsaved. No working copy is carried through the save, nothing an edit step needs
+waits for a file to be read back, and the order in which the library answers
+does not matter.
 
-Rule 2 is met per document type, and a type that does not meet it takes rule 3
-for its saves. Bodies meet it with the changes under
-[What rule 2 needs](#what-rule-2-needs). A document edited in its file does not
-meet it today, because its save lets go of the edit, and it starts under rule 3:
-its save ends its edit steps, and undoing the save takes the document back with
-the file. Edits made since the last save are undone one by one for every type.
+Rule 3 needs no bookkeeping, because a working copy says everything its content
+depends on. A body is whole. An edit names its baseline, so an edit over a file
+that has since been saved, changed or read again is another value, and a step
+that recorded the old one does not match. Nothing counts changes or marks steps
+stale: the comparison at the moment of the undo is the only test.
+
+An outside change that a document does not take, because the user keeps their
+own side, replaces no body. The steps of a body stay good across it.
 
 ### Where the state belongs
 
@@ -163,55 +170,54 @@ Five tests of the design:
 
 - *Each fact in one place.* A working copy lives in the editor's half only. One
   fact is mirrored: the order of library steps is in toshokan's history and in
-  the timeline. The mirror exists today as `History`, and the invariant below is
-  what a test holds it to.
+  the timeline. The mirror existed before as the store's `History`, and the
+  invariant below is what a test holds it to.
 - *A derived structure can be deleted.* Dropping the timeline changes nothing
   shown after a reread.
 - *One writer per file.* The timeline writes no file.
-- *One mechanism per concern.* One list answers ⌘Z. A text field's own undo is
-  the exception, bounded by focus.
-- *The spec fits on a page.* The three rules, the guard and the invariant are
-  the spec.
+- *One mechanism per concern.* One list answers ⌘Z, and one comparison decides
+  whether a step applies. A text field's own undo is the exception, bounded by
+  focus.
+- *The spec fits on a page.* The three rules and the invariant are the spec.
 
 ### The working copy
 
 ```rust
-/// What the editor holds of a document.
+/// What the editor holds of a document. It is all of the document's content: a
+/// body is whole, and an edit names the baseline it is over.
 #[derive(Clone, PartialEq)]
 pub enum Working {
     /// The whole body.
     Body(Bytes),
-    /// An edit over the file the document rests in, or none.
-    Edit(Option<Edit>),
+    /// An edit over the saved baseline stamped `over`, or none.
+    Edit { over: u64, edit: Option<Edit> },
 }
 ```
 
 `Bytes` is the workspace's `Arc<[u8]>` and `Edit` is `rewrite::Edit`: a sample
-instrument's sets or a piano library's plan. Both exist today.
+instrument's sets or a piano library's plan. Both existed. `over` is the stamp
+the workspace gives a saved baseline, which moves whenever the baseline does.
 
 | Document | Working copy | Its saves |
 |---|---|---|
 | Program, set list, project, note | `Body` | Rule 2 |
 | Sample instrument held whole, WAV take | `Body` | Rule 2 |
-| Sample instrument resting in its file | `Edit`, its sets | Rule 3 to start |
-| Piano library | `Edit`, its plan | Rule 3 to start |
+| Sample instrument resting in its file | `Edit`, its sets | The baseline moves, so rule 3 |
+| Piano library | `Edit`, its plan | The baseline moves, so rule 3 |
 
 [Large documents](#large-documents) moves the second row to `Edit`.
 
 `Document` answers `working(id) -> Working` and accepts `hold(id, Working)`,
-beside the workspace it already drives. Each is one exhaustive match on the
-document's shape, so a new kind of document cannot compile without stating what
-it holds. `hold` goes through the mutators an edit goes through, and the editors
-then take their state from the workspace, as they do when a kept edit is
-restored at open. `working` is read before an editor lets go of anything: a
-revert notes what the document held, then reverts.
+beside the workspace it already drives. `hold` records no step, and answers
+whether the document holds exactly what it was given. After it, the editors
+derive what they show from the content again, as they do when a kept edit is
+restored at open: a WAV take's gain figures, the bytes a piano library's plan
+was laid out into, decoded audio, a field view, a half-typed box, a picked row.
+Where the user is looking, such as a zoom or a scroll, is kept.
 
-Anything else an editor keeps about a document's content is derived from the
-working copy and the file: a WAV take's gain figures, the bytes a piano
-library's plan was laid out into, decoded audio, a field view, a half-typed box,
-a picked row. After `hold` it is derived again as opening the document derives
-it, or checked against the content. Where the user is looking, such as a zoom or
-a scroll, is kept.
+A piano library held whole keeps its plan in its editor, and its bytes are laid
+out from the plan only when something needs them. Its working copy is the plan,
+so laying it out changes no working copy.
 
 ### Steps
 
@@ -219,48 +225,49 @@ a scroll, is kept.
 enum Step {
     /// A change the library logged, undone by the library. `saved` names the
     /// documents it saved under rule 2, and is empty for anything else.
-    Library { label: String, entry: toshokan::EntryHash, saved: Vec<u64> },
-    /// What one gesture changed in the editor's half.
-    Edit { label: String, changes: Vec<Change> },
+    Library { label: String, entry: toshokan::EntryHash, saved: Vec<Saved> },
+    /// What one gesture changed in what the editor holds of one document.
+    Edit { label: String, id: u64, before: Working, after: Working },
 }
 
-struct Change {
-    id: u64,
-    /// The document's epoch when the change was made.
-    epoch: u64,
-    before: Working,
-    after: Working,
-}
+/// A document a save wrote from its body: the file it replaced and the file it
+/// left, by content.
+struct Saved { id: u64, before: toshokan::Identity, after: toshokan::Identity }
 
 struct Timeline {
-    done: Vec<Step>,
+    done: VecDeque<Step>,
     undone: Vec<Step>,
-    /// The library step an undo or redo was sent for and has not answered.
-    in_flight: Option<Step>,
-    /// The step that failed partway and waits for the next write, as today.
-    waiting: Option<Step>,
+    /// The gesture that keeps the last step open, if one does.
+    open: Option<Gesture>,
+    /// What the library was asked that failed partway and waits for the next
+    /// write, as today.
+    waiting: Option<Asked>,
 }
 ```
 
-`Timeline` takes over from the mirror's `History` and adds one kind of step. It
-belongs to the app, and the store reports to it. A view of a slot has no file,
-and a library may be read-only or closed, and edits to documents are undone all
-the same. Switching libraries drops the old library's steps.
+`Timeline` takes over from the store mirror's `History` and adds one kind of
+step. It belongs to the app, and the store reports to it. A view of a slot has
+no file, and a library may be read-only or closed, and edits to documents are
+undone all the same. Switching libraries drops the old library's steps and
+every step behind one.
 
-A library step is recorded when the library answers, where `History` records it
-today. The handling of a step that failed partway, of a step the next write
-finishes, and of an intent no undo takes back stays as it is.
+A library step is recorded when the library answers, where `History` recorded
+it. The handling of a step that failed partway, of a step the next write
+finishes, and of an intent no undo takes back stays as it was.
 
-Each document has an *epoch*, a counter raised whenever rule 3 applies. An edit
-step records the epoch it was made in.
+A library step leaves its list when its undo or redo is sent, and the store
+holds it until the library answers. An edit made meanwhile is recorded as usual.
+When the answer comes, a step that was redone joins `done`. A step that was
+undone joins `undone`, unless a step was recorded after it was sent, and then it
+is dropped. A refused step goes back to the end of the list it left.
 
 | Action | Step |
 |---|---|
-| An edit, one gesture | `Edit`, one change per document touched |
+| An edit, one gesture | `Edit` |
 | Revert, or taking the file's side of a conflict | `Edit`: the working copy becomes the file's |
 | Save of a body | `Library`, with the document in `saved` |
-| Save of a document edited in its file | `Library`; rule 3 |
-| Writing over a sound | `Library`; rule 3 |
+| Save of a document edited in its file | `Library`; its baseline moves |
+| Writing over a sound | `Library`; the sound written over takes the file |
 | Rename, move, tag, copy, new, delete | `Library` |
 
 ### Recording
@@ -269,46 +276,49 @@ Each call that changes a working copy states its cause:
 
 ```rust
 enum Cause {
-    /// The user changed it. This is a step.
+    /// The user changed it: a step Undo takes back.
     User,
-    /// Rule 3: it follows its file, or a draft kept from an earlier session.
-    /// This raises the epoch.
+    /// It takes what a file, a kept draft or an undo gives it: no step.
     Follow,
-    /// The timeline put it back.
-    Timeline,
 }
 ```
 
-The cause is a parameter of the mutators that change a working copy: the
-workspace's `respell`, `make_edit`, `let_go_edit` and `drop_edits`, and the
-piano editor's plan commit. It has no default, so a new caller cannot compile
-without choosing. Laying a plan out into bytes changes no working copy and takes
-no cause. Where a frame runs a call says nothing about why it ran: store
-events, device answers, finished jobs and user acts interleave, and some of the
-store's changes arrive as acts. The caller knows the cause, so the caller states
-it.
+The cause is a parameter of the workspace's mutators that change a working copy:
+`replace_bytes`, `hold_edit` and `drop_edits`. It has no default, so a new
+caller cannot compile without choosing. Bytes laid out from a plan change no
+working copy and go in by a call of their own. Where a frame runs a call says
+nothing about why it ran: store events, device answers, finished jobs and user
+acts interleave. The caller knows the cause, so the caller states it.
 
 A `User` change notes the working copy the document held before it, once per
 document per frame. At the end of the frame each noted document whose working
-copy now differs joins the open step, or opens one.
+copy now differs is a step, or extends the open one.
 
-A step stays open while the gesture that opened it goes on: a pointer button is
-still down, or the widget that had keyboard focus when it opened still has it.
-A run of arrow-key nudges on one control is one step. The step closes at the end
-of the first frame where neither holds, and before any library step, Undo or
-Redo. A change to a document already in the open step replaces its `after`. On
-closing, a change whose `before` equals its `after` is dropped, and a step left
-with none is dropped. A new step empties `undone`.
+A step stays open while the gesture that made it goes on, and the app reads the
+gesture off the frame's input:
+
+- a widget has keyboard focus, and the step stays open while that widget keeps
+  it. A run of arrow-key nudges on one control is one step, and so is one visit
+  to a text box.
+- otherwise a pointer button pressed in an earlier frame is down, or was let go
+  in this frame. A drag is one step, and so is a click. A change in the frame of
+  a press belongs to what came before it, such as a box that commits when a
+  press elsewhere takes its focus.
+- otherwise nothing goes on, and the change is a step of its own.
+
+A change extends the open step only if it is to the same document and starts
+from what the step left. The step closes at the end of the first frame with
+another gesture, and before any library step, Undo or Redo. On closing, a step
+whose two ends are equal is dropped. A new step empties `undone`.
 
 No timer takes part. A drag that pauses is still one step, and two quick clicks
 are two.
 
 Recording clones an `Arc` or an `Edit`. It does no I/O, sends the store nothing,
-and copies no body. A frame with no edit does nothing. Closing a step compares
-each change's two ends, which share an allocation when nothing changed.
+and copies no body. A frame with no edit takes no note.
 
 A result that arrives later than the act that asked for it, such as a detection
-over a take, is a `User` change when it lands. It is its own step.
+over a take, is a `User` change when it lands.
 
 ### Undo and redo
 
@@ -319,33 +329,33 @@ A library step sends `Cmd::Undo`, as today. A refusal that can never pass lets
 the step go and says so. Any other refusal keeps the step and says what is in
 the way. Neither changes from today.
 
-An edit step, for each change, last first:
+An edit step is one comparison and one call:
 
-1. If `epoch(id) == change.epoch` and `working(id) == change.after`, call
-   `hold(id, change.before)` with cause `Timeline`.
-2. Otherwise let that change go, and say in the activity log that it cannot be
-   undone.
-
-A step with at least one change put back moves to `undone`. A step with none is
-dropped.
+1. If the document holds exactly `after`, call `hold(id, before)`.
+2. Otherwise let the step go, and try the one behind it.
 
 Redo is the same with `before` and `after` exchanged and `Cmd::Redo`.
 
-The guard in step 1 is the safety argument for the editor's half. An undo only
-replaces a working copy the timeline recorded with another the timeline
-recorded, in the epoch it recorded them. It is the editor's counterpart to
-toshokan's `ChangedSince` refusal. Every step checks its own ground, so a step
-let go cannot leave another wrong. The comparison runs once per key press and
-tries pointer equality first.
+The comparison in step 1 is the safety argument for the editor's half. An undo
+only replaces a working copy the timeline recorded with another the timeline
+recorded for the same document, and a working copy is all of the content. It is
+the editor's counterpart to toshokan's `ChangedSince` refusal. Every step checks
+its own ground, so a step let go cannot leave another wrong. A step whose
+document holds the recorded value again is good again, whatever happened
+between.
 
-Undo and Redo stay disabled while a change to the library is in flight or an act
-waits for a document to be laid out, as today.
+The comparison tries pointer equality first. Where a document holds an equal
+body in another allocation, the step takes the document's, so the bytes are
+compared once.
 
-A library step leaves its list when its undo or redo is sent and waits in
-`in_flight` until the library answers. An edit made meanwhile is recorded as
-usual. When the answer comes, a step that was redone joins `done`. A step that
-was undone joins `undone`, unless a step was recorded after it was sent, and
-then it is dropped. A refused step goes back to the end of the list it left.
+At the end of each frame the timeline makes the same comparison for the step
+Undo would take and the step Redo would take, and lets go of one that no longer
+matches. The menu therefore names only a step that would apply. That is a
+pointer comparison in a frame where nothing changed.
+
+Undo and Redo are disabled while a change to the library is sent and not
+answered. A library step also waits, as today, for every change asked for to be
+sent.
 
 ### Saves and edits
 
@@ -359,16 +369,17 @@ Undo looks past the saves at the end of `done` to the first step that is not a
 save. If that step is an edit, Undo takes it out from beneath them. Otherwise
 Undo takes the last step, which is a save when there is one.
 
-Only a library step with documents in `saved` is passed this way. Every other
-library step is undone in its turn.
+Only a library step with documents in `saved` is passed this way: a commit that
+did nothing but save documents from their bodies over files that existed. Every
+other library step is undone in its turn.
 
 Redo takes the last step of `undone`, of either kind, and puts it at the end of
 `done`. An edit redone lands after the save it was taken from beneath, which is
 the same state by the same independence.
 
-The command undoes one step and stops. Nothing here loops or waits. An edit
-taken from beneath a save runs no commit and touches no file. A save is undone
-only by a command whose label says **Undo Save**.
+The command undoes one step and stops. Nothing here loops over the library or
+waits. An edit taken from beneath a save runs no commit and touches no file. A
+save is undone only by a command whose label says **Undo Save**.
 
 ### Keeping toshokan in step
 
@@ -398,32 +409,30 @@ toshokan's history, also out of reach.
 Three things, all in the workspace and the store's mirror. toshokan is not among
 them.
 
-- **The baseline is what the file is known to hold.** Today a save moves the
-  baseline when it is asked for, before the library answers, and a refused save
-  leaves it moved under a new stamp. With Undo able to bring back equal bytes, the
-  document would read saved over a file that does not hold them. A refused save
-  puts the baseline back. Refusing a save over a file rewritten at the same
-  length and time, as
-  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) proposes, makes
-  refused saves more common and this more pressing.
-- **A save's own file is told by identity.** When the file is read back after a
-  save, its undo or its redo, rule 2 applies only if the file is the one that
-  commit left. Any other file is a change from outside, and rule 3 applies. The
-  mirror keeps the identity the commit wrote for each document it is reading
-  back. A mark on the whole answer is not enough, because another writer's
-  change can arrive with it.
-- **A save's own file moves only the baseline.** For a document in `saved`, the
-  read-back moves the baseline, leaves the working copy, and asks no conflict
-  question.
+- **The baseline is what the file is known to hold.** A save moved the baseline
+  when it was asked for, before the library answered, and a refused save left it
+  moved under a new stamp. With Undo able to bring back equal bytes, the
+  document would read saved over a file that does not hold them. The workspace
+  now keeps what the file holds while a save is unanswered, and a refused save
+  puts the baseline back.
+- **A save's own file is told by content.** A save's step records, for each
+  document, the identity of the file it replaced and of the file it left. Both
+  are known when the save is answered. When the step is undone or redone, the
+  file is read again whatever its length and time say, and rule 2 applies only
+  if what was read has the identity the step expects. Any other file is a change
+  from outside, and is followed as one is today. A mark on the whole answer is
+  not enough, because another writer's change can arrive with it.
+- **A save's own file moves only the baseline.** For such a file, the read-back
+  moves the baseline, leaves the working copy, and asks no conflict question.
 
-For a document edited in its file to meet rule 2, its save must stop letting go
-of the edit. The edit a save was sent with has to be held apart from the edit
-the editor holds now, and an edit that changes nothing over the file has to stay
-held and read saved. A piano library's plan has to name the file it was made
-over by content. An edit over a file is also not independent of a save of that
-file, so Undo would have to undo such a save before an edit behind it. Those are
-changes to how the workspace holds edits, and they are why these documents start
-under rule 3.
+For a document edited in its file to keep its edit steps across a save, its save
+must stop moving the ground its edit stands on. The edit a save was sent with
+has to be held apart from the edit the editor holds now, an edit that changes
+nothing over the file has to stay held and read saved, and a working copy has to
+name its file by content and not by a stamp. An edit over a file is also not
+independent of a save of that file, so Undo would have to undo such a save
+before an edit behind it. Those are changes to how the workspace holds edits,
+and they are why these documents lose their edit steps at a save.
 
 ### When things go wrong
 
@@ -432,42 +441,36 @@ under rule 3.
 | A save is refused | The baseline goes back. No step is recorded. |
 | An undo is refused and may pass later | The step stays, and the log says what is in the way. |
 | An undo can never pass | The step is let go. |
-| A file changes from outside | Rule 3. The document's edit steps are let go as Undo reaches them. |
-| The file read back after a save's undo is another file | Rule 3. |
-| The workspace no longer holds a document's body | Rule 3. There is no working copy to keep. |
+| A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
+| A file changes from outside and the user keeps their side | A body is untouched and its steps stay. An edit over the file is made again over it, and its steps no longer match. |
+| The file read back after a save's undo is another file | It is followed as a change from outside. |
+| The workspace no longer holds a document's body | There is no working copy. Its steps no longer match. |
 | An edit of a body is made while its save is in flight | It is recorded. The save's step lands after it, and the two are independent. |
 | An edit is made while an undo or redo is in flight | It is recorded. A redo in flight joins `done`. An undo in flight is dropped. |
 | An asset leaves and returns | It has a new id. The edit steps made before it left are let go. |
 
 ### Order of work
 
-This lands after [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300),
-if that merges. #300 rewrites the mirror functions rule 2 changes: the one that
-takes a file read back under a document, the one that takes a save's answer, and
-the one that takes a commit's view. It also supplies what rule 2 builds on. A
-commit reports the identity of each file it wrote, and an unsaved document
-already keeps its edit, unasked, when this session's own undo changes its file.
-Rule 2 extends that to the saved document, which adopts the file today.
-
-#300 adds ways a document's file changes with no edit: two files found to be
-one, an unsaved copy going back onto a file, and a file that ends while its
-document holds work. Each takes cause `Follow`.
-
-In order:
-
 1. The baseline after a refused save. It is a fix on its own.
-2. `working` and `hold`, causes, edit steps, the guard, and the timeline in
-   place of `History`. Every document type gets undo of edits back to its last
-   save.
+2. `working` and `hold`, causes and notes, the timeline in place of `History`,
+   edit steps and the gesture rule. Every document type gets undo of edits back
+   to its last save.
 3. Rule 2 for bodies, and Undo taking an edit from beneath a save.
 4. [Large documents](#large-documents), one row at a time.
+
+Steps 1 to 3 are one change. Step 4 is later work.
+
+[jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) is not needed. It
+would have given a commit that reports the identity of each file it wrote. The
+identities a save's step records, and the read-back checked against them, do
+that work here.
 
 ### Limits
 
 The timeline holds at most `STEPS` steps and at most `BYTES` bytes, counting
-each distinct body once and each edit at its size. Past either, the oldest steps
-go. A single step larger than `BYTES` is not kept, and the timeline is cut
-there.
+both ends of each edit step, so a body two steps share counts twice. Past
+either, the oldest steps go. A single step larger than `BYTES` is not kept, and
+the timeline is cut there.
 
 Program, set list, project and note bodies are a kilobyte to tens of kilobytes.
 A sample instrument's sets grow with each edit until a save, so they count. A
@@ -476,8 +479,8 @@ per step while they are still bodies. They are what `BYTES` is for until
 [Large documents](#large-documents) is done, and few of their steps fit.
 
 The trash holds what a save displaced, up to its own limit. When it lets go of a
-save's bytes, the timeline is cut at that save, as `History` is today. The cut
-now takes the edit steps behind it too.
+save's bytes, the timeline is cut at that save, as `History` was. The cut takes
+the edit steps behind it too.
 
 ### Large documents
 
@@ -509,9 +512,9 @@ install's own state is reached through toshokan's file layer, as `unsaved/` is
 today. A save of an edit over a file lays the edit out by range, and a copy of a
 file is made without reading it whole. The store has an intent for each.
 
-A document that moves from `Body` to `Edit` also moves from rule 2 to rule 3 for
-its saves. It trades undo across a save for memory until edits over files meet
-rule 2.
+A document that moves from `Body` to `Edit` loses its edit steps at each save,
+as every edit over a file does. It trades undo across a save for memory until a
+save of an edit over a file leaves the edit's ground alone.
 
 ### Where unsaved work is kept
 
@@ -568,9 +571,10 @@ sounds have unsaved edits.
 
 ### Text fields
 
-A field being typed in keeps egui's undo, and the menu and the keys stay out of
-its way as they do now. The field's changes reach the working copy during the
-visit and form one open step, which closes when focus leaves.
+A field being typed in keeps egui's undo, and the keys and the menu bar stay out
+of its way as they do now. A note's text reaches the working copy as it is
+typed, and forms one open step that closes when focus leaves. Every other box
+commits when it is left, which is one change and one step.
 
 ### Browser and desktop
 
@@ -587,32 +591,40 @@ storage, and it adds no store command.
 - Undoing an edit of a body from beneath a save leaves the file as saved and the
   working copy as it was before the edit, and the document reads unsaved. Redo
   puts back both and it reads saved.
-- After a refused save, a document reads saved only when its working copy equals
-  what the file holds.
-- An edit step never changes a document whose epoch or working copy differs from
-  what the step recorded.
+- A document reads unsaved exactly when its working copy differs from what its
+  file holds, after a refused save as after anything else.
+- An edit step never changes a document whose working copy differs from what the
+  step recorded.
 - The timeline's library steps match toshokan's history after any sequence of
   actions, refusals and cuts.
+- For every document type, `hold` of what `working` answered changes nothing,
+  and `working` after `hold` answers what was held.
 - An edit sends the store nothing and allocates nothing proportional to the
   body.
 - The timeline's memory is bounded by `STEPS` and `BYTES` for any session.
 
-All but the last two are properties over random sequences of edits, saves, renames,
-reverts, outside changes and undos, checked against a model that is a list of
-whole states. Each document type has a direct test for the rule its saves
-follow: under rule 2, save, undo the save, and the document shows what it
-showed; under rule 3, it shows the file.
+All but the last three are properties over random sequences of edits, saves,
+renames, reverts, outside changes and undos, checked against a model that is a
+list of whole states.
 
 ## Drawbacks
 
 - Undo can reach a document that is not in front. Bringing it to the front is a
   jump the user did not ask for by name.
+- A step whose document moved on is let go without a word. The menu stops
+  offering it, and nothing says why.
 - Undo treats a save two ways. It leaves the save alone to reach an edit of a
   body, and stops at it to reach anything else. The label says which, but a
   user meets the rule without being told.
 - A sample instrument or piano library edited in its file loses its edit steps
   at each save until it meets rule 2.
 - Writing one sound over another ends the edit steps of the sound written over.
+- A sample instrument or piano library held whole, such as one just made, takes
+  its file when a save of it is undone, because its file is read back in place
+  and not as a body.
+- The same content held another way is another working copy. A body put back to
+  rest in its file after a refused save holds what it held, and its steps no
+  longer match.
 - Edit steps name a document by the id the workspace gave it, which is the
   steadiest name a document has. An asset that leaves and returns, as when a
   delete is undone, gets a new id, and the edit steps made before it left are
@@ -620,7 +632,9 @@ showed; under rule 3, it shows the file.
   [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) would not help:
   one is drawn anew when a file returns, and a view of a slot has none.
 - Rule 2 changes how the workspace takes its own saves, and needs the baseline
-  fixed after a refused save.
+  fixed after a refused save. The store tells its own file after an undo by
+  reading it again, so a read of that file already in flight has to be followed
+  by another.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
   the trash keeps their bytes, until the next commit.
 - A long visit to a note is one step. The field's own undo covers the typing
@@ -628,8 +642,9 @@ showed; under rule 3, it shows the file.
 - Sample instruments held whole and WAV takes keep a body per step, so few of
   their steps fit until they are held as edits. Held as edits, they lose their
   edit steps at each save.
-- An outside change ends the undo of a document's earlier edits, even where the
-  user keeps their own side of the conflict.
+- An outside change that a document takes ends the undo of its earlier edits.
+- A step holds one document. An edit made to several sounds at once, which
+  nothing makes today, would be a step for each.
 - The timeline and toshokan's history are two lists that must agree.
 
 ## Rationale and alternatives
@@ -701,11 +716,10 @@ edit made between the save and its answer lands on the wrong side of the save's
 step. Rule 2 removes each of those by leaving the working copy alone.
 
 **H. The document follows the file.** Undoing a save restores the file, the
-saved document adopts it as it does today, and the edit steps behind the save go
-stale. It is rule 3 applied to saves, and needs nothing that rule 2 needs. The
-cost is that one ⌘Z after a save takes back every edit since the save before.
-It is where documents edited in their files start, and the fallback for any type
-where rule 2 proves fragile.
+saved document adopts it as it did before, and the edit steps behind the save no
+longer match. It needs nothing that rule 2 needs. The cost is that one ⌘Z after
+a save takes back every edit since the save before. It is where documents edited
+in their files start, and the fallback for any type where rule 2 proves fragile.
 
 **I. Always stop, or never.** If Undo always stops at a save, a user who saves
 after each edit presses ⌘Z twice per edit, and every second press changes
@@ -795,9 +809,9 @@ What this RFC takes from them:
   reported to clear history, users complain. None of them makes ⌘Z stop at a
   save, and none changes the saved file on undo. For a body, neither does this.
 - **History over the wrong base is the classic corruption.** Vim and VS Code
-  compare content and drop the history on a mismatch. The guard is that rule,
-  applied per step, and the epoch is its stricter form for a file changed from
-  outside.
+  compare content and drop the history on a mismatch. The comparison each edit
+  step makes is that rule, applied per step, and an edit over a file carries its
+  base in the value compared.
 - **Whole-state steps are right for small state.** Blender's undo became slow
   where state was large, and its fix was to share unchanged blocks. Bodies here
   are small and shared by `Arc`. Inverse commands earn their cost where several
@@ -833,15 +847,19 @@ Sources:
 
 ## Unresolved questions
 
-- **Documents edited in their files.** When should sample instruments and
-  piano libraries move from rule 3 to rule 2, and is it worth it? A save of one
-  is rare and heavy, and its undo moves a large file.
+- **Documents edited in their files.** Should sample instruments and piano
+  libraries keep their edit steps across a save, and is it worth it? A save of
+  one is rare and heavy, and its undo moves a large file.
 - **Delete.** Deleting an asset with an unsaved edit drops the edit. Undoing the
   delete brings the file back and the edit stays gone. Should the edit come
   back?
 - **Bringing the document to the front.** Should the first ⌘Z on a document that
-  is not showing only show it, and the second undo? Should a step that touched
-  several documents show any?
+  is not showing only show it, and the second undo?
+- **A step let go.** Should the activity log say when Undo stops reaching a
+  sound's earlier edits, or is the menu no longer offering them enough?
+- **Keep both.** Keeping both sides of a conflict moves the edit to a copy and
+  records no step, so the original's earlier edit steps are let go. Should they
+  follow the edit to the copy?
 - **`STEPS` and `BYTES`.** 1,000 steps and 256 MiB are placeholders. The browser
   may want less.
 - **What uses memory in the browser.** It has not been measured. Decoded audio
@@ -851,8 +869,6 @@ Sources:
 - **Kept slot views.** What lets go of an edit kept over a slot that is never
   viewed again, and of the bytes behind it: an age, a size, or a list the user
   can clear?
-- **The wheel.** A wheel has no end the app can see, so each tick is a step. Is
-  that too many?
 - **Notes.** Is one step per visit to a note too coarse? The note editor could
   close the step on its own terms.
 - **The label.** "Edit" names no field. The editor knows the field at the point
