@@ -227,6 +227,9 @@ pub struct Store {
     finishing: BTreeSet<LibPath>,
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
+    /// Assets whose file this session's undo or redo of a save left as the file of this
+    /// identity, each read again until that read answers.
+    expected: BTreeMap<u64, toshokan::Identity>,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
@@ -381,6 +384,7 @@ impl Store {
             quietly: BTreeSet::new(),
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
+            expected: BTreeMap::new(),
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
@@ -1387,8 +1391,9 @@ impl Store {
         let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
             if self.rechecking.remove(&id) {
+                let expected = self.expected.remove(&id);
                 match answer {
-                    Ok(found) => self.changed(id, found, workspace, browser, log),
+                    Ok(found) => self.changed(id, found, expected, workspace, browser, log),
                     Err(_) => self.rescan(),
                 }
                 continue;
@@ -1608,7 +1613,11 @@ impl Store {
             } => {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
-                let asked = self.answering.pop_front().map(Sent::asked);
+                let sent = self.answering.pop_front();
+                if landed {
+                    self.expected.extend(sent.iter().flat_map(Sent::leaves));
+                }
+                let asked = sent.map(Sent::asked);
                 let answer = timeline::Answer {
                     made,
                     undoable,
@@ -1642,6 +1651,8 @@ impl Store {
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, timeline, log);
+                        let rechecking = &self.rechecking;
+                        self.expected.retain(|id, _| rechecking.contains(id));
                     }
                     Err(why) => match forgotten {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
@@ -1684,6 +1695,7 @@ impl Store {
                 // Whether the library took a step is not known, so the Edit menu offers
                 // none it holds until the next one it hears of.
                 timeline.forget_library();
+                self.expected.clear();
                 log.say(format!(
                     "drawbar lost the library's answer to “{label}”, so it looks at the \
                      folder to see what changed."
@@ -1760,6 +1772,7 @@ impl Store {
             Event::Unkept(why) => self.say_unkept(&why, log),
             Event::Restarted => {
                 timeline.forget_library();
+                self.expected.clear();
                 // What waited to be finished never will be, but as the user settles it.
                 self.awaiting.clear();
                 log.say(
@@ -2362,6 +2375,7 @@ impl Store {
         browser.forget_gone(workspace);
         if retired {
             timeline.forget_library();
+            self.expected.clear();
             self.awaiting.clear();
             log.say(
                 "drawbar's own data for this library was copied and used elsewhere too, so \
@@ -2523,7 +2537,8 @@ impl Store {
                 continue;
             };
             let known = record.fingerprint.map(|print| print.stat());
-            if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
+            let expected = self.expected.contains_key(&id);
+            if let Some(stat) = stat.filter(|stat| expected || known != Some(*stat)) {
                 touched.insert(id);
                 if self.quiet {
                     self.quietly.insert(id);
@@ -3445,11 +3460,14 @@ impl Store {
     }
 
     /// A file drawbar knew now holds something else. One drawbar has not read is only
-    /// looked at again: what it holds is not known, and nothing shows it.
+    /// looked at again: what it holds is not known, and nothing shows it. Where it is the
+    /// file of identity `expected`, as this session's undo or redo of a save left it, an
+    /// asset holding its body keeps it, and only what it was saved as moves.
     fn changed(
         &mut self,
         id: u64,
         found: Found,
+        expected: Option<toshokan::Identity>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
@@ -3474,7 +3492,12 @@ impl Store {
         let holds = found.holds();
         // A copy, or a browser's move, gives a file a new time over the same bytes.
         let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
-        match (unsaved, found.bytes, found.file) {
+        let own = expected.is_some()
+            && expected == found.identity
+            && found.bytes.is_some()
+            && !entity.unread()
+            && entity.rests().is_none();
+        match (unsaved || own, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
             (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
@@ -3483,9 +3506,9 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now, and one that file already holds leaves nothing to choose between.
-        match !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        match !own && !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
-            false if quietly || same => {}
+            false if own || quietly || same => {}
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
@@ -4391,6 +4414,17 @@ impl Sent {
             step,
             doing,
             saving: Vec::new(),
+        }
+    }
+
+    /// The file an undo or a redo of a save leaves each document it saved as.
+    fn leaves(&self) -> Vec<(u64, toshokan::Identity)> {
+        match &self.step {
+            timeline::Asked::Undo(taken) => {
+                taken.saved().iter().map(|s| (s.id, s.before)).collect()
+            }
+            timeline::Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
+            timeline::Asked::Change { .. } | timeline::Asked::Lasting => Vec::new(),
         }
     }
 

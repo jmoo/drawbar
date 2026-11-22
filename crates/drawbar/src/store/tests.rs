@@ -4504,6 +4504,215 @@ fn a_save_over_another_sound_or_through_a_resting_file_names_none() {
     assert_eq!(session.saved_by_next_undo(), [], "a rewrite");
 }
 
+/// The documents of a session, as the timeline puts back what they held.
+struct Held<'a>(&'a mut Bench);
+
+impl Documents for Held<'_> {
+    fn holds(&self, id: u64, working: &mut Working) -> bool {
+        self.0.workspace.working(id).as_ref() == Some(working)
+    }
+
+    fn hold(&mut self, id: u64, working: &Working) -> bool {
+        let Bench { workspace, log, .. } = &mut self.0;
+        workspace.hold(id, working, log)
+    }
+}
+
+impl Session {
+    /// A program made, written, then edited to `gain` and saved: its id, and the file's
+    /// bytes before and after the save.
+    fn saved_once(&mut self, gain: &str) -> (u64, Vec<u8>, Vec<u8>) {
+        let id = self.create();
+        self.sync();
+        let made = self.bytes(id);
+        let edited = self.edit(id, gain);
+        self.bench.workspace.mark_saved(id);
+        self.sync();
+        (id, made, edited)
+    }
+
+    /// Record the edits made since the last call as one step each, as a frame ends.
+    fn record(&mut self) {
+        for note in self.bench.workspace.take_notes() {
+            let after = self.bench.workspace.working(note.id).expect("held");
+            let label = format!("Edit “{}”", note.id);
+            let gesture = crate::timeline::Gesture::Over;
+            self.timeline
+                .record(note.id, label, note.before, after, gesture);
+        }
+    }
+}
+
+#[test]
+fn a_save_its_undo_and_its_redo_change_what_the_document_holds_nowhere() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    let held = session.bench.workspace.working(id);
+
+    session.undo();
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), made, "the file is as it was");
+    assert_eq!(session.bench.workspace.working(id), held);
+    assert!(
+        session.unsaved(id),
+        "the document holds what the file does not"
+    );
+
+    session.redo();
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), edited);
+    assert_eq!(session.bench.workspace.working(id), held);
+    assert!(!session.unsaved(id));
+    assert_eq!(session.said("changed on disk"), 0);
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+}
+
+#[test]
+fn undoing_a_save_under_an_unsaved_edit_asks_nothing_and_keeps_the_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    let edit = session.edit(id, "12");
+
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.bytes(id), edit);
+    assert!(session.unsaved(id));
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn a_save_undone_at_its_files_length_and_time_still_moves_what_the_document_was_saved_as() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+    let made = root.read("untitled.ne5p");
+    let edited = session.edit(id, "96");
+    assert_eq!(made.len(), edited.len());
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+
+    session.undo();
+    session.settle();
+
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+}
+
+#[test]
+fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    session.edit(id, "12");
+    let theirs = with_gain(&edited, "40");
+
+    session.press(false);
+    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.decided();
+    session.settle();
+
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), theirs);
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "the user is asked"
+    );
+}
+
+#[test]
+fn a_save_asked_while_its_undo_is_read_leaves_the_document_unsaved_over_the_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+
+    session.press(false);
+    while session.store.changing() {
+        assert!(session.next(), "the undo answered");
+    }
+    let again = session.edit(id, "12");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.bytes(id), again);
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn undo_takes_an_edit_from_beneath_a_save_and_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.record();
+    let before = session.bench.workspace.working(id);
+    let edited = session.edit(id, "96");
+    session.record();
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    let went = session.timeline.undo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    assert_eq!(root.read("untitled.ne5p"), edited, "the file is as saved");
+    assert_eq!(session.bench.workspace.working(id), before);
+    assert!(session.unsaved(id));
+
+    let went = session.timeline.redo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    assert_eq!(session.bytes(id), edited);
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn an_edit_made_while_the_library_undoes_a_step_ends_its_redo_and_is_undone_first() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.record();
+    session.tag(&[id], "A");
+    session.tag(&[id], "B");
+
+    session.press(false);
+    session.edit(id, "96");
+    session.record();
+    session.decided();
+    assert_eq!(session.worn(id), ["A"]);
+    assert_eq!(session.redo_label(), None, "the edit ended redo");
+
+    let went = session.timeline.undo(&mut Held(&mut session.bench));
+    assert_eq!(went, Went::Edit(id));
+    session.undo();
+    assert_eq!(session.worn(id), Vec::<String>::new());
+    session.redo();
+    assert_eq!(
+        session.worn(id),
+        ["A"],
+        "the library redoes its own last undo"
+    );
+}
+
 impl Session {
     /// The names of the library's tags, sorted.
     fn tag_names(&self) -> Vec<String> {

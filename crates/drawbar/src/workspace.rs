@@ -2176,9 +2176,10 @@ impl Workspace {
         self.sent.remove(&id);
     }
 
-    /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
-    /// writes the edit over them, and a revert takes them. An asset resting in its file
-    /// adopts them instead, and the edit held of it is made again over them.
+    /// Make `theirs` the saved baseline, and keep what the asset holds, which is unsaved
+    /// where it differs from them: the next save writes it over them, and a revert takes
+    /// them. An asset resting in its file adopts them instead, and the edit held of it is
+    /// made again over them.
     pub fn rebase(&mut self, id: u64, theirs: Vec<u8>, log: &mut Log) {
         if !self.apart(id) {
             return self.adopt(id, theirs, log);
@@ -2188,6 +2189,7 @@ impl Workspace {
             entity.resave(Baseline::read(theirs.into(), stamp));
         }
         self.forget_saves(id);
+        self.revision += 1;
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
