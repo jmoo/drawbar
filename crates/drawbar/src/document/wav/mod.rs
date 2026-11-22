@@ -614,6 +614,13 @@ impl State {
                     (view, close, audition, detect);
             }
         }
+        if self
+            .view
+            .picked
+            .is_some_and(|hit| !self.read.order.contains(&hit))
+        {
+            self.view.picked = None;
+        }
     }
 
     /// The bytes every gain is applied to.

@@ -212,6 +212,8 @@ struct Opened {
     variant: String,
     /// The path boxes for a project's audio files, by file id, kept for the same reason.
     paths: std::collections::HashMap<u32, String>,
+    /// The stamp and the names a save writes that the boxes were filled from.
+    filled: (u64, (Option<String>, Option<String>)),
     /// The last refusal message.
     error: Option<String>,
     /// A WAV's read and gain.
@@ -246,6 +248,7 @@ impl Opened {
         parked: Option<wav::State>,
     ) -> Opened {
         let entity = asset.entity;
+        let filled = (entity.stamp, renaming.clone());
         let (name, variant) = header::boxes(entity, asset.shape, view, renaming);
         Opened {
             id: entity.id,
@@ -253,6 +256,7 @@ impl Opened {
             name,
             variant,
             paths: std::collections::HashMap::new(),
+            filled,
             error: None,
             wav: match asset.shape {
                 Shape::Wav => Some(parked.unwrap_or_else(|| wav::State::new(entity))),
@@ -271,6 +275,19 @@ impl Opened {
             text: text::State::default(),
             wavs: project::Located::default(),
         }
+    }
+
+    /// Fill the boxes again, and let go of the last refusal, where the content they were
+    /// filled from has moved.
+    fn fill(&mut self, asset: Asset<'_>, view: bool, renaming: &(Option<String>, Option<String>)) {
+        if self.filled.0 == asset.entity.stamp && self.filled.1 == *renaming {
+            return;
+        }
+        self.filled = (asset.entity.stamp, renaming.clone());
+        (self.name, self.variant) =
+            header::boxes(asset.entity, asset.shape, view, renaming.clone());
+        self.paths.clear();
+        self.error = None;
     }
 }
 
@@ -457,6 +474,7 @@ impl Document {
         let Some(open) = self.open.as_mut() else {
             return Wants::default();
         };
+        open.fill(asset, viewing, &renaming);
         let mut sets: Sets = Vec::new();
         let act = header::ui(
             ui,
@@ -657,11 +675,16 @@ impl Document {
         };
         match checked {
             Ok(resting) => {
+                // Only this editor holds the plan of a library held whole.
+                let before = (!resting).then(|| self.working(workspace, id)).flatten();
+                if let Some(before) = before {
+                    workspace.note(id, before, false);
+                }
                 self.piano.commit(plan.clone());
                 self.refused(None);
                 // A library resting in its file is saved by writing the plan through it.
                 if resting {
-                    let edit = (!plan.is_empty()).then_some(Edit::Piano(plan));
+                    let edit = (!plan.is_empty()).then(|| Edit::Piano(plan.unmarked()));
                     workspace.hold_edit(id, edit, Cause::User);
                 }
             }
@@ -716,12 +739,35 @@ impl Document {
         workspace.mark_pending(id, self.pends(id))
     }
 
-    /// What the editor holds of the document `id`.
+    /// What the editor holds of the document `id`: all of its content, so two documents
+    /// holding equal working copies show and save the same thing. `None` while unread.
     pub fn working(&self, workspace: &Workspace, id: u64) -> Option<Working> {
-        workspace.working(id)
+        match workspace.get(id) {
+            Some(entity) if piano::held_whole(entity) => Some(self.piano.working(entity)),
+            _ => workspace.working(id),
+        }
     }
 
-    /// Put back a working copy the document held, and return whether it holds it now.
+    /// Whether the document `id` holds exactly `working`, which takes the document's body
+    /// where it holds an equal one in another allocation.
+    pub fn holds(&self, workspace: &Workspace, id: u64, working: &mut Working) -> bool {
+        let Some(entity) = workspace.get(id).filter(|entity| !entity.unread()) else {
+            return false;
+        };
+        if piano::held_whole(entity) {
+            return self.piano.holds(entity, working);
+        }
+        match (entity.rests(), working) {
+            (None, Working::Body(held)) => shares(held, &entity.bytes),
+            (Some(_), Working::Edit { over, edit }) => {
+                *over == entity.saved.stamp() && edit.as_ref() == workspace.edit(id)
+            }
+            (None, Working::Edit { .. }) | (Some(_), Working::Body(_)) => false,
+        }
+    }
+
+    /// Put back a working copy the document held, with no step, and return whether it
+    /// holds it now. Every editor takes it up, and keeps where the user is looking.
     pub fn hold(
         &mut self,
         id: u64,
@@ -729,7 +775,59 @@ impl Document {
         workspace: &mut Workspace,
         log: &mut Log,
     ) -> bool {
-        workspace.hold(id, working, log)
+        if self.holds(workspace, id, &mut working.clone()) {
+            return true;
+        }
+        let Some(entity) = workspace.get(id) else {
+            return false;
+        };
+        match working {
+            Working::Edit {
+                over,
+                edit: Some(Edit::Piano(plan)),
+            } if piano::held_whole(entity) && *over == entity.saved.stamp() => {
+                self.piano.adopt(entity, Some(plan));
+            }
+            _ => {
+                workspace.hold(id, working, log);
+                self.take_up(id, workspace);
+            }
+        }
+        self.replaced(id);
+        self.note_pending(id, workspace);
+        self.holds(workspace, id, &mut working.clone())
+    }
+
+    /// Make the editors that mirror an edit the workspace holds take up the one it holds
+    /// of `id` now, or none.
+    fn take_up(&mut self, id: u64, workspace: &mut Workspace) {
+        self.samples.forget(id);
+        self.follow_sample(id, workspace);
+        let Some(entity) = workspace.get(id).filter(|entity| piano::is_piano(entity)) else {
+            return;
+        };
+        let plan = match workspace.edit(id) {
+            Some(Edit::Piano(plan)) => Some(plan),
+            Some(Edit::Sample(_)) | None => None,
+        };
+        self.piano.adopt(entity, plan);
+    }
+
+    /// Nothing goes on playing or searching what `id` held before its content was put
+    /// back from elsewhere.
+    fn replaced(&mut self, id: u64) {
+        let open = self.open.as_mut().filter(|open| open.id == id);
+        let parked = self.parked.get_mut(&id);
+        for wav in open
+            .and_then(|open| open.wav.as_mut())
+            .into_iter()
+            .chain(parked)
+        {
+            wav.detect.stop();
+        }
+        if self.opened() == Some(id) {
+            self.player.stop();
+        }
     }
 
     /// Let go of what is kept about an asset that has left the workspace.
@@ -1461,6 +1559,37 @@ impl Document {
         }
         Ok(())
     }
+}
+
+/// The documents of a window and the workspace they edit, as the timeline puts their
+/// working copies back.
+pub struct Editors<'a> {
+    pub document: &'a mut Document,
+    pub workspace: &'a mut Workspace,
+    pub log: &'a mut Log,
+}
+
+impl crate::timeline::Documents for Editors<'_> {
+    fn holds(&self, id: u64, working: &mut Working) -> bool {
+        self.document.holds(self.workspace, id, working)
+    }
+
+    fn hold(&mut self, id: u64, working: &Working) -> bool {
+        self.document.hold(id, working, self.workspace, self.log)
+    }
+}
+
+/// Whether `held` is the body `body` is, which it takes where it is an equal body in
+/// another allocation.
+fn shares(held: &mut crate::workspace::Bytes, body: &crate::workspace::Bytes) -> bool {
+    if held.shares(body) {
+        return true;
+    }
+    if **held != **body {
+        return false;
+    }
+    *held = body.clone();
+    true
 }
 
 /// The faces this document offers, in the order the control shows them.
@@ -4593,5 +4722,423 @@ mod tests {
             "{}",
             open.log.status().1,
         );
+    }
+
+    /// What one recorded working copy is, without dumping its body.
+    fn told(working: &Working) -> String {
+        match working {
+            Working::Body(bytes) => format!("a body of {} bytes", bytes.len()),
+            Working::Edit { over, edit } => format!("an edit over {over}: {edit:?}"),
+        }
+    }
+
+    impl Open {
+        fn working(&self) -> Working {
+            self.document
+                .working(&self.workspace, self.id)
+                .expect("it is read")
+        }
+
+        fn hold(&mut self, working: &Working) -> bool {
+            let Open {
+                document,
+                workspace,
+                log,
+                ..
+            } = self;
+            document.hold(self.id, working, workspace, log)
+        }
+
+        fn apply(&mut self, sets: &[(&str, &str)]) {
+            let sets = sets
+                .iter()
+                .map(|(path, value)| ((*path).to_string(), (*value).to_string()))
+                .collect();
+            let Open {
+                document,
+                workspace,
+                log,
+                ..
+            } = self;
+            document.apply(self.id, sets, workspace, log).unwrap();
+        }
+
+        /// Hold `working`, and check it is held exactly, and that holding what is held
+        /// then changes nothing.
+        fn holds(&mut self, working: &Working) {
+            assert!(self.hold(working), "{} is held", told(working));
+            let now = self.working();
+            assert!(
+                now == *working,
+                "{} reads back as {}",
+                told(working),
+                told(&now)
+            );
+            let (stamp, pending) = (self.entity().stamp, self.document.pends(self.id));
+            assert!(self.hold(&now));
+            assert_eq!(
+                (self.entity().stamp, self.document.pends(self.id)),
+                (stamp, pending),
+                "holding what it holds changes nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_held_back_holds_the_bytes_it_held() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.frame(Vec::new());
+        let (before, unsaved) = (open.working(), open.entity().is_unsaved());
+        open.set(&[("center_panel.gain", "96")]);
+        let after = open.working();
+        assert!(after != before, "the edit is a working copy of its own");
+
+        open.holds(&before);
+        assert!(open.entity().bytes == *body_of(&before));
+        assert_eq!(open.entity().is_unsaved(), unsaved);
+        open.holds(&after);
+        assert!(open.entity().is_unsaved());
+    }
+
+    fn body_of(working: &Working) -> &crate::workspace::Bytes {
+        match working {
+            Working::Body(bytes) => bytes,
+            Working::Edit { .. } => panic!("{} is no body", told(working)),
+        }
+    }
+
+    #[test]
+    fn a_note_held_back_shows_the_words_it_held() {
+        let mut open = Open::file("Set 1.txt", b"Set 1\n".to_vec());
+        open.frame(Vec::new());
+        let before = open.working();
+        open.apply(&[("text", "Set 2\n")]);
+        let after = open.working();
+
+        open.holds(&before);
+        assert!(open.twice().iter().any(|word| word == "Set 1\n"));
+        assert!(!open.entity().is_unsaved(), "it holds what it was saved as");
+        open.holds(&after);
+        assert!(open.twice().iter().any(|word| word == "Set 2\n"));
+        assert!(open.entity().is_unsaved());
+    }
+
+    #[test]
+    fn a_name_box_shows_the_name_held_back() {
+        let mut open = Open::file("whatever.nsmp", sample_bytes());
+        open.frame(Vec::new());
+        let before = open.working();
+        open.apply(&[("name", "Vibes")]);
+        open.frame(Vec::new());
+        assert_eq!(open.state().name, "Vibes");
+        let after = open.working();
+
+        open.holds(&before);
+        open.frame(Vec::new());
+        assert_eq!(open.state().name, "Marimba");
+        assert!(!open.entity().is_unsaved());
+        open.holds(&after);
+        open.frame(Vec::new());
+        assert_eq!(open.state().name, "Vibes");
+    }
+
+    #[test]
+    fn a_path_box_shows_the_path_held_back() {
+        let mut open = Open::file("clarinet.nsmpproj", project_bytes());
+        open.frame(Vec::new());
+        let decoded = open.entity().entity.as_deref().unwrap();
+        let file = project::snapshot(decoded).unwrap().unwrap().files[0].id;
+        let before = open.working();
+        let path = format!("file{file}.path");
+        open.apply(&[(&path, "audio/elsewhere.wav")]);
+        open.frame(Vec::new());
+        open.state()
+            .paths
+            .insert(file, "audio/elsewhere.wav".to_string());
+
+        open.holds(&before);
+        open.frame(Vec::new());
+        assert_ne!(
+            open.state().paths.get(&file).map(String::as_str),
+            Some("audio/elsewhere.wav")
+        );
+    }
+
+    /// A take with two hits, both of key 69.
+    fn marked_take(labels: &[&str]) -> Vec<u8> {
+        use nord_format::wav as prep;
+        let audio = prep::Audio {
+            rate: 44_100,
+            channels: 1,
+            samples: (0..44_100 * 3)
+                .map(|i| 0.3 * (i as f32 * 0.06).sin())
+                .collect(),
+        };
+        let regions = labels
+            .iter()
+            .enumerate()
+            .map(|(at, label)| prep::Region {
+                start: 10_000 + 60_000 * at as u32,
+                frames: 30_000,
+                label: (*label).into(),
+            })
+            .collect();
+        let marks = prep::Marks {
+            regions,
+            loops: Vec::new(),
+        };
+        let bytes = prep::write(&audio, prep::Encoding::Int { bits: 16 }).unwrap();
+        prep::with_marks(&bytes, &marks).unwrap()
+    }
+
+    #[test]
+    fn a_wav_held_back_drops_a_pick_it_does_not_mark_and_a_search_of_other_bytes() {
+        use nord_format::formats::npno::encode::LayerTag;
+        let mut open = Open::file("take.wav", marked_take(&["069-b0-v22", "069-b0-v60"]));
+        open.frame(Vec::new());
+        let ctx = open.ctx.clone();
+        let state = open.state().wav.as_mut().unwrap();
+        state.view.picked = Some((69, LayerTag::Value(60)));
+        let audio = state.audio().unwrap().clone();
+        state.detect.start(&ctx, &audio);
+
+        let fewer = Working::Body(marked_take(&["069-b0-v22"]).into());
+        assert!(open.hold(&fewer));
+        assert!(!open.state().wav.as_ref().unwrap().detect.running());
+        open.frame(Vec::new());
+        assert_eq!(open.state().wav.as_ref().unwrap().view.picked, None);
+    }
+
+    #[test]
+    fn a_wav_held_back_keeps_a_pick_it_still_marks() {
+        use nord_format::formats::npno::encode::LayerTag;
+        let mut open = Open::file("take.wav", marked_take(&["069-b0-v22", "069-b0-v60"]));
+        open.frame(Vec::new());
+        let before = open.working();
+        let picked = Some((69, LayerTag::Value(22)));
+        open.state().wav.as_mut().unwrap().view.picked = picked;
+        open.apply(&[(&format!("{}069-b0-v60", wav::RENAMED), "069-b0-v90")]);
+        let after = open.working();
+
+        open.holds(&before);
+        open.frame(Vec::new());
+        assert_eq!(open.state().wav.as_ref().unwrap().view.picked, picked);
+        open.holds(&after);
+    }
+
+    /// A sample instrument resting in its file, with the edit `sets` make of it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resting_sample(dir: &testing::Temp, sets: &[(&str, &str)]) -> Open {
+        let file = testing::on_disk(dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.twice();
+        open.apply(sets);
+        open
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_held_back_shows_the_edit_held() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[]);
+        let before = open.working();
+        open.apply(&[("name", "Vibes")]);
+        let after = open.working();
+        assert!(
+            matches!(
+                &after,
+                Working::Edit {
+                    edit: Some(Edit::Sample(_)),
+                    ..
+                }
+            ),
+            "{}",
+            told(&after)
+        );
+
+        open.holds(&before);
+        assert_eq!(
+            open.document.instrument_name(open.id, &open.workspace),
+            "Marimba"
+        );
+        assert!(!open.document.pends(open.id) && !open.entity().is_unsaved());
+        open.holds(&after);
+        open.frame(Vec::new());
+        assert_eq!(
+            open.document.instrument_name(open.id, &open.workspace),
+            "Vibes"
+        );
+        assert_eq!(open.state().name, "Vibes");
+        assert!(open.entity().is_unsaved());
+    }
+
+    /// A piano library the user renamed by typing `X` into its name box.
+    fn renamed_piano(open: &mut Open) {
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+    }
+
+    fn renames(open: &Open) -> bool {
+        let (name, _) = open.document.piano.renaming(open.entity());
+        name.is_some_and(|name| name.contains('X'))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_piano_held_back_takes_up_the_plan_held() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.frame(Vec::new());
+        let before = open.working();
+        renamed_piano(&mut open);
+        let after = open.working();
+
+        open.holds(&before);
+        open.frame(Vec::new());
+        assert!(!renames(&open) && !open.document.pends(open.id));
+        assert!(!open.entity().is_unsaved());
+        open.holds(&after);
+        open.frame(Vec::new());
+        assert!(renames(&open) && open.entity().is_unsaved());
+    }
+
+    #[test]
+    fn a_piano_held_whole_notes_its_plan_and_holds_it_back() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.frame(Vec::new());
+        let before = open.working();
+        open.workspace.take_notes();
+        renamed_piano(&mut open);
+        let after = open.working();
+        assert!(
+            matches!(
+                &after,
+                Working::Edit {
+                    edit: Some(Edit::Piano(_)),
+                    ..
+                }
+            ),
+            "{}",
+            told(&after)
+        );
+        let noted = open.workspace.take_notes();
+        assert!(
+            matches!(noted.as_slice(), [note] if note.before == before && !note.revert),
+            "{noted:?}"
+        );
+
+        open.holds(&before);
+        open.frame(Vec::new());
+        assert!(!renames(&open) && !open.entity().is_unsaved());
+        open.holds(&after);
+        open.frame(Vec::new());
+        assert!(renames(&open) && open.entity().is_unsaved());
+        assert_eq!(
+            open.state().name,
+            "XTest Piano",
+            "the name box shows the plan"
+        );
+    }
+
+    /// A small deterministic walk, so a failing seed replays.
+    struct Walk(u64);
+
+    impl Walk {
+        fn below(&mut self, sides: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % sides
+        }
+    }
+
+    impl Open {
+        /// Lay the plan in hand out, as an act that carries the bytes would.
+        fn lay_out(&mut self) {
+            let ctx = self.ctx.clone();
+            self.document.piano.start(&ctx, self.id, &self.workspace);
+            if let Some(applied) = self.document.piano.awaited(&ctx, &self.workspace) {
+                let Open {
+                    document,
+                    workspace,
+                    log,
+                    ..
+                } = self;
+                document.put_back(applied, workspace, log);
+            }
+        }
+    }
+
+    #[test]
+    fn a_piano_held_whole_holds_back_exactly_any_working_copy_it_held() {
+        let plans = [
+            piano::Plan::default(),
+            piano::Plan::trimmed("A", 60, 0),
+            piano::Plan::trimmed("B", 72, 0),
+            piano::Plan::trimmed("A", 72, 0),
+        ];
+        for seed in 1..=24 {
+            let mut walk = Walk(seed);
+            let mut open = Open::file("Test Piano.npno", piano_bytes());
+            open.frame(Vec::new());
+            let mut held = vec![open.working()];
+            for step in 0..16 {
+                match walk.below(4) {
+                    0 => {
+                        let plan = plans[walk.below(plans.len() as u64) as usize].clone();
+                        open.document.piano.redraft(plan);
+                        let Open {
+                            document,
+                            workspace,
+                            log,
+                            id,
+                            ..
+                        } = &mut open;
+                        document.replan(*id, workspace, log);
+                    }
+                    1 => {
+                        let planned = open.working();
+                        open.lay_out();
+                        let laid = open.working();
+                        assert!(
+                            laid == planned,
+                            "seed {seed} step {step}: a lay-out took {} to {}",
+                            told(&planned),
+                            told(&laid)
+                        );
+                    }
+                    2 => {
+                        open.lay_out();
+                        open.workspace.mark_saved(open.id);
+                    }
+                    _ => {
+                        let working = held[walk.below(held.len() as u64) as usize].clone();
+                        let over = open.entity().saved.stamp();
+                        let holdable = match &working {
+                            Working::Body(_) => true,
+                            Working::Edit { over: was, .. } => *was == over,
+                        };
+                        let put = open.hold(&working);
+                        assert_eq!(put, holdable, "seed {seed} step {step}: {}", told(&working));
+                        let now = open.working();
+                        assert!(
+                            !put || now == working,
+                            "seed {seed} step {step}: {} reads back as {}",
+                            told(&working),
+                            told(&now)
+                        );
+                    }
+                }
+                open.frame(Vec::new());
+                let working = open.working();
+                open.holds(&working);
+                held.push(working);
+            }
+        }
     }
 }

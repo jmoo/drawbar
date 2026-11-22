@@ -3536,11 +3536,11 @@ impl Workspace {
 
     /// Note `before` as what a document held before the user changed it, where its editor
     /// holds what the workspace does not, unless it was noted since the notes were last
-    /// taken.
-    pub fn note(&mut self, id: u64, before: Working) {
-        if !self.notes.iter().any(|note| note.id == id) {
-            let revert = false;
-            self.notes.push(Note { id, before, revert });
+    /// taken. `revert` marks the note as a revert's.
+    pub fn note(&mut self, id: u64, before: Working, revert: bool) {
+        match self.notes.iter_mut().find(|note| note.id == id) {
+            Some(note) => note.revert |= revert,
+            None => self.notes.push(Note { id, before, revert }),
         }
     }
 
