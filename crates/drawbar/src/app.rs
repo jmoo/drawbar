@@ -3018,8 +3018,9 @@ mod tests {
     #[test]
     fn a_click_and_an_undo_pressed_in_one_frame_undo_the_click() {
         let (ctx, mut app) = keyed();
-        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
         let turned = turn_gain(&ctx, &mut app, id, "40");
+        let said = input(&ctx, &mut app, Vec::new());
 
         click_and_undo(&ctx, &mut app, &said, false);
 
@@ -3031,8 +3032,9 @@ mod tests {
     #[test]
     fn an_undo_pressed_before_a_click_in_one_frame_leaves_the_click_to_be_redone() {
         let (ctx, mut app) = keyed();
-        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
         let turned = turn_gain(&ctx, &mut app, id, "40");
+        let said = input(&ctx, &mut app, Vec::new());
 
         click_and_undo(&ctx, &mut app, &said, true);
         assert_eq!(bytes(&app, id), turned);
