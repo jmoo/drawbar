@@ -17,6 +17,7 @@ use toshokan::plan::FactChange;
 use toshokan::report::{
     Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, ScanReport, Start, TrashItem, What,
 };
+use toshokan::schema::JOINED;
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
@@ -2038,8 +2039,9 @@ fn changes_nothing(change: &FactChange, view: &View) -> bool {
 
 /// The changes of `listed` that `named` names, or all it can take where it names none,
 /// each once, and whether each is made on the library's own record. A tag taken brings
-/// its entry in the library's list of tags where the run added it there too, and a
-/// change taken to an entity the run made brings its making and its file.
+/// its entry in the library's list of tags where the run added it there too, the
+/// removal of an entity the run joined into another brings the id that other keeps of
+/// it, and a change taken to an entity the run made brings its making and its file.
 fn taking(listed: &[Listed], named: &[KeptKey]) -> Vec<(FactChange, bool)> {
     let picked: Vec<&Listed> = listed
         .iter()
@@ -2059,7 +2061,22 @@ fn taking(listed: &[Listed], named: &[KeptKey]) -> Vec<(FactChange, bool)> {
         matches!(&listed.change.change, Some(FactChange::Add { key, value, .. })
             if key == TAG_NAMES.name() && gained(value))
     });
-    let taken: Vec<&Listed> = picked.iter().copied().chain(tag_list).collect();
+    let removed = |joined: &toshokan::Raw| {
+        picked.iter().any(|taken| {
+            matches!(&taken.change.change, Some(FactChange::Delete { entity })
+                if toshokan::Raw::of(entity).is_ok_and(|id| id == *joined))
+        })
+    };
+    let joined = listed.iter().filter(|listed| {
+        matches!(&listed.change.change, Some(FactChange::Add { key, value, .. })
+            if key == JOINED.name() && removed(value))
+    });
+    let taken: Vec<&Listed> = picked
+        .iter()
+        .copied()
+        .chain(tag_list)
+        .chain(joined)
+        .collect();
     let made = |entity| {
         let mut changes = listed.iter().map(|listed| &listed.change);
         changes.any(|change| change.entity == entity && change.what == What::Created)
@@ -2317,6 +2334,40 @@ mod tests {
     use super::super::native::{self, Blocking};
     use super::super::Moving;
     use super::*;
+
+    /// Taking only the removal of an asset a branch joined into another takes the id
+    /// that other keeps of it too, and no other id the branch kept.
+    #[test]
+    fn taking_the_removal_of_a_joined_asset_brings_the_id_kept_of_it() {
+        let [low, high, third] = [1, 2, 3].map(toshokan::EntityId::from_u128);
+        let listed = |entity, what, change: &FactChange| Listed {
+            change: ItemChange {
+                entity,
+                what,
+                change: Some(change.clone()),
+                forgotten: false,
+            },
+            onto: false,
+        };
+        let keeps = |joined| FactChange::Add {
+            entity: low,
+            key: JOINED.name().to_string(),
+            value: toshokan::Raw::of(&joined).unwrap(),
+        };
+        let field = || What::Field(JOINED.name().to_string());
+        let removal = FactChange::Delete { entity: high };
+        let all = [
+            listed(low, field(), &keeps(high)),
+            listed(low, field(), &keeps(third)),
+            listed(high, What::Deleted, &removal),
+        ];
+        let named = [(high, What::Deleted, Some(super::super::KeptDo::Delete))];
+        let taken: Vec<FactChange> = taking(&all, &named)
+            .into_iter()
+            .map(|(change, _)| change)
+            .collect();
+        assert_eq!(taken, [removal, keeps(high)]);
+    }
     use crate::ondisk::OnDisk;
     use crate::rewrite::Rewrite;
     use crate::testing::Temp;
