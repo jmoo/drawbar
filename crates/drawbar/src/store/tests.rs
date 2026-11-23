@@ -10432,6 +10432,72 @@ fn a_document_counted_unsaved_until_its_file_is_read_makes_room_once_it_reads_sa
 }
 
 #[test]
+fn a_document_let_go_of_before_a_lost_undo_of_its_save_still_follows_an_outside_change() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    session.later();
+    fs::write(root.at("Other.ne5p"), with_gain(&made, "12")).unwrap();
+    session.settle();
+    let other = session.named("Other.ne5p");
+    session.store.budget(made.len() as u64 + 1);
+    session.read(&[other]);
+    assert!(session.bench.workspace.get(id).unwrap().unread());
+    session.store.fault(Fault::Unread);
+    session.press(false);
+    session.decided();
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo landed");
+    session.later();
+    session.read(&[id]);
+    assert_eq!(session.bytes(id), made);
+    assert!(!session.unsaved(id));
+
+    let theirs = with_gain(&made, "30");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.refocus();
+
+    assert_eq!(session.bytes(id), theirs, "it holds no edit, so it follows");
+    assert!(!session.unsaved(id));
+}
+
+/// The save is sent against the file as it was before the lost save, so it is refused.
+/// Nothing is asked about drawbar's own save, and saving again writes the edit.
+#[test]
+fn a_save_sent_while_the_file_of_a_lost_save_is_read_again_asks_nothing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, _) = session.saved_once("96");
+    session.settle();
+    session.store.fault(Fault::Unread);
+    let lost = session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    while session.bench.workspace.saves_asked(id) {
+        assert!(session.next(), "the lost save answered");
+    }
+    let third = session.edit(id, "70");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    session.settle();
+
+    assert_eq!(session.bench.browser.asking(), None);
+    assert_eq!(root.read("untitled.ne5p"), lost, "the lost save had landed");
+    assert_eq!(session.bytes(id), third, "the edit is kept");
+    assert!(session.unsaved(id));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(root.read("untitled.ne5p"), third, "saving again writes it");
+    assert!(!session.unsaved(id));
+}
+
+#[test]
 fn with_two_changes_in_flight_a_save_is_named_by_the_one_that_made_it() {
     let root = Temp::new();
     let mut session = Session::open(&root);

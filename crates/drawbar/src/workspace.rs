@@ -2290,6 +2290,12 @@ impl Workspace {
         }
     }
 
+    /// [`Workspace::refile`] with the bytes a read found in the file.
+    pub fn refile_bytes(&mut self, id: u64, theirs: Vec<u8>) {
+        let stamp = self.stamp();
+        self.refile(id, Baseline::read(theirs.into(), stamp));
+    }
+
     /// A save of an asset landed. A newer saved baseline still to be written leaves its
     /// file known to hold what that save carried.
     pub fn save_landed(&mut self, id: u64) {

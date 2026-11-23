@@ -713,6 +713,12 @@ list of whole states.
   the gain left unclipped. A gain that clips every sample leaves none, so after
   its Undo and Redo the take reads 0 dB over the clipped audio, as it does when
   such an edit is restored at open.
+- A set of a sample instrument takes the place of one of the same value just
+  before it, and no other. A gesture that sets two values at once keeps every
+  set it made, so dragged there and back it leaves a step that changes nothing.
+- A read that follows a lost answer cannot tell drawbar's own bytes from
+  another writer's. The document keeps what it holds, unsaved, and is not asked
+  about either.
 - A file resting in the library is known by the identity toshokan samples. A
   write from outside that keeps its length and changes only bytes the identity
   does not sample is not seen, and an edit held over the file still matches its

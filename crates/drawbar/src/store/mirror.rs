@@ -1398,7 +1398,11 @@ impl Store {
             if self.rechecking.remove(&id) {
                 match answer {
                     Ok(found) => self.changed(id, found, workspace, browser, log),
-                    Err(_) => self.rescan(),
+                    Err(_) => {
+                        self.quietly.remove(&id);
+                        self.settling.remove(&id);
+                        self.rescan();
+                    }
                 }
                 continue;
             }
@@ -2338,15 +2342,6 @@ impl Store {
             joined,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
-        // What such a change leaves in a file is not known until it is finished.
-        let pending = |record: &Record| {
-            let path = record.path.as_ref();
-            path.is_some_and(|path| self.finishing.contains(path))
-        };
-        let pending = self.records.iter().filter(|(_, record)| pending(record));
-        let pending: Vec<u64> = pending.map(|(id, _)| *id).collect();
-        self.deferred.extend(pending.iter().copied());
-        self.awaiting.extend(pending);
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2546,10 +2541,9 @@ impl Store {
             let known = record.fingerprint.map(|print| print.stat());
             if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
                 touched.insert(id);
-                if self.quiet {
+                if self.recheck(id, path.clone(), stat, workspace) && self.quiet {
                     self.quietly.insert(id);
                 }
-                self.recheck(id, path.clone(), stat, workspace);
             }
         }
         let appeared = self.arrive(listed, reach, workspace, browser, log);
@@ -2908,30 +2902,32 @@ impl Store {
         let Some(print) = self.records.get(&id).and_then(|record| record.fingerprint) else {
             return;
         };
-        self.quietly.insert(id);
-        self.settling.insert(id);
         let stat = Stat {
             len: print.len,
             modified: print.modified,
         };
-        self.recheck(id, path, stat, workspace);
+        if self.recheck(id, path, stat, workspace) {
+            self.quietly.insert(id);
+            self.settling.insert(id);
+        }
     }
 
     /// A file drawbar knew changed on disk: an unread one is only known to be another,
     /// and one drawbar holds is read again to see what it holds now.
-    fn recheck(&mut self, id: u64, path: LibPath, stat: Stat, workspace: &mut Workspace) {
+    fn recheck(&mut self, id: u64, path: LibPath, stat: Stat, workspace: &mut Workspace) -> bool {
         let Some(record) = self.records.get_mut(&id) else {
-            return;
+            return false;
         };
         if record.holds == Holds::Unread {
             record.fingerprint = Some(Fingerprint::unread(stat));
             workspace.stale(id);
-            return;
+            return false;
         }
         self.rechecking.insert(id);
         let files = vec![(id, path, record.fingerprint)];
         let room = self.budget;
         self.send(Cmd::Read { files, room });
+        true
     }
 
     /// The rescues in this install's own folders, by name, each read whole on this thread
@@ -3545,8 +3541,10 @@ impl Store {
         }
         let unfiled = workspace.unfiled(id);
         let holds = found.holds();
-        let keeps = unfiled || (settling && !rests);
-        match (keeps, found.bytes, found.file) {
+        // What drawbar's own change left in the file of an asset holding its body.
+        let own = settling && !rests;
+        match (unfiled || own, found.bytes, found.file) {
+            (true, Some(bytes), _) if own => workspace.refile_bytes(id, bytes),
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
             (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
@@ -3555,7 +3553,7 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now.
-        match unfiled && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        match unfiled && !own && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
             false if quietly => {}
             false => log.say(format!(
@@ -3563,7 +3561,7 @@ impl Store {
             )),
         }
         browser.folders.missing.remove(&id);
-        let saved = workspace.get(id).map(|entity| entity.saved.stamp());
+        let saved = workspace.filed(id).map(Baseline::stamp);
         if let (Some(record), Some(saved)) = (self.records.get_mut(&id), saved) {
             record.fingerprint = Some(print);
             record.saved = saved;
