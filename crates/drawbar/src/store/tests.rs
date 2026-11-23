@@ -13,6 +13,8 @@ use crate::timeline::{Asked, Documents, Timeline, Went};
 use crate::workspace::{Cause, Fresh, Origin, VerifyState, Working};
 use nord_usb::{Location, ObjectClass};
 
+mod undo_walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
