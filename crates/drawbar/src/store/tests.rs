@@ -10398,12 +10398,21 @@ fn the_undo_of_a_save_leaves_a_document_let_go_of_since_to_read_the_file_again()
     }
     session.sync();
     session.later();
-    assert!(session.bench.workspace.evict(b).is_some(), "b is let go of");
+    fs::write(root.at("Other.ne5p"), with_gain(&made, "12")).unwrap();
+    session.settle();
+    let other = session.named("Other.ne5p");
+    let unread = |session: &Session| {
+        let entity = session.bench.workspace.get(b).expect("listed");
+        entity.unread()
+    };
+    session.store.budget(made.len() as u64 + 1);
+    session.read(&[other]);
+    assert!(unread(&session), "b is let go of");
 
     session.undo();
-    let entity = session.bench.workspace.get(b).expect("listed");
-    assert!(entity.unread(), "the undo puts no baseline on it");
+    assert!(unread(&session), "the undo puts no baseline on it");
     session.settle();
+    session.later();
     session.read(&[b]);
     assert_eq!(session.bytes(b), made);
     assert!(!session.unsaved(b));
