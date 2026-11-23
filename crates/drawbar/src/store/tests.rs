@@ -10554,6 +10554,39 @@ fn a_save_sent_while_the_file_of_a_lost_save_is_read_again_asks_nothing() {
 }
 
 #[test]
+fn a_document_let_go_of_while_its_file_is_read_again_takes_what_the_file_holds() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, first) = session.saved_once("96");
+    session.settle();
+    session.store.fault(Fault::Unread);
+    let second = session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace,
+        browser,
+        log,
+        ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    workspace.replace_bytes(id, first, Cause::User, log);
+    while session.bench.workspace.saves_asked(id) {
+        assert!(session.next(), "the lost save answered");
+    }
+    session.later();
+    assert!(
+        session.bench.workspace.evict(id).is_some(),
+        "it is let go of"
+    );
+
+    session.settle();
+    session.read(&[id]);
+
+    assert_eq!(session.bytes(id), second, "it holds what its file does");
+    assert!(!session.unsaved(id));
+}
+
+#[test]
 fn with_two_changes_in_flight_a_save_is_named_by_the_one_that_made_it() {
     let root = Temp::new();
     let mut session = Session::open(&root);

@@ -2940,10 +2940,12 @@ impl Store {
             workspace.stale(id);
             return false;
         }
-        self.rechecking.insert(id);
-        let files = vec![(id, path, record.fingerprint)];
-        let room = self.budget;
-        self.send(Cmd::Read { files, room });
+        // A read still to answer runs after everything known now, and answers for this.
+        if self.rechecking.insert(id) {
+            let files = vec![(id, path, record.fingerprint)];
+            let room = self.budget;
+            self.send(Cmd::Read { files, room });
+        }
         true
     }
 
@@ -3521,6 +3523,8 @@ impl Store {
         }
         let name = entity.name.clone();
         let rests = entity.rests().is_some();
+        // What drawbar's own change left in the file of an asset holding its body.
+        let own = settling && entity.holds_body();
         let known = self
             .records
             .get(&id)
@@ -3558,8 +3562,6 @@ impl Store {
         }
         let unfiled = workspace.unfiled(id);
         let holds = found.holds();
-        // What drawbar's own change left in the file of an asset holding its body.
-        let own = settling && !rests;
         match (unfiled || own, found.bytes, found.file) {
             (true, Some(bytes), _) if own => workspace.refile_bytes(id, bytes),
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
@@ -3581,7 +3583,10 @@ impl Store {
         let saved = workspace.filed(id).map(Baseline::stamp);
         if let (Some(record), Some(saved)) = (self.records.get_mut(&id), saved) {
             record.fingerprint = Some(print);
-            record.saved = saved;
+            // A save sent since is answered by its own stamp.
+            if !(own && record.saving) {
+                record.saved = saved;
+            }
             record.missing = false;
             record.holds = holds;
         }
