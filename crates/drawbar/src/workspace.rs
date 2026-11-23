@@ -3629,9 +3629,14 @@ impl Workspace {
         std::mem::take(&mut self.notes)
     }
 
-    /// [`Workspace::drop_edits`], and say so where it changed anything.
+    /// [`Workspace::drop_edits`] as the user's, and say so where it changed anything.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
-        if !self.drop_edits(id, Cause::User) {
+        self.revert_as(id, Cause::User, log);
+    }
+
+    /// [`Workspace::revert`] for `cause`.
+    pub fn revert_as(&mut self, id: u64, cause: Cause, log: &mut Log) {
+        if !self.drop_edits(id, cause) {
             return;
         }
         if let Some(entity) = self.get(id) {

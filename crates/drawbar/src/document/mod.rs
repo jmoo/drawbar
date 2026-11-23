@@ -768,6 +768,7 @@ impl Document {
 
     /// Put back a working copy the document held, with no step, and return whether it
     /// holds it now. Every editor takes it up, and keeps where the user is looking.
+    /// All or nothing: one it cannot hold exactly changes nothing.
     ///
     /// ⚠️ What was asked of the content it replaces is dropped: a save not yet sent, and
     /// every act waiting on that save, each of which carries the document.
@@ -781,7 +782,7 @@ impl Document {
         if self.holds(workspace, id, &mut working.clone()) {
             return true;
         }
-        if workspace.get(id).is_none_or(piano::held_whole) || !workspace.hold(id, working, log) {
+        if !holdable(workspace, id, working) || !workspace.hold(id, working, log) {
             return false;
         }
         self.saving
@@ -793,13 +794,17 @@ impl Document {
     }
 
     /// Drop every edit of `id`, in its editors and its bytes, as the user's revert, noted
-    /// as the document held it.
+    /// as the document held it. A document with no working copy notes nothing.
     fn revert(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
-        if let Some(before) = self.working(workspace, id) {
-            workspace.note(id, before, true);
-        }
+        let cause = match self.working(workspace, id) {
+            Some(before) => {
+                workspace.note(id, before, true);
+                Cause::User
+            }
+            None => Cause::Follow,
+        };
         self.let_go(id, workspace);
-        workspace.revert(id, log);
+        workspace.revert_as(id, cause, log);
         self.note_pending(id, workspace);
     }
 
@@ -1611,6 +1616,30 @@ impl crate::timeline::Documents for Editors<'_> {
 /// not edited until the save is answered.
 fn saving(workspace: &Workspace, entity: &LocalEntity) -> bool {
     piano::held_whole(entity) && workspace.saves_asked(entity.id)
+}
+
+/// Whether the document `id` can be made to hold exactly `working`, decided before
+/// anything changes. A piano library held whole holds no working copy, and a piano
+/// library takes no body back: its body would hold no plan. An edit is held over the file
+/// of the baseline it names, where it changes that file, and a body where the file the
+/// document rests in does not hold it already.
+fn holdable(workspace: &Workspace, id: u64, working: &Working) -> bool {
+    let Some(entity) = workspace.get(id).filter(|entity| !entity.unread()) else {
+        return false;
+    };
+    match working {
+        Working::Body(bytes) => {
+            !piano::is_piano(entity) && entity.rests().is_none_or(|file| !file.holds(bytes))
+        }
+        Working::Edit { over, edit } => {
+            let file = (entity.saved.file()).filter(|_| *over == entity.saved.stamp());
+            let changes = |file: &crate::ondisk::OnDisk| {
+                edit.as_ref()
+                    .is_none_or(|edit| !matches!(edit.over(file), Ok(None)))
+            };
+            !piano::held_whole(entity) && file.is_some_and(|file| changes(file))
+        }
+    }
 }
 
 /// The plan the workspace holds of a piano library resting in its file, where it applies
@@ -5028,6 +5057,129 @@ mod tests {
         assert!(open.workspace.edits_to_save().is_empty());
         assert!(open.document.saving.is_empty(), "nothing waits on it");
         assert!(open.entity().is_unsaved());
+    }
+
+    /// A piano library held whole over the file it was read from, as a kept draft of its
+    /// bytes leaves it, renamed in its editor.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drafted_piano(dir: &testing::Temp) -> Open {
+        let file = testing::on_disk(dir, "Test Piano.npno", &piano_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.frame(Vec::new());
+        let draft =
+            piano::rebuild(&piano_bytes(), &piano::Plan::trimmed("Test Piano", 60, 0)).unwrap();
+        open.workspace
+            .replace_bytes(open.id, draft, Cause::Follow, &mut open.log);
+        open.frame(Vec::new());
+        assert!(piano::held_whole(open.entity()));
+        renamed_piano(&mut open);
+        open
+    }
+
+    /// A document with no working copy has no step to take back, so reverting it notes
+    /// nothing, though the revert leaves it resting in its file.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_revert_of_a_piano_held_whole_notes_nothing() {
+        let dir = testing::Temp::new();
+        let mut open = drafted_piano(&dir);
+        open.workspace.take_notes();
+        let Open {
+            document,
+            workspace,
+            log,
+            id,
+            ..
+        } = &mut open;
+        document.revert(*id, workspace, log);
+        let noted = open.workspace.take_notes().len();
+        assert_eq!(noted, 0, "the revert noted {noted}");
+        assert!(open.entity().rests().is_some() && !renames(&open));
+    }
+
+    impl Open {
+        /// What a hold could change: the bytes and their stamp, the baseline, the edit
+        /// held over the file, and what the editors hold.
+        fn held_state(&self) -> String {
+            let entity = self.entity();
+            format!(
+                "bytes {} crc {:08x} stamp {}, saved {}, resting {}, edit {:?}, pending {}, \
+                 renaming {:?}",
+                entity.bytes.len(),
+                nord_format::crc::crc32(&entity.bytes),
+                entity.stamp,
+                entity.saved.stamp(),
+                entity.rests().is_some(),
+                self.workspace.edit(self.id),
+                self.document.pends(self.id),
+                self.document.renaming(entity),
+            )
+        }
+
+        /// Check `hold` refuses `working` and leaves everything as it was.
+        fn refuses(&mut self, working: Working, said: &str) {
+            let was = self.held_state();
+            assert!(!self.hold(&working), "{said}: it is held");
+            assert_eq!(self.held_state(), was, "{said}: a refused hold changed it");
+            self.frame(Vec::new());
+            assert_eq!(self.held_state(), was, "{said}: and the next frame");
+        }
+    }
+
+    /// A hold is all or nothing: a working copy the document cannot hold exactly changes
+    /// nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_hold_the_document_cannot_take_changes_nothing() {
+        let dir = testing::Temp::new();
+        let mut open = drafted_piano(&dir);
+        let over = open.entity().saved.stamp();
+        let edit = Working::Edit { over, edit: None };
+        open.refuses(edit, "an edit of a piano held whole");
+        let body = Working::Body(open.entity().saved.bytes().clone());
+        open.refuses(body, "a body of a piano held whole");
+
+        let mut open = Open::empty();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        open.id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.twice();
+        let draft = piano::rebuild(&piano_bytes(), &piano::Plan::trimmed("A", 60, 0)).unwrap();
+        open.refuses(Working::Body(draft.into()), "a body of a resting piano");
+
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        let over = open.entity().saved.stamp();
+        let moved = Working::Edit {
+            over: over + 1,
+            edit: None,
+        };
+        open.refuses(moved, "an edit over another baseline");
+        let nothing = Edit::Sample(vec![("name".into(), "Marimba".into())]);
+        let nothing = Working::Edit {
+            over,
+            edit: Some(nothing),
+        };
+        open.refuses(nothing, "an edit that changes nothing over the file");
+
+        let mut open = Open::empty();
+        std::fs::write(dir.at("Checked.nsmp"), sample_bytes()).unwrap();
+        let checked = std::fs::File::open(dir.at("Checked.nsmp")).unwrap();
+        let crc = nord_format::crc::crc32(&sample_bytes());
+        let checked = crate::ondisk::OnDisk::open(checked, Some(crc))
+            .unwrap()
+            .unwrap();
+        open.id = testing::rest(&mut open.workspace, "Checked.nsmp", checked.into());
+        open.twice();
+        open.refuses(
+            Working::Body(sample_bytes().into()),
+            "a body the checked file it rests in holds",
+        );
+
+        let mut open = Open::fresh(Fresh::Program);
+        open.frame(Vec::new());
+        let over = open.entity().saved.stamp();
+        let edit = Working::Edit { over, edit: None };
+        open.refuses(edit, "an edit of a document with no file");
     }
 
     /// A piano library the user renamed by typing `X` into its name box.
