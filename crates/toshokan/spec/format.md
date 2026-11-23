@@ -237,7 +237,10 @@ the writer saw live: of a register, of a set's member, or of the file register.
 `observed` names the live field writes of the entity a delete saw, each as
 `{"key","at"}` for a register, `{"key","value","at"}` for a set's member or
 `{"file":true,"at"}` for the file register, with `at` the reference. A `value`
-is the app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
+is the app's JSON, kept byte for byte; `"value":null` writes `null`. Under the
+key `joined`, which is toshokan's own, a `value` is the id of an entity joined
+into the one that holds it, as a JSON string (see
+[Relations](protocol.md#relations)). A `file` is
 `{"path","identity","len"}` with an optional `modified`, the backend's
 modification time, compared only for equality. Each member of `displaced` is
 `{"item","from","identity","len"}`: the trash item's nonce, the library path the

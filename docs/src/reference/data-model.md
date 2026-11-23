@@ -183,7 +183,8 @@ as when both tag it while a sync is paused.
 [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)
 says which keeps the file. A drawbar that can write commits one change joining
 each such pair: the entity that keeps the file gains the tags and the origin it
-lacks, and the other is deleted. That change is no step of Undo. A read-only
+lacks and keeps the other's id, and the other is deleted. That change is no step
+of Undo. A read-only
 drawbar writes nothing and shows the tags of both on the file.
 
 A change another drawbar left unfinished is settled

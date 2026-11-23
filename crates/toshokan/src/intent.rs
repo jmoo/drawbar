@@ -24,7 +24,7 @@ use crate::merge::{Folded, Write};
 use crate::path::RelPath;
 use crate::plan::{Content, Expect, FactChange, FileChange, Plan};
 use crate::report::Joined;
-use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value};
+use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value, JOINED};
 
 /// The library an intent is built for and committed through: a driver's.
 pub trait Driver {
@@ -147,9 +147,10 @@ impl<L: Driver> Intent<L> {
 
     /// Gives `into` each member of each set `entity` holds that `into` does not,
     /// and `entity`'s shown value of each register `into` holds no value of, then
-    /// deletes `entity`. Refused unless both are shown and differ. An intent that
-    /// only joins entities is no step of undo, which takes its writes for another
-    /// writer's.
+    /// deletes `entity`. `into` also keeps `entity`'s id, so a relation that names
+    /// `entity` resolves to `into` ([`crate::View::resolve`]). Refused unless both
+    /// are shown and differ. An intent that only joins entities is no step of
+    /// undo, which takes its writes for another writer's.
     pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
         self.plan.joins.push(Joined { entity, into });
         self
@@ -541,8 +542,9 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
 }
 
 /// The ops that give `joined.into` what `joined.entity` holds and it does not:
-/// each member of each set, and the shown value of each register it holds no
-/// value of. Then the delete of `joined.entity`.
+/// each member of each set, [`JOINED`] among them, and the shown value of each
+/// register it holds no value of. Then `joined.entity`'s id as a member of
+/// `joined.into`'s [`JOINED`], and the delete of `joined.entity`.
 fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Invalid> {
     let Joined { entity, into } = joined;
     if entity == into {
@@ -551,13 +553,18 @@ fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Inv
     if let Some(absent) = [entity, into].into_iter().find(|e| !folded.present(*e)) {
         return Err(Invalid::NoEntity(absent));
     }
+    let own = Raw::of(&entity).map_err(|error| Invalid::Unencodable {
+        key: JOINED.name().to_owned(),
+        reason: error.to_string(),
+    })?;
     let mut ops = Vec::new();
     for key in schema.keys() {
         let name = key.name;
         match key.kind {
             KeyKind::Set => {
                 let held = folded.members(into, name);
-                let lacking = folded.members(entity, name).into_iter();
+                let own = (name == JOINED.name()).then(|| own.clone());
+                let lacking = folded.members(entity, name).into_iter().chain(own);
                 let lacking = lacking.filter(|member| held.binary_search(member).is_err());
                 ops.extend(lacking.map(|value| Op::Add {
                     replaces: member_writes(folded, into, name, &value),

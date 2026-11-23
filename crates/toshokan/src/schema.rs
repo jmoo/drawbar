@@ -23,12 +23,49 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use crate::error::{Error, Result};
-use crate::ids::{EntryHash, Hlc, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
+
+/// The set every schema holds, of the ids of the entities joined into an entity
+/// ([`crate::intent::Intent::join`]). No app declares a key of this name.
+pub const JOINED: Set<EntityId> = Set::new("joined");
 
 /// What a key's values may be. The app owns the type; toshokan stores its JSON.
 pub trait Value: Serialize + DeserializeOwned + Ord + Clone {}
 
 impl<T: Serialize + DeserializeOwned + Ord + Clone> Value for T {}
+
+/// A value that names an entity, its target. A register or set of such values is
+/// a relation, which [`crate::View::resolve`], [`crate::View::relations`] and
+/// [`crate::View::referrers`] read.
+///
+/// ```
+/// use serde::{Deserialize, Serialize};
+/// use toshokan::{EntityId, Relates, Set};
+///
+/// #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// struct Source {
+///     to: EntityId,
+///     role: String,
+/// }
+///
+/// impl Relates for Source {
+///     fn target(&self) -> EntityId {
+///         self.to
+///     }
+/// }
+///
+/// const BUILT_FROM: Set<Source> = Set::new("built from");
+/// const TEMPLATE: toshokan::Register<EntityId> = toshokan::Register::new("template");
+/// ```
+pub trait Relates: Value {
+    fn target(&self) -> EntityId;
+}
+
+impl Relates for EntityId {
+    fn target(&self) -> EntityId {
+        *self
+    }
+}
 
 /// A multi-value register: each write replaces the writes it observed, and
 /// concurrent writes of different values all survive, in conflict.
@@ -121,25 +158,27 @@ pub struct Key {
     pub kind: KeyKind,
 }
 
-/// The keys an app declares. Facts under other names, which a newer writer may
-/// have logged, are kept and reported as unreadable rather than dropped.
+/// The keys an app declares, and [`JOINED`]. Facts under other names, which a
+/// newer writer may have logged, are kept and reported as unreadable rather than
+/// dropped.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Schema {
     keys: BTreeMap<&'static str, KeyKind>,
 }
 
 impl Schema {
-    /// Refuses a name declared twice, and an empty name.
+    /// Refuses a name declared twice, an empty name, and [`JOINED`]'s.
     pub fn of(keys: &[Key]) -> Result<Self> {
         let mut declared = BTreeMap::new();
         for key in keys {
-            if key.name.is_empty() {
+            if key.name.is_empty() || key.name == JOINED.name() {
                 return Err(Error::InvalidKey { name: key.name });
             }
             if declared.insert(key.name, key.kind).is_some() {
                 return Err(Error::DuplicateKey { name: key.name });
             }
         }
+        declared.insert(JOINED.name(), KeyKind::Set);
         Ok(Self { keys: declared })
     }
 
@@ -282,7 +321,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_schema_refuses_a_name_declared_twice_or_empty() {
+    fn a_schema_refuses_a_name_declared_twice_empty_or_its_own() {
         const A: Register<u8> = Register::new("a");
         let schema = Schema::of(&[A.key(), Set::<u8>::new("b").key()]).unwrap();
         assert_eq!(schema.kind("a"), Some(KeyKind::Register));
@@ -295,6 +334,11 @@ mod tests {
         assert!(matches!(
             Schema::of(&[Register::<u8>::new("").key()]),
             Err(Error::InvalidKey { name: "" })
+        ));
+        assert_eq!(schema.kind("joined"), Some(KeyKind::Set), "toshokan's own");
+        assert!(matches!(
+            Schema::of(&[Set::<u8>::new("joined").key()]),
+            Err(Error::InvalidKey { name: "joined" })
         ));
     }
 

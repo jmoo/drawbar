@@ -670,6 +670,16 @@ impl Folded {
         held.map(|(member, _)| member.clone()).collect()
     }
 
+    /// Each member of the set `key` of each entity shown, by entity.
+    pub fn holding<'a>(&'a self, key: &'a str) -> impl Iterator<Item = (EntityId, &'a Raw)> {
+        let shown = self.entities.iter().filter(|(_, state)| state.present());
+        shown.flat_map(move |(entity, state)| {
+            let members = state.sets.get(key).into_iter().flatten();
+            let held = members.filter(|(_, writes)| writes.iter().any(|held| held.value));
+            held.map(move |(member, _)| (*entity, member))
+        })
+    }
+
     /// The live adds and removes of `value` in a set, oldest first: what a new
     /// add or remove of it replaces.
     pub fn tags(&self, entity: EntityId, key: &str, value: &Raw) -> Vec<Write<bool>> {

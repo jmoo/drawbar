@@ -649,6 +649,7 @@ through_both!(
     a_file_two_writers_adopted_unseen_is_the_lower_entitys,
     a_join_gives_the_lower_entity_what_both_held_and_no_undo_takes_it_back,
     writers_joining_one_entity_at_once_converge,
+    what_names_an_entity_a_scan_joined_names_the_one_bound_to_the_file,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
     undoing_a_delete_puts_a_file_moved_outside_back_where_it_was,
@@ -2866,6 +2867,50 @@ fn a_join_gives_the_lower_entity_what_both_held_and_no_undo_takes_it_back<F: Fac
         let into = view.at(&path(NOTES)).unwrap();
         assert_eq!(into.members(TAGS).values, ["Live", "Studio"]);
     }
+}
+
+fn what_names_an_entity_a_scan_joined_names_the_one_bound_to_the_file<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, made) = adopted_by_both::<F>(&folder, &clock, [None, None]);
+    let (low, high) = (made[0].min(made[1]), made[0].max(made[1]));
+    let naming = match made[0] == high {
+        true => &mut a,
+        false => &mut b,
+    };
+    let built = naming.commit("Build", |i| {
+        let (i, _) = i.create(|e| {
+            e.set(PLAYS, high);
+        });
+        i
+    });
+    let program = built.unwrap().created[0];
+    let named = |writer: &F, when: &str| {
+        let view = writer.view();
+        assert_eq!(view.resolve(high), Some(low), "{when}");
+        assert_eq!(view.referrers(PLAYS, low), [program], "{when}");
+        assert_eq!(view.referrers(PLAYS, high), [program], "{when}");
+        let [related] = &view.entity(program).unwrap().relations(PLAYS).related[..] else {
+            panic!("{when}: one value");
+        };
+        assert_eq!((related.value, related.to), (high, Some(low)), "{when}");
+        let file = view.entity(low).unwrap().file().unwrap();
+        assert_eq!(
+            (file.path, file.state),
+            (path(NOTES), FileState::InSync),
+            "{when}"
+        );
+    };
+    a.refresh().unwrap();
+    b.refresh().unwrap();
+    named(&a, "before any join is logged");
+    named(&b, "before any join is logged");
+
+    a.commit("Join", |i| i.join(high, low)).unwrap();
+    b.refresh().unwrap();
+    assert!(a.view().entity(high).is_none());
+    named(&a, "joined");
+    named(&b, "joined, as another writer reads it");
 }
 
 fn writers_joining_one_entity_at_once_converge<F: Facade>() {

@@ -29,8 +29,10 @@ writer, number and hash. An entry's ops apply in order, so where two of them
 write one field, the later is the entry's write.
 
 Keys are declared by the app as registers or sets, each under a name. A key's
-values are the app's JSON. A field is an entity's existence, one of its
-registers, one member of one of its sets, or its file register. A write is
+values are the app's JSON. One set, `joined`, is toshokan's own (see
+Relations), and no app declares a key of that name. A field is an entity's
+existence, one of its registers, one member of one of its sets, or its file
+register. A write is
 **live** unless one of these kills it:
 
 - **Own writes.** A writer's write on a field kills that writer's writes
@@ -415,10 +417,11 @@ An intent may join one entity into another, as the app does for each entity a
 scan reports joined. It logs an `add` to the other of each member of each set
 the one holds and the other does not, a `write` to the other of each register
 the one holds a value of and the other holds none of, the one's shown value
-where its writes conflict, and then the one's `delete`. A register both hold a
-value of keeps the other's. Two writers joining the same entity converge: an
-add of a member already held and a second delete of one entity change nothing
-shown. The delete observes only the writes its writer saw, so a change to the
+where its writes conflict, an `add` to the other's `joined` of the one's id,
+and then the one's `delete`. The one's own `joined` is a set as any other, so
+the other gains every id the one held. A register both hold a value of keeps
+the other's. Two writers joining the same entity converge: an add of a member
+already held and a second delete of one entity change nothing shown. The delete observes only the writes its writer saw, so a change to the
 joined entity another writer made without seeing the join is a deletion
 conflict. An intent that only joins entities is final (see Undo and redo).
 
@@ -447,6 +450,38 @@ the move. The move back logs a `tree` op, so a redo
 moves the tree again.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
+
+## Relations
+
+A relation is a register or a set whose values each name an entity, the value's
+**target**, by its id. How a value names its target is the app's, as the value
+is. Nothing about a relation is logged but its values: what an id names now,
+and which entities name it, every reader derives from the merged state and the
+binding.
+
+An id **resolves** to an entity a reader shows, or to none:
+
+1. The id of an entity shown resolves to that entity. Any other id resolves to
+   the lowest by id of the entities shown whose `joined` holds it, and to none
+   where no entity shown holds it.
+2. Where the binding joins the entity of step 1 into another (see Binding), the
+   id resolves to that other.
+
+So a value written before its target was joined, or by a writer that had not
+seen the join, names the entity that has the file, and no join rewrites a value.
+An id that resolves to none is kept as written: its target was deleted, or the
+entries that create it have not arrived. Undoing the delete, or the entries
+arriving, resolves it again. An entity deleted and brought back resolves to
+itself, whatever holds its id. Deleting the entity an id resolves to ends its
+`joined` with its other fields, so the ids joined into it resolve to none with
+it.
+
+The entities that name an entity are those whose value's target is its id, or
+resolves to what its id resolves to. Readers that show the same entities and
+bind the same files resolve every id alike.
+
+A join by a build that does not write `joined` leaves the ids it joined
+resolving to none.
 
 ## File effects and pending records
 
