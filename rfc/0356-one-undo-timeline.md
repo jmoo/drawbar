@@ -384,9 +384,10 @@ frame take back the click, whichever the frame order of keys and widgets would
 have run first.
 
 Undo and Redo are disabled while a change to the library is sent and not
-answered. An edit step also waits while a save, export or send asked of its
-document waits on that document's save. A library step also waits, as today, for every change asked for to be
-sent.
+answered. An edit step also waits while a save of its document is asked and not
+sent, and while any save, export or send waits on a save, since what waits may
+carry the document. A library step also waits, as today, for every change asked
+for to be sent.
 
 ### Saves and edits
 
@@ -402,9 +403,10 @@ Undo takes the last step, which is a save when there is one.
 
 Only a library step with documents in `saved` is passed this way: a commit that
 did nothing but save documents from their bodies over their own files, which
-existed. A new file, one sound written over another, and any save of a sample
-instrument or piano library are not such steps. Every other library step is
-undone in its turn.
+existed. A new file, one sound written over another, a save that failed partway
+and was finished by a later write, and any save of a sample instrument or piano
+library are not such steps. Every other library step is undone in its turn, and
+a document follows its file when one that saved it is undone.
 
 Redo takes the last step of `undone`, of either kind, and puts it at the end of
 `done`. An edit redone lands after the save it was taken from beneath, which is
@@ -495,6 +497,8 @@ and they are why these documents lose their edit steps at a save.
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | An undo is refused and may pass later | The step stays, and the log says what is in the way. |
 | An undo can never pass | The step is let go. |
+| The library's history ends while an undo or redo waits for its answer | The step is let go with the rest of that history, whatever the answer. |
+| The answer to a save is lost, and the document was edited since it was sent | What the file holds is unknown. The document reads unsaved until its file is read again, and other bytes found there ask. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
 | A file changes from outside and the user keeps their side | A body is untouched and its steps stay. An edit over the file is made again over it, and its steps no longer match. |
 | A file changes or is deleted from outside after a save of it is undone | The document holds unsaved work, so the user is asked, or the document is kept as missing. |
@@ -698,6 +702,14 @@ list of whole states.
   refused save gives the earlier plan back and two plans cannot be merged.
 - Undo or Redo of an edit to a WAV take decodes the take again. On a five-minute
   stereo take a redo measured about twice the cost of the edit.
+- A WAV take's gain is told from its bytes against its saved file, by a sample
+  the gain left unclipped. A gain that clips every sample leaves none, so after
+  its Undo and Redo the take reads 0 dB over the clipped audio, as it does when
+  such an edit is restored at open.
+- A file resting in the library is known by the identity toshokan samples. A
+  write from outside that keeps its length and changes only bytes the identity
+  does not sample is not seen, and an edit held over the file still matches its
+  steps.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
   the trash keeps their bytes, until the next commit.
 - A long visit to a note is one step. The field's own undo covers the typing

@@ -3556,7 +3556,8 @@ impl Store {
     /// follows the file when it is read.
     fn refiled(&mut self, asked: &timeline::Asked, workspace: &mut Workspace) {
         for (id, filed) in asked.leaves() {
-            match workspace.get(id).is_some_and(LocalEntity::holds_body) {
+            let held = workspace.get(id).is_some_and(LocalEntity::holds_body);
+            match held {
                 true => workspace.refile(id, filed.baseline.clone()),
                 false => workspace.stale(id),
             }
@@ -3569,7 +3570,7 @@ impl Store {
                 crc: filed.baseline.whole_crc(),
                 identity: Some(filed.identity),
             });
-            if !record.saving {
+            if held && !record.saving {
                 record.saved = filed.baseline.stamp();
             }
         }
@@ -3677,6 +3678,9 @@ impl Store {
         };
         // A newer baseline waiting is written still, since the file holds neither.
         let waits = workspace.unsave(id);
+        if why.is_none() {
+            workspace.unfile(id);
+        }
         if let (Some(record), Some(entity), false) =
             (self.records.get_mut(&id), workspace.get(id), waits)
         {

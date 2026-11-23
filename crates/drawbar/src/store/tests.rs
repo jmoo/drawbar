@@ -10239,6 +10239,29 @@ fn a_save_whose_answer_is_lost_reads_saved_once_its_file_holds_what_it_does() {
 }
 
 #[test]
+fn an_edit_made_back_while_a_save_whose_answer_is_lost_was_written_is_kept_unsaved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, first) = session.saved_once("96");
+    session.settle();
+    session.store.fault(Fault::Unread);
+    let second = session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace,
+        browser,
+        log,
+        ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    workspace.replace_bytes(id, first.clone(), Cause::User, log);
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), second, "the save landed");
+    assert_eq!(session.bytes(id), first, "the edit made since is kept");
+    assert!(session.unsaved(id), "it holds what its file does not");
+}
+
+#[test]
 fn an_undo_of_a_save_finished_by_a_change_whose_answer_is_lost_keeps_what_the_document_holds() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -10282,6 +10305,40 @@ fn the_undo_of_a_save_leaves_a_document_let_go_of_since_to_read_the_file_again()
     session.bench.workspace.place(b, renamed);
     session.sync();
     assert_eq!(root.read("Renamed.ne5p"), made, "the rename is not refused");
+}
+
+#[test]
+fn a_document_read_again_after_the_undo_of_its_save_makes_room_as_any_clean_one_does() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    let made = session.bytes(b);
+    session.edit(b, "96");
+    session.bench.workspace.mark_saved(b);
+    session.sync();
+    session.later();
+    fs::write(root.at("Other.ne5p"), with_gain(&made, "12")).unwrap();
+    session.settle();
+    let other = session.named("Other.ne5p");
+    let unread = |session: &Session, id: u64| {
+        let entity = session.bench.workspace.get(id).expect("listed");
+        entity.unread()
+    };
+    session.store.budget(made.len() as u64 + 1);
+    session.read(&[other]);
+    assert!(unread(&session, a) && unread(&session, b), "both made room");
+
+    session.undo();
+    session.settle();
+    session.later();
+    session.read(&[b]);
+    assert_eq!(session.bytes(b), made);
+    session.later();
+    session.read(&[a]);
+
+    assert!(unread(&session, b), "b is let go of for a");
+    assert!(!unread(&session, a));
 }
 
 #[test]

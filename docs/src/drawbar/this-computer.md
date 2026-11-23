@@ -193,9 +193,8 @@ than two seconds shows what it is doing over the window.
 
 Deleting a sound or a hidden file, or saving over a sound, moves the old file
 into drawbar's trash in the `.drawbar` folder, where Undo finds it. The trash
-keeps only what Undo can still reach, at most 1 GiB. Past that, the oldest goes
-first, and the activity log says which change Undo no longer reaches. Quitting
-empties the trash. What a crash left there goes when the library next opens,
+keeps at most 1 GiB. Past that, the oldest goes first, and the activity log says
+which change Undo no longer reaches. Quitting empties the trash. What a crash left there goes when the library next opens,
 once drawbar has finished any change the crash interrupted.
 
 When drawbar has to go on with a history of its own, Undo starts again. If that

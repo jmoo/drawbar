@@ -1423,12 +1423,13 @@ impl State {
 
     /// The documents [`State::follow`] would change: each whose plan is against another
     /// baseline than its own, and each with no plan whose folded plan is against its own.
+    /// One that is gone is among them, for [`State::unplan`].
     pub fn moved(&self, workspace: &Workspace) -> Vec<u64> {
         let baseline = |id: &u64| workspace.get(*id).map(mark);
-        let stale = (self.plans.iter())
-            .filter(|(id, plan)| baseline(id).is_some_and(|baseline| plan.against != baseline));
+        let stale = (self.plans.iter()).filter(|(id, plan)| baseline(id) != Some(plan.against));
         let back = (self.folded.iter()).filter(|(id, folded)| {
-            !self.plans.contains_key(*id) && baseline(id) == Some(folded.plan.against)
+            let own = |baseline| baseline == folded.plan.against;
+            !self.plans.contains_key(*id) && baseline(id).is_none_or(own)
         });
         let mut ids: Vec<u64> = stale
             .map(|(id, _)| *id)
@@ -1588,14 +1589,20 @@ impl State {
         }
     }
 
+    /// Let go of the plans of a document that is gone. An act waiting on its lay-out is
+    /// freed as [`State::freed`] finds it gone.
+    pub fn unplan(&mut self, id: u64) {
+        self.plans.remove(&id);
+        self.laid.remove(&id);
+        self.folded.remove(&id);
+    }
+
     /// Forget this document's plan, and anything waiting on it.
     ///
     /// ⚠️ Only the document being drawn loses its draft and its facts: forgetting
     /// another document's plan must not close the open one.
     pub fn forget(&mut self, id: u64) {
-        self.plans.remove(&id);
-        self.laid.remove(&id);
-        self.folded.remove(&id);
+        self.unplan(id);
         self.held.retain(|(held, _)| *held != id);
         if self.job.as_ref().is_some_and(|job| job.id == id) {
             self.job = None;

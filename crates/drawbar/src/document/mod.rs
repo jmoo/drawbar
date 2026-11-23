@@ -766,11 +766,10 @@ impl Document {
         self.piano.holds_for(id)
     }
 
-    /// Whether something asked of the document `id` waits on its save: a save of the edit
-    /// held over its file, not yet sent, or an act waiting for that save.
+    /// Whether something waits on what the document `id` holds: a save of the edit held
+    /// over its file, not yet sent, or an act waiting for a save, which may carry it.
     pub fn awaits_save(&self, id: u64, workspace: &Workspace) -> bool {
-        workspace.saving_edit(id)
-            || (self.saving.iter()).any(|held| held.files.iter().any(|(file, _)| *file == id))
+        workspace.saving_edit(id) || !self.saving.is_empty()
     }
 
     /// Put back a working copy the document held, with no step, and return whether it
@@ -889,8 +888,9 @@ impl Document {
             self.follow_sample(id, workspace);
         }
         for id in self.piano.moved(workspace) {
-            if let Some(entity) = workspace.get(id) {
-                self.piano.follow(entity, held_plan(workspace, id));
+            match workspace.get(id) {
+                Some(entity) => self.piano.follow(entity, held_plan(workspace, id)),
+                None => self.piano.unplan(id),
             }
         }
         let mut out = Vec::new();
@@ -5106,6 +5106,14 @@ mod tests {
         let export = || crate::browser::Act::Export(id);
         assert_eq!(open.settled(vec![export()]), []);
         assert!(open.document.awaits_save(id, &open.workspace), "Undo waits");
+        let carried = open
+            .workspace
+            .create(Fresh::Program, &mut open.log)
+            .unwrap();
+        assert!(
+            open.document.awaits_save(carried, &open.workspace),
+            "and waits for a document the act may carry"
+        );
 
         assert!(open.hold(&vibes));
         open.frame(Vec::new());
@@ -5360,6 +5368,19 @@ mod tests {
         assert!(!open.hold(&saved), "and nothing is put back");
         open.frame(Vec::new());
         assert!(renames(&open) && open.document.pends(id));
+    }
+
+    #[test]
+    fn a_piano_that_is_gone_is_looked_for_once() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.frame(Vec::new());
+        open.workspace.forget(open.id);
+        open.settled(Vec::new());
+        let searched = open.workspace.searched.get();
+
+        open.settled(Vec::new());
+
+        assert_eq!(open.workspace.searched.get(), searched);
     }
 
     /// A small deterministic walk, so a failing seed replays.

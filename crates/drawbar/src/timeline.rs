@@ -130,6 +130,8 @@ pub struct Taken {
     step: Logged,
     /// How many steps had been recorded when it was taken.
     recorded: u64,
+    /// The library history it was taken in.
+    history: u64,
 }
 
 impl Taken {
@@ -220,6 +222,8 @@ pub struct Timeline {
     waiting: Option<Asked>,
     /// Counts the steps recorded.
     recorded: u64,
+    /// Counts the library histories that have ended.
+    history: u64,
     /// The bytes the steps of both lists hold.
     bytes: usize,
 }
@@ -383,6 +387,7 @@ impl Timeline {
         Taken {
             step,
             recorded: self.recorded,
+            history: self.history,
         }
     }
 
@@ -431,7 +436,7 @@ impl Timeline {
             Waiting::Earlier => self.waiting = earlier,
             Waiting::Nothing | Waiting::This => earlier.into_iter().for_each(|e| self.put_back(e)),
         }
-        let asked = asked?;
+        let asked = asked.filter(|asked| self.stands(asked))?;
         if answer.forgot {
             return forgotten(asked);
         }
@@ -441,6 +446,15 @@ impl Timeline {
             _ => self.put_back(asked),
         }
         None
+    }
+
+    /// Whether `asked` is of the library history that still stands. A step taken in one
+    /// that ended is in neither list of the library's any longer.
+    fn stands(&self, asked: &Asked) -> bool {
+        match asked {
+            Asked::Undo(taken) | Asked::Redo(taken) => taken.history == self.history,
+            Asked::Change { .. } | Asked::Lasting => true,
+        }
     }
 
     /// Follow a step the library made, which `entry` logged.
@@ -498,6 +512,7 @@ impl Timeline {
             self.done.drain(..=at);
         }
         self.waiting = None;
+        self.history += 1;
         self.count();
     }
 
@@ -1044,6 +1059,24 @@ mod tests {
 
         assert_eq!(said, None);
         assert_eq!(session.undo_reads(), Some("Rename “1”"));
+    }
+
+    #[test]
+    fn an_undo_refused_after_the_library_history_ended_stays_gone() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the rename is undone by the library");
+        };
+        session.timeline.forget_library();
+
+        let said = session
+            .timeline
+            .answered(Some(Asked::Undo(taken)), refused());
+
+        assert_eq!(said, None);
+        assert_eq!(session.undo_reads(), None);
+        assert_eq!(session.redo_reads(), None);
     }
 
     #[test]
