@@ -675,7 +675,7 @@ impl Document {
                 self.refused(None);
                 // A library resting in its file is saved by writing the plan through it.
                 if resting {
-                    let edit = (!plan.is_empty()).then_some(Edit::Piano(plan));
+                    let edit = (!plan.is_empty()).then(|| Edit::Piano(plan.unmarked()));
                     workspace.hold_edit(id, edit, Cause::User);
                 }
             }
@@ -5073,6 +5073,47 @@ mod tests {
         open.workspace.edit_saved(id, std::sync::Arc::new(file));
         assert_eq!(open.settled(Vec::new()), [export()], "what waited runs");
         assert!(!open.document.awaits_save(id, &open.workspace));
+    }
+
+    /// The plan a resting piano's edit holds names no baseline: the edit's working copy
+    /// does. A file read again unchanged, which marks the editor's plan afresh, leaves a
+    /// plan edited there and back holding what it held.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_pianos_plan_edited_there_and_back_over_its_file_read_again_is_no_change() {
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        let mut open = Open::empty();
+        open.id = testing::rest(&mut open.workspace, "Test Piano.npno", file);
+        open.frame(Vec::new());
+        renamed_piano(&mut open);
+        let again = testing::on_disk(&dir, "Test Piano.npno", &piano_bytes());
+        open.workspace.rest_again(open.id, again);
+        open.twice();
+        let renamed = open.document.piano.shown().clone();
+        open.workspace.take_notes();
+
+        for plan in [piano::Plan::trimmed("B", 72, 0), renamed] {
+            open.document.piano.redraft(plan);
+            let Open {
+                document,
+                workspace,
+                log,
+                id,
+                ..
+            } = &mut open;
+            document.replan(*id, workspace, log);
+        }
+        let noted = open.workspace.take_notes();
+        let [note] = noted.as_slice() else {
+            panic!("{} notes", noted.len());
+        };
+        assert!(
+            note.before == open.working(),
+            "{} came back as {}",
+            told(&note.before),
+            told(&open.working())
+        );
     }
 
     /// A piano library held whole over the file it was read from, as a kept draft of its

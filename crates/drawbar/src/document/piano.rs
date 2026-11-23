@@ -313,6 +313,15 @@ impl Plan {
             }
     }
 
+    /// The edit alone, as the workspace holds it: an edit's working copy names its
+    /// baseline, so the plan in it names none.
+    pub fn unmarked(&self) -> Plan {
+        Plan {
+            against: Mark::default(),
+            ..self.clone()
+        }
+    }
+
     /// About how many bytes it holds.
     pub fn size(&self) -> usize {
         fn entries<T>(len: usize) -> usize {
