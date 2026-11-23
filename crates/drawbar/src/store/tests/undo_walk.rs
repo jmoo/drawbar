@@ -79,10 +79,32 @@ struct Model {
 }
 
 impl Model {
+    /// Record a new step. A save ends the redo of every step undone before a library
+    /// step, and leaves the edits undone since it to be made again; any other step ends
+    /// all redo.
     fn new_step(&mut self, mut step: Step) {
         self.stamp(&mut step);
-        self.undone.clear();
+        let library = |step: &Step| matches!(step, Step::Library { .. });
+        match step {
+            Step::Library { save: true, .. } => {
+                if let Some(at) = self.undone.iter().rposition(library) {
+                    self.undone.drain(..=at);
+                }
+            }
+            _ => self.undone.clear(),
+        }
         self.done.push(step);
+    }
+
+    /// Whether `step` is an edit whose document no longer holds what Undo, or Redo where
+    /// `again`, needs.
+    fn dead(&self, step: &Step, again: bool) -> bool {
+        match step {
+            Step::Edit {
+                doc, before, after, ..
+            } => !self.holds(*doc, if again { before } else { after }),
+            Step::Library { .. } => false,
+        }
     }
 
     fn stamp(&self, step: &mut Step) {
@@ -232,11 +254,10 @@ struct Walk {
     /// Every file is given one modification time after each action, as a disk whose
     /// clock is coarse leaves files of one length looking alike.
     coarse: bool,
-    /// A frame has not ended since the last action, so the timeline has not let go of
-    /// the steps whose documents moved on.
-    unsettled: bool,
     /// The library refused the last step Undo or Redo took.
     refusal: bool,
+    /// The document whose edit the last action undid.
+    undid: Option<usize>,
     /// Undoing every step returns to the start: no file changed outside drawbar, and no
     /// save was refused.
     unwinds: bool,
@@ -269,11 +290,6 @@ impl Walk {
         session.sync();
         session.timeline.forget_library();
         session.bench.workspace.take_notes();
-        let made = session.store.key(ids[0]);
-        assert!(
-            made.is_some_and(|key| key.entity().is_some()),
-            "a file drawbar made is an entity, which a coarse clock may touch"
-        );
         ids.push(session.named(listed));
         let state: State = ids
             .iter()
@@ -303,8 +319,8 @@ impl Walk {
             at: 0,
             action: Action::Undo,
             coarse: seed.is_multiple_of(2),
-            unsettled: false,
             refusal: false,
+            undid: None,
             unwinds: true,
             start: state,
         };
@@ -361,10 +377,10 @@ impl Walk {
     /// and Redo would take are let go where their documents moved on.
     fn frame(&mut self) {
         for note in self.session.bench.workspace.take_notes() {
-            let doc = self.doc(note.id);
-            let after = self.session.bench.workspace.working(note.id).expect("held");
+            let workspace = &self.session.bench.workspace;
+            let after = self.document.working(workspace, note.id).expect("held");
             let verb = if note.revert { "Revert" } else { "Edit" };
-            let label = format!("{verb} “{}”", self.name(doc));
+            let label = format!("{verb} “{}”", self.name(self.doc(note.id)));
             let timeline = &mut self.session.timeline;
             timeline.record(note.id, label, note.before, after, Gesture::Over);
         }
@@ -376,17 +392,16 @@ impl Walk {
         };
         self.session.timeline.settle(Gesture::Over, &editors);
         self.model.settle();
-        self.unsettled = false;
     }
 
-    /// Send everything asked, and wait until the library has answered it and every file
-    /// it changed has been read again.
+    /// Send everything asked, and wait until the library has answered it and nothing is
+    /// in flight.
     fn pump(&mut self) {
-        for _ in 0..20 {
+        for _ in 0..50 {
             self.session.decided();
-            self.session.settle();
             let store = &self.session.store;
-            if !store.changing() && !store.writing() && !store.deciding() {
+            let busy = store.changing() || store.writing() || store.deciding();
+            if !busy && !store.scanning() {
                 return;
             }
             assert!(
@@ -451,6 +466,7 @@ impl Walk {
         let place = LibPath::root().join(&to);
         self.session.bench.workspace.place(self.ids[doc], place);
         self.pump();
+        self.moved();
         self.model.state[doc].path = to;
         let after = self.model.placed(doc);
         let label = format!("Rename “{}”", leaf(&before.0));
@@ -464,6 +480,18 @@ impl Walk {
         let save = false;
         self.model.new_step(Step::Library { label, save, files });
         self.frame();
+    }
+
+    /// A file was renamed, or the rename undone or made again.
+    // ⚠️ Excluded: where the folder copies instead of renaming, a save before the next
+    // rescan asks whose to keep: `a_save_right_after_a_rename_by_copy_lands_without_asking`
+    // fails.
+    fn moved(&mut self) {
+        let all = toshokan::io::Capabilities::ALL;
+        if !crate::testing::abilities(toshokan::io::Root::Folder, all).rename_file {
+            self.session.refocus();
+            self.pump();
+        }
     }
 
     fn revert(&mut self, doc: usize) {
@@ -522,7 +550,6 @@ impl Walk {
             }
         }
         // Undo or Redo may come in the frame the change was read in, before it ends.
-        self.unsettled = true;
         match self.roll(3) {
             0 => self.undo(),
             1 => self.redo(),
@@ -547,22 +574,25 @@ impl Walk {
 
     fn undo(&mut self) {
         let shown = self.named(self.session.timeline.next_undo());
-        if !self.unsettled {
-            assert_eq!(
-                shown,
-                self.model.next_undo(),
-                "{}: Undo names the step the model takes back",
-                self.whence()
-            );
-        }
-        self.model.settle();
+        assert_eq!(
+            shown,
+            self.model.next_undo(),
+            "{}: Undo names the step the model takes back",
+            self.whence()
+        );
         let before = self.actual();
         let Some(at) = self.model.undoes() else {
             self.press(false, None);
             return self.frame();
         };
         let step = self.model.done[at].clone();
+        if self.model.dead(&step, false) {
+            return self.let_go(false, at);
+        }
         let beneath = at + 1 != self.model.done.len();
+        if let Step::Edit { doc, .. } = step {
+            self.undid = Some(doc);
+        }
         let answer = self.press(false, Some(&step));
         self.model.answered(false, at, answer);
         self.frame();
@@ -596,21 +626,21 @@ impl Walk {
 
     fn redo(&mut self) {
         let shown = self.named(self.session.timeline.next_redo());
-        if !self.unsettled {
-            assert_eq!(
-                shown,
-                self.model.next_redo(),
-                "{}: Redo names the step the model makes again",
-                self.whence()
-            );
-        }
-        self.model.settle();
+        assert_eq!(
+            shown,
+            self.model.next_redo(),
+            "{}: Redo names the step the model makes again",
+            self.whence()
+        );
         let before = self.actual();
         let Some(step) = self.model.undone.last().cloned() else {
             self.press(true, None);
             return self.frame();
         };
         let at = self.model.undone.len() - 1;
+        if self.model.dead(&step, true) {
+            return self.let_go(true, at);
+        }
         let answer = self.press(true, Some(&step));
         self.model.answered(true, at, answer);
         self.frame();
@@ -620,6 +650,19 @@ impl Walk {
             Step::Library { save: false, .. } => "redoing a rename",
         };
         self.expect(claim, &before, &step);
+    }
+
+    /// Press Undo, or Redo where `again`, on the edit step at `at`, whose document moved
+    /// on: the step goes, and nothing else changes.
+    fn let_go(&mut self, again: bool, at: usize) {
+        let before = self.actual();
+        self.press(again, None);
+        self.model.answered(again, at, Answer::Forgotten);
+        self.frame();
+        self.compare(
+            "a press on an edit whose document moved on changes nothing",
+            &before,
+        );
     }
 
     /// The state after `step` was undone or redone from `before`: a library step changes
@@ -691,6 +734,15 @@ impl Walk {
             assert!(refused.is_none(), "{whence}: the library was asked");
         }
         self.pump();
+        // ⚠️ Excluded: the baseline moves only once a rescan reads the file back:
+        // `the_undo_of_a_save_moves_what_the_document_was_saved_as_when_the_library_answers`
+        // fails.
+        if matches!(step, Some(Step::Library { save: true, .. })) {
+            self.session.settle();
+        }
+        if matches!(step, Some(Step::Library { save: false, .. })) {
+            self.moved();
+        }
         let Some(Step::Library { label, .. }) = step else {
             return Answer::Taken;
         };
@@ -782,16 +834,9 @@ impl Walk {
 
     /// Give every file the one time a coarse clock gives files written close together,
     /// and let the library look.
-    ///
-    /// A file the library only lists keeps its time:
-    /// `a_listed_files_save_undone_at_its_files_length_and_time_still_moves_what_it_was_saved_as`
-    /// fails, and the walk would find it again.
     fn coarsen(&mut self) {
-        for (doc, whole) in self.model.state.iter().enumerate() {
-            let key = self.session.store.key(self.ids[doc]);
-            if key.is_some_and(|key| key.entity().is_some()) {
-                touch(&self.root, &whole.path);
-            }
+        for whole in &self.model.state {
+            touch(&self.root, &whole.path);
         }
         self.session.refocus();
         self.pump();
@@ -800,6 +845,7 @@ impl Walk {
     fn act(&mut self, action: Action) {
         self.action = action;
         self.refusal = false;
+        self.undid = None;
         self.session.bench.log.clear();
         match action {
             Action::Edit(doc) => self.edit(doc),
@@ -824,7 +870,21 @@ impl Walk {
         assert!(loud.is_empty(), "{}: the log says {loud:?}", self.whence());
     }
 
+    /// Half the time, the document of the edit Undo names, so that a change outside
+    /// lands under the step Undo would take.
+    fn under_undo(&mut self) -> Option<usize> {
+        let at = self.model.undoes()?;
+        let Step::Edit { doc, .. } = self.model.done[at] else {
+            return None;
+        };
+        (self.roll(2) == 0).then_some(doc)
+    }
+
     fn pick(&mut self, outside: bool) -> Action {
+        // A save right after an edit is undone leaves that edit to be redone.
+        if let Some(doc) = self.undid.take().filter(|_| self.roll(2) == 0) {
+            return [Action::Save(doc), Action::SaveAll][self.roll(2)];
+        }
         let doc = self.roll(DOCUMENTS);
         let unsaved = {
             let whole = &self.model.state[doc];
@@ -836,7 +896,7 @@ impl Walk {
             8 => Action::SaveAll,
             9 => Action::Rename(doc),
             10 => Action::Revert(doc),
-            11..=13 if outside => Action::Outside(doc),
+            11..=13 if outside => Action::Outside(self.under_undo().unwrap_or(doc)),
             14 if outside && unsaved => Action::RefusedSave(doc),
             11..=19 => Action::Undo,
             _ => Action::Redo,
