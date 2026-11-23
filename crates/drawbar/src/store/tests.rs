@@ -4637,6 +4637,56 @@ fn a_save_undone_at_its_files_length_and_time_still_moves_what_the_document_was_
 }
 
 #[test]
+#[ignore = "the undo of a save leaving a listed file of its length and time is never read again"]
+fn a_listed_files_save_undone_at_its_files_length_and_time_still_moves_what_it_was_saved_as() {
+    let root = Temp::new();
+    let made = with_gain(&Fresh::Program.bytes().unwrap(), "30");
+    fs::write(root.at("Grand.ne5p"), &made).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("Grand.ne5p");
+    touch(&root, "Grand.ne5p");
+    session.refocus();
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    touch(&root, "Grand.ne5p");
+    session.refocus();
+
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.read("Grand.ne5p"), made);
+    assert_eq!(session.bytes(id), edited);
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert!(entity.is_unsaved());
+}
+
+#[test]
+#[ignore = "an undo refused because its file changed outside stays first in Undo, and every press fails"]
+fn an_undo_refused_because_its_file_changed_outside_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    let theirs = with_gain(&edited, "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.refocus();
+    let save = Some("Undo Save “untitled.ne5p”".to_string());
+    assert_eq!(session.undo_label(), save);
+
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), theirs);
+    assert_eq!(session.bytes(id), theirs);
+    assert_ne!(
+        session.undo_label(),
+        save,
+        "Undo goes on to the step before"
+    );
+}
+
+#[test]
 fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
     let root = Temp::new();
     let mut session = Session::open(&root);
