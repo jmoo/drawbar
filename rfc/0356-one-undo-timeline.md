@@ -314,11 +314,15 @@ gesture off the frame's input:
 - otherwise nothing goes on, and the change is a step of its own.
 
 A pointer press ends the step before it, whatever gesture made it. A change in
-the frame of the press, where a widget had focus as the frame began, is that
-widget committing as the press takes its focus: it joins the widget's step,
-which then closes. Any other change in that frame, such as a slider jumping to
-the pointer, begins the step the press goes on with. A click inside a text box
-therefore splits the typing in two.
+the frame of the press, where a widget had focus as the frame began, is taken as
+that widget committing as the press takes its focus: it joins the widget's step,
+which then closes. Where no widget had focus, a change in that frame, such as a
+slider jumping to the pointer, begins the step the press goes on with. A click
+inside a text box therefore splits the typing in two.
+
+A document is noted once a frame, so a control that changes on the press, pressed
+while another widget has focus, cannot be told from that widget committing. Its
+first change joins the widget's step and the rest of its drag is a second step.
 
 A revert is always a step of its own. It closes the open step and is never
 extended, so Undo always brings back what it reverted.
@@ -374,8 +378,14 @@ Undo would take and the step Redo would take, and lets go of one that no longer
 matches. The menu therefore names only a step that would apply. That is a
 pointer comparison in a frame where nothing changed.
 
+Undo and Redo run at the end of the frame they are asked in, after the frame's
+edits are recorded, and the offer is checked then. A click and ⌘Z that reach one
+frame take back the click, whichever the frame order of keys and widgets would
+have run first.
+
 Undo and Redo are disabled while a change to the library is sent and not
-answered. A library step also waits, as today, for every change asked for to be
+answered. An edit step also waits while a save, export or send asked of its
+document waits on that document's save. A library step also waits, as today, for every change asked for to be
 sent.
 
 ### Saves and edits
@@ -481,16 +491,18 @@ and they are why these documents lose their edit steps at a save.
 | A save is refused | The baseline goes back. No step is recorded. A piano library held whole shows its plan again. |
 | A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
 | A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
+| The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. Equal bytes read saved again. Other bytes leave the document unsaved over them, and the user is asked. |
+| A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | An undo is refused and may pass later | The step stays, and the log says what is in the way. |
 | An undo can never pass | The step is let go. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
 | A file changes from outside and the user keeps their side | A body is untouched and its steps stay. An edit over the file is made again over it, and its steps no longer match. |
 | A file changes or is deleted from outside after a save of it is undone | The document holds unsaved work, so the user is asked, or the document is kept as missing. |
-| An edit is undone while a save, export or send of its document waits to be sent | What waited is dropped. It was asked of content the document no longer holds. |
 | The workspace no longer holds a document's body | There is no working copy. Its steps no longer match. |
 | An edit of a body is made while its save is in flight | It is recorded. The save's step lands after it, and the two are independent. |
 | An edit is made while an undo or redo is in flight | It is recorded. A redo in flight joins `done`. An undo in flight is dropped. |
-| An asset leaves and returns | It has a new id. The edit steps made before it left are let go. |
+| An asset leaves and returns | It has a new id. The edit steps made before it left are let go, and a save step that named it follows its file as any library step does. |
+| A document was let go of for memory since a save of it | The undo of that save marks what is remembered of it stale, and it is read from its file when next shown. |
 
 ### Order of work
 
@@ -684,8 +696,6 @@ list of whole states.
 - A piano library held whole has no edit steps. Its plan cannot be edited in the
   moment between asking for a save of it and the library's answer, because a
   refused save gives the earlier plan back and two plans cannot be merged.
-- Undoing an edit drops a save, export or send of that document still waiting to
-  be sent.
 - Undo or Redo of an edit to a WAV take decodes the take again. On a five-minute
   stereo take a redo measured about twice the cost of the edit.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
