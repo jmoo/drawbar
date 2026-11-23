@@ -191,6 +191,9 @@ pub struct DrawbarApp {
     pub(crate) store: Option<Store>,
     /// The steps Undo and Redo take, the library's among them.
     pub(crate) timeline: Timeline,
+    /// The Undo and Redo asked for this frame, in order, which run once its edits are
+    /// recorded.
+    pub(crate) undoing: Vec<crate::menu::Command>,
     /// The libraries opened lately.
     #[cfg(not(target_arch = "wasm32"))]
     recent: crate::libraries::Recent,
@@ -314,6 +317,7 @@ impl DrawbarApp {
             menubar: None,
             store,
             timeline: Timeline::default(),
+            undoing: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             recent: cc
                 .storage
@@ -397,11 +401,7 @@ impl DrawbarApp {
             ctx.request_repaint();
         }
         for command in picked {
-            if admit(command)
-                && self
-                    .offer_now(ctx, command)
-                    .is_some_and(|offer| offer.enabled)
-            {
+            if admit(command) && self.may_run(ctx, command) {
                 self.run(ctx, frame, command, acts);
             }
         }
@@ -1331,6 +1331,7 @@ impl eframe::App for DrawbarApp {
             &mut self.log,
         );
         self.record(ctx, began);
+        self.undo_asked(ctx);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1495,9 +1496,10 @@ struct Change {
 /// timeline as the frame ends. `began` is the widget that had focus as the frame began.
 ///
 /// A press ends the step before it. A change in its frame where a widget had focus is
-/// that widget committing: it joins the widget's step, which then closes. Otherwise the
-/// change, as a slider's jump to the pointer, begins the step the press goes on with. A
-/// revert is a step of its own.
+/// that widget committing: it joins the widget's step, which then closes. That holds even
+/// for another control's change, as a slider's jump, since a document is noted once a
+/// frame. Otherwise the change begins the step the press goes on with. A revert is a
+/// step of its own.
 fn follow(
     timeline: &mut Timeline,
     ctx: &egui::Context,
@@ -2849,7 +2851,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_save_and_an_undo_pressed_in_one_frame_save_the_edit_and_the_undo_waits_on_it() {
+    fn a_save_and_an_undo_pressed_in_one_frame_save_the_edit_and_undo_it_beneath_the_save() {
         let root = crate::testing::Temp::new();
         let (ctx, mut app, id) = filed(&root);
         let before = bytes(&app, id);
@@ -2866,11 +2868,60 @@ mod tests {
         until(&ctx, &mut app, |app| {
             idle(app) && root.read("untitled.ne5p") == changed
         });
-        assert_eq!(bytes(&app, id), changed, "nothing was undone");
-
-        input(&ctx, &mut app, vec![undo_key(false)]);
         assert_eq!(bytes(&app, id), before);
-        assert_eq!(root.read("untitled.ne5p"), changed);
+        assert!(app.workspace.get(id).unwrap().is_unsaved());
+
+        input(&ctx, &mut app, vec![undo_key(true)]);
+        assert_eq!(bytes(&app, id), changed);
+        assert!(!app.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    /// A click on the program's “+” and `undo` pressed in one frame, in the order given.
+    fn click_and_undo(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        said: &[crate::testing::Word],
+        undo_first: bool,
+    ) {
+        let plus = crate::testing::where_(said, "+").center();
+        input(ctx, app, vec![egui::Event::PointerMoved(plus)]);
+        let click = [
+            crate::testing::button(plus, true),
+            crate::testing::button(plus, false),
+        ];
+        let events = match undo_first {
+            true => [vec![undo_key(false)], click.to_vec()].concat(),
+            false => [click.to_vec(), vec![undo_key(false)]].concat(),
+        };
+        input(ctx, app, events);
+        input(ctx, app, Vec::new());
+    }
+
+    #[test]
+    fn a_click_and_an_undo_pressed_in_one_frame_undo_the_click() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let turned = turn_gain(&ctx, &mut app, id, "40");
+
+        click_and_undo(&ctx, &mut app, &said, false);
+
+        assert_eq!(bytes(&app, id), turned, "the turn of the gain stands");
+        assert_eq!(steps(&app), (1, 1));
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
+    }
+
+    #[test]
+    fn an_undo_pressed_before_a_click_in_one_frame_leaves_the_click_to_be_redone() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let turned = turn_gain(&ctx, &mut app, id, "40");
+
+        click_and_undo(&ctx, &mut app, &said, true);
+        assert_eq!(bytes(&app, id), turned);
+        input(&ctx, &mut app, vec![undo_key(true)]);
+
+        assert_ne!(bytes(&app, id), turned, "Redo makes the click again");
+        assert_eq!(steps(&app), (2, 0));
     }
 
     #[test]
