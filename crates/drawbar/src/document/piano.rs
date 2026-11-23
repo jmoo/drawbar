@@ -1418,6 +1418,11 @@ impl State {
         extras(facts, summary.kept, self.free, standing)
     }
 
+    /// Whether an act waits for the plan of `id` to be laid out.
+    pub fn holds_for(&self, id: u64) -> bool {
+        self.held.iter().any(|(held, _)| *held == id)
+    }
+
     /// Recompute the figures where the plan or the free space it must fit in has
     /// changed. A frame that changed neither reuses what the last one computed.
     fn summarize(&mut self) {
@@ -1506,9 +1511,11 @@ impl State {
     }
 
     /// Take `plan` up as the plan of `entity`, or none, as an undo or a revert leaves it.
-    /// An apply in flight for another plan is dropped when it answers.
+    /// An apply in flight for another plan is dropped when it answers, and so is every act
+    /// waiting for one: it was asked of content the document no longer holds.
     pub fn adopt(&mut self, entity: &LocalEntity, plan: Option<&Plan>) {
         let id = entity.id;
+        self.held.retain(|(held, _)| *held != id);
         match plan.filter(|plan| !plan.is_empty()) {
             Some(plan) => {
                 let against = mark(entity);

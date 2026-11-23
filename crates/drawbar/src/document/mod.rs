@@ -763,8 +763,16 @@ impl Document {
         }
     }
 
+    /// Whether an act waits for the plan of document `id` to be laid out.
+    pub fn waits_for_lay_out(&self, id: u64) -> bool {
+        self.piano.holds_for(id)
+    }
+
     /// Put back a working copy the document held, with no step, and return whether it
     /// holds it now. Every editor takes it up, and keeps where the user is looking.
+    ///
+    /// ⚠️ An act waiting for the document's plan to be laid out is dropped, since it was
+    /// asked of content the document no longer holds.
     pub fn hold(
         &mut self,
         id: u64,
@@ -5081,6 +5089,52 @@ mod tests {
                 } = self;
                 document.put_back(applied, workspace, log);
             }
+        }
+    }
+
+    /// An act waiting for a plan to be laid out is asked of that plan: a revert drops it,
+    /// and so does an undo, so it never runs on content nobody asked to carry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_revert_or_an_undo_drops_an_act_waiting_on_the_lay_out() {
+        for revert in [true, false] {
+            let mut open = Open::file("Test Piano.npno", piano_bytes());
+            open.frame(Vec::new());
+            let before = open.working();
+            renamed_piano(&mut open);
+            let (ctx, id) = (open.ctx.clone(), open.id);
+            let export = crate::browser::Act::Export(id);
+            assert_eq!(
+                open.document.piano.hold(&ctx, export, &open.workspace),
+                None
+            );
+            assert!(open.document.waits_for_lay_out(id));
+
+            let acts = match revert {
+                true => vec![crate::browser::Act::Revert(id)],
+                false => {
+                    assert!(open.hold(&before));
+                    Vec::new()
+                }
+            };
+            let mut ran = Vec::new();
+            let mut acts = acts;
+            loop {
+                let Open {
+                    document,
+                    workspace,
+                    queue,
+                    log,
+                    ..
+                } = &mut open;
+                ran.extend(document.settle(&ctx, std::mem::take(&mut acts), workspace, queue, log));
+                if !open.document.piano.applying() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(ran, [], "revert {revert}: nothing waited runs");
+            assert!(!open.document.waits_for_lay_out(id));
         }
     }
 
