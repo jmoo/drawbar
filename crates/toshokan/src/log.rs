@@ -142,11 +142,13 @@ pub enum Op {
         take: Option<Run>,
     },
     /// A write of the existence register: the entity is deleted. `observed` names
-    /// the field writes the deleting writer had seen.
+    /// the field writes the deleting writer had seen, and `into` the entity a join
+    /// gave what this one held.
     Delete {
         entity: EntityId,
         replaces: Vec<Ref>,
         observed: Vec<Observed>,
+        into: Option<EntityId>,
         take: Option<Run>,
     },
     /// A register write replacing the writes it names; `None` clears.
@@ -859,6 +861,8 @@ enum OpOut<'a> {
         replaces: &'a [Ref],
         observed: &'a [Observed],
         #[serde(skip_serializing_if = "Option::is_none")]
+        into: Option<EntityId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         take: Option<&'a Run>,
     },
     Write {
@@ -937,11 +941,13 @@ impl Serialize for Op {
                 entity,
                 replaces,
                 observed,
+                into,
                 take,
             } => OpOut::Delete {
                 entity: *entity,
                 replaces,
                 observed,
+                into: *into,
                 take: take.as_ref(),
             },
             Self::Write {
@@ -1049,6 +1055,8 @@ struct DeleteIn {
     entity: EntityId,
     replaces: Vec<Ref>,
     observed: Vec<Observed>,
+    #[serde(default)]
+    into: Option<EntityId>,
     #[serde(default)]
     take: Option<Run>,
 }
@@ -1179,12 +1187,14 @@ fn decode_op(json: &str) -> Option<Op> {
                  entity,
                  replaces,
                  observed,
+                 into,
                  take,
                  ..
              }| Op::Delete {
                 entity,
                 replaces,
                 observed,
+                into,
                 take,
             },
         ),
@@ -1344,6 +1354,7 @@ mod tests {
                         at: r(5),
                     },
                 ],
+                into: Some(EntityId::from_u128(8)),
                 take: Some(run()),
             },
             Op::Write {

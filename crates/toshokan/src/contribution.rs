@@ -85,17 +85,35 @@ impl FieldKey {
     }
 }
 
+/// What a write of an entity's existence register says.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Exists {
+    /// `into` names the entity a join gave what this one held.
+    Deleted {
+        into: Option<EntityId>,
+    },
+    Created,
+}
+
+impl Exists {
+    pub fn created(self) -> bool {
+        matches!(self, Self::Created)
+    }
+}
+
 /// What a write sets its field to.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Value {
-    /// Existence: created, or deleted.
-    Exist(bool),
+    Exist(Exists),
     /// A register's value; `None` clears.
     Register(Option<Raw>),
     /// A set member: added, or removed.
     Member(bool),
     /// An entity's file; `pin` for a binding a scan derived.
-    File { fact: Option<FileFact>, pin: bool },
+    File {
+        fact: Option<FileFact>,
+        pin: bool,
+    },
 }
 
 /// One write: of which field, by which entry, and what.
@@ -200,7 +218,7 @@ pub fn said(op: &Op) -> Said {
         } => write(
             &mut said,
             FieldKey::Exist(*entity),
-            Value::Exist(true),
+            Value::Exist(Exists::Created),
             replaces,
             take.as_ref(),
         ),
@@ -208,12 +226,13 @@ pub fn said(op: &Op) -> Said {
             entity,
             replaces,
             observed,
+            into,
             take,
         } => {
             write(
                 &mut said,
                 FieldKey::Exist(*entity),
-                Value::Exist(false),
+                Value::Exist(Exists::Deleted { into: *into }),
                 replaces,
                 take.as_ref(),
             );
@@ -353,6 +372,18 @@ pub fn forks(kind: &EntryKind) -> &[Forked] {
 }
 
 impl Contribution {
+    /// Records that the delete `own` joined `entity` into `into`, where it is the
+    /// delete held. A build that does not know of joins carries what named an
+    /// earlier delete past it, and keeps the entry of one it folded whole.
+    fn joined(&mut self, entity: EntityId, own: Own, into: EntityId) {
+        let plain = Value::Exist(Exists::Deleted { into: None });
+        if let Some(held) = self.own.get_mut(&FieldKey::Exist(entity)) {
+            if held.at == own && held.value == plain {
+                held.value = Value::Exist(Exists::Deleted { into: Some(into) });
+            }
+        }
+    }
+
     /// Folds `writer`'s own `entry`, the successor of every entry folded before.
     pub fn fold(&mut self, writer: WriterId, entry: &Entry) {
         let own = entry.own();
@@ -649,6 +680,15 @@ struct EntityOut {
     takes: Vec<TakenOut>,
 }
 
+/// An own delete an entity's `writes` hold, with the entity it was joined into.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JoinedOut {
+    entity: EntityId,
+    own: Own,
+    into: EntityId,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DismissalOut {
@@ -673,6 +713,8 @@ struct ContributionOut {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     entities: BTreeMap<EntityId, EntityOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    joined: Vec<JoinedOut>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dismissals: Vec<DismissalOut>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     trash: Vec<TrashOut>,
@@ -687,7 +729,7 @@ struct ContributionOut {
 impl HeldOut {
     fn of(field: &FieldKey, held: &Held) -> Option<Self> {
         let (set, off, pin) = match &held.value {
-            Value::Exist(created) => (None, !created, false),
+            Value::Exist(exists) => (None, !exists.created(), false),
             Value::Register(value) => (value.clone(), value.is_none(), false),
             Value::Member(added) => (None, !added, false),
             Value::File { fact, pin } => {
@@ -715,7 +757,8 @@ impl HeldOut {
     fn read(self, entity: EntityId) -> Option<(FieldKey, Held)> {
         let field = FieldOut::read(self.key, self.value, self.file).field(entity)?;
         let value = match (&field, self.set, self.off, self.pin) {
-            (FieldKey::Exist(_), None, off, false) => Value::Exist(!off),
+            (FieldKey::Exist(_), None, false, false) => Value::Exist(Exists::Created),
+            (FieldKey::Exist(_), None, true, false) => Value::Exist(Exists::Deleted { into: None }),
             (FieldKey::Register(..), Some(value), false, false) => Value::Register(Some(value)),
             (FieldKey::Register(..), None, true, false) => Value::Register(None),
             (FieldKey::Member(..), None, off, false) => Value::Member(!off),
@@ -743,6 +786,13 @@ impl Serialize for Contribution {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut out = ContributionOut::default();
         for (field, held) in &self.own {
+            if let Value::Exist(Exists::Deleted { into: Some(into) }) = held.value {
+                out.joined.push(JoinedOut {
+                    entity: field.entity(),
+                    own: held.at,
+                    into,
+                });
+            }
             let held = HeldOut::of(field, held)
                 .ok_or_else(|| serde::ser::Error::custom("a file fact that is not JSON"))?;
             out.entities
@@ -828,8 +878,9 @@ impl Serialize for Contribution {
 }
 
 /// A contribution's members, as [`ContributionOut`] names them.
-const STATE: [&str; 6] = [
+const STATE: [&str; 7] = [
     "entities",
+    "joined",
     "dismissals",
     "trash",
     "settled",
@@ -902,6 +953,24 @@ impl<'de> Deserialize<'de> for Contribution {
                     .is_some()
                 {
                     return Err(bad("two takes in one place"));
+                }
+            }
+        }
+        for JoinedOut { entity, own, into } in out.joined {
+            contribution.joined(entity, own, into);
+        }
+        for (hash, raw) in &out.extended {
+            let Ok(entry) = Entry::kept(raw.as_str().to_owned(), *hash) else {
+                continue;
+            };
+            for op in ops(entry.kind()) {
+                if let Op::Delete {
+                    entity,
+                    into: Some(into),
+                    ..
+                } = op
+                {
+                    contribution.joined(*entity, entry.own(), *into);
                 }
             }
         }
@@ -1075,6 +1144,7 @@ mod tests {
             entity: E,
             replaces: vec![],
             observed: vec![],
+            into: None,
             take: None,
         };
         let entries = chain(vec![
@@ -1133,6 +1203,7 @@ mod tests {
             entity: E,
             replaces: vec![],
             observed: vec![],
+            into: None,
             take: None,
         });
         let entries = chain(ops.into_iter().map(|op| (op, vec![])).collect());
@@ -1221,6 +1292,7 @@ mod tests {
                         target: Target::Member("tags".into(), raw(r#""y""#)),
                         at: them(5),
                     }],
+                    into: None,
                     take: None,
                 },
                 vec![],
@@ -1248,6 +1320,70 @@ mod tests {
         let json = serde_json::to_string(&contribution).unwrap();
         let read: Contribution = serde_json::from_str(&json).unwrap();
         assert_eq!(read, contribution, "{json}");
+    }
+
+    fn joined(entries: &[Entry]) -> Contribution {
+        let contribution = folded(entries);
+        let json = serde_json::to_string(&contribution).unwrap();
+        let read: Contribution = serde_json::from_str(&json).unwrap();
+        assert_eq!(read, contribution, "{json}");
+        read
+    }
+
+    fn delete(into: Option<EntityId>) -> Op {
+        Op::Delete {
+            entity: E,
+            replaces: vec![],
+            observed: vec![],
+            into,
+            take: None,
+        }
+    }
+
+    const INTO: EntityId = EntityId::from_u128(3);
+
+    #[test]
+    fn a_packed_delete_keeps_the_entity_it_was_joined_into() {
+        let entries = chain(vec![(delete(Some(INTO)), vec![])]);
+        let held = joined(&entries).own[&FieldKey::Exist(E)].value.clone();
+        assert_eq!(held, Value::Exist(Exists::Deleted { into: Some(INTO) }));
+    }
+
+    #[test]
+    fn a_join_record_naming_a_delete_no_longer_held_is_left_out() {
+        let create = Op::Create {
+            entity: E,
+            replaces: vec![],
+            take: None,
+        };
+        let entries = chain(vec![
+            (delete(Some(INTO)), vec![]),
+            (create, vec![]),
+            (delete(None), vec![]),
+        ]);
+        let mut json = serde_json::to_value(folded(&entries[..2])).unwrap();
+        let carried = json["joined"].take();
+        assert_eq!(carried[0]["into"], serde_json::json!(INTO), "{carried}");
+        let mut json = serde_json::to_value(folded(&entries)).unwrap();
+        json["joined"] = carried;
+        let read: Contribution = serde_json::from_value(json).unwrap();
+        assert_eq!(read, folded(&entries));
+    }
+
+    #[test]
+    fn a_join_a_build_kept_as_an_entry_it_did_not_know_is_read_from_the_entry() {
+        let entries = chain(vec![(delete(Some(INTO)), vec![])]);
+        let join = &entries[1];
+        let mut kept = folded(&entries);
+        let plain = Value::Exist(Exists::Deleted { into: None });
+        kept.own.get_mut(&FieldKey::Exist(E)).unwrap().value = plain;
+        kept.extended.insert((join.hash(), raw(&join.json())));
+        let json = serde_json::to_string(&kept).unwrap();
+        assert!(!json.contains("joined"), "{json}");
+
+        let read: Contribution = serde_json::from_str(&json).unwrap();
+        let held = &read.own[&FieldKey::Exist(E)].value;
+        assert_eq!(*held, Value::Exist(Exists::Deleted { into: Some(INTO) }));
     }
 
     #[test]

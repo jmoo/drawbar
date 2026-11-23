@@ -86,10 +86,11 @@
 //! [`View::resolve`] gives the entity an id names now, which is another once its
 //! target is joined, or `None` while its target is deleted or has not arrived.
 //! The value stays as written, so an undo or a sync resolves it again.
-//! [`EntityView::relations`] reads an entity's values with what each names,
-//! [`View::relations`] every entity's, and [`View::referrers`] the entities that
-//! name one. A change to a target is no change to the entities that name it:
-//! [`View::changed_since`] lists the target, whose referrers show it differently.
+//! [`EntityView::relations`] reads the values of an entity's set with what each
+//! names, [`View::relations`] every entity's, and [`View::referrers`] the entities
+//! that name one. A change to a target is no change to the entities that name it:
+//! [`View::changed_since`] lists the target, and an app redraws its referrers in
+//! the earlier view and in the new one.
 //!
 //! ## Scans
 //!
@@ -105,8 +106,8 @@
 //! Two writers can each make an entity of one file before either sees the other's.
 //! The file is then the lowest entity's, and [`View::joined`] lists each other one,
 //! shown without a file. An app commits [`Intent::join`](intent::Intent::join) to
-//! give the lowest what each holds and delete the rest. The lowest keeps their
-//! ids, so what named them names it.
+//! give the lowest what each holds and delete the rest. What named one of the
+//! rest then names the lowest.
 //!
 //! ## Commits and undo
 //!

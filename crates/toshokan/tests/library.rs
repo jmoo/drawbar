@@ -650,6 +650,8 @@ through_both!(
     a_join_gives_the_lower_entity_what_both_held_and_no_undo_takes_it_back,
     writers_joining_one_entity_at_once_converge,
     what_names_an_entity_a_scan_joined_names_the_one_bound_to_the_file,
+    a_join_taken_from_a_forked_branch_still_says_what_the_entity_was_joined_into,
+    an_entity_joined_into_one_a_scan_joins_names_the_one_bound_to_the_file,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
     undoing_a_delete_puts_a_file_moved_outside_back_where_it_was,
@@ -2048,6 +2050,51 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
     );
 }
 
+fn a_join_taken_from_a_forked_branch_still_says_what_the_entity_was_joined_into<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let made = [
+        create(&mut a, "song.npno", b"song"),
+        create(&mut a, "other.npno", b"other"),
+    ];
+    let (low, high) = (made[0].min(made[1]), made[0].max(made[1]));
+    let built = a.commit("Build", |i| {
+        let (i, _) = i.create(|e| {
+            e.set(PLAYS, high);
+        });
+        i
+    });
+    let program = built.unwrap().created[0];
+    a.close().unwrap();
+    let [mut original, mut copy] = fork::<F>(&here, "a", 2, &clock, |library, side| {
+        let done = match side {
+            "there" => library.commit("Join", |i| i.join(high, low)),
+            _ => library.commit("Tag", |i| i.add(low, TAGS, tag(side))),
+        };
+        done.unwrap();
+    });
+    original.refresh().unwrap();
+    copy.refresh().unwrap();
+    let view = original.view();
+    assert_eq!(view.resolve(high), Some(high), "neither branch is merged");
+    let joined = FactChange::Delete {
+        entity: high,
+        into: Some(low),
+    };
+    let item = item_making(&view, &joined);
+    original
+        .commit("Keep there", |i| i.take(item.run, joined))
+        .unwrap();
+    copy.refresh().unwrap();
+    for view in [original.view(), copy.view()] {
+        assert!(view.entity(high).is_none());
+        assert_eq!(view.resolve(high), Some(low));
+        assert_eq!(view.referrers(PLAYS, low), [program]);
+    }
+}
+
 /// Forks the writer whose local root `here` holds: it resumes on `here` and on a
 /// copy of that root, and each instance commits what `branch` makes of its
 /// library and the name of its side, `"here"` or `"there"`. Both stay open.
@@ -2890,10 +2937,12 @@ fn what_names_an_entity_a_scan_joined_names_the_one_bound_to_the_file<F: Facade>
         assert_eq!(view.resolve(high), Some(low), "{when}");
         assert_eq!(view.referrers(PLAYS, low), [program], "{when}");
         assert_eq!(view.referrers(PLAYS, high), [program], "{when}");
-        let [related] = &view.entity(program).unwrap().relations(PLAYS).related[..] else {
+        let played = view.entity(program).unwrap().get(PLAYS);
+        assert_eq!(played, Field::Value(high), "{when}");
+        let [related] = &view.relations(PLAYS).related[..] else {
             panic!("{when}: one value");
         };
-        assert_eq!((related.value, related.to), (high, Some(low)), "{when}");
+        assert_eq!((related.from, related.to), (program, Some(low)), "{when}");
         let file = view.entity(low).unwrap().file().unwrap();
         assert_eq!(
             (file.path, file.state),
@@ -2909,6 +2958,44 @@ fn what_names_an_entity_a_scan_joined_names_the_one_bound_to_the_file<F: Facade>
     a.commit("Join", |i| i.join(high, low)).unwrap();
     b.refresh().unwrap();
     assert!(a.view().entity(high).is_none());
+    named(&a, "joined");
+    named(&b, "joined, as another writer reads it");
+}
+
+fn an_entity_joined_into_one_a_scan_joins_names_the_one_bound_to_the_file<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, made) = adopted_by_both::<F>(&folder, &clock, [None, None]);
+    let (low, high) = (made[0].min(made[1]), made[0].max(made[1]));
+    let naming = match made[0] == high {
+        true => &mut a,
+        false => &mut b,
+    };
+    let built = naming.commit("Build", |i| {
+        let (i, extra) = i.create(|e| {
+            e.set(ORIGIN, "extra".to_owned());
+        });
+        let (i, _) = i.create(|e| {
+            e.set(PLAYS, extra);
+        });
+        i
+    });
+    let [extra, program] = built.unwrap().created[..] else {
+        panic!("two entities");
+    };
+    naming.commit("Join", |i| i.join(extra, high)).unwrap();
+    a.refresh().unwrap();
+    b.refresh().unwrap();
+    let named = |writer: &F, when: &str| {
+        let view = writer.view();
+        assert_eq!(view.resolve(extra), Some(low), "{when}");
+        assert_eq!(view.referrers(PLAYS, low), [program], "{when}");
+    };
+    named(&a, "before the scan's join is logged");
+    named(&b, "before the scan's join is logged");
+
+    a.commit("Join", |i| i.join(high, low)).unwrap();
+    b.refresh().unwrap();
     named(&a, "joined");
     named(&b, "joined, as another writer reads it");
 }

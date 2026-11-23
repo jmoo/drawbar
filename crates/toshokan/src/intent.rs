@@ -24,7 +24,7 @@ use crate::merge::{Folded, Write};
 use crate::path::RelPath;
 use crate::plan::{Content, Expect, FactChange, FileChange, Plan};
 use crate::report::Joined;
-use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value, JOINED};
+use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value};
 
 /// The library an intent is built for and committed through: a driver's.
 pub trait Driver {
@@ -141,15 +141,17 @@ impl<L: Driver> Intent<L> {
     /// Deletes the entity, observing every field write this writer has seen. Its
     /// file stays where it is unless the intent also trashes it.
     pub fn delete(mut self, entity: EntityId) -> Self {
-        self.plan.facts.push((FactChange::Delete { entity }, None));
+        let delete = FactChange::Delete { entity, into: None };
+        self.plan.facts.push((delete, None));
         self
     }
 
     /// Gives `into` each member of each set `entity` holds that `into` does not,
     /// and `entity`'s shown value of each register `into` holds no value of, then
-    /// deletes `entity`. `into` also keeps `entity`'s id, so a relation that names
-    /// `entity` resolves to `into` ([`crate::View::resolve`]). Refused unless both
-    /// are shown and differ. An intent that only joins entities is no step of
+    /// deletes `entity`. The delete names `into`, so a relation that names
+    /// `entity` resolves to `into` ([`crate::View::resolve`]). Where the intent
+    /// also joins `into` into another entity, that one gets it all. Refused unless
+    /// both are shown and differ. An intent that only joins entities is no step of
     /// undo, which takes its writes for another writer's.
     pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
         self.plan.joins.push(Joined { entity, into });
@@ -406,7 +408,8 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 ///
 /// Refuses a key the schema does not declare with the change's kind, a change
 /// to an entity that is neither shown, created nor revived by the plan, and a
-/// join of an entity not shown, into one not shown or into itself. Of several
+/// join of an entity not shown, into one not shown or into itself. A join into
+/// an entity the plan joins into another is a join into that other. Of several
 /// changes to one register of one entity, or to one entity's existence, the last
 /// is logged. A plan that changes nothing is refused unless it reverses an entry
 /// or dismisses a run.
@@ -500,11 +503,14 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                     take,
                 }
             }
-            FactChange::Delete { entity } => {
+            FactChange::Delete { entity, into } => {
                 if !folded.present(*entity) && !revived.contains(entity) {
                     return Err(Invalid::NoEntity(*entity));
                 }
-                delete(folded, *entity, take)
+                if *into == Some(*entity) {
+                    return Err(Invalid::JoinedIntoItself(*entity));
+                }
+                delete(folded, *entity, *into, take)
             }
             FactChange::Revive { entity } => {
                 let replaces = existence(folded, *entity);
@@ -531,7 +537,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         ops.push(op);
     }
     for joined in &plan.joins {
-        ops.extend(join(folded, schema, *joined)?);
+        ops.extend(join(folded, schema, settled(&plan.joins, *joined)?)?);
     }
     if !plan.dismiss.is_empty() {
         ops.push(Op::Dismiss {
@@ -541,10 +547,28 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
     Ok(ops)
 }
 
+/// `joined` into the entity `joins`, the plan's joins, leave: where they join
+/// `joined.into` into another, that other, so nothing given to an entity the plan
+/// deletes is lost with it. Refuses joins that lead back to where they began.
+fn settled(joins: &[Joined], joined: Joined) -> Result<Joined, Invalid> {
+    let mut into = joined.into;
+    for _ in joins {
+        match joins.iter().find(|next| next.entity == into) {
+            Some(next) => into = next.into,
+            None => {
+                return Ok(Joined {
+                    entity: joined.entity,
+                    into,
+                })
+            }
+        }
+    }
+    Err(Invalid::JoinedIntoItself(joined.entity))
+}
+
 /// The ops that give `joined.into` what `joined.entity` holds and it does not:
-/// each member of each set, [`JOINED`] among them, and the shown value of each
-/// register it holds no value of. Then `joined.entity`'s id as a member of
-/// `joined.into`'s [`JOINED`], and the delete of `joined.entity`.
+/// each member of each set, and the shown value of each register it holds no
+/// value of. Then the delete of `joined.entity`, which names `joined.into`.
 fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Invalid> {
     let Joined { entity, into } = joined;
     if entity == into {
@@ -553,18 +577,13 @@ fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Inv
     if let Some(absent) = [entity, into].into_iter().find(|e| !folded.present(*e)) {
         return Err(Invalid::NoEntity(absent));
     }
-    let own = Raw::of(&entity).map_err(|error| Invalid::Unencodable {
-        key: JOINED.name().to_owned(),
-        reason: error.to_string(),
-    })?;
     let mut ops = Vec::new();
     for key in schema.keys() {
         let name = key.name;
         match key.kind {
             KeyKind::Set => {
                 let held = folded.members(into, name);
-                let own = (name == JOINED.name()).then(|| own.clone());
-                let lacking = folded.members(entity, name).into_iter().chain(own);
+                let lacking = folded.members(entity, name).into_iter();
                 let lacking = lacking.filter(|member| held.binary_search(member).is_err());
                 ops.extend(lacking.map(|value| Op::Add {
                     replaces: member_writes(folded, into, name, &value),
@@ -584,12 +603,13 @@ fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Inv
             }
         }
     }
-    ops.push(delete(folded, entity, None));
+    ops.push(delete(folded, entity, Some(into), None));
     Ok(ops)
 }
 
-/// A delete of `entity` observing every live field write of it.
-fn delete(folded: &Folded, entity: EntityId, take: Option<Run>) -> Op {
+/// A delete of `entity` observing every live field write of it, which names the
+/// entity `into` where a join deletes it.
+fn delete(folded: &Folded, entity: EntityId, into: Option<EntityId>, take: Option<Run>) -> Op {
     let observed = folded.live_writes(entity).into_iter();
     let observed = observed.filter_map(|(field, write)| {
         Some(Observed {
@@ -601,6 +621,7 @@ fn delete(folded: &Folded, entity: EntityId, take: Option<Run>) -> Op {
         entity,
         replaces: existence(folded, entity),
         observed: observed.collect(),
+        into,
         take,
     }
 }
@@ -612,7 +633,7 @@ fn superseded(rest: &[(FactChange, Option<Run>)], change: &FactChange) -> bool {
         FactChange::Set { entity, key, .. } | FactChange::Clear { entity, key } => {
             Some((*entity, Some(key.clone())))
         }
-        FactChange::Delete { entity } | FactChange::Revive { entity } => Some((*entity, None)),
+        FactChange::Delete { entity, .. } | FactChange::Revive { entity } => Some((*entity, None)),
         FactChange::Add { .. } | FactChange::Remove { .. } | FactChange::File { .. } => None,
     };
     let Some(own) = slot(change) else {

@@ -1,15 +1,15 @@
 //! Views: immutable values the app renders from.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::binding::{Bindings, Scanned};
 use crate::ids::EntityId;
-use crate::merge::{side_by_side, Folded, Paired, Shown};
+use crate::merge::{side_by_side, Folded, Paired};
 use crate::path::RelPath;
 use crate::report::{Fork, Gap, Item, Joined, WriterInfo};
 use crate::schema::{
-    Field, Key, KeyKind, Keyed, Members, Raw, Register, Relates, Set, Value, Written, JOINED,
+    Field, Key, KeyKind, Keyed, Members, Raw, Register, Relates, Set, Value, Written,
 };
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
@@ -25,9 +25,6 @@ struct Shared {
     parts: Parts,
     /// The entity bound to each file in sync or changed outside.
     at: BTreeMap<RelPath, EntityId>,
-    /// The lowest entity shown whose [`JOINED`] holds each id, from the first
-    /// [`View::resolve`] of an id that is not shown.
-    joined: OnceLock<BTreeMap<EntityId, EntityId>>,
 }
 
 /// What a view is built from.
@@ -136,11 +133,7 @@ impl View {
                 at.entry(file.path.clone()).or_insert(*entity);
             }
         }
-        Self(Arc::new(Shared {
-            parts,
-            at,
-            joined: OnceLock::new(),
-        }))
+        Self(Arc::new(Shared { parts, at }))
     }
 
     pub(crate) fn parts(&self) -> &Parts {
@@ -150,11 +143,7 @@ impl View {
     /// Each entity shown holding a value under `key`, by id, with the values it
     /// holds there, sorted and once each.
     fn holding(&self, key: Key) -> impl Iterator<Item = (EntityId, Vec<&Raw>)> {
-        let shown = self.parts().folded.each_shown();
-        shown.filter_map(move |(entity, shown)| {
-            let held = held(shown?, key);
-            (!held.is_empty()).then_some((entity, held))
-        })
+        self.parts().folded.holding(key.kind, key.name)
     }
 
     /// `held`, the values `from` holds under a relation's key, each with what it
@@ -243,36 +232,46 @@ impl View {
         Some(EntityView { view: self, id })
     }
 
-    /// The entity shown that `named` names now: itself while it is shown, or the
-    /// entity it was joined into ([`crate::intent::Intent::join`]); and, of either,
-    /// the entity a scan found it joined into ([`View::joined`]). `None` while no
-    /// entity shown is it: it was deleted, or its writer's entries have not
-    /// arrived. A deleted entity brought back resolves again.
+    /// The entity shown that `named` names now: itself while it is shown; else
+    /// the lowest of the entities shown that the joins which deleted it lead to
+    /// ([`crate::intent::Intent::join`]); and, of either, the entity a scan found
+    /// it joined into ([`View::joined`]). `None` while no entity shown is it: it
+    /// was deleted, or its writer's entries have not arrived. A deleted entity
+    /// brought back resolves again.
+    ///
+    /// The entity has a file only where [`EntityView::file`] says so.
     pub fn resolve(&self, named: EntityId) -> Option<EntityId> {
         let shown = match self.parts().folded.present(named) {
             true => named,
-            false => *self.joined_into().get(&named)?,
+            false => self.joined_to(named)?,
         };
         let scanned = &self.parts().bindings.report.joined;
         let found = scanned.binary_search_by_key(&shown, |joined| joined.entity);
         Some(found.map_or(shown, |at| scanned[at].into))
     }
 
-    fn joined_into(&self) -> &BTreeMap<EntityId, EntityId> {
-        self.0.joined.get_or_init(|| {
-            let mut into = BTreeMap::new();
-            for (holder, member) in self.parts().folded.holding(JOINED.name()) {
-                if let Ok(joined) = member.decode::<EntityId>() {
-                    into.entry(joined).or_insert(holder);
-                }
+    /// The lowest entity shown that the joins which deleted `gone` lead to, each
+    /// followed through the entities joined in turn.
+    fn joined_to(&self, gone: EntityId) -> Option<EntityId> {
+        let folded = &self.parts().folded;
+        let mut seen = BTreeSet::from([gone]);
+        let mut next = folded.joined_into(gone);
+        let mut lowest: Option<EntityId> = None;
+        while let Some(into) = next.pop() {
+            if !seen.insert(into) {
+                continue;
             }
-            into
-        })
+            match folded.present(into) {
+                true => lowest = Some(lowest.map_or(into, |lowest| lowest.min(into))),
+                false => next.extend(folded.joined_into(into)),
+            }
+        }
+        lowest
     }
 
     /// Every value of the relation `key`, a register or a set, with what each
     /// names now. A register holds the value of each write that survives, so each
-    /// side of a conflict is read.
+    /// side of a conflict is read; [`EntityView::get`] says which is shown.
     pub fn relations<K>(&self, key: K) -> Relations<K::Value>
     where
         K: Keyed<Value: Relates>,
@@ -287,22 +286,28 @@ impl View {
         relations
     }
 
-    /// The entities whose relation `key` names `target`, or the entity `target`
-    /// [resolves](View::resolve) to, by id: each as it resolves, once. A value
-    /// that does not decode names nothing here; [`View::relations`] lists those.
+    /// The entities that hold a value of the relation `key` naming `target`, or
+    /// naming what `target` [resolves](View::resolve) to, by id and once each. A
+    /// value that does not decode names nothing here; [`View::relations`] lists
+    /// those.
     pub fn referrers<K>(&self, key: K, target: EntityId) -> Vec<EntityId>
     where
         K: Keyed<Value: Relates>,
     {
         let now = self.resolve(target);
-        let related = self.relations(key).related.into_iter();
-        let naming = related.filter(|related| {
-            related.value.target() == target || (now.is_some() && related.to == now)
-        });
-        let from: BTreeSet<EntityId> = naming
-            .map(|related| self.resolve(related.from).unwrap_or(related.from))
-            .collect();
-        from.into_iter().collect()
+        let mut from = Vec::new();
+        for (holder, held) in self.holding(key.key()) {
+            let names = |raw: &&Raw| {
+                raw.decode::<K::Value>().is_ok_and(|value| {
+                    let named = value.target();
+                    named == target || (now.is_some() && self.resolve(named) == now)
+                })
+            };
+            if held.iter().any(names) {
+                from.push(holder);
+            }
+        }
+        from
     }
 
     /// Every conflict among the entities shown, sorted.
@@ -426,13 +431,6 @@ pub struct Changed {
     pub files: BTreeSet<RelPath>,
 }
 
-/// The values `shown` holds under `key`, sorted and once each.
-fn held<'a>(shown: Shown<'a>, key: Key) -> Vec<&'a Raw> {
-    let values = shown.values.into_iter();
-    let under = values.filter(|(kind, name, _)| *kind == key.kind && *name == key.name);
-    under.map(|(_, _, value)| value).collect()
-}
-
 /// The keys whose entries differ, of two maps [`side_by_side`].
 fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
     pairs: impl Iterator<Item = Paired<'a, K, V>> + 'a,
@@ -495,20 +493,16 @@ impl EntityView<'_> {
         }
     }
 
-    /// The entity's values of the relation `key`, a register or a set, with what
-    /// each names now, as [`View::relations`] reads them.
-    pub fn relations<K>(&self, key: K) -> Relations<K::Value>
-    where
-        K: Keyed<Value: Relates>,
-    {
+    /// The members of the relation `key`, each with what it names now. A relation
+    /// kept in a register is read with [`EntityView::get`] and [`View::resolve`].
+    pub fn relations<T: Relates>(&self, key: Set<T>) -> Relations<T> {
         let mut relations = Relations {
             related: Vec::new(),
             unreadable: Vec::new(),
         };
-        if let Some(shown) = self.view.parts().folded.shown(self.id) {
-            self.view
-                .relate(&mut relations, self.id, held(shown, key.key()));
-        }
+        let folded = &self.view.parts().folded;
+        let held = folded.held(self.id, KeyKind::Set, key.name());
+        self.view.relate(&mut relations, self.id, held);
         relations
     }
 

@@ -83,8 +83,13 @@ pub enum FactChange {
         value: Raw,
     },
     /// Ends the entity, observing the field writes this writer has seen. A
-    /// concurrent write it did not observe keeps the entity, in conflict.
-    Delete { entity: EntityId },
+    /// concurrent write it did not observe keeps the entity, in conflict. `into`
+    /// names the entity a join gave what this one held, which what named this
+    /// one then names ([`crate::View::resolve`]).
+    Delete {
+        entity: EntityId,
+        into: Option<EntityId>,
+    },
     /// Brings a deleted entity back.
     Revive { entity: EntityId },
     /// Says where the entity's file is, moving nothing, as undoing a delete

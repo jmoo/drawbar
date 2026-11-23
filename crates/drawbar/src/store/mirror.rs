@@ -4650,9 +4650,8 @@ struct Held {
 /// The rows Kept apart lists of `changes`, as `held` says the window holds each asset:
 /// one for each change the user would tell apart. A tag's entry in the library's list
 /// of tags goes with the row that puts the tag on an asset, which takes it too, the
-/// list's own making goes with its first entry, the id an asset keeps of one joined
-/// into it goes with the row that removes that one, and a file change that names where
-/// the asset's file is already says nothing.
+/// list's own making goes with its first entry, and a file change that names where the
+/// asset's file is already says nothing.
 fn kept_rows(
     changes: &[super::KeptChange],
     held: impl Fn(toshokan::EntityId) -> Option<Held>,
@@ -4660,7 +4659,6 @@ fn kept_rows(
     use super::KeptDo;
     let catalog = What::Field(TAG_NAMES.name().to_string());
     let worn = What::Field(TAGS.name().to_string());
-    let joined = What::Field(toshokan::schema::JOINED.name().to_string());
     let gained = |tag: &str| {
         changes.iter().any(|change| {
             change.what == worn && matches!(&change.takes, Some(KeptDo::Gain(gain)) if gain == tag)
@@ -4675,7 +4673,6 @@ fn kept_rows(
         let asset = held(change.entity);
         let said = match (&change.what, &change.takes) {
             (What::Created, _) if lists.contains(&change.entity) => return None,
-            (what, _) if *what == joined => return None,
             (what, Some(KeptDo::Gain(tag))) if *what == catalog && gained(tag) => return None,
             (what, Some(KeptDo::Gain(tag))) if *what == catalog => format!("Made the tag “{tag}”"),
             (what, Some(KeptDo::Lose(tag))) if *what == catalog => {
@@ -4838,7 +4835,6 @@ mod tests {
                 Some("“Grand” gains the tag “Sunday”"),
             ),
             (change(9, catalog, Some(Gain("Sunday".into()))), None),
-            (change(1, "joined", Some(Gain("0".repeat(32)))), None),
             (
                 change(9, catalog, Some(Gain("Spare".into()))),
                 Some("Made the tag “Spare”"),

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::binding::{Fact, Facts};
+pub use crate::contribution::Exists;
 use crate::contribution::{FieldKey, Name, Trashed, Value};
 use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
 use crate::log::{FileFact, Ref};
@@ -44,13 +45,6 @@ impl<V> Write<V> {
             hash: self.entry,
         }
     }
-}
-
-/// One write of an entity's existence register.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Exists {
-    Created,
-    Deleted,
 }
 
 /// The part of an entity one write changed.
@@ -128,7 +122,7 @@ fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, b
 
 #[derive(Clone, PartialEq, Debug, Default)]
 struct EntityState {
-    existence: Writes<bool>,
+    existence: Writes<Exists>,
     registers: BTreeMap<Name, Writes<Option<Raw>>>,
     /// Per key, per member, its live adds and removes.
     sets: BTreeMap<Name, BTreeMap<Raw, Writes<bool>>>,
@@ -189,11 +183,11 @@ impl EntityState {
     }
 
     fn created(&self) -> bool {
-        self.existence.iter().any(|held| held.value)
+        self.existence.iter().any(|held| held.value.created())
     }
 
     fn deleted(&self) -> bool {
-        self.existence.iter().any(|held| !held.value)
+        self.existence.iter().any(|held| !held.value.created())
     }
 
     fn deletion_conflicted(&self) -> bool {
@@ -226,6 +220,24 @@ impl EntityState {
             ))
         });
         named.max_by_key(|(order, _)| *order).map(|(_, file)| file)
+    }
+
+    /// The values the register or set `key` holds, sorted and once each.
+    fn held(&self, kind: KeyKind, key: &str) -> Vec<&Raw> {
+        match kind {
+            KeyKind::Register => {
+                let writes = self.registers.get(key).into_iter().flatten();
+                let mut values: Vec<&Raw> = writes.filter_map(|held| held.value.as_ref()).collect();
+                values.sort_unstable();
+                values.dedup();
+                values
+            }
+            KeyKind::Set => {
+                let members = self.sets.get(key).into_iter().flatten();
+                let held = members.filter(|(_, writes)| writes.iter().any(|held| held.value));
+                held.map(|(member, _)| member).collect()
+            }
+        }
     }
 
     /// Each value a register or set holds.
@@ -268,10 +280,10 @@ impl EntityState {
             value,
         } = live;
         match (field, value) {
-            (FieldKey::Exist(_), Value::Exist(created)) => self.existence.push(Held {
+            (FieldKey::Exist(_), Value::Exist(exists)) => self.existence.push(Held {
                 at,
                 stamp,
-                value: created,
+                value: exists,
             }),
             (FieldKey::Register(_, key), Value::Register(value)) => {
                 let writes = self.registers.entry(key).or_default();
@@ -401,7 +413,7 @@ impl Folded {
         let state = self.entities.get(&field.entity());
         let present = state.is_some_and(|state| state.present());
         match (field, value) {
-            (FieldKey::Exist(_), Value::Exist(created)) => *created != present,
+            (FieldKey::Exist(_), Value::Exist(exists)) => exists.created() != present,
             (FieldKey::Register(entity, key), Value::Register(value)) => {
                 let writes = match present {
                     true => self.register_writes(*entity, key),
@@ -451,7 +463,7 @@ impl Folded {
                 continue;
             }
             for (write, gained) in changed(&now.existence, &old.existence) {
-                let part = match write.value == gained {
+                let part = match write.value.created() == gained {
                     true => Part::Created,
                     false => Part::Deleted,
                 };
@@ -529,6 +541,27 @@ impl Folded {
         entities.map(|(entity, state)| (*entity, state.shown()))
     }
 
+    /// The values the register or set `key` of `entity` holds while it is
+    /// shown, sorted and once each.
+    pub fn held(&self, entity: EntityId, kind: KeyKind, key: &str) -> Vec<&Raw> {
+        let state = self.entities.get(&entity).filter(|state| state.present());
+        state.map_or_else(Vec::new, |state| state.held(kind, key))
+    }
+
+    /// Each entity shown holding a value under the register or set `key`, by id,
+    /// with the values it holds there, sorted and once each.
+    pub fn holding<'a>(
+        &'a self,
+        kind: KeyKind,
+        key: &'a str,
+    ) -> impl Iterator<Item = (EntityId, Vec<&'a Raw>)> + 'a {
+        let shown = self.entities.iter().filter(|(_, state)| state.present());
+        shown.filter_map(move |(entity, state)| {
+            let held = state.held(kind, key);
+            (!held.is_empty()).then_some((*entity, held))
+        })
+    }
+
     /// The path of `entity`'s latest live file write that names a file, while it
     /// is shown.
     pub fn logged_path(&self, entity: EntityId) -> Option<&RelPath> {
@@ -570,27 +603,21 @@ impl Folded {
         let Some(state) = self.entities.get(&entity) else {
             return Vec::new();
         };
-        let exists = |created: bool| {
-            if created {
-                Exists::Created
-            } else {
-                Exists::Deleted
-            }
+        state.existence.iter().map(Held::write).collect()
+    }
+
+    /// The entities the live deletes of `entity` say it was joined into, by id
+    /// and once each.
+    pub fn joined_into(&self, entity: EntityId) -> Vec<EntityId> {
+        let Some(state) = self.entities.get(&entity) else {
+            return Vec::new();
         };
-        state
-            .existence
-            .iter()
-            .map(|held| {
-                let write = held.write();
-                Write {
-                    entry: write.entry,
-                    by: write.by,
-                    n: write.n,
-                    at: write.at,
-                    value: exists(write.value),
-                }
-            })
-            .collect()
+        let into = state.existence.iter().filter_map(|held| match held.value {
+            Exists::Deleted { into } => into,
+            Exists::Created => None,
+        });
+        let into: BTreeSet<EntityId> = into.collect();
+        into.into_iter().collect()
     }
 
     /// The live writes of `entity`'s fields, each with its field: what a delete
@@ -668,16 +695,6 @@ impl Folded {
             .iter()
             .filter(|(_, writes)| writes.iter().any(|held| held.value));
         held.map(|(member, _)| member.clone()).collect()
-    }
-
-    /// Each member of the set `key` of each entity shown, by entity.
-    pub fn holding<'a>(&'a self, key: &'a str) -> impl Iterator<Item = (EntityId, &'a Raw)> {
-        let shown = self.entities.iter().filter(|(_, state)| state.present());
-        shown.flat_map(move |(entity, state)| {
-            let members = state.sets.get(key).into_iter().flatten();
-            let held = members.filter(|(_, writes)| writes.iter().any(|held| held.value));
-            held.map(move |(member, _)| (*entity, member))
-        })
     }
 
     /// The live adds and removes of `value` in a set, oldest first: what a new

@@ -221,7 +221,7 @@ Each op is an object whose `op` member names it:
 | `op`      | Members                                          | Meaning                                      |
 | --------- | ------------------------------------------------ | -------------------------------------------- |
 | `create`  | `entity`, `replaces`, `take`?                    | The entity exists                            |
-| `delete`  | `entity`, `replaces`, `observed`, `take`?        | The entity is deleted                        |
+| `delete`  | `entity`, `replaces`, `observed`, `into`?, `take`? | The entity is deleted; with `into`, joined into that entity |
 | `write`   | `entity`, `key`, `value`, `replaces`, `take`?    | A register holds `value`; cleared without it |
 | `add`     | `entity`, `key`, `value`, `replaces`, `take`?    | A set gains `value`                          |
 | `remove`  | `entity`, `key`, `value`, `tags`, `take`?        | A set loses `value`                          |
@@ -237,10 +237,7 @@ the writer saw live: of a register, of a set's member, or of the file register.
 `observed` names the live field writes of the entity a delete saw, each as
 `{"key","at"}` for a register, `{"key","value","at"}` for a set's member or
 `{"file":true,"at"}` for the file register, with `at` the reference. A `value`
-is the app's JSON, kept byte for byte; `"value":null` writes `null`. Under the
-key `joined`, which is toshokan's own, a `value` is the id of an entity joined
-into the one that holds it, as a JSON string (see
-[Relations](protocol.md#relations)). A `file` is
+is the app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
 `{"path","identity","len"}` with an optional `modified`, the backend's
 modification time, compared only for equality. Each member of `displaced` is
 `{"item","from","identity","len"}`: the trash item's nonce, the library path the
@@ -333,6 +330,7 @@ for the file register.
    "refs":[{field…,"above"?,"own":[n,"h"],"target":["w",n,"h"]}],
    "killed":[{field…,"own":[n,"h"]}],
    "takes":[{field…,"writer","own":[n,"h"],"below"}]}},
+ "joined":[{"entity","own":[n,"h"],"into"}],
  "dismissals":[{"own":[n,"h"],"run":{…}}],
  "trash":[{"item","entry","at","from","identity","len"}],
  "settled":[["<writer>","<record>"]],
@@ -353,6 +351,12 @@ for the file register.
   it.
 - `takes`: per field and other writer, the latest take of a run of that writer,
   below the run's `from`.
+- `joined`: per own delete held in `writes` that names an `into`, its entity,
+  the delete and that `into`. A reader leaves out a record whose `own` is not
+  the entity's delete in `writes`: a build that does not know `joined` carries
+  it past the delete it names. Such a build folds a `delete` with `into` as a
+  delete and keeps its entry in `extended`, where a reader that knows `into`
+  reads it for the delete `writes` holds.
 - `dismissals`: the runs the writer dismissed, each with its entry.
 - `settled`: each pending record the writer closed, by its writer and nonce: its
   own, by the intent naming it, and another writer's, by a settlement.
