@@ -415,7 +415,9 @@ the same state by the same independence.
 A save is not a new edit, so it does not end the redo of one. A save recorded
 while an undone edit waits in `undone` leaves it there: the save changed nothing
 the edit step holds. It does end toshokan's redo, as every commit does, so the
-library steps of `undone` go, and every step undone before one of them.
+library steps of `undone` go, and every step undone before one of them. A change
+no undo takes back, such as taking in a rescued sound, is recorded as no step and
+ends redo in the same way.
 
 The command undoes one step and stops. Nothing here loops over the library or
 waits. An edit taken from beneath a save runs no commit and touches no file. A

@@ -472,8 +472,7 @@ impl Timeline {
                     saved,
                 }));
             }
-            // Logging any step ends the library's redo, as a change does.
-            Asked::Lasting => self.end_redo(),
+            Asked::Lasting => self.end_library_redo(),
             // A step recorded since the undo was asked ended redo, this one included.
             Asked::Undo(taken) if taken.recorded == self.recorded => self.unlogged(Logged {
                 entry,
@@ -536,9 +535,9 @@ impl Timeline {
         self.bytes -= self.undone.drain(..).map(|step| step.size()).sum::<usize>();
     }
 
-    /// A save ends the library's redo, and the redo of every step behind one of the
-    /// library's. An edit undone since stays to be made again: a save changes nothing an
-    /// edit step holds.
+    /// A save, or a change no undo takes back, ends the library's redo, and the redo of
+    /// every step behind one of the library's. An edit undone since stays to be made
+    /// again: neither changes anything an edit step holds.
     fn end_library_redo(&mut self) {
         self.recorded += 1;
         let logged = |step: &Step| matches!(step, Step::Library(_));
@@ -950,6 +949,32 @@ mod tests {
         assert_eq!(session.holds(1), body(3));
         assert_eq!(session.undo().as_deref(), Some("Edit “1”"));
         assert_eq!(session.undo_reads(), Some("Save “1”"));
+    }
+
+    #[test]
+    fn a_change_no_undo_takes_back_leaves_an_edit_undone_before_it_to_be_made_again() {
+        let mut session = Session::default();
+        session.click(1, 3);
+        session.undo();
+
+        session.log(Asked::Lasting);
+
+        assert_eq!(session.redo().as_deref(), Some("Edit “1”"));
+        assert_eq!(session.holds(1), body(3));
+    }
+
+    #[test]
+    fn a_change_no_undo_takes_back_ends_the_redo_of_a_library_step() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        session.click(2, 5);
+        session.undo();
+        session.undo();
+        assert_eq!(session.redo_reads(), Some("Rename “1”"));
+
+        session.log(Asked::Lasting);
+
+        assert_eq!(session.redo(), None);
     }
 
     #[test]
