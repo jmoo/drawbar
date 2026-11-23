@@ -1079,18 +1079,38 @@ fn saves_answered_keep_nothing_of_what_their_files_held() {
 }
 
 #[test]
-fn saves_where_nothing_may_be_written_keep_nothing_of_what_their_files_held() {
+fn a_save_where_nothing_may_be_written_keeps_what_its_file_holds() {
     let (root, _) = newer_drawbar_wrote();
     fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut session = Session::open(&root);
     assert!(session.store.read_only().is_some());
     let grand = session.named("Grand.ne5p");
+    let filed = root.read("Grand.ne5p");
+    let mut mine = Vec::new();
     for gain in ["12", "34"] {
-        session.edit(grand, gain);
+        mine = session.edit(grand, gain);
         session.bench.workspace.mark_saved(grand);
         session.autosave();
     }
-    assert_eq!(session.bench.workspace.saves_unanswered(), 0);
+    let workspace = &session.bench.workspace;
+    assert_eq!(*workspace.filed(grand).expect("held").bytes(), filed);
+    assert!(workspace.unfiled(grand));
+    assert!(
+        !workspace.saves_asked(grand),
+        "no save of it will be answered"
+    );
+
+    touch(&root, "Grand.ne5p");
+    session.refocus();
+    assert_eq!(session.bytes(grand), mine, "a time alone changes nothing");
+    assert_eq!(session.bench.browser.asking(), None);
+    fs::write(root.at("Grand.ne5p"), with_gain(&filed, "40")).unwrap();
+    session.refocus();
+    assert_eq!(session.bytes(grand), mine);
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "the user is asked"
+    );
 }
 
 /// `count` programs in three folders of `root`.
@@ -10160,4 +10180,132 @@ fn a_resting_instrument_read_again_unchanged_keeps_what_it_holds() {
     session.refocus();
 
     assert_eq!(session.bench.workspace.working(id), held);
+}
+
+#[test]
+fn an_undo_of_a_save_whose_answer_is_lost_keeps_what_the_document_holds() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    session.store.fault(Fault::Unread);
+    session.press(false);
+    session.decided();
+    assert!(session.unsaved(id), "what its file holds is not known");
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo landed");
+    assert_eq!(session.bytes(id), edited);
+    assert!(session.unsaved(id), "it holds what its file does not");
+    session.refocus();
+    session.read_all();
+    assert_eq!(session.bytes(id), edited);
+    assert!(session.unsaved(id));
+}
+
+#[test]
+fn a_redo_of_a_save_whose_answer_is_lost_reads_saved_once_its_file_holds_what_it_does() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session.undo();
+    session.settle();
+    session.store.fault(Fault::Unread);
+    session.press(true);
+    session.decided();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), edited, "the redo landed");
+    assert_eq!(session.bytes(id), edited);
+    assert!(!session.unsaved(id));
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn a_save_whose_answer_is_lost_reads_saved_once_its_file_holds_what_it_does() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Unread);
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), edited, "the save landed");
+    assert_eq!(session.bytes(id), edited);
+    assert!(!session.unsaved(id));
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn an_undo_of_a_save_finished_by_a_change_whose_answer_is_lost_keeps_what_the_document_holds() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    session.store.fault(Fault::Unread);
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    assert_eq!(session.bytes(id), edited);
+    assert!(session.unsaved(id));
+}
+
+#[test]
+fn the_undo_of_a_save_leaves_a_document_let_go_of_since_to_read_the_file_again() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    let made = session.bytes(b);
+    for id in [a, b] {
+        session.edit(id, "96");
+        session.bench.workspace.mark_saved(id);
+    }
+    session.sync();
+    session.later();
+    assert!(session.bench.workspace.evict(b).is_some(), "b is let go of");
+
+    session.undo();
+    let entity = session.bench.workspace.get(b).expect("listed");
+    assert!(entity.unread(), "the undo puts no baseline on it");
+    session.settle();
+    session.read(&[b]);
+    assert_eq!(session.bytes(b), made);
+    assert!(!session.unsaved(b));
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(b, renamed);
+    session.sync();
+    assert_eq!(root.read("Renamed.ne5p"), made, "the rename is not refused");
+}
+
+#[test]
+fn with_two_changes_in_flight_a_save_is_named_by_the_one_that_made_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    session.edit(a, "96");
+    session.bench.workspace.mark_saved(a);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(b, renamed);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.decided();
+    session.undo();
+
+    let saved = session.saved_by_next_undo();
+    let ids: Vec<u64> = saved.iter().map(|saved| saved.id).collect();
+    assert_eq!(ids, [a]);
 }
