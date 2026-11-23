@@ -314,9 +314,9 @@ gesture off the frame's input:
 - otherwise nothing goes on, and the change is a step of its own.
 
 A pointer press ends the step before it, whatever gesture made it. A change in
-the frame of the press, where a widget had focus as the frame began, is taken as
-that widget committing as the press takes its focus: it joins the widget's step,
-which then closes. Where no widget had focus, a change in that frame, such as a
+the frame of the press, or in the frame focus leaves a widget by a key, where
+that widget had focus as the frame began, is taken as that widget committing as
+it loses focus: it joins the widget's step, which then closes. Where no widget had focus, a change in that frame, such as a
 slider jumping to the pointer, begins the step the press goes on with. A click
 inside a text box therefore splits the typing in two.
 
@@ -385,9 +385,9 @@ have run first.
 
 Undo and Redo are disabled while a change to the library is sent and not
 answered. An edit step also waits while a save of its document is asked and not
-sent, and while any save, export or send waits on a save, since what waits may
-carry the document. A library step also waits, as today, for every change asked
-for to be sent.
+sent, and while a save, export or send that carries its document waits on a
+save. A library step also waits, as today, for every change asked for to be
+sent.
 
 ### Saves and edits
 
@@ -493,12 +493,13 @@ and they are why these documents lose their edit steps at a save.
 | A save is refused | The baseline goes back. No step is recorded. A piano library held whole shows its plan again. |
 | A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
 | A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
-| The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. Equal bytes read saved again. Other bytes leave the document unsaved over them, and the user is asked. |
+| The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. That read moves only the baseline: equal bytes read saved again, and other bytes leave the document unsaved over them. |
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
+| A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
 | An undo is refused and may pass later | The step stays, and the log says what is in the way. |
 | An undo can never pass | The step is let go. |
 | The library's history ends while an undo or redo waits for its answer | The step is let go with the rest of that history, whatever the answer. |
-| The answer to a save is lost, and the document was edited since it was sent | What the file holds is unknown. The document reads unsaved until its file is read again, and other bytes found there ask. |
+| The answer to a save is lost, or a save fails partway and a later write finishes it | The baseline goes back, and the file is read again once what it holds can be known. That read moves only the baseline, so an edit made or undone since stays, unsaved where the file holds something else. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
 | A file changes from outside and the user keeps their side | A body is untouched and its steps stay. An edit over the file is made again over it, and its steps no longer match. |
 | A file changes or is deleted from outside after a save of it is undone | The document holds unsaved work, so the user is asked, or the document is kept as missing. |

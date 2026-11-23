@@ -1495,11 +1495,11 @@ struct Change {
 /// Record `changes`, the frame's, under the gesture they belong to, and settle the
 /// timeline as the frame ends. `began` is the widget that had focus as the frame began.
 ///
-/// A press ends the step before it. A change in its frame where a widget had focus is
-/// that widget committing: it joins the widget's step, which then closes. That holds even
-/// for another control's change, as a slider's jump, since a document is noted once a
-/// frame. Otherwise the change begins the step the press goes on with. A revert is a
-/// step of its own.
+/// A press ends the step before it. A change in its frame, or in the frame focus leaves a
+/// widget, where that widget had focus as the frame began, is the widget committing: it
+/// joins the widget's step, which then closes. That holds even for another control's
+/// change, as a slider's jump, since a document is noted once a frame. Otherwise the
+/// change begins the step the press goes on with. A revert is a step of its own.
 fn follow(
     timeline: &mut Timeline,
     ctx: &egui::Context,
@@ -1509,7 +1509,8 @@ fn follow(
 ) {
     let gesture = gesture(ctx);
     let pressed = ctx.input(|i| i.pointer.any_pressed());
-    let committed = began.filter(|_| pressed).map(Gesture::Focused);
+    let left = |began: &egui::Id| pressed || gesture != Gesture::Focused(*began);
+    let committed = began.filter(left).map(Gesture::Focused);
     if pressed && committed.is_none() {
         timeline.close();
     }
@@ -2440,6 +2441,9 @@ mod tests {
         level: f64,
         clicks: u32,
         text: String,
+        /// Two boxes that change the document only when they are left.
+        typed: [String; 2],
+        kept: [String; 2],
     }
 
     const SLIDER: egui::Pos2 = egui::pos2(10.0, 100.0);
@@ -2447,6 +2451,7 @@ mod tests {
     const B: egui::Pos2 = egui::pos2(130.0, 212.0);
     const BOX: egui::Pos2 = egui::pos2(60.0, 312.0);
     const NOWHERE: egui::Pos2 = egui::pos2(300.0, 380.0);
+    const FIELDS: [egui::Pos2; 2] = [egui::pos2(10.0, 340.0), egui::pos2(120.0, 340.0)];
 
     impl Controls {
         fn draw(&mut self, ui: &mut egui::Ui) {
@@ -2469,10 +2474,20 @@ mod tests {
             }
             let text = egui::TextEdit::singleline(&mut self.text).id(egui::Id::new("box"));
             ui.put(at(BOX - egui::vec2(50.0, 12.0), 200.0), text);
+            for (field, left) in FIELDS.into_iter().enumerate() {
+                let text = egui::TextEdit::singleline(&mut self.typed[field]);
+                if ui.put(at(left, 100.0), text).lost_focus() {
+                    self.kept[field].clone_from(&self.typed[field]);
+                }
+            }
         }
 
         fn working(&self) -> Working {
-            let held = format!("{} {} {}", self.level, self.clicks, self.text);
+            let [first, second] = &self.kept;
+            let held = format!(
+                "{} {} {} {first} {second}",
+                self.level, self.clicks, self.text
+            );
             Working::Body(held.into_bytes().into())
         }
     }
@@ -2596,6 +2611,23 @@ mod tests {
         bench.frame(Vec::new());
 
         assert!(bench.controls.text.contains('c'));
+        assert_eq!(bench.steps(), 2);
+    }
+
+    #[test]
+    fn a_box_left_with_tab_and_the_box_tab_goes_to_are_two_steps() {
+        let mut bench = Bench::new();
+        bench.frame(Vec::new());
+        bench.click(FIELDS[0] + egui::vec2(20.0, 12.0));
+        bench.frame(vec![egui::Event::Text("a".into())]);
+        assert_eq!(bench.steps(), 0, "the box changes nothing until it is left");
+
+        bench.frame(vec![crate::testing::key(egui::Key::Tab)]);
+        bench.frame(vec![egui::Event::Text("b".into())]);
+        bench.click(NOWHERE);
+        bench.frame(Vec::new());
+
+        assert_eq!(bench.controls.kept, ["a", "b"]);
         assert_eq!(bench.steps(), 2);
     }
 

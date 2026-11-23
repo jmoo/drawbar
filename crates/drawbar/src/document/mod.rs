@@ -330,6 +330,8 @@ pub struct Document {
 /// [`crate::ondisk::OnDisk::serial`] of the file it rested in as the act began.
 struct Saving {
     files: Vec<(u64, u64)>,
+    /// Every asset the act carries.
+    carried: Vec<u64>,
     act: crate::browser::Act,
 }
 
@@ -767,9 +769,9 @@ impl Document {
     }
 
     /// Whether something waits on what the document `id` holds: a save of the edit held
-    /// over its file, not yet sent, or an act waiting for a save, which may carry it.
+    /// over its file, not yet sent, or an act that carries it and waits for a save.
     pub fn awaits_save(&self, id: u64, workspace: &Workspace) -> bool {
-        workspace.saving_edit(id) || !self.saving.is_empty()
+        workspace.saving_edit(id) || (self.saving.iter()).any(|held| held.carried.contains(&id))
     }
 
     /// Put back a working copy the document held, with no step, and return whether it
@@ -960,7 +962,12 @@ impl Document {
         for (id, _) in &files {
             workspace.save_edit(*id);
         }
-        self.saving.push(Saving { files, act });
+        let carried = carried.to_vec();
+        self.saving.push(Saving {
+            files,
+            carried,
+            act,
+        });
         None
     }
 
@@ -972,7 +979,7 @@ impl Document {
             .partition(|held| held.files.iter().all(|(id, _)| !workspace.saving_edit(*id)));
         self.saving = waiting;
         let mut out = Vec::new();
-        for Saving { files, act } in answered {
+        for Saving { files, act, .. } in answered {
             let unsaved = files.iter().find_map(|(id, serial)| {
                 let entity = workspace.get(*id)?;
                 let moved = entity.rests().is_some_and(|file| file.serial != *serial);
@@ -5106,14 +5113,6 @@ mod tests {
         let export = || crate::browser::Act::Export(id);
         assert_eq!(open.settled(vec![export()]), []);
         assert!(open.document.awaits_save(id, &open.workspace), "Undo waits");
-        let carried = open
-            .workspace
-            .create(Fresh::Program, &mut open.log)
-            .unwrap();
-        assert!(
-            open.document.awaits_save(carried, &open.workspace),
-            "and waits for a document the act may carry"
-        );
 
         assert!(open.hold(&vibes));
         open.frame(Vec::new());
@@ -5132,6 +5131,39 @@ mod tests {
         open.workspace.edit_saved(id, std::sync::Arc::new(file));
         assert_eq!(open.settled(Vec::new()), [export()], "what waited runs");
         assert!(!open.document.awaits_save(id, &open.workspace));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_set_there_and_back_holds_what_it_held() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        let before = open.working();
+
+        open.apply(&[("name", "Bells")]);
+        open.apply(&[("name", "Vibes")]);
+
+        assert!(open.working() == before, "{}", told(&open.working()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn undo_waits_for_each_document_an_act_waiting_on_a_save_carries() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        let mut fresh = || open.workspace.create(Fresh::Program, &mut open.log);
+        let (carried, other) = (fresh().unwrap(), fresh().unwrap());
+        let bundle = crate::browser::Act::ExportBundle {
+            ids: vec![open.id, carried],
+            slots: Vec::new(),
+            reading: Vec::new(),
+        };
+
+        assert_eq!(open.settled(vec![bundle]), []);
+
+        let waits = |id: u64| open.document.awaits_save(id, &open.workspace);
+        assert!(waits(open.id) && waits(carried));
+        assert!(!waits(other), "one the act does not carry goes on");
     }
 
     /// The plan a resting piano's edit holds names no baseline: the edit's working copy

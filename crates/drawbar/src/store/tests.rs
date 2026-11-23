@@ -1616,6 +1616,30 @@ fn a_save_the_next_change_finishes_can_be_undone_after_it() {
 }
 
 #[test]
+fn an_edit_made_back_after_its_save_failed_partway_is_kept_when_the_save_is_finished() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, first) = session.saved_once("96");
+    session.settle();
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    let second = session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, first.clone(), Cause::User, log);
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), second, "the save is finished");
+    assert_eq!(session.bytes(id), first, "the edit made since is kept");
+    assert!(session.unsaved(id), "it holds what its file does not");
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
 fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -4009,6 +4033,20 @@ fn planned_piano(root: &Temp) -> (Session, u64, crate::document::piano::Plan) {
     );
     assert!(workspace.get(id).unwrap().is_unsaved());
     (session, id, plan)
+}
+
+#[test]
+fn a_save_of_an_edit_over_its_file_is_refused_where_nothing_may_be_written() {
+    let (root, _) = newer_drawbar_wrote();
+    let (mut session, id, _) = planned_piano(&root);
+    assert!(session.store.read_only().is_some());
+    assert!(session.bench.workspace.save_edit(id));
+
+    session.sync();
+
+    let workspace = &session.bench.workspace;
+    assert!(!workspace.saving_edit(id), "nothing waits on it");
+    assert!(workspace.get(id).unwrap().is_unsaved(), "the edit is kept");
 }
 
 /// A piano library whose file is saved over outside drawbar under an unsaved plan keeps
@@ -6852,6 +6890,28 @@ fn a_folder_rename_undone_leaves_no_folder_behind() {
     session.refocus();
     assert_eq!(root.names(""), [".drawbar", "Gig"]);
     assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
+}
+
+/// An undo of a save under an unsaved edit puts the file back as it was and keeps the
+/// edit over it, asking nothing.
+#[test]
+fn an_undo_of_a_save_keeps_the_unsaved_edit_over_it_without_asking() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.bench.act(vec![crate::browser::Act::SaveDoc(grand)]);
+    session.sync();
+    let edited = session.edit(grand, "34");
+    session.undo();
+    session.sync();
+    assert_eq!(root.read("Grand.ne5p"), program, "the save is undone");
+    assert!(session.bytes(grand) == edited, "the edit stays");
+    assert!(session.bench.workspace.get(grand).unwrap().is_unsaved());
+    assert_eq!(session.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(session.said("changed on disk"), 0);
 }
 
 /// An unsaved edit of a file in a folder renamed, and the rename undone, follows the
@@ -10339,6 +10399,36 @@ fn a_document_read_again_after_the_undo_of_its_save_makes_room_as_any_clean_one_
 
     assert!(unread(&session, b), "b is let go of for a");
     assert!(!unread(&session, a));
+}
+
+#[test]
+fn a_document_counted_unsaved_until_its_file_is_read_makes_room_once_it_reads_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.create(), session.create());
+    session.sync();
+    let made = session.bytes(b);
+    let name = session.path(b).expect("b has a file");
+    fs::write(root.at("Other.ne5p"), with_gain(&made, "12")).unwrap();
+    session.settle();
+    let other = session.named("Other.ne5p");
+    session.later();
+    session.store.budget(made.len() as u64 + 1);
+    session.read(&[other]);
+    session.later();
+    session.read(&[b]);
+
+    session.bench.workspace.unfile(b);
+    assert!(session.unsaved(b));
+    touch(&root, &name);
+    session.settle();
+    assert!(!session.unsaved(b), "its file holds what it does");
+    session.later();
+    session.read(&[a]);
+
+    let unread = |id: u64| session.bench.workspace.get(id).expect("listed").unread();
+    assert!(unread(b), "b is let go of for a");
+    assert!(!unread(a));
 }
 
 #[test]

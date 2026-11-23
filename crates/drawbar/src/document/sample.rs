@@ -721,7 +721,14 @@ impl Edits {
     ) -> Result<(), String> {
         let held = self.0.get(&id).filter(|edit| edit.over == file.serial);
         let mut all = held.map(|edit| edit.sets.clone()).unwrap_or_default();
-        all.extend(sets.iter().cloned());
+        for (path, value) in sets {
+            // A set names the value it leaves, so it takes the place of one of the same
+            // path just before it.
+            match all.last_mut().filter(|(last, _)| last == path) {
+                Some((_, last)) => last.clone_from(value),
+                None => all.push((path.clone(), value.clone())),
+            }
+        }
         self.make(id, file, index, all, false)
     }
 
