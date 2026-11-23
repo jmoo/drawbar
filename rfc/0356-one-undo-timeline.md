@@ -200,11 +200,14 @@ the workspace gives a saved baseline, which moves whenever the baseline does.
 
 | Document | Working copy | Its saves |
 |---|---|---|
-| Program, set list, project, note | `Body` | Rule 2 |
-| Sample instrument held whole, WAV take | `Body` | Rule 2 |
+| Program, set list, project, note, WAV take | `Body` | Rule 2 |
+| Sample instrument held whole | `Body` | Its file is read back in place, so rule 3 |
 | Sample instrument resting in its file | `Edit`, its sets | The baseline moves, so rule 3 |
 | Piano library | `Edit`, its plan | The baseline moves, so rule 3 |
 
+A sample instrument or piano library is read back from its file once saved, and
+its editor then shows the file. Its save is an ordinary library step, and the
+document follows the file when that step is undone.
 [Large documents](#large-documents) moves the second row to `Edit`.
 
 `Document` answers `working(id) -> Working` and accepts `hold(id, Working)`,
@@ -370,8 +373,10 @@ save. If that step is an edit, Undo takes it out from beneath them. Otherwise
 Undo takes the last step, which is a save when there is one.
 
 Only a library step with documents in `saved` is passed this way: a commit that
-did nothing but save documents from their bodies over files that existed. Every
-other library step is undone in its turn.
+did nothing but save documents from their bodies over their own files, which
+existed. A new file, one sound written over another, and any save of a sample
+instrument or piano library are not such steps. Every other library step is
+undone in its turn.
 
 Redo takes the last step of `undone`, of either kind, and puts it at the end of
 `done`. An edit redone lands after the save it was taken from beneath, which is
@@ -424,6 +429,10 @@ them.
   not enough, because another writer's change can arrive with it.
 - **A save's own file moves only the baseline.** For such a file, the read-back
   moves the baseline, leaves the working copy, and asks no conflict question.
+- **A save asked and not answered is unsaved work.** The baseline moves when a
+  save is asked for, so the document reads saved before its file holds the
+  bytes. A change found on disk in that window is never taken over them: the
+  document keeps what it holds, and the user is asked which side to keep.
 
 For a document edited in its file to keep its edit steps across a save, its save
 must stop moving the ground its edit stands on. The edit a save was sent with
@@ -438,7 +447,9 @@ and they are why these documents lose their edit steps at a save.
 
 | Event | What happens |
 |---|---|
-| A save is refused | The baseline goes back. No step is recorded. |
+| A save is refused | The baseline goes back. No step is recorded. A piano library held whole shows its plan again. |
+| A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
+| A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
 | An undo is refused and may pass later | The step stays, and the log says what is in the way. |
 | An undo can never pass | The step is let go. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
