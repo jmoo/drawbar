@@ -228,7 +228,9 @@ pub struct Store {
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
     /// Assets whose file this session's undo or redo of a save left as the file of this
-    /// identity, each read again until that read answers.
+    /// identity, each read again, whatever its length and time say, once nothing defers it.
+    /// A read in flight when the answer comes ran after the undo, as every command runs
+    /// in the order sent.
     expected: BTreeMap<u64, toshokan::Identity>,
     /// A change of this session's own failed partway and waits for the next change to
     /// finish it. An undo or a redo would reverse that change, not the step it names.
@@ -1473,6 +1475,12 @@ impl Store {
         }
     }
 
+    /// How many assets' files an undo or a redo of a save left to be read again.
+    #[cfg(test)]
+    pub fn expecting(&self) -> usize {
+        self.expected.len()
+    }
+
     /// Whether a rescan is waiting for its answer.
     #[cfg(test)]
     pub fn scanning(&self) -> bool {
@@ -1618,11 +1626,19 @@ impl Store {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
                 self.waits = waiting != Waiting::Nothing;
-                let sent = self.answering.pop_front();
-                if landed {
-                    self.expected.extend(sent.iter().flat_map(Sent::leaves));
+                let asked = self.answering.pop_front().map(Sent::asked);
+                if finished.is_some() {
+                    self.expected.extend(
+                        timeline
+                            .waiting()
+                            .map(timeline::Asked::leaves)
+                            .unwrap_or_default(),
+                    );
                 }
-                let asked = sent.map(Sent::asked);
+                if landed {
+                    self.expected
+                        .extend(asked.iter().flat_map(timeline::Asked::leaves));
+                }
                 let answer = timeline::Answer {
                     made,
                     undoable,
@@ -1656,8 +1672,6 @@ impl Store {
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, timeline, log);
-                        let rechecking = &self.rechecking;
-                        self.expected.retain(|id, _| rechecking.contains(id));
                     }
                     Err(why) => match forgotten {
                         Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
@@ -2361,6 +2375,11 @@ impl Store {
             browser.folders.others = shown.others();
         }
         let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
+        // An expectation waits for a read in flight, or for a projection that no longer
+        // defers its asset.
+        let (rechecking, deferred) = (&self.rechecking, &self.deferred);
+        self.expected
+            .retain(|id, _| rechecking.contains(id) || deferred.contains(id));
         if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }
@@ -2464,7 +2483,8 @@ impl Store {
             None => self.ids.iter().map(|(id, key)| (id, key.clone())).collect(),
             Some(keys) => {
                 let ids = keys.iter().filter_map(|key| self.ids.id(key));
-                let ids: BTreeSet<u64> = ids.chain(deferred).collect();
+                let expected = self.expected.keys().copied();
+                let ids: BTreeSet<u64> = ids.chain(deferred).chain(expected).collect();
                 let keyed = ids
                     .into_iter()
                     .filter_map(|id| Some((id, self.ids.key(id)?.clone())));
@@ -3493,7 +3513,7 @@ impl Store {
             print.crc = Some(nord_format::crc::crc32(bytes));
         }
         let name = entity.name.clone();
-        let unsaved = entity.is_unsaved();
+        let unsaved = entity.is_unsaved() || self.saves_asked(id, workspace);
         let holds = found.holds();
         // A copy, or a browser's move, gives a file a new time over the same bytes.
         let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
@@ -3528,6 +3548,14 @@ impl Store {
         }
     }
 
+    /// Whether a save of an asset is asked and not answered: it holds what its file does
+    /// not, even where it reads saved.
+    fn saves_asked(&self, id: u64, workspace: &Workspace) -> bool {
+        self.records.get(&id).is_some_and(|record| record.saving)
+            || self.asks.iter().any(|(ask, _)| *ask == FileAsk::Save(id))
+            || workspace.saves_asked(id)
+    }
+
     /// A file drawbar knew is gone, and nothing on disk holds what it held.
     fn vanished(
         &mut self,
@@ -3537,6 +3565,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> Vanished {
+        let asked = self.saves_asked(id, workspace);
         let Some(record) = self.records.get_mut(&id) else {
             return Vanished::Untouched;
         };
@@ -3548,6 +3577,7 @@ impl Store {
         };
         let name = entity.name.clone();
         let keep = precious(entity, queue)
+            || asked
             || !browser.tags.worn(id).is_empty()
             || entity.origin.slot().is_some();
         if keep {
@@ -4212,9 +4242,9 @@ impl Store {
         record.saving = true;
         record.path = Some(at.clone());
         let over = !matches!(expect, toshokan::Expect::Absent);
-        if let (toshokan::Expect::Holds(before), None) = (expect, workspace.overwritten_from(id)) {
-            self.batch.saves.push((id, before));
-        }
+        // A piano or sample instrument's file is read back in place, and its editor shows
+        // nothing but what it was saved as.
+        let indexed = crate::ondisk::Index::tagged(entity.saved.bytes()).is_some();
         self.part(Intent::Save {
             id,
             path: at,
@@ -4222,7 +4252,10 @@ impl Store {
             expect,
             came: None,
         });
-        workspace.send_save(id, over);
+        let edited = workspace.send_save(id, over);
+        if let (toshokan::Expect::Holds(before), true, false) = (expect, edited, indexed) {
+            self.batch.saves.push((id, before));
+        }
         self.delete_with(id, workspace);
         true
     }
@@ -4419,17 +4452,6 @@ impl Sent {
             step,
             doing,
             saving: Vec::new(),
-        }
-    }
-
-    /// The file an undo or a redo of a save leaves each document it saved as.
-    fn leaves(&self) -> Vec<(u64, toshokan::Identity)> {
-        match &self.step {
-            timeline::Asked::Undo(taken) => {
-                taken.saved().iter().map(|s| (s.id, s.before)).collect()
-            }
-            timeline::Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
-            timeline::Asked::Change { .. } | timeline::Asked::Lasting => Vec::new(),
         }
     }
 

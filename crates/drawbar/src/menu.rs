@@ -11,15 +11,17 @@ use nord_usb::ObjectClass;
 use crate::app::{accent, DrawbarApp, ThemeChoice};
 use crate::browser::{bulk, Act, Bulk};
 use crate::device::NO_USB;
+use crate::document::Editors;
 use crate::icon::{sized, Glyph};
 use crate::libraries::Picking;
 use crate::newproject::Making;
 use crate::platform::{written, Platform};
 use crate::shell::Dock;
+use crate::store::Store;
 use crate::strings::folder;
 use crate::tabs::Spot;
-use crate::timeline::{Asked, Documents, Went};
-use crate::workspace::{Fresh, Working};
+use crate::timeline::{Asked, Next, Went};
+use crate::workspace::Fresh;
 use crate::zoom::Step;
 
 /// Everything a menu item can do.
@@ -27,7 +29,7 @@ use crate::zoom::Step;
 pub enum Command {
     /// Copy picked files into the library, as a drop does.
     Import,
-    /// Take back this session's last change to the library.
+    /// Take back this session's last edit or change to the library.
     Undo,
     /// Make again the change undone last.
     Redo,
@@ -114,19 +116,6 @@ impl Offer {
             checked: None,
             hint: hint(command),
         }
-    }
-}
-
-/// The documents of a timeline that records no edit step.
-struct Unrecorded;
-
-impl Documents for Unrecorded {
-    fn holds(&self, _: u64, _: &mut Working) -> bool {
-        false
-    }
-
-    fn hold(&mut self, _: u64, _: &Working) -> bool {
-        false
     }
 }
 
@@ -600,12 +589,18 @@ impl DrawbarApp {
                 }
             }
             Command::Undo | Command::Redo => {
-                let undoes = self.store.as_ref().is_some_and(crate::store::Store::undoes);
+                let store = self.store.as_ref();
+                // An edit step needs no library, but waits while a change sent to one, as
+                // a save of what it holds is, has not been answered.
+                let goes = |next: &Next| match next {
+                    Next::Library { .. } => store.is_some_and(Store::undoes),
+                    Next::Edit { .. } => !store.is_some_and(Store::changing),
+                };
                 let next = match command {
                     Command::Undo => self.timeline.next_undo(),
                     _ => self.timeline.next_redo(),
                 };
-                match next.filter(|_| undoes) {
+                match next.filter(goes) {
                     Some(next) => relabeled(format!("{} {}", label(command), next.label())),
                     None => Offer {
                         enabled: false,
@@ -672,23 +667,32 @@ impl DrawbarApp {
     }
 
     /// Undo the step the timeline names next, or redo it `again`: a library step is asked
-    /// of the library.
+    /// of the library, and an edit step brings its document to the front.
     fn undo(&mut self, again: bool) {
-        let Some(store) = self.store.as_mut().filter(|store| store.undoes()) else {
-            return;
+        let mut documents = Editors {
+            document: &mut self.document,
+            workspace: &mut self.workspace,
+            log: &mut self.log,
         };
-        let mut documents = Unrecorded;
         let went = match again {
             false => self.timeline.undo(&mut documents),
             true => self.timeline.redo(&mut documents),
         };
-        let asked = match went {
-            Went::Library(taken) if again => store.redo(taken).err().map(Asked::Redo),
-            Went::Library(taken) => store.undo(taken).err().map(Asked::Undo),
-            Went::Edit(_) | Went::Nowhere => None,
+        let taken = match went {
+            Went::Nowhere => return,
+            Went::Edit(id) => return self.tabs.open(id),
+            Went::Library(taken) => taken,
         };
-        if let Some(asked) = asked {
-            self.timeline.put_back(asked);
+        let asked = match self.store.as_mut() {
+            Some(store) if again => store.redo(taken),
+            Some(store) => store.undo(taken),
+            None => Err(taken),
+        };
+        if let Err(taken) = asked {
+            self.timeline.put_back(match again {
+                true => Asked::Redo(taken),
+                false => Asked::Undo(taken),
+            });
         }
     }
 

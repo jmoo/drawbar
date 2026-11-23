@@ -7,7 +7,7 @@ use eframe::egui;
 
 use crate::browser::{self, Browser};
 use crate::device::{Device, DeviceCard};
-use crate::document::Document;
+use crate::document::{Document, Editors};
 use crate::keyboard::Keyboard;
 use crate::library::Library;
 use crate::log::Log;
@@ -18,7 +18,7 @@ use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
-use crate::timeline::Timeline;
+use crate::timeline::{Gesture, Timeline};
 use crate::workspace::Workspace;
 use crate::zoom::{Room, Zoom};
 
@@ -415,6 +415,9 @@ impl DrawbarApp {
     /// Only the notice draws, so no input reaches a shell with no room to lay out, and its
     /// state is untouched. The zoom alone still answers its keys and menu items.
     fn gated(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // A press in a frame not drawn is never seen, so the gesture it began must not
+        // join the one before it.
+        self.timeline.close();
         let zooms =
             |command: crate::menu::Command| matches!(command, crate::menu::Command::Zoom(_));
         let mut acts = Vec::new();
@@ -558,6 +561,38 @@ impl DrawbarApp {
         }
         self.workspace.read_outside(name, from);
         None
+    }
+
+    /// Record what this frame's edits made of each document they changed, as steps Undo
+    /// takes back, and let go of the steps Undo and Redo would take whose documents moved
+    /// on.
+    fn record(&mut self, ctx: &egui::Context) {
+        let gesture = gesture(ctx);
+        let shown = self.timeline.shown();
+        let documents = Editors {
+            document: &mut self.document,
+            workspace: &mut self.workspace,
+            log: &mut self.log,
+        };
+        for note in documents.workspace.take_notes() {
+            let workspace = &*documents.workspace;
+            let Some(after) = documents.document.working(workspace, note.id) else {
+                continue;
+            };
+            let Some(entity) = workspace.get(note.id) else {
+                continue;
+            };
+            let label = match note.revert {
+                true => format!("Revert “{}”", entity.name),
+                false => format!("Edit “{}”", entity.name),
+            };
+            self.timeline
+                .record(note.id, label, note.before, after, gesture);
+        }
+        self.timeline.settle(gesture, &documents);
+        if self.timeline.shown() != shown {
+            ctx.request_repaint();
+        }
     }
 
     /// Hold a send to the instrument until the library's files have been checked for
@@ -1292,6 +1327,7 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.log,
         );
+        self.record(ctx);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1440,6 +1476,22 @@ impl DrawbarApp {
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));
         }
+    }
+}
+
+/// The gesture going on as a frame ends. A drag changes nothing in the frame of its press
+/// and makes its last change in the frame of its release, as a click makes its only one,
+/// so a change in the frame of a press belongs to no gesture.
+fn gesture(ctx: &egui::Context) -> Gesture {
+    if let Some(id) = ctx.memory(|memory| memory.focused()) {
+        return Gesture::Focused(id);
+    }
+    let pointer = |i: &egui::InputState| {
+        (i.pointer.any_down() || i.pointer.any_released()) && !i.pointer.any_pressed()
+    };
+    match ctx.input(pointer) {
+        true => Gesture::Dragging,
+        false => Gesture::Over,
     }
 }
 
@@ -2120,6 +2172,475 @@ mod tests {
                 && undoes(app)),
             "⇧⌘Z redid it"
         );
+    }
+
+    /// The app over no library, taking its keys as the browser build does.
+    fn keyed() -> (egui::Context, DrawbarApp) {
+        let ctx = crate::testing::context();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::with_library(&cc, None);
+        app.platform = crate::platform::Platform::Web;
+        (ctx, app)
+    }
+
+    /// One frame with `events`, and every word it painted.
+    fn input(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        events: Vec<egui::Event>,
+    ) -> Vec<crate::testing::Word> {
+        use eframe::App as _;
+
+        let mut window = eframe::Frame::_new_kittest();
+        let input = crate::testing::screen(egui::vec2(1280.0, 720.0), events);
+        let output = crate::testing::run(ctx, input, |ctx| app.update(ctx, &mut window));
+        crate::testing::painted(&output)
+    }
+
+    /// ⌘Z, or ⇧⌘Z where it redoes.
+    fn undo_key(redo: bool) -> egui::Event {
+        let shift = match redo {
+            true => egui::Modifiers::SHIFT,
+            false => egui::Modifiers::NONE,
+        };
+        egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND.plus(shift),
+        }
+    }
+
+    /// A new document of `kind`, in front, and the words its first frames painted.
+    fn in_front(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        kind: crate::workspace::Fresh,
+    ) -> (u64, Vec<crate::testing::Word>) {
+        let id = app.workspace.create(kind, &mut app.log).unwrap();
+        app.tabs.open(id);
+        input(ctx, app, Vec::new());
+        (id, input(ctx, app, Vec::new()))
+    }
+
+    fn bytes(app: &DrawbarApp, id: u64) -> Vec<u8> {
+        app.workspace.get(id).expect("still open").bytes.to_vec()
+    }
+
+    /// The middle of the knob captioned `caption`, whose stored number is painted under
+    /// it.
+    fn dial(said: &[crate::testing::Word], caption: &str) -> egui::Pos2 {
+        let at = said
+            .iter()
+            .position(|word| word.text == caption)
+            .unwrap_or_else(|| panic!("{caption} was never painted"));
+        let number = said[at + 1].rect;
+        egui::pos2(number.left() + 21.0, number.top() - 23.0)
+    }
+
+    /// What the Undo line reads, and whether it may be picked.
+    fn undo_line(app: &DrawbarApp) -> (String, bool) {
+        let offer = app
+            .offer(crate::menu::Command::Undo)
+            .expect("always offered");
+        (offer.label, offer.enabled)
+    }
+
+    /// How many steps Undo and Redo reach.
+    fn steps(app: &DrawbarApp) -> (usize, usize) {
+        let (_, done, undone) = app.timeline.shown();
+        (done, undone)
+    }
+
+    #[test]
+    fn a_frame_reads_each_gesture_off_its_input_as_egui_reports_it() {
+        let ctx = crate::testing::context();
+        let at = egui::pos2(100.0, 100.0);
+        let gesture_of = |events: Vec<egui::Event>| {
+            let input = crate::testing::screen(egui::vec2(400.0, 400.0), events);
+            crate::testing::run(&ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut text = String::new();
+                    ui.put(
+                        egui::Rect::from_min_size(egui::pos2(10.0, 300.0), egui::vec2(200.0, 30.0)),
+                        egui::TextEdit::singleline(&mut text).id(egui::Id::new("box")),
+                    );
+                });
+            });
+            super::gesture(&ctx)
+        };
+        assert_eq!(
+            gesture_of(vec![egui::Event::PointerMoved(at)]),
+            Gesture::Over
+        );
+        assert_eq!(
+            gesture_of(vec![crate::testing::button(at, true)]),
+            Gesture::Over,
+            "a press begins a gesture in the frames after it"
+        );
+        let below = at + egui::vec2(0.0, 30.0);
+        assert_eq!(
+            gesture_of(vec![egui::Event::PointerMoved(below)]),
+            Gesture::Dragging
+        );
+        assert_eq!(
+            gesture_of(vec![crate::testing::button(below, false)]),
+            Gesture::Dragging,
+            "the frame of the release is the gesture's last"
+        );
+        assert_eq!(gesture_of(Vec::new()), Gesture::Over);
+
+        let in_box = egui::pos2(50.0, 315.0);
+        gesture_of(crate::testing::click(in_box));
+        assert_eq!(
+            gesture_of(vec![egui::Event::Text("a".into())]),
+            Gesture::Focused(egui::Id::new("box"))
+        );
+        assert_eq!(
+            gesture_of(vec![crate::testing::button(at, true)]),
+            Gesture::Over,
+            "a press elsewhere takes the box's focus in the frame of the press"
+        );
+    }
+
+    #[test]
+    fn dragging_a_knob_through_several_values_is_one_step_that_undo_takes_back_whole() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let on_dial = dial(&said, "PROGRAM LEVEL");
+        let before = bytes(&app, id);
+
+        input(&ctx, &mut app, vec![egui::Event::PointerMoved(on_dial)]);
+        input(&ctx, &mut app, vec![crate::testing::button(on_dial, true)]);
+        let mut values = Vec::new();
+        for up in [20.0, 40.0, 60.0] {
+            let at = on_dial - egui::vec2(0.0, up);
+            input(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+            values.push(bytes(&app, id));
+        }
+        let top = on_dial - egui::vec2(0.0, 60.0);
+        input(&ctx, &mut app, vec![crate::testing::button(top, false)]);
+        input(&ctx, &mut app, Vec::new());
+        values.dedup();
+        assert!(values.len() >= 2, "the drag passed through several values");
+        assert_eq!(steps(&app), (1, 0));
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before, "the value before the drag is back");
+    }
+
+    #[test]
+    fn each_click_on_a_button_is_a_step_of_its_own() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let plus = crate::testing::where_(&said, "+").center();
+        let before = bytes(&app, id);
+
+        input(&ctx, &mut app, vec![egui::Event::PointerMoved(plus)]);
+        input(&ctx, &mut app, vec![crate::testing::button(plus, true)]);
+        input(&ctx, &mut app, vec![crate::testing::button(plus, false)]);
+        let once = bytes(&app, id);
+        input(&ctx, &mut app, vec![crate::testing::button(plus, true)]);
+        input(&ctx, &mut app, vec![crate::testing::button(plus, false)]);
+        input(&ctx, &mut app, Vec::new());
+        assert_ne!(once, before, "the first click changed the value");
+        assert_ne!(bytes(&app, id), once, "and so did the second");
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), once, "the second click is undone alone");
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before);
+    }
+
+    #[test]
+    fn typing_in_a_note_is_one_step_once_focus_leaves_it() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Text);
+        let page = egui::pos2(600.0, 500.0);
+        let before = bytes(&app, id);
+
+        input(&ctx, &mut app, crate::testing::click(page));
+        input(&ctx, &mut app, Vec::new());
+        for typed in ["a", "b", "c"] {
+            input(&ctx, &mut app, vec![egui::Event::Text(typed.into())]);
+        }
+        assert_eq!(bytes(&app, id), b"abc");
+        let outside = egui::pos2(150.0, 600.0);
+        input(&ctx, &mut app, crate::testing::click(outside));
+        input(&ctx, &mut app, Vec::new());
+        assert_eq!(steps(&app), (1, 0), "the visit is one step");
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before);
+    }
+
+    #[test]
+    fn a_box_committed_by_a_press_on_a_knob_and_the_drag_that_press_begins_are_two_steps() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let on_dial = dial(&said, "PROGRAM LEVEL");
+        let before = bytes(&app, id);
+        let click = || {
+            vec![
+                crate::testing::button(on_dial, true),
+                crate::testing::button(on_dial, false),
+            ]
+        };
+        input(&ctx, &mut app, vec![egui::Event::PointerMoved(on_dial)]);
+        input(&ctx, &mut app, click());
+        input(&ctx, &mut app, click());
+        input(&ctx, &mut app, Vec::new());
+        input(&ctx, &mut app, vec![egui::Event::Text("5".into())]);
+        assert_eq!(
+            bytes(&app, id),
+            before,
+            "the box commits only when it is left"
+        );
+
+        input(&ctx, &mut app, vec![crate::testing::button(on_dial, true)]);
+        let typed = bytes(&app, id);
+        assert_ne!(typed, before, "the press elsewhere committed the box");
+        for up in [20.0, 40.0] {
+            let at = on_dial - egui::vec2(0.0, up);
+            input(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        }
+        let top = on_dial - egui::vec2(0.0, 40.0);
+        input(&ctx, &mut app, vec![crate::testing::button(top, false)]);
+        input(&ctx, &mut app, Vec::new());
+        assert_ne!(bytes(&app, id), typed, "the drag turned the knob");
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), typed, "the drag is undone alone");
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before);
+    }
+
+    #[test]
+    fn a_frame_with_no_edit_records_nothing() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, id, "40");
+        let shown = app.timeline.shown();
+
+        input(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(egui::pos2(600.0, 400.0))],
+        );
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(600.0, 700.0)),
+        );
+        input(&ctx, &mut app, Vec::new());
+
+        assert_eq!(app.timeline.shown(), shown);
+    }
+
+    #[test]
+    fn undo_of_an_edit_brings_its_document_to_the_front() {
+        let (ctx, mut app) = keyed();
+        let (edited, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, edited, "40");
+        let (other, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        assert_eq!(app.tabs.active(), Some(other));
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(app.tabs.active(), Some(edited));
+    }
+
+    #[test]
+    fn revert_is_a_step_whose_undo_brings_the_edits_back() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        act(&ctx, &mut app, vec![browser::Act::Revert(id)]);
+        input(&ctx, &mut app, Vec::new());
+        assert!(!app.workspace.get(id).unwrap().is_unsaved());
+        assert_eq!(
+            undo_line(&app),
+            ("Undo Revert “untitled.ne5p”".into(), true)
+        );
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, id), changed);
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
+    }
+
+    /// Run `acts` as a frame runs what its panels asked for.
+    fn act(ctx: &egui::Context, app: &mut DrawbarApp, acts: Vec<browser::Act>) {
+        let acts = app
+            .document
+            .settle(ctx, acts, &mut app.workspace, &app.queue, &mut app.log);
+        browser::apply(
+            &mut app.browser,
+            &mut app.shell,
+            acts,
+            &mut app.workspace,
+            &mut app.device,
+            &mut app.tabs,
+            &mut app.queue,
+            &mut app.builds,
+            &mut app.log,
+        );
+    }
+
+    /// Turn the gain of the program `id` to `gain`, as a control does, in one frame.
+    fn turn_gain(ctx: &egui::Context, app: &mut DrawbarApp, id: u64, gain: &str) -> Vec<u8> {
+        let sets = [("center_panel.gain".into(), gain.into())];
+        let changed = crate::fields::apply(&bytes(app, id), &sets).unwrap().1;
+        app.workspace.replace_bytes(
+            id,
+            changed.clone(),
+            crate::workspace::Cause::User,
+            &mut app.log,
+        );
+        input(ctx, app, Vec::new());
+        changed
+    }
+
+    /// The app over a library in `root`, taking its keys as the browser build does, with
+    /// a new program filed in it and open in front.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn filed(root: &crate::testing::Temp) -> (egui::Context, DrawbarApp, u64) {
+        let (ctx, mut app) = opened_over(root);
+        app.platform = crate::platform::Platform::Web;
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        app.tabs.open(id);
+        until(&ctx, &mut app, |app| {
+            idle(app) && app.timeline.next_undo().is_some()
+        });
+        (ctx, app, id)
+    }
+
+    fn idle(app: &DrawbarApp) -> bool {
+        app.store.as_ref().is_some_and(Store::undoes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn undo_after_a_save_takes_the_edit_back_and_leaves_the_file_as_saved() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        let before = bytes(&app, id);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        let save = egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        input(&ctx, &mut app, vec![save]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && root.read("untitled.ne5p") == changed
+        });
+        assert_eq!(
+            undo_line(&app),
+            ("Undo Edit “untitled.ne5p”".into(), true),
+            "the save is passed over"
+        );
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, id), before);
+        assert_eq!(
+            root.read("untitled.ne5p"),
+            changed,
+            "the file stays as saved"
+        );
+        assert!(app.workspace.get(id).unwrap().is_unsaved());
+        assert_eq!(undo_line(&app).0, "Undo Save “untitled.ne5p”");
+
+        input(&ctx, &mut app, vec![undo_key(true)]);
+
+        assert_eq!(bytes(&app, id), changed);
+        assert!(!app.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_undo_line_names_each_step_as_the_guide_does() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        turn_gain(&ctx, &mut app, id, "40");
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
+
+        let name = "gospel".to_string();
+        act(&ctx, &mut app, vec![browser::Act::RenameLocal { id, name }]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && root.at("gospel.ne5p").exists()
+        });
+        assert_eq!(undo_line(&app).0, "Undo Rename “untitled.ne5p”");
+
+        turn_gain(&ctx, &mut app, id, "50");
+        assert_eq!(undo_line(&app).0, "Undo Edit “gospel.ne5p”");
+        act(&ctx, &mut app, vec![browser::Act::SaveDoc(id)]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && !app.workspace.get(id).unwrap().is_unsaved()
+        });
+        assert_eq!(undo_line(&app).0, "Undo Edit “gospel.ne5p”");
+
+        turn_gain(&ctx, &mut app, id, "60");
+        act(&ctx, &mut app, vec![browser::Act::Revert(id)]);
+        input(&ctx, &mut app, Vec::new());
+        assert_eq!(undo_line(&app).0, "Undo Revert “gospel.ne5p”");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn undo_and_redo_wait_while_a_change_to_the_library_is_unanswered() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::from_secs(10));
+        store.fault(crate::store::Fault::Stall);
+        app.browser.tags.make("Live").expect("a new tag");
+        input(&ctx, &mut app, Vec::new());
+
+        assert_eq!(undo_line(&app), ("Undo".into(), false));
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), changed, "nothing was undone");
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::ZERO);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_of_a_slots_view_undoes_with_no_library_open_and_once_one_opens() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = keyed();
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let at = nord_usb::Location { bank: 0, slot: 0 };
+        let class = nord_usb::ObjectClass::Program;
+        let id = app.workspace.view(
+            "Grand.ne5p".into(),
+            Origin::Device { class, at },
+            program.clone(),
+            &mut app.log,
+        );
+        app.tabs.open(id);
+        input(&ctx, &mut app, Vec::new());
+        let once = turn_gain(&ctx, &mut app, id, "40");
+        turn_gain(&ctx, &mut app, id, "50");
+        assert!(app.store.is_none());
+        assert_eq!(undo_line(&app), ("Undo Edit “Grand.ne5p”".into(), true));
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), once);
+
+        app.open_library(&ctx, root.0.clone(), false);
+        until_open(&ctx, &mut app);
+        until(&ctx, &mut app, idle);
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), program);
     }
 
     /// End to end through the app's own frames: New makes a file, and the next run finds

@@ -129,6 +129,19 @@ pub enum Asked {
     Redo(Taken),
 }
 
+impl Asked {
+    /// The file an undo or a redo of a save leaves each document it saved as: the file
+    /// the save replaced for an undo, the file it wrote for a redo, and nothing for
+    /// anything else.
+    pub fn leaves(&self) -> Vec<(u64, Identity)> {
+        match self {
+            Asked::Undo(taken) => taken.saved().iter().map(|s| (s.id, s.before)).collect(),
+            Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
+            Asked::Change { .. } | Asked::Lasting => Vec::new(),
+        }
+    }
+}
+
 /// How the library answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Answer {
@@ -203,7 +216,7 @@ impl Timeline {
                 if open.id == id && open.after == before {
                     self.bytes = self.bytes - open.after.size() + after.size();
                     open.after = after;
-                    return;
+                    return self.extended();
                 }
             }
         }
@@ -218,6 +231,23 @@ impl Timeline {
         if self.keep(Step::Edit(Box::new(step))) && gesture != Gesture::Over {
             self.open = Some(gesture);
         }
+    }
+
+    /// The open step took a further change. One back where it began is no step, and one
+    /// grown too large to keep cuts the timeline as a new one would.
+    fn extended(&mut self) {
+        let Some(Step::Edit(open)) = self.done.back() else {
+            return;
+        };
+        if open.before == open.after {
+            return self.let_go(self.done.len() - 1);
+        }
+        if open.before.size() + open.after.size() > BYTES {
+            self.done.clear();
+            self.open = None;
+            return self.count();
+        }
+        self.limit();
     }
 
     /// The frame ended with `gesture` going on. A step another gesture opened closes,
@@ -255,6 +285,21 @@ impl Timeline {
         }
     }
 
+    /// Changes whenever a step is recorded or either list gains or loses one, which is
+    /// whenever what Undo and Redo name may have.
+    pub fn shown(&self) -> (u64, usize, usize) {
+        (self.recorded, self.done.len(), self.undone.len())
+    }
+
+    /// The gesture that keeps the last step open, where one does.
+    pub fn open(&self) -> Option<Gesture> {
+        self.open
+    }
+
+    pub fn waiting(&self) -> Option<&Asked> {
+        self.waiting.as_ref()
+    }
+
     pub fn next_undo(&self) -> Option<Next<'_>> {
         self.undoes().map(|at| next(&self.done[at]))
     }
@@ -263,54 +308,47 @@ impl Timeline {
         self.undone.last().map(next)
     }
 
-    /// Take back the step [`Timeline::next_undo`] names. An edit step whose document
-    /// holds something else is let go, and the step behind it is tried.
+    /// Take back the step [`Timeline::next_undo`] names, and no other: an edit step
+    /// whose document holds something else is let go, and nothing is taken back.
     pub fn undo(&mut self, documents: &mut impl Documents) -> Went {
         self.close();
-        while let Some(at) = self.undoes() {
-            let Some(step) = self.done.remove(at) else {
-                break;
-            };
-            let size = step.size();
-            self.bytes -= size;
-            match step {
-                Step::Library(step) => return Went::Library(self.taken(step)),
-                Step::Edit(mut step) => {
-                    if documents.holds(step.id, &mut step.after)
-                        && documents.hold(step.id, &step.before)
-                    {
-                        let id = step.id;
-                        self.bytes += size;
-                        self.undone.push(Step::Edit(step));
-                        return Went::Edit(id);
-                    }
-                }
-            }
+        let Some(step) = self.undoes().and_then(|at| self.done.remove(at)) else {
+            return Went::Nowhere;
+        };
+        let size = step.size();
+        self.bytes -= size;
+        let mut step = match step {
+            Step::Library(step) => return Went::Library(self.taken(step)),
+            Step::Edit(step) => step,
+        };
+        if !(documents.holds(step.id, &mut step.after) && documents.hold(step.id, &step.before)) {
+            return Went::Nowhere;
         }
-        Went::Nowhere
+        let id = step.id;
+        self.bytes += size;
+        self.undone.push(Step::Edit(step));
+        Went::Edit(id)
     }
 
-    /// Make again the step [`Timeline::next_redo`] names.
+    /// Make again the step [`Timeline::next_redo`] names, and no other.
     pub fn redo(&mut self, documents: &mut impl Documents) -> Went {
         self.close();
-        while let Some(step) = self.undone.pop() {
-            let size = step.size();
-            self.bytes -= size;
-            match step {
-                Step::Library(step) => return Went::Library(self.taken(step)),
-                Step::Edit(mut step) => {
-                    if documents.holds(step.id, &mut step.before)
-                        && documents.hold(step.id, &step.after)
-                    {
-                        let id = step.id;
-                        self.bytes += size;
-                        self.done.push_back(Step::Edit(step));
-                        return Went::Edit(id);
-                    }
-                }
-            }
+        let Some(step) = self.undone.pop() else {
+            return Went::Nowhere;
+        };
+        let size = step.size();
+        self.bytes -= size;
+        let mut step = match step {
+            Step::Library(step) => return Went::Library(self.taken(step)),
+            Step::Edit(step) => step,
+        };
+        if !(documents.holds(step.id, &mut step.before) && documents.hold(step.id, &step.after)) {
+            return Went::Nowhere;
         }
-        Went::Nowhere
+        let id = step.id;
+        self.bytes += size;
+        self.done.push_back(Step::Edit(step));
+        Went::Edit(id)
     }
 
     fn taken(&self, step: Logged) -> Taken {
@@ -324,10 +362,20 @@ impl Timeline {
     /// end of the list it left.
     pub fn put_back(&mut self, asked: Asked) {
         match asked {
-            Asked::Undo(taken) => self.done.push_back(Step::Library(taken.step)),
-            Asked::Redo(taken) => self.undone.push(Step::Library(taken.step)),
-            Asked::Change { .. } | Asked::Lasting => {}
+            Asked::Undo(taken) => self.logged(taken.step),
+            // A step recorded since the redo was asked ended redo, this one included.
+            Asked::Redo(taken) if taken.recorded == self.recorded => {
+                self.undone.push(Step::Library(taken.step));
+            }
+            Asked::Redo(_) | Asked::Change { .. } | Asked::Lasting => {}
         }
+    }
+
+    /// Put a library step at the end of `done`, above a step no longer open.
+    fn logged(&mut self, step: Logged) {
+        self.close();
+        self.done.push_back(Step::Library(step));
+        self.limit();
     }
 
     /// Follow the library's answer to `asked`. Returns what can no longer be done with
@@ -362,7 +410,10 @@ impl Timeline {
         match asked {
             Asked::Change { label, saved } => {
                 self.close();
-                self.end_redo();
+                match saved.is_empty() {
+                    true => self.end_redo(),
+                    false => self.end_library_redo(),
+                }
                 self.keep(Step::Library(Logged {
                     label,
                     entry,
@@ -379,10 +430,10 @@ impl Timeline {
                 }));
             }
             Asked::Undo(_) => {}
-            Asked::Redo(taken) => self.done.push_back(Step::Library(Logged {
+            Asked::Redo(taken) => self.logged(Logged {
                 entry,
                 ..taken.step
-            })),
+            }),
         }
     }
 
@@ -414,20 +465,16 @@ impl Timeline {
         self.count();
     }
 
-    /// Close the open step, so the next change is a step of its own. One that left its
-    /// document as it found it goes.
+    /// Close the open step, so the next change is a step of its own.
     pub fn close(&mut self) {
-        if self.open.take().is_none() {
-            return;
-        }
-        if let Some(Step::Edit(step)) = self.done.back() {
-            if step.before == step.after {
-                self.let_go(self.done.len() - 1);
-            }
-        }
+        self.open = None;
     }
 
+    /// Let go of the step at `at`, which is no longer open if it was.
     fn let_go(&mut self, at: usize) {
+        if at + 1 == self.done.len() {
+            self.open = None;
+        }
         self.bytes -= self.done.remove(at).map_or(0, |step| step.size());
     }
 
@@ -438,21 +485,41 @@ impl Timeline {
         self.bytes -= self.undone.drain(..).map(|step| step.size()).sum::<usize>();
     }
 
+    /// A save ends the library's redo, and the redo of every step behind one of the
+    /// library's. An edit undone since stays to be made again: a save changes nothing an
+    /// edit step holds.
+    fn end_library_redo(&mut self) {
+        self.recorded += 1;
+        let logged = |step: &Step| matches!(step, Step::Library(_));
+        if let Some(at) = self.undone.iter().rposition(logged) {
+            self.undone.drain(..=at);
+            self.count();
+        }
+    }
+
     /// Keep a new step within the limits, letting the oldest go, and return whether it
     /// was kept. One too large to keep cuts the timeline, since Undo skips no change.
     fn keep(&mut self, step: Step) -> bool {
         let size = step.size();
         if size > BYTES {
             self.done.clear();
-            self.bytes = 0;
+            self.count();
             return false;
         }
         self.done.push_back(step);
         self.bytes += size;
-        while self.done.len() > STEPS || self.bytes > BYTES {
+        self.limit();
+        true
+    }
+
+    /// Let the oldest steps go while there are more than the limits allow.
+    fn limit(&mut self) {
+        while self.done.len() + self.undone.len() > STEPS || self.bytes > BYTES {
+            if self.done.is_empty() {
+                break;
+            }
             self.let_go(0);
         }
-        true
     }
 
     fn count(&mut self) {
@@ -684,6 +751,19 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_back_where_it_began_is_not_offered_while_it_goes_on() {
+        let mut session = Session::default();
+        session.edit(1, 9, Gesture::Dragging);
+        session.edit(1, 0, Gesture::Dragging);
+        assert_eq!(session.undo_reads(), None);
+
+        session.edit(1, 5, Gesture::Dragging);
+        session.undo();
+        assert_eq!(session.holds(1), body(0));
+        assert_eq!(session.undo(), None, "the drag is one step");
+    }
+
+    #[test]
     fn a_gesture_on_another_document_is_a_step_of_its_own() {
         let mut session = Session::default();
         session.edit(1, 1, Gesture::Dragging);
@@ -731,9 +811,25 @@ mod tests {
         // The document follows its file, which no step records.
         session.held.0.insert(1, body(9));
 
-        assert_eq!(session.undo().as_deref(), Some("Edit “2”"));
+        assert_eq!(session.undo(), None, "the step Undo named is let go");
         assert_eq!(session.holds(1), body(9), "no step touched it");
+        assert_eq!(session.holds(2), body(5), "and no other step was taken");
+        assert_eq!(session.undo().as_deref(), Some("Edit “2”"));
         assert_eq!(session.undo(), None, "its earlier step went as well");
+    }
+
+    #[test]
+    fn an_edit_step_that_cannot_be_put_back_takes_no_library_step_with_it() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        session.click(1, 3);
+        session.held.0.insert(1, body(9));
+
+        assert!(matches!(
+            session.timeline.undo(&mut session.held),
+            Went::Nowhere
+        ));
+        assert_eq!(session.undo_reads(), Some("Rename “1”"));
     }
 
     #[test]
@@ -777,6 +873,40 @@ mod tests {
     }
 
     #[test]
+    fn a_save_leaves_an_edit_undone_before_it_to_be_made_again() {
+        let mut session = Session::default();
+        session.click(1, 3);
+        session.undo();
+
+        session.log(save(1));
+
+        assert_eq!(session.redo().as_deref(), Some("Edit “1”"));
+        assert_eq!(session.holds(1), body(3));
+        assert_eq!(session.undo().as_deref(), Some("Edit “1”"));
+        assert_eq!(session.undo_reads(), Some("Save “1”"));
+    }
+
+    #[test]
+    fn a_save_ends_the_redo_of_a_library_step_and_of_the_edits_made_after_it() {
+        let mut session = Session::default();
+        session.click(1, 3);
+        session.log(change("Rename “1”"));
+        session.click(2, 5);
+        session.undo();
+        session.undo();
+        session.undo();
+
+        session.log(save(2));
+
+        assert_eq!(session.redo().as_deref(), Some("Edit “1”"));
+        assert_eq!(
+            session.redo(),
+            None,
+            "the library no longer makes its rename again"
+        );
+    }
+
+    #[test]
     fn a_library_step_undone_while_an_edit_was_made_is_not_redone() {
         let mut session = Session::default();
         session.log(change("Rename “1”"));
@@ -805,6 +935,43 @@ mod tests {
 
         assert_eq!(session.undo().as_deref(), Some("Rename “1”"));
         assert_eq!(session.undo().as_deref(), Some("Edit “1”"));
+    }
+
+    #[test]
+    fn a_refused_redo_stays_ended_by_an_edit_made_while_it_was_asked() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        session.undo();
+        let Went::Library(taken) = session.timeline.redo(&mut session.held) else {
+            panic!("the rename is redone by the library");
+        };
+        session.click(1, 3);
+
+        session
+            .timeline
+            .answered(Some(Asked::Redo(taken)), refused());
+
+        assert_eq!(session.redo_reads(), None, "the edit ended redo");
+        assert_eq!(session.undo_reads(), Some("Edit “1”"));
+    }
+
+    #[test]
+    fn a_refused_undo_closes_the_drag_made_while_it_was_asked() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the rename is undone by the library");
+        };
+        session.edit(1, 3, Gesture::Dragging);
+        session
+            .timeline
+            .answered(Some(Asked::Undo(taken)), refused());
+        assert_eq!(session.undo().as_deref(), Some("Rename “1”"));
+
+        session.edit(1, 4, Gesture::Dragging);
+
+        session.undo();
+        assert_eq!(session.holds(1), body(3), "the later drag is its own step");
     }
 
     #[test]
@@ -1011,6 +1178,43 @@ mod tests {
             2,
             "each step holds two fifths of the limit"
         );
+    }
+
+    #[test]
+    fn a_step_its_gesture_grows_keeps_within_the_bytes() {
+        let sized = |len: usize| Working::Body(vec![1; len].into());
+        let mut timeline = Timeline::default();
+        for len in [1, 2] {
+            let (before, after) = (sized(len), sized(len + 1));
+            timeline.record(len as u64, "Edit".to_string(), before, after, Gesture::Over);
+        }
+        let (small, grown) = (sized(BYTES / 4), sized(BYTES / 2));
+        timeline.record(
+            9,
+            "Edit".to_string(),
+            sized(8),
+            small.clone(),
+            Gesture::Dragging,
+        );
+
+        timeline.record(
+            9,
+            "Edit".to_string(),
+            small,
+            grown.clone(),
+            Gesture::Dragging,
+        );
+        assert!(timeline.bytes <= BYTES);
+        assert_eq!(timeline.done.len(), 3, "the limit is not reached");
+
+        let larger = sized(BYTES);
+        timeline.record(9, "Edit".to_string(), grown, larger, Gesture::Dragging);
+        assert_eq!(
+            timeline.done.len(),
+            0,
+            "a step too large to keep cuts the timeline"
+        );
+        assert_eq!((timeline.bytes, timeline.open), (0, None));
     }
 
     #[test]

@@ -155,20 +155,37 @@ the one kept last is shown, and the activity log says so.
 
 ## Undo
 
-**Edit ▸ Undo** (⌘Z) takes back the last change you made to your files and
-tags, and **Edit ▸ Redo** (⇧⌘Z) makes it again. Undo reaches back only to when
-this window opened the library: a change from before, or from another window,
-cannot be undone. The menu says which change it is, such as **Undo Rename
-“c3.ne5p”**. A save, a new sound, a copy, a rename or move, a deletion, a new or
-removed folder, and a change to tags can each be undone. One action is one
-step: dropping, moving or deleting several sounds at once, unpacking a bundle,
-writing over a sound, removing a folder with what is in it, or making a tag and
-naming it, is one undo. An action on more files than the library can keep as one
-step is refused whole and changes nothing; do it in smaller parts. That is tens of
+**Edit ▸ Undo** (⌘Z) takes back your last edit to a sound or your last change to
+your files and tags, whichever came later, and **Edit ▸ Redo** (⇧⌘Z) makes it
+again. The menu says which it is, such as **Undo Edit “c3.ne5p”** or **Undo
+Rename “c3.ne5p”**. Undoing an edit brings its sound to the front and sends
+nothing to the instrument.
+
+One gesture is one step: a drag of a knob, a click, or what you typed in a box
+before you left it. While you type in a box, Undo and Redo belong to that box. A
+**Revert** is a step too, and undoing it brings the edits back.
+
+A save is passed over. Undo takes back the edit before it and leaves the file as
+you saved it, so the sound reads unsaved until you save again or redo. When the
+save itself is next, the menu reads **Undo Save**, which puts the file back as
+it was. A sample instrument or a piano library edited in its file is different:
+a save ends what Undo can take back of the edits before it.
+
+A save, a new sound, a copy, a rename or move, a deletion, a new or removed
+folder, and a change to tags can each be undone. One action is one step:
+dropping, moving or deleting several sounds at once, unpacking a bundle, writing
+over a sound, removing a folder with what is in it, or making a tag and naming
+it, is one undo. An action on more files than the library can keep as one step
+is refused whole and changes nothing; do it in smaller parts. That is tens of
 thousands of files with short names, and about ten thousand with names hundreds
 of characters long. If another drawbar has changed what an undo would take
-back, that undo is refused, and Undo goes on to the change before it. An edit
-you have not saved is taken back with **Revert** instead.
+back, that undo is refused, and Undo goes on to the change before it.
+
+Undo reaches back only to when this window opened the library, and no further
+than the last thousand steps, or fewer when the edits are to large sounds. A
+change from before, or from another window, cannot be undone. When a sound
+takes what its file holds, as after a change made outside drawbar, its earlier
+edits can no longer be undone.
 
 Undo and Redo are off while a change is being written. A change that takes more
 than two seconds shows what it is doing over the window.
