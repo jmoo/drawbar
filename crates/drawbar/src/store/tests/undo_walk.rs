@@ -398,17 +398,23 @@ impl Walk {
     /// in flight.
     fn pump(&mut self) {
         for _ in 0..50 {
+            // ⚠️ The library's thread counts a command as run after it sent the command's
+            // last answer, so the count is read before the answers are folded in, and no
+            // answer is waited for once they all are.
+            let ran = !self.session.store.writing();
             self.session.decided();
             let store = &self.session.store;
-            let busy = store.changing() || store.writing() || store.deciding();
-            if !busy && !store.scanning() {
-                return;
+            let waits = store.changing() || store.rechecking();
+            let answered = !waits && self.session.settled();
+            match (answered, ran) {
+                (true, true) => return,
+                (true, false) => self.session.ran(),
+                (false, _) => assert!(
+                    self.session.next(),
+                    "{}: the library answered",
+                    self.whence()
+                ),
             }
-            assert!(
-                self.session.next(),
-                "{}: the library answered",
-                self.whence()
-            );
         }
         panic!("{}: the library is still deciding", self.whence());
     }

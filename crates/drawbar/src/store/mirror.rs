@@ -1494,6 +1494,12 @@ impl Store {
         self.ids.key(id).cloned()
     }
 
+    /// Whether a file read again to see what it holds has not answered.
+    #[cfg(test)]
+    pub fn rechecking(&self) -> bool {
+        !self.rechecking.is_empty()
+    }
+
     /// Whether a change to the facts waits to be sent or answered.
     #[cfg(test)]
     pub fn deciding(&self) -> bool {

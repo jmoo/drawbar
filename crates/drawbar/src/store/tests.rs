@@ -4767,13 +4767,23 @@ impl Session {
         }
     }
 
+    /// Wait, folding no answer in, until the library's thread has run through every
+    /// command sent. It counts a command as run after it sent the command's last answer.
+    fn ran(&self) {
+        let patience = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.store.writing() {
+            let waited = std::time::Instant::now() < patience;
+            assert!(waited, "the library ran its commands");
+            std::thread::yield_now();
+        }
+    }
+
     /// Undo the save of the file at `at`, which leaves it holding `made`, and let
     /// `outside` change the file before the answer is followed.
     fn undo_then(&mut self, root: &Temp, at: &str, made: &[u8], outside: impl FnOnce()) {
         self.press(false);
-        while fs::read(root.at(at)).ok().as_deref() != Some(made) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        self.ran();
+        assert_eq!(root.read(at), made, "the undo wrote the file");
         outside();
         self.decided();
         self.settle();
@@ -4865,13 +4875,8 @@ fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
     session.edit(id, "12");
     let theirs = with_gain(&edited, "40");
 
-    session.press(false);
-    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
-    session.decided();
-    session.settle();
+    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, write);
 
     let entity = session.bench.workspace.get(id).expect("held");
     assert_eq!(*entity.saved.bytes(), theirs);
@@ -4888,13 +4893,8 @@ fn a_file_the_undo_of_a_save_left_that_cannot_be_read_is_followed_as_one_gone_ou
     let (id, made, _) = session.saved_once("96");
     let edit = session.edit(id, "12");
 
-    session.press(false);
-    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    fs::remove_file(root.at("untitled.ne5p")).unwrap();
-    session.decided();
-    session.settle();
+    let delete = || fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, delete);
 
     assert_eq!(session.said("is missing from the library folder"), 1);
     assert_eq!(session.bytes(id), edit);
@@ -10142,13 +10142,8 @@ fn a_file_deleted_outside_after_the_undo_of_a_save_keeps_the_document() {
     let mut session = Session::open(&root);
     let (id, made, edited) = session.saved_once("96");
 
-    session.press(false);
-    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    fs::remove_file(root.at("untitled.ne5p")).unwrap();
-    session.decided();
-    session.settle();
+    let delete = || fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, delete);
 
     assert!(session.bench.workspace.get(id).is_some());
     assert_eq!(session.bytes(id), edited);
@@ -10185,13 +10180,8 @@ fn another_writers_change_read_with_the_undo_of_a_save_asks_with_nothing_else_un
     let (id, made, edited) = session.saved_once("96");
     let theirs = with_gain(&edited, "40");
 
-    session.press(false);
-    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
-    session.decided();
-    session.settle();
+    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, write);
 
     assert_eq!(session.bytes(id), edited);
     assert!(
