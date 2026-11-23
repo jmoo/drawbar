@@ -129,6 +129,19 @@ pub enum Asked {
     Redo(Taken),
 }
 
+impl Asked {
+    /// The file an undo or a redo of a save leaves each document it saved as: the file
+    /// the save replaced for an undo, the file it wrote for a redo, and nothing for
+    /// anything else.
+    pub fn leaves(&self) -> Vec<(u64, Identity)> {
+        match self {
+            Asked::Undo(taken) => taken.saved().iter().map(|s| (s.id, s.before)).collect(),
+            Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
+            Asked::Change { .. } | Asked::Lasting => Vec::new(),
+        }
+    }
+}
+
 /// How the library answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Answer {
@@ -276,6 +289,10 @@ impl Timeline {
     /// whenever what Undo and Redo name may have.
     pub fn shown(&self) -> (u64, usize, usize) {
         (self.recorded, self.done.len(), self.undone.len())
+    }
+
+    pub fn waiting(&self) -> Option<&Asked> {
+        self.waiting.as_ref()
     }
 
     pub fn next_undo(&self) -> Option<Next<'_>> {
