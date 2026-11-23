@@ -411,6 +411,15 @@ fn unwritten(command: Command, platform: Platform) -> Option<egui::KeyboardShort
         .then(|| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))
 }
 
+/// Whether `event` presses `keys`, matched as egui matches a shortcut.
+fn presses(event: &egui::Event, keys: egui::KeyboardShortcut) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { key, modifiers, pressed: true, .. }
+            if *key == keys.logical_key && modifiers.matches_logically(keys.modifiers)
+    )
+}
+
 /// Whether a command undoes or redoes, which a field being typed in does for itself.
 pub(crate) fn undoes(command: Command) -> bool {
     matches!(command, Command::Undo | Command::Redo)
@@ -799,7 +808,8 @@ impl DrawbarApp {
         }
     }
 
-    /// Run whatever command this frame's keys ask for, of those `admit` lets through.
+    /// Run the commands this frame's keys ask for, of those `admit` lets through, in the
+    /// order the keys were pressed.
     pub(crate) fn shortcuts(
         &mut self,
         ctx: &egui::Context,
@@ -808,18 +818,30 @@ impl DrawbarApp {
         acts: &mut Vec<Act>,
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
-        for command in KEYED {
-            // ⚠️ A field being typed in takes its own undo keys.
-            if undoes(command) && ctx.wants_keyboard_input() {
-                continue;
-            }
+        // ⚠️ A field being typed in takes its own undo keys.
+        let typing = ctx.wants_keyboard_input();
+        let bound = |command: Command, event: &egui::Event| {
             let mut keys = shortcut(command, platform, mac)
                 .into_iter()
                 .chain(unwritten(command, platform));
-            if !keys.any(|keys| ctx.input_mut(|input| input.consume_shortcut(&keys))) {
-                continue;
-            }
+            !(undoes(command) && typing) && keys.any(|keys| presses(event, keys))
+        };
+        let pressed = ctx.input_mut(|input| {
+            let mut pressed = Vec::new();
+            input.events.retain(|event| {
+                let command = KEYED.into_iter().find(|command| bound(*command, event));
+                pressed.extend(command);
+                command.is_none()
+            });
+            pressed
+        });
+        let queued = acts.len();
+        for command in pressed {
+            // An act runs after the keys, so an undo after a key that asked for one, as
+            // a save, would run first; it waits as it would for that change in flight.
+            let waits = undoes(command) && acts.len() > queued;
             if admit(command)
+                && !waits
                 && self
                     .offer_now(ctx, command)
                     .is_some_and(|offer| offer.enabled)

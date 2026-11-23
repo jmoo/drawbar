@@ -2849,6 +2849,45 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn a_save_and_an_undo_pressed_in_one_frame_save_the_edit_and_the_undo_waits_on_it() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        let before = bytes(&app, id);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        let save = egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+
+        input(&ctx, &mut app, vec![save, undo_key(false)]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && root.read("untitled.ne5p") == changed
+        });
+        assert_eq!(bytes(&app, id), changed, "nothing was undone");
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before);
+        assert_eq!(root.read("untitled.ne5p"), changed);
+    }
+
+    #[test]
+    fn an_undo_and_a_redo_pressed_in_one_frame_run_in_that_order() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, id, "40");
+        let last = turn_gain(&ctx, &mut app, id, "50");
+
+        input(&ctx, &mut app, vec![undo_key(false), undo_key(true)]);
+
+        assert_eq!(bytes(&app, id), last);
+        assert_eq!(steps(&app), (2, 0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn the_undo_line_names_each_step_as_the_guide_does() {
         let root = crate::testing::Temp::new();
         let (ctx, mut app, id) = filed(&root);
