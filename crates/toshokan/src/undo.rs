@@ -70,8 +70,8 @@ pub struct Before {
     /// the delete ended: each register's latest value, each member and where its
     /// file is.
     pub revived: BTreeMap<EntityId, Vec<FactChange>>,
-    /// Per entity the intent brought back, the entity the latest delete it
-    /// replaced had joined it into.
+    /// Per entity the intent brought back, the entity that the latest delete it
+    /// replaced which names one had joined it into.
     pub joined: BTreeMap<EntityId, EntityId>,
 }
 
@@ -116,8 +116,13 @@ impl Before {
                 } => {
                     let replaced = folded.existence(*entity).into_iter();
                     let replaced = replaced.filter(|write| replaces.contains(&write.named()));
-                    let latest = replaced.max_by_key(|write| (write.at, write.by, write.entry));
-                    if let Some(Exists::Deleted { into: Some(into) }) = latest.map(|w| w.value) {
+                    let joins = replaced.filter_map(|write| match write.value {
+                        Exists::Deleted { into } => {
+                            Some(((write.at, write.by, write.entry), into?))
+                        }
+                        Exists::Created => None,
+                    });
+                    if let Some((_, into)) = joins.max_by_key(|(order, _)| *order) {
                         before.joined.insert(*entity, into);
                     }
                 }
@@ -328,15 +333,15 @@ fn reverse(intent: EntryHash, logged: &Logged, reversing: &Reversing) -> Result<
     for op in &logged.ops {
         match op {
             Op::Create { entity, .. } => {
-                reversing.existence(*entity, true)?;
+                reversing.existence(*entity, Exists::Created)?;
                 reversing.only_own_writes(*entity)?;
                 facts.push(FactChange::Delete {
                     entity: *entity,
                     into: before.joined.get(entity).copied(),
                 });
             }
-            Op::Delete { entity, .. } => {
-                reversing.existence(*entity, false)?;
+            Op::Delete { entity, into, .. } => {
+                reversing.existence(*entity, Exists::Deleted { into: *into })?;
                 facts.push(FactChange::Revive { entity: *entity });
                 let revived = before.revived.get(entity).into_iter().flatten();
                 facts.extend(revived.cloned());
@@ -456,12 +461,10 @@ impl Reversing<'_> {
         write.by != self.writer || self.finals.contains(&write.entry)
     }
 
-    /// Refuses unless every surviving existence write of `entity` creates it,
-    /// where `created`, or deletes it.
-    fn existence(&self, entity: EntityId, created: bool) -> Result<(), Refusal> {
+    /// Refuses unless every surviving existence write of `entity` is as `left`.
+    fn existence(&self, entity: EntityId, left: Exists) -> Result<(), Refusal> {
         let survivors = self.folded.existence(entity);
-        let other = |write: &&Write<Exists>| write.value.created() != created;
-        match survivors.iter().rev().find(other) {
+        match survivors.iter().rev().find(|write| write.value != left) {
             Some(write) => Err(changed(write)),
             None => Ok(()),
         }

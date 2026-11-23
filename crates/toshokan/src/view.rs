@@ -233,40 +233,27 @@ impl View {
     }
 
     /// The entity shown that `named` names now: itself while it is shown; else
-    /// the lowest of the entities shown that the joins which deleted it lead to
-    /// ([`crate::intent::Intent::join`]); and, of either, the entity a scan found
-    /// it joined into ([`View::joined`]). `None` while no entity shown is it: it
+    /// the entity the join that deleted it names ([`crate::intent::Intent::join`]),
+    /// followed while that one is not shown either; and, of the entity reached,
+    /// the one a scan found it joined into ([`View::joined`]). Where joins
+    /// disagree, the latest is followed. `None` while no entity shown is it: it
     /// was deleted, or its writer's entries have not arrived. A deleted entity
     /// brought back resolves again.
     ///
     /// The entity has a file only where [`EntityView::file`] says so.
     pub fn resolve(&self, named: EntityId) -> Option<EntityId> {
-        let shown = match self.parts().folded.present(named) {
-            true => named,
-            false => self.joined_to(named)?,
-        };
+        let folded = &self.parts().folded;
+        let mut shown = named;
+        let mut passed = BTreeSet::new();
+        while !folded.present(shown) {
+            if !passed.insert(shown) {
+                return None;
+            }
+            shown = folded.joined_into(shown)?;
+        }
         let scanned = &self.parts().bindings.report.joined;
         let found = scanned.binary_search_by_key(&shown, |joined| joined.entity);
         Some(found.map_or(shown, |at| scanned[at].into))
-    }
-
-    /// The lowest entity shown that the joins which deleted `gone` lead to, each
-    /// followed through the entities joined in turn.
-    fn joined_to(&self, gone: EntityId) -> Option<EntityId> {
-        let folded = &self.parts().folded;
-        let mut seen = BTreeSet::from([gone]);
-        let mut next = folded.joined_into(gone);
-        let mut lowest: Option<EntityId> = None;
-        while let Some(into) = next.pop() {
-            if !seen.insert(into) {
-                continue;
-            }
-            match folded.present(into) {
-                true => lowest = Some(lowest.map_or(into, |lowest| lowest.min(into))),
-                false => next.extend(folded.joined_into(into)),
-            }
-        }
-        lowest
     }
 
     /// Every value of the relation `key`, a register or a set, with what each

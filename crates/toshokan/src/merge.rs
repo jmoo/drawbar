@@ -606,18 +606,15 @@ impl Folded {
         state.existence.iter().map(Held::write).collect()
     }
 
-    /// The entities the live deletes of `entity` say it was joined into, by id
-    /// and once each.
-    pub fn joined_into(&self, entity: EntityId) -> Vec<EntityId> {
-        let Some(state) = self.entities.get(&entity) else {
-            return Vec::new();
-        };
-        let into = state.existence.iter().filter_map(|held| match held.value {
-            Exists::Deleted { into } => into,
+    /// The entity that `entity`'s latest live delete naming one says it was
+    /// joined into: latest by clock, then writer, then entry.
+    pub fn joined_into(&self, entity: EntityId) -> Option<EntityId> {
+        let state = self.entities.get(&entity)?;
+        let joins = state.existence.iter().filter_map(|held| match held.value {
+            Exists::Deleted { into } => Some(((held.stamp, held.at.writer, held.at.hash), into?)),
             Exists::Created => None,
         });
-        let into: BTreeSet<EntityId> = into.collect();
-        into.into_iter().collect()
+        joins.max_by_key(|(order, _)| *order).map(|(_, into)| into)
     }
 
     /// The live writes of `entity`'s fields, each with its field: what a delete

@@ -237,7 +237,10 @@ the writer saw live: of a register, of a set's member, or of the file register.
 `observed` names the live field writes of the entity a delete saw, each as
 `{"key","at"}` for a register, `{"key","value","at"}` for a set's member or
 `{"file":true,"at"}` for the file register, with `at` the reference. A `value`
-is the app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
+is the app's JSON, kept byte for byte; `"value":null` writes `null`. An `into`
+that is not an id reads as none, as a reader that does not know `into` reads
+it, and its entry is kept as one holding a member the reader does not know. A
+`file` is
 `{"path","identity","len"}` with an optional `modified`, the backend's
 modification time, compared only for equality. Each member of `displaced` is
 `{"item","from","identity","len"}`: the trash item's nonce, the library path the
@@ -352,11 +355,13 @@ for the file register.
 - `takes`: per field and other writer, the latest take of a run of that writer,
   below the run's `from`.
 - `joined`: per own delete held in `writes` that names an `into`, its entity,
-  the delete and that `into`. A reader leaves out a record whose `own` is not
-  the entity's delete in `writes`: a build that does not know `joined` carries
-  it past the delete it names. Such a build folds a `delete` with `into` as a
+  the delete and that `into`; at most one record per entity, and a second
+  refuses the snapshot. A reader leaves out a record whose `own` is not the
+  entity's delete in `writes`: a build that does not know `joined` carries it
+  past the delete it names. Such a build folds a `delete` with `into` as a
   delete and keeps its entry in `extended`, where a reader that knows `into`
-  reads it for the delete `writes` holds.
+  reads it for the delete `writes` holds, from the entry's last write of that
+  entity's existence.
 - `dismissals`: the runs the writer dismissed, each with its entry.
 - `settled`: each pending record the writer closed, by its writer and nonce: its
   own, by the intent naming it, and another writer's, by a settlement.

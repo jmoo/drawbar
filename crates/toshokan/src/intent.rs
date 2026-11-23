@@ -149,10 +149,10 @@ impl<L: Driver> Intent<L> {
     /// Gives `into` each member of each set `entity` holds that `into` does not,
     /// and `entity`'s shown value of each register `into` holds no value of, then
     /// deletes `entity`. The delete names `into`, so a relation that names
-    /// `entity` resolves to `into` ([`crate::View::resolve`]). Where the intent
-    /// also joins `into` into another entity, that one gets it all. Refused unless
-    /// both are shown and differ. An intent that only joins entities is no step of
-    /// undo, which takes its writes for another writer's.
+    /// `entity` resolves to `into` ([`crate::View::resolve`]). Refused unless both
+    /// are shown and differ, and where the intent also deletes or joins `into`, or
+    /// deletes or joins `entity` again. An intent that only joins entities is no
+    /// step of undo, which takes its writes for another writer's.
     pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
         self.plan.joins.push(Joined { entity, into });
         self
@@ -408,11 +408,11 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 ///
 /// Refuses a key the schema does not declare with the change's kind, a change
 /// to an entity that is neither shown, created nor revived by the plan, and a
-/// join of an entity not shown, into one not shown or into itself. A join into
-/// an entity the plan joins into another is a join into that other. Of several
-/// changes to one register of one entity, or to one entity's existence, the last
-/// is logged. A plan that changes nothing is refused unless it reverses an entry
-/// or dismisses a run.
+/// join of an entity not shown, into one not shown or into itself. A join of an
+/// entity the plan deletes or joins again, or into one it deletes or joins, is
+/// refused as of an entity not shown. Of several changes to one register of one
+/// entity, or to one entity's existence, the last is logged. A plan that changes
+/// nothing is refused unless it reverses an entry or dismisses a run.
 pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Invalid> {
     let nothing = plan.created.is_empty()
         && plan.facts.is_empty()
@@ -536,8 +536,21 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         };
         ops.push(op);
     }
+    let deleted = plan.facts.iter().filter_map(|(change, _)| match change {
+        FactChange::Delete { entity, .. } => Some(*entity),
+        _ => None,
+    });
+    let mut ended: BTreeSet<EntityId> = deleted.collect();
     for joined in &plan.joins {
-        ops.extend(join(folded, schema, settled(&plan.joins, *joined)?)?);
+        if !ended.insert(joined.entity) {
+            return Err(Invalid::NoEntity(joined.entity));
+        }
+    }
+    for joined in &plan.joins {
+        if joined.into != joined.entity && ended.contains(&joined.into) {
+            return Err(Invalid::NoEntity(joined.into));
+        }
+        ops.extend(join(folded, schema, *joined)?);
     }
     if !plan.dismiss.is_empty() {
         ops.push(Op::Dismiss {
@@ -545,25 +558,6 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         });
     }
     Ok(ops)
-}
-
-/// `joined` into the entity `joins`, the plan's joins, leave: where they join
-/// `joined.into` into another, that other, so nothing given to an entity the plan
-/// deletes is lost with it. Refuses joins that lead back to where they began.
-fn settled(joins: &[Joined], joined: Joined) -> Result<Joined, Invalid> {
-    let mut into = joined.into;
-    for _ in joins {
-        match joins.iter().find(|next| next.entity == into) {
-            Some(next) => into = next.into,
-            None => {
-                return Ok(Joined {
-                    entity: joined.entity,
-                    into,
-                })
-            }
-        }
-    }
-    Err(Invalid::JoinedIntoItself(joined.entity))
 }
 
 /// The ops that give `joined.into` what `joined.entity` holds and it does not:

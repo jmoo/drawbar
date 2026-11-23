@@ -956,19 +956,29 @@ impl<'de> Deserialize<'de> for Contribution {
                 }
             }
         }
+        let mut joined = BTreeSet::new();
         for JoinedOut { entity, own, into } in out.joined {
+            if !joined.insert(entity) {
+                return Err(bad("two joins of one entity"));
+            }
             contribution.joined(entity, own, into);
         }
         for (hash, raw) in &out.extended {
             let Ok(entry) = Entry::kept(raw.as_str().to_owned(), *hash) else {
                 continue;
             };
-            for op in ops(entry.kind()) {
-                if let Op::Delete {
-                    entity,
-                    into: Some(into),
-                    ..
-                } = op
+            let mut written = BTreeSet::new();
+            for op in ops(entry.kind()).iter().rev() {
+                let (Op::Create { entity, .. } | Op::Delete { entity, .. }) = op else {
+                    continue;
+                };
+                let last = written.insert(*entity);
+                if let (
+                    true,
+                    Op::Delete {
+                        into: Some(into), ..
+                    },
+                ) = (last, op)
                 {
                     contribution.joined(*entity, entry.own(), *into);
                 }
@@ -1384,6 +1394,63 @@ mod tests {
         let read: Contribution = serde_json::from_str(&json).unwrap();
         let held = &read.own[&FieldKey::Exist(E)].value;
         assert_eq!(*held, Value::Exist(Exists::Deleted { into: Some(INTO) }));
+    }
+
+    /// One entry logging `ops`, after a genesis entry, as a build that does not
+    /// know of joins packs it: its deletes plain, and the entry kept whole.
+    fn kept_whole(ops: Vec<Op>) -> Contribution {
+        let genesis = chain(vec![]).remove(0);
+        let kind = EntryKind::Intent(Logged {
+            label: "L".into(),
+            ops,
+            displaced: vec![],
+            forks: vec![],
+            record: None,
+        });
+        let entry = Entry::encode(genesis.hash(), 1, at(1), kind).unwrap();
+        let mut kept = folded(&[genesis, entry.clone()]);
+        if let Some(held) = kept.own.get_mut(&FieldKey::Exist(E)) {
+            if held.value != Value::Exist(Exists::Created) {
+                held.value = Value::Exist(Exists::Deleted { into: None });
+            }
+        }
+        kept.extended.insert((entry.hash(), raw(&entry.json())));
+        let json = serde_json::to_string(&kept).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn an_entry_kept_whole_says_what_its_last_write_of_an_entity_says() {
+        let other = EntityId::from_u128(4);
+        let create = Op::Create {
+            entity: E,
+            replaces: vec![],
+            take: None,
+        };
+        for (ops, said) in [
+            (
+                vec![delete(Some(INTO)), delete(Some(other))],
+                Exists::Deleted { into: Some(other) },
+            ),
+            (
+                vec![delete(Some(INTO)), delete(None)],
+                Exists::Deleted { into: None },
+            ),
+            (vec![delete(Some(INTO)), create], Exists::Created),
+        ] {
+            let read = kept_whole(ops.clone());
+            let held = &read.own[&FieldKey::Exist(E)].value;
+            assert_eq!(*held, Value::Exist(said), "{ops:?}");
+        }
+    }
+
+    #[test]
+    fn a_contribution_naming_two_joins_of_one_entity_is_refused() {
+        let entries = chain(vec![(delete(Some(INTO)), vec![])]);
+        let mut json = serde_json::to_value(folded(&entries)).unwrap();
+        let record = json["joined"][0].clone();
+        json["joined"].as_array_mut().unwrap().push(record);
+        assert!(serde_json::from_value::<Contribution>(json).is_err());
     }
 
     #[test]

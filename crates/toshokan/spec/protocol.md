@@ -418,12 +418,11 @@ the one holds a value of and the other holds none of, the one's shown value
 where its writes conflict, and then the one's `delete`, whose `into` names the
 other (see Relations). A register both hold a value of keeps the other's. Two
 writers joining the same entity converge: an add of a member already held and a
-second delete of one entity change nothing shown. Where one intent joins an
-entity into another and that other into a third, it joins both into the third;
-joins that lead back to where they began refuse the intent. The delete observes
-only the writes its writer saw, so a change to the joined entity another writer
-made without seeing the join is a deletion conflict. An intent that only joins
-entities is final (see Undo and redo).
+second delete of one entity change nothing shown. An intent joins an entity
+once, and neither deletes nor joins an entity it joins or joins into; one that
+does is refused. The delete observes only the writes its writer saw, so a change
+to the joined entity another writer made without seeing the join is a deletion
+conflict. An intent that only joins entities is final (see Undo and redo).
 
 An intent may save, rename or trash a library file no entity is bound to, by its
 path, without making it an entity: a file nothing is said about stays without
@@ -467,10 +466,10 @@ an undo logs (see Undo and redo) and the one that takes a forked writer's join.
 An id **resolves** to an entity a reader shows, or to none:
 
 1. The id of an entity shown resolves to that entity.
-2. The id of an entity not shown resolves to the lowest by id of the entities
-   shown that its live deletes lead to: each names an entity in `into` or none,
-   and from an entity named that is not shown, its own live deletes lead on. It
-   resolves to none where they lead to no entity shown.
+2. The id of an entity not shown resolves as the id its join names: the `into`
+   of its live deletes that have one, and of several the latest, by clock, then
+   writer, then entry. It resolves to none where no live delete of it has an
+   `into`, and where following them comes back to an id already passed.
 3. Where the binding joins the entity of step 1 or 2 into another (see
    Binding), the id resolves to that other.
 
@@ -481,7 +480,8 @@ entries that create it have not arrived. Undoing the delete, or the entries
 arriving, resolves it again. An entity deleted and brought back resolves to
 itself, and to none once it is deleted again by other than a join. Deleting the
 entity an id resolves to leaves it resolving to none, unless that delete is a
-join's.
+join's. Where two writers join one entity into different ones, the later join
+alone is followed, so undo, which logs one delete, can put back what was shown.
 
 The entities that name an entity are those whose value's target is its id, or
 resolves to what its id resolves to. Readers that hold the same merged state and
@@ -756,8 +756,10 @@ before it. Undo takes what a join or a settlement wrote for another writer's.
 - An add is reversed by a remove, a remove by an add.
 - A create is reversed by a delete, and a delete by a create replacing it, with
   the register values, members and file the delete ended. The delete names the
-  `into` of the latest delete the create replaced, so undoing the return of a
-  joined entity, or redoing a join, joins it again.
+  `into` that Relations follows among the deletes the create replaced, so
+  undoing the return of a joined entity, or redoing a join, joins it again. A
+  delete is not reversed while a surviving delete of its entity says otherwise:
+  another `into`, or none where it named one.
 - A `file` op is reversed by putting back what it changed: the displaced bytes
   from the trash, under a precondition on what the path holds now; the old name;
   or the trash, for a file the intent added. A save over a file that was gone
