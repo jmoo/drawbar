@@ -1922,6 +1922,92 @@ mod tests {
         panic!("it never happened");
     }
 
+    /// A sample instrument in a library over `root`, read and in front, renamed Vibes by
+    /// an edit held over the file it rests in.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn edited_sample(root: &crate::testing::Temp) -> (egui::Context, DrawbarApp, u64) {
+        std::fs::write(root.at("Marimba.nsmp"), crate::testing::sample_bytes()).unwrap();
+        let (ctx, mut app) = opened_over(root);
+        app.platform = crate::platform::Platform::Web;
+        let named = |app: &DrawbarApp| {
+            let mut listed = app.workspace.listed();
+            listed
+                .find(|entity| entity.name == "Marimba.nsmp")
+                .map(|entity| entity.id)
+        };
+        until(&ctx, &mut app, |app| named(app).is_some());
+        let id = named(&app).expect("listed");
+        app.tabs.open(id);
+        until(&ctx, &mut app, |app| {
+            idle(app)
+                && app
+                    .workspace
+                    .get(id)
+                    .is_some_and(|entity| entity.rests().is_some())
+        });
+        let vibes = crate::rewrite::Edit::Sample(vec![("name".into(), "Vibes".into())]);
+        app.workspace
+            .hold_edit(id, Some(vibes), crate::workspace::Cause::User);
+        input(&ctx, &mut app, Vec::new());
+        assert_eq!(undo_line(&app), ("Undo Edit “Marimba.nsmp”".into(), true));
+        (ctx, app, id)
+    }
+
+    fn save_key() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }
+    }
+
+    /// An Undo of an edit waits while a save asked of its document waits to be sent, as
+    /// it does behind a rescan. Once the save lands, Undo takes the save back, and with it
+    /// the edit the file now holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn undo_of_an_edit_waits_while_its_save_waits() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = edited_sample(&root);
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::from_secs(10));
+        store.fault(crate::store::Fault::Stall);
+        store.rescan();
+        input(&ctx, &mut app, vec![save_key()]);
+        assert!(
+            app.workspace.saving_edit(id),
+            "the save waits on the rescan"
+        );
+        assert_eq!(undo_line(&app), ("Undo".into(), false));
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert!(app.workspace.edit(id).is_some(), "nothing was undone");
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::ZERO);
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = edited_sample(&root);
+        input(&ctx, &mut app, vec![save_key()]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && !app.workspace.saving_edit(id)
+        });
+        assert!(!app.workspace.get(id).unwrap().is_unsaved(), "it saved");
+        // The edit is in the file now, so the save's undo takes it back.
+        assert_eq!(undo_line(&app), ("Undo Save “Marimba.nsmp”".into(), true));
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        until(&ctx, &mut app, idle);
+        assert!(root.read("Marimba.nsmp") == crate::testing::sample_bytes());
+        let held = app.document.working(&app.workspace, id);
+        assert!(
+            matches!(
+                held,
+                Some(crate::workspace::Working::Edit { edit: None, .. })
+            ),
+            "the document holds what the file does"
+        );
+    }
+
     /// The list is let go of only once the library holds it, its keys left as they were,
     /// and a list the library holds already, as after a crash before it was let go of, is
     /// let go of without being taken in again.

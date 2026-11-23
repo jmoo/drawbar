@@ -766,12 +766,20 @@ impl Document {
         self.piano.holds_for(id)
     }
 
+    /// Whether something asked of the document `id` waits on its save: a save of the edit
+    /// held over its file, not yet sent, or an act waiting for that save.
+    pub fn awaits_save(&self, id: u64, workspace: &Workspace) -> bool {
+        workspace.saving_edit(id)
+            || (self.saving.iter()).any(|held| held.files.iter().any(|(file, _)| *file == id))
+    }
+
     /// Put back a working copy the document held, with no step, and return whether it
     /// holds it now. Every editor takes it up, and keeps where the user is looking.
     /// All or nothing: one it cannot hold exactly changes nothing.
     ///
-    /// ⚠️ What was asked of the content it replaces is dropped: a save not yet sent, and
-    /// every act waiting on that save, each of which carries the document.
+    /// ⚠️ A save asked of the document and not yet sent saves what it holds after this,
+    /// and the acts waiting on that save carry it. Undo waits while one is asked; see
+    /// [`Document::awaits_save`].
     pub fn hold(
         &mut self,
         id: u64,
@@ -785,8 +793,6 @@ impl Document {
         if !holdable(workspace, id, working) || !workspace.hold(id, working, log) {
             return false;
         }
-        self.saving
-            .retain(|held| held.files.iter().all(|(file, _)| *file != id));
         self.take_up(id, workspace);
         self.replaced(id);
         self.note_pending(id, workspace);
@@ -5033,30 +5039,40 @@ mod tests {
         assert!(open.entity().is_unsaved());
     }
 
-    /// Undo puts back an edit nobody asked to save: the save asked of the edit it
-    /// replaces is let go unsent, and so is the act that waited on it.
+    /// A save asked of a document waits on the store while Undo waits on it. Where a
+    /// hold comes anyway, as a Save and an Undo picked in one frame, the save writes the
+    /// edit the document holds after it, which is the one it shows, and the act that
+    /// waited runs once that is saved.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn an_undo_lets_go_of_a_save_asked_of_the_edit_it_replaces() {
+    fn a_hold_while_a_save_waits_saves_the_edit_it_puts_back() {
         let dir = testing::Temp::new();
         let mut open = resting_sample(&dir, &[("name", "Vibes")]);
         let vibes = open.working();
         open.apply(&[("name", "Bells")]);
         let id = open.id;
-        assert_eq!(open.settled(vec![crate::browser::Act::SaveDoc(id)]), []);
-        assert!(
-            open.workspace.saving_edit(id),
-            "the save waits on the store"
-        );
+        assert!(!open.document.awaits_save(id, &open.workspace));
+        let export = || crate::browser::Act::Export(id);
+        assert_eq!(open.settled(vec![export()]), []);
+        assert!(open.document.awaits_save(id, &open.workspace), "Undo waits");
 
         assert!(open.hold(&vibes));
-        assert!(
-            !open.workspace.saving_edit(id),
-            "nothing asks to save Vibes"
-        );
-        assert!(open.workspace.edits_to_save().is_empty());
-        assert!(open.document.saving.is_empty(), "nothing waits on it");
-        assert!(open.entity().is_unsaved());
+        open.frame(Vec::new());
+        assert_eq!(open.document.instrument_name(id, &open.workspace), "Vibes");
+        let (from, edit) = open.workspace.send_edit(id).expect("the save goes on");
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &sample_bytes());
+        let saved = sample::apply(&sample_bytes(), &[("name".into(), "Vibes".into())]);
+        assert!(out.unwrap() == saved.unwrap(), "it writes the edit shown");
+        std::fs::write(
+            dir.at("Saved.nsmp"),
+            sample::apply(&sample_bytes(), &[("name".into(), "Vibes".into())]).unwrap(),
+        )
+        .unwrap();
+        let file = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
+        let file = crate::ondisk::OnDisk::open(file, None).unwrap().unwrap();
+        open.workspace.edit_saved(id, std::sync::Arc::new(file));
+        assert_eq!(open.settled(Vec::new()), [export()], "what waited runs");
+        assert!(!open.document.awaits_save(id, &open.workspace));
     }
 
     /// A piano library held whole over the file it was read from, as a kept draft of its
