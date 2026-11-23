@@ -1517,3 +1517,103 @@ fn each_side_of_a_conflicted_relation_is_read() {
     assert_eq!(view.referrers(TEMPLATE, one), [library]);
     assert_eq!(view.referrers(TEMPLATE, two), [library]);
 }
+
+/// Seeded walks of three writers that make entities, name them, join, delete,
+/// bring back and sync at random. Once each holds every entry, all resolve each id
+/// to the same entity, which they show, and agree on who names it, as does a
+/// reader of their snapshots.
+#[test]
+fn writers_that_hold_the_same_entries_resolve_every_id_alike() {
+    for seed in 0..200 {
+        let mut random = SeededRandom::new(seed);
+        let mut pick = |below: usize| (random.next_u128() % below as u128) as usize;
+        let mut writers = [Writer::new(0xa), Writer::new(0xb), Writer::new(0xc)];
+        let mut made: Vec<EntityId> = Vec::new();
+        for step in 0..40u64 {
+            let at = pick(3);
+            let shown = writers[at].folded.entities();
+            let now = step + 1;
+            let any = |pick: &mut dyn FnMut(usize) -> usize, of: &[EntityId]| {
+                (!of.is_empty()).then(|| of[pick(of.len())])
+            };
+            let built = match pick(7) {
+                0 | 1 => {
+                    let id = entity(made.len() as u128 + 1);
+                    let named = any(&mut pick, &made);
+                    made.push(id);
+                    let (create, _) = creating("Add", &[id]).create(|new| {
+                        new.set(NAME, "made".into());
+                        if let Some(named) = named {
+                            new.add(SOURCES, source(named));
+                        }
+                    });
+                    Some(create)
+                }
+                2 => {
+                    let pair = (any(&mut pick, &shown), any(&mut pick, &shown));
+                    match pair {
+                        (Some(one), Some(into)) if one != into => {
+                            Some(intent("Join").join(one, into))
+                        }
+                        _ => None,
+                    }
+                }
+                3 => any(&mut pick, &shown).map(|gone| intent("Delete").delete(gone)),
+                4 => any(&mut pick, &made).map(|back| intent("Keep").revive(back)),
+                5 => {
+                    let pair = (any(&mut pick, &shown), any(&mut pick, &made));
+                    match pair {
+                        (Some(holder), Some(named)) => {
+                            Some(intent("Name").add(holder, SOURCES, source(named)))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => {
+                    let from = writers[(at + 1 + pick(2)) % 3].clone();
+                    writers[at].sync(&from);
+                    None
+                }
+            };
+            if let Some(built) = built {
+                // A change the writer's state refuses, such as a revive of an
+                // entity it has not seen, is no step of the walk.
+                let _ = writers[at].commit(plan(built), now);
+            }
+        }
+        let held = writers.clone();
+        for writer in &mut writers {
+            for from in &held {
+                writer.sync(from);
+            }
+        }
+        let compacted = view(writers[0].compacted());
+        let views: Vec<View> = writers
+            .iter()
+            .map(Writer::view)
+            .chain([compacted])
+            .collect();
+        let read = |view: &View| {
+            let resolved: Vec<Option<EntityId>> = made.iter().map(|id| view.resolve(*id)).collect();
+            for to in resolved.iter().flatten() {
+                assert!(view.entity(*to).is_some(), "seed {seed}: {to} is not shown");
+                assert_eq!(
+                    view.resolve(*to),
+                    Some(*to),
+                    "seed {seed}: {to} resolves on"
+                );
+            }
+            let naming: Vec<Vec<EntityId>> =
+                made.iter().map(|id| view.referrers(SOURCES, *id)).collect();
+            for related in view.relations(SOURCES).related {
+                let named = view.referrers(SOURCES, related.value.to);
+                assert!(named.contains(&related.from), "seed {seed}: {related:?}");
+            }
+            (resolved, naming, sources(view))
+        };
+        let first = read(&views[0]);
+        for view in &views[1..] {
+            assert_eq!(read(view), first, "seed {seed}");
+        }
+    }
+}
