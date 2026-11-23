@@ -419,8 +419,8 @@ where its writes conflict, and then the one's `delete`, whose `into` names the
 other (see Relations). A register both hold a value of keeps the other's. Two
 writers joining the same entity converge: an add of a member already held and a
 second delete of one entity change nothing shown. An intent joins an entity
-once, and neither deletes nor joins an entity it joins or joins into; one that
-does is refused. The delete observes only the writes its writer saw, so a change
+once, neither deletes nor joins an entity it joins or joins into, and brings
+back none it joins; one that does is refused. The delete observes only the writes its writer saw, so a change
 to the joined entity another writer made without seeing the join is a deletion
 conflict. An intent that only joins entities is final (see Undo and redo).
 
@@ -461,7 +461,8 @@ binding.
 A `delete` that a join logs says in `into` which entity it joined its own into.
 It is the existence write any delete is: a `create` that replaces it, or a later
 `delete`, ends what it says with it. Another delete names no entity, but the one
-an undo logs (see Undo and redo) and the one that takes a forked writer's join.
+an undo or a redo logs (see Undo and redo) and the one that takes a forked
+writer's join.
 
 An id **resolves** to an entity a reader shows, or to none:
 

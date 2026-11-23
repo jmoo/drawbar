@@ -1064,8 +1064,8 @@ struct DeleteIn {
 /// A delete's `into`. A value that is no id reads as none, as a build that does
 /// not know the member reads it, so both show the same entities.
 fn joined_into<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<EntityId>, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).ok())
+    let value = Box::<RawValue>::deserialize(deserializer)?;
+    Ok(serde_json::from_str(value.get()).ok())
 }
 
 #[derive(Deserialize)]
@@ -1700,7 +1700,7 @@ mod tests {
     fn a_delete_whose_into_is_no_id_is_a_plain_delete_kept_whole() {
         let prev = hash(1);
         let e = "0000000000000000000000000000000e";
-        for into in ["7", "null", r#""x""#, "{}"] {
+        for into in ["7", "1e400", "null", r#""x""#, "{}"] {
             let line = format!(
                 r#"{{"prev":"{prev}","n":2,"at":[1,2],"kind":"intent","label":"L","ops":[{{"op":"delete","entity":"{e}","replaces":[],"observed":[],"into":{into}}}]}}"#
             );
@@ -1713,6 +1713,7 @@ mod tests {
                 "{line}"
             );
             assert!(entry.unknown_members(), "{line}");
+            assert_eq!(entry.json(), line);
         }
     }
 

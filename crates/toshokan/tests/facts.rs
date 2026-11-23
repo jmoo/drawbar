@@ -1440,6 +1440,11 @@ fn an_intent_that_ends_an_entity_it_joins_or_joins_into_is_refused() {
         ("twice", join(&[(high, low), (high, middle)]), high),
         ("into one deleted", join(&[(high, low)]).delete(low), low),
         ("of one deleted", join(&[(high, low)]).delete(high), high),
+        (
+            "of one brought back",
+            join(&[(high, low)]).delete(high).revive(high),
+            high,
+        ),
     ] {
         assert_eq!(
             ops(&plan(built), &a.folded, &schema()),
@@ -1449,6 +1454,8 @@ fn an_intent_that_ends_an_entity_it_joins_or_joins_into_is_refused() {
     }
     let star = join(&[(high, low), (middle, low)]);
     assert!(ops(&plan(star), &a.folded, &schema()).is_ok());
+    let kept = join(&[(high, low)]).delete(low).revive(low);
+    assert!(ops(&plan(kept), &a.folded, &schema()).is_ok());
 }
 
 #[test]
@@ -1527,41 +1534,66 @@ fn undoing_the_return_of_a_joined_entity_joins_it_again() {
 }
 
 /// Writers `a` and `b`, of whom `a` has seen both join `gone`, which `library`
-/// names: `a` into `first`, and then `b` into `second`.
-fn joined_apart(first: EntityId, second: EntityId, gone: EntityId) -> (Writer, Writer) {
+/// names: `a` into `first` at the clock reading `at.0`, `b` into `second` at
+/// `at.1`.
+fn joined_apart(first: EntityId, second: EntityId, gone: EntityId, at: (u64, u64)) -> Writer {
     let mut a = library_of(&[first, second, gone], entity(3), &[gone]);
     let mut b = Writer::new(0xb);
     b.sync(&a);
-    a.commit(plan(intent("Join").join(gone, first)), 3).unwrap();
-    b.commit(plan(intent("Join").join(gone, second)), 4)
+    a.commit(plan(intent("Join").join(gone, first)), at.0)
+        .unwrap();
+    b.commit(plan(intent("Join").join(gone, second)), at.1)
         .unwrap();
     a.sync(&b);
-    (a, b)
+    a
 }
 
 #[test]
 fn where_writers_join_one_entity_into_different_ones_the_later_join_is_followed() {
     let [first, second, gone, library] = [entity(1), entity(2), entity(7), entity(3)];
-    let (mut a, mut b) = joined_apart(first, second, gone);
-    b.sync(&a);
-    for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
-        let view = view(folded);
-        assert_eq!(view.resolve(gone), Some(second));
-        assert_eq!(sources(&view), [(library, vec![Some(second)])]);
-    }
+    for (at, later, why) in [
+        ((4, 3), first, "by clock"),
+        ((3, 4), second, "by clock"),
+        ((3, 3), second, "by writer, where the clocks agree"),
+    ] {
+        let mut a = joined_apart(first, second, gone, at);
+        for folded in [a.folded.clone(), a.compacted()] {
+            let view = view(folded);
+            assert_eq!(view.resolve(gone), Some(later), "{why}");
+            assert_eq!(sources(&view), [(library, vec![Some(later)])], "{why}");
+        }
 
-    a.commit(plan(intent("Delete").delete(second)), 5).unwrap();
-    assert_eq!(a.view().resolve(gone), None, "the earlier join is not");
+        a.commit(plan(intent("Delete").delete(later)), 5).unwrap();
+        assert_eq!(a.view().resolve(gone), None, "the earlier join is not");
+    }
 }
 
 #[test]
 fn undoing_the_return_of_an_entity_two_writers_joined_follows_the_later_join_again() {
     let [first, second, gone] = [entity(1), entity(2), entity(7)];
-    let (mut a, _) = joined_apart(first, second, gone);
-    a.commit(plan(intent("Keep").revive(gone)), 5).unwrap();
-    assert_eq!(a.view().resolve(gone), Some(gone));
+    for (at, later) in [((4, 3), first), ((3, 4), second)] {
+        let mut a = joined_apart(first, second, gone, at);
+        a.commit(plan(intent("Keep").revive(gone)), 5).unwrap();
+        assert_eq!(a.view().resolve(gone), Some(gone));
+        a.undo(6).unwrap();
+        assert_eq!(a.view().resolve(gone), Some(later));
+    }
+}
+
+#[test]
+fn a_delete_beside_a_join_leaves_the_join_followed() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.commit(plan(intent("Delete").delete(high)), 4).unwrap();
+    a.sync(&b);
+    for folded in [a.folded.clone(), a.compacted()] {
+        assert_eq!(view(folded).resolve(high), Some(low));
+    }
+
+    a.commit(plan(intent("Keep").revive(high)), 5).unwrap();
     a.undo(6).unwrap();
-    assert_eq!(a.view().resolve(gone), Some(second));
+    assert_eq!(a.view().resolve(high), Some(low));
 }
 
 #[test]
@@ -1584,20 +1616,27 @@ fn undoing_the_return_that_settled_a_conflict_over_a_join_joins_it_again() {
 }
 
 #[test]
-fn undoing_a_join_is_refused_once_another_writer_deleted_the_entity_otherwise() {
+fn undoing_a_delete_is_refused_once_another_writer_deleted_the_entity_otherwise() {
     let [low, middle, high, library] = [entity(1), entity(2), entity(3), entity(4)];
     let tidy = || intent("Tidy").join(high, low).add(low, TAGS, "kept".into());
-    for other in [
-        intent("Delete").delete(high),
-        intent("Join").join(high, middle),
+    let delete = || intent("Delete").delete(high);
+    let join = |into| intent("Join").join(high, into);
+    for (what, own, other) in [
+        ("a join, beside a delete", tidy(), delete()),
+        ("a join, beside another join", tidy(), join(middle)),
+        ("a delete, beside a join", delete(), join(low)),
     ] {
         let mut a = library_of(&[low, middle, high], library, &[high]);
         let mut b = Writer::new(0xb);
         b.sync(&a);
-        a.commit(plan(tidy()), 3).unwrap();
+        a.commit(plan(own), 3).unwrap();
         b.commit(plan(other), 3).unwrap();
         a.sync(&b);
-        assert!(matches!(a.undo(4), Err(Refusal::ChangedSince { .. })));
+        let refused = a.undo(4);
+        assert!(
+            matches!(refused, Err(Refusal::ChangedSince { .. })),
+            "{what}: {refused:?}"
+        );
     }
 
     let mut a = library_of(&[low, middle, high], library, &[high]);
@@ -1657,6 +1696,25 @@ fn joins_that_lead_back_to_where_they_began_resolve_to_none() {
         assert_eq!((view.resolve(one), view.resolve(other)), (None, None));
         assert_eq!(sources(&view), [(library, vec![None, None])]);
     }
+}
+
+#[test]
+fn an_entity_that_gained_from_a_join_its_delete_did_not_see_is_what_both_ids_name() {
+    let [one, other, library] = [entity(1), entity(2), entity(3)];
+    let mut a = library_of(&[one, other], library, &[one, other]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("").add(one, TAGS, "one".into())), 3)
+        .unwrap();
+    a.commit(plan(intent("Join").join(one, other)), 4).unwrap();
+    b.commit(plan(intent("Join").join(other, one)), 4).unwrap();
+    a.sync(&b);
+    let view = a.view();
+    assert_eq!(view.conflicts(), [Conflicted::Existence { entity: other }]);
+    assert_eq!(
+        (view.resolve(one), view.resolve(other)),
+        (Some(other), Some(other))
+    );
 }
 
 #[test]

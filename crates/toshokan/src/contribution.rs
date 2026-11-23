@@ -1422,9 +1422,11 @@ mod tests {
     #[test]
     fn an_entry_kept_whole_says_what_its_last_write_of_an_entity_says() {
         let other = EntityId::from_u128(4);
-        let create = Op::Create {
-            entity: E,
+        let unrelated = Op::Delete {
+            entity: other,
             replaces: vec![],
+            observed: vec![],
+            into: None,
             take: None,
         };
         for (ops, said) in [
@@ -1436,7 +1438,10 @@ mod tests {
                 vec![delete(Some(INTO)), delete(None)],
                 Exists::Deleted { into: None },
             ),
-            (vec![delete(Some(INTO)), create], Exists::Created),
+            (
+                vec![delete(Some(INTO)), unrelated],
+                Exists::Deleted { into: Some(INTO) },
+            ),
         ] {
             let read = kept_whole(ops.clone());
             let held = &read.own[&FieldKey::Exist(E)].value;

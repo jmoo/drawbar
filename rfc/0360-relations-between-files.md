@@ -178,8 +178,8 @@ An id resolves to an entity the view shows, or to none:
 Step 3 covers the time between two computers adopting one file and a drawbar logging
 the join. Step 2 covers the time after. Step 2 follows one delete at each entity, so
 it is a walk that ends, and what it finds is what one delete can say: undo, which
-logs one delete, puts back exactly what was resolved before. Binding joins only into
-the entity bound to the file, so step 3 is one step.
+logs one delete, puts back the join the return replaced. Binding joins only into the
+entity bound to the file, so step 3 is one step.
 
 An entity that is shown resolves to itself, or to the entity a scan joins it into. A
 joined entity brought back is shown again, and so is one in a deletion conflict,
@@ -216,12 +216,14 @@ delete that undoes the return of a joined entity, the delete that redoes a join,
 the delete that takes a join from a history kept apart (`FactChange::Delete` carries
 it). Any other delete names no entity.
 
-Undo refuses to reverse a join once another writer's delete of the same entity says
-otherwise, as it refuses to reverse a write another writer has changed since.
+Undo refuses to reverse a delete once another writer's delete of the same entity
+says otherwise: it names a different entity, or names one where this named none. It
+refuses in the same way to reverse a write another writer has changed since.
 
-One intent joins an entity once, and may not delete or join away an entity it joins
-or joins into. Such a plan is refused: its parts would write to an entity the same
-entry deletes.
+One intent joins an entity once. It may not delete or join away an entity it joins
+or joins into, nor bring back one it joins. Such a plan is refused: a join would give
+fields to an entity the same entry deletes, or the entry would write one entity's
+existence twice.
 
 A snapshot keeps, per field, one record whose members are frozen, so the entity
 joined into goes in a new member of snapshot state, `joined`, beside the records:
