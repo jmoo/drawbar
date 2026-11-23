@@ -2342,6 +2342,15 @@ impl Store {
             joined,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
+        // A view reaches only what its change touched, which a change still to be
+        // finished did not, so the files it names are looked at with it.
+        let pending = |record: &Record| {
+            let path = record.path.as_ref();
+            path.is_some_and(|path| self.finishing.contains(path))
+        };
+        let pending = self.records.iter().filter(|(_, record)| pending(record));
+        let pending: Vec<u64> = pending.map(|(id, _)| *id).collect();
+        self.deferred.extend(pending);
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2480,7 +2489,6 @@ impl Store {
             let Some(record) = self.records.get(&id) else {
                 continue;
             };
-            let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
             if record
                 .path
                 .as_ref()
@@ -2494,9 +2502,16 @@ impl Store {
                 if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
                     log.say(format!("Finished saving “{}”.", entity.name));
                 }
-                self.read_unheard(id, path, workspace);
-                continue;
+                // One no read is sent for, as a file never written before, is followed
+                // as the listing finds it.
+                if self.read_unheard(id, path, workspace) {
+                    continue;
+                }
             }
+            let Some(record) = self.records.get(&id) else {
+                continue;
+            };
+            let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
             if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
                 self.deferred.insert(id);
                 continue;
@@ -2898,18 +2913,20 @@ impl Store {
 
     /// Read again, quietly, the file of an asset whose save went unheard: one that holds
     /// the edit leaves the asset saved.
-    fn read_unheard(&mut self, id: u64, path: LibPath, workspace: &mut Workspace) {
+    fn read_unheard(&mut self, id: u64, path: LibPath, workspace: &mut Workspace) -> bool {
         let Some(print) = self.records.get(&id).and_then(|record| record.fingerprint) else {
-            return;
+            return false;
         };
         let stat = Stat {
             len: print.len,
             modified: print.modified,
         };
-        if self.recheck(id, path, stat, workspace) {
+        let sent = self.recheck(id, path, stat, workspace);
+        if sent {
             self.quietly.insert(id);
             self.settling.insert(id);
         }
+        sent
     }
 
     /// A file drawbar knew changed on disk: an unread one is only known to be another,
@@ -3704,7 +3721,8 @@ impl Store {
             record.saved = entity.saved.stamp();
         }
         let Some(why) = why else {
-            return self.read_unheard(id, path, workspace);
+            self.read_unheard(id, path, workspace);
+            return;
         };
         log.error(format!("saving {path}: {why}"));
         log.trouble(format!(
@@ -3755,7 +3773,8 @@ impl Store {
             Err(Failure::Io(why)) => why,
             Err(Failure::Unheard) => {
                 workspace.edit_not_saved(id);
-                return self.read_unheard(id, path, workspace);
+                self.read_unheard(id, path, workspace);
+                return;
             }
         };
         workspace.edit_not_saved(id);

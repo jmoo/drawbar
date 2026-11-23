@@ -1626,7 +1626,14 @@ fn an_edit_made_back_after_its_save_failed_partway_is_kept_when_the_save_is_fini
         .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let second = session.edit(id, "40");
     session.bench.workspace.mark_saved(id);
-    session.sync();
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    // No rescan comes between the save that failed and the change that finishes it.
+    while session.bench.workspace.saves_asked(id) {
+        assert!(session.next(), "the save answered");
+    }
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.replace_bytes(id, first.clone(), Cause::User, log);
 
