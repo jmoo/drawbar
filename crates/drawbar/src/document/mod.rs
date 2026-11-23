@@ -514,6 +514,9 @@ impl Document {
                 .id_salt(PAGE)
                 .max_rect(ui.available_rect_before_wrap().shrink(BODY_MARGIN)),
         );
+        if saving(workspace, entity) {
+            page.disable();
+        }
         {
             let ui = &mut page;
             // ⚠️ A view's tab looks like a local document; the banner is the only
@@ -660,6 +663,9 @@ impl Document {
             return;
         };
         let checked = match workspace.get(id) {
+            Some(entity) if saving(workspace, entity) => {
+                Err(format!("“{}” is still saving.", entity.name))
+            }
             Some(entity) => piano::check(entity, &plan).map(|()| entity.rests().is_some()),
             None => return,
         };
@@ -1593,6 +1599,13 @@ impl crate::timeline::Documents for Editors<'_> {
     fn hold(&mut self, id: u64, working: &Working) -> bool {
         self.document.hold(id, working, self.workspace, self.log)
     }
+}
+
+/// Whether `entity` is a piano library held whole whose save is unanswered. That save
+/// folds the plan into the baseline, and a refused one gives the plan back, so the plan is
+/// not edited until the save is answered.
+fn saving(workspace: &Workspace, entity: &LocalEntity) -> bool {
+    piano::held_whole(entity) && workspace.saves_asked(entity.id)
 }
 
 /// The plan the workspace holds of a piano library resting in its file, where it applies
@@ -5075,6 +5088,7 @@ mod tests {
             }
             self.workspace.mark_saved(self.id);
             self.frame(Vec::new());
+            self.workspace.take_file_asks();
             self.workspace.send_save(self.id, true);
             match landed {
                 true => self.workspace.save_landed(self.id),
@@ -5100,6 +5114,7 @@ mod tests {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         let path = crate::store::LibPath::parse("Test Piano.npno").unwrap();
         open.workspace.place(open.id, path);
+        open.workspace.take_file_asks();
         open.frame(Vec::new());
         open
     }
@@ -5115,6 +5130,40 @@ mod tests {
             !open.document.pends(open.id),
             "its body holds the plan already"
         );
+        open.shows_its_body("after the refused save");
+    }
+
+    /// A save folds the plan into the baseline, and a refused one gives that plan back, so
+    /// a plan edit made while the save is unanswered would be lost: it is refused, and
+    /// says so.
+    #[test]
+    fn a_piano_held_whole_takes_no_plan_edit_while_its_save_is_unanswered() {
+        let mut open = filed_piano();
+        renamed_piano(&mut open);
+        open.lay_out();
+        open.workspace.mark_saved(open.id);
+        open.frame(Vec::new());
+        assert!(open.workspace.saves_asked(open.id));
+
+        open.document
+            .piano
+            .redraft(piano::Plan::trimmed("B", 72, 0));
+        let Open {
+            document,
+            workspace,
+            log,
+            id,
+            ..
+        } = &mut open;
+        document.replan(*id, workspace, log);
+        assert!(open.document.refusal().is_some(), "the edit is refused");
+        assert!(!open.document.pends(open.id), "and not taken");
+
+        open.workspace.take_file_asks();
+        open.workspace.send_save(open.id, true);
+        assert!(!open.workspace.unsave(open.id));
+        open.frame(Vec::new());
+        assert!(renames(&open));
         open.shows_its_body("after the refused save");
     }
 
