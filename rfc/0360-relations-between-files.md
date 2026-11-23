@@ -187,10 +187,10 @@ until the conflict is settled.
 
 That conflict is an ordinary one, and it matters here. A computer that has not seen
 a join may still write to the joined entity, a tag for one. The entity is then shown
-again, with that tag and no file, and what named it resolves to it and not to the
-entity with the file. Joining it again settles this: the join carries the tag as any
-join does, and the id resolves to the survivor again. Nothing joins it again by
-itself (see Drawbacks and Unresolved questions).
+again, with that tag and no file, and what named it resolves as it does for any
+entity shown: to it, and not to the entity with the file. Joining it again settles
+this: the join carries the tag as any join does, and the id resolves to the survivor
+again. Nothing joins it again by itself (see Drawbacks and Unresolved questions).
 
 ### What a join records
 
@@ -347,9 +347,9 @@ a relation naming such an entity resolves to one with no file.
   none. Joining it again keeps what it names.
 - **A write that did not see a join undoes it for what names the entity.** A value,
   a set member or a file written to the joined entity by a computer that had not
-  seen the join shows it again, and what named it resolves to it until the conflict
-  is settled. toshokan does not settle it, and no view says which entity it was
-  joined into.
+  seen the join shows it again, and what named it resolves as it does for any entity
+  shown until the conflict is settled. toshokan does not settle it, and no view says
+  which entity it was joined into.
 - **Joining two entities that name each other leaves one that names itself.** A
   join copies values as written.
 - **Older builds.** A join by a build from before this change records nothing. Where
@@ -379,7 +379,7 @@ through a join.
 | A reference kind declared in the schema, with an index the view maintains | The typed key already says how to read a target. An index is derived state to build on every view, and the measurements do not call for it |
 | The join rewrites every value that names the joined entity | It sees only the values its writer has read, so one written elsewhere at the same time is left behind. It also needs toshokan to edit values it does not own |
 | Follow every live join of an entity and take the lowest entity shown | This was the second design here. With two joins into different entities, what an id resolved to changed when a scan's join was logged, and changed again when an unrelated entity was joined. Undo writes one delete and could not put back two. Following the later join alone has neither problem, and is how a register in conflict already picks what it shows |
-| The id of a joined entity resolves to the entity it was joined into while a write its join did not see shows it | A late tag would then leave what named the entity alone. But binding gives a file to any entity shown, so a scan could join a third entity into the one shown again, and that id resolved to an entity whose own id resolved elsewhere. Undo of a second join brought the entity back as itself and could not put back the first. Two reviews found both. The rule needs binding and undo to treat such an entity as deleted, and it holds a write a user made |
+| The id of a joined entity resolves to the entity it was joined into while a write its join did not see shows it | A late tag would then leave what named the entity alone. But binding gives a file to any entity shown, so a scan could join a third entity into the one shown again, and that id resolved to an entity whose own id resolved elsewhere. Undo of an intent that joined it a second time and did something else brought the entity back as itself and could not put back the first join. Two reviews found both. The rule needs binding and undo to treat such an entity as deleted, and it holds a write a user made |
 | The survivor keeps a set of the ids joined into it, under a key toshokan reserves | This was the first design here, and review took it apart. The fact sat on the survivor, apart from the delete it describes, so nothing ended it: after the joined entity was brought back and deleted for good, the survivor still answered for its id. The member was a field write on the survivor, so a join concurrent with the survivor's delete left the survivor shown in a deletion conflict over nothing a user did. Taking a forked join took the delete and the member as two changes that could be taken apart. It reserved a key name in every schema, and each later join copied every id again |
 | A new op or field kind for relations, such as a map from target to data | A second merge rule, snapshot record and retention term beside sets and registers. Sets and registers already merge the way a relation should |
 | Refuse a value whose target is not shown | Undoing a removal, taking a change from a kept-apart history, and naming a target whose entries have not arrived are all correct writes of a target not shown. An unresolved target is reported, never silent |
