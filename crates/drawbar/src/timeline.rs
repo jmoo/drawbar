@@ -34,7 +34,7 @@ pub trait Documents {
 pub enum Gesture {
     /// Nothing goes on, so a change is a step of its own.
     Over,
-    /// A pointer button pressed in an earlier frame is down, or was let go in this one.
+    /// A pointer button is down, or was let go in this frame.
     Dragging,
     /// This widget has keyboard focus.
     Focused(egui::Id),

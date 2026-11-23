@@ -19,7 +19,7 @@ use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
 use crate::timeline::{Gesture, Timeline};
-use crate::workspace::Workspace;
+use crate::workspace::{Working, Workspace};
 use crate::zoom::{Room, Zoom};
 
 /// A theme-specific success color with enough contrast for small text.
@@ -566,30 +566,32 @@ impl DrawbarApp {
     /// Record what this frame's edits made of each document they changed, as steps Undo
     /// takes back, and let go of the steps Undo and Redo would take whose documents moved
     /// on.
-    fn record(&mut self, ctx: &egui::Context) {
-        let gesture = gesture(ctx);
+    fn record(&mut self, ctx: &egui::Context, began: Option<egui::Id>) {
         let shown = self.timeline.shown();
         let documents = Editors {
             document: &mut self.document,
             workspace: &mut self.workspace,
             log: &mut self.log,
         };
-        for note in documents.workspace.take_notes() {
+        let notes = documents.workspace.take_notes();
+        let changes = notes.into_iter().filter_map(|note| {
             let workspace = &*documents.workspace;
-            let Some(after) = documents.document.working(workspace, note.id) else {
-                continue;
-            };
-            let Some(entity) = workspace.get(note.id) else {
-                continue;
-            };
+            let after = documents.document.working(workspace, note.id)?;
+            let name = &workspace.get(note.id)?.name;
             let label = match note.revert {
-                true => format!("Revert “{}”", entity.name),
-                false => format!("Edit “{}”", entity.name),
+                true => format!("Revert “{name}”"),
+                false => format!("Edit “{name}”"),
             };
-            self.timeline
-                .record(note.id, label, note.before, after, gesture);
-        }
-        self.timeline.settle(gesture, &documents);
+            Some(Change {
+                id: note.id,
+                label,
+                before: note.before,
+                after,
+                revert: note.revert,
+            })
+        });
+        let changes: Vec<_> = changes.collect();
+        follow(&mut self.timeline, ctx, began, changes, &documents);
         if self.timeline.shown() != shown {
             ctx.request_repaint();
         }
@@ -1094,6 +1096,7 @@ impl eframe::App for DrawbarApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let began = ctx.memory(|memory| memory.focused());
         self.room = Room::of(ctx);
         #[cfg(target_arch = "wasm32")]
         crate::telemetry::visit(
@@ -1327,7 +1330,7 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.log,
         );
-        self.record(ctx);
+        self.record(ctx, began);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1479,16 +1482,54 @@ impl DrawbarApp {
     }
 }
 
-/// The gesture going on as a frame ends. A drag changes nothing in the frame of its press
-/// and makes its last change in the frame of its release, as a click makes its only one,
-/// so a change in the frame of a press belongs to no gesture.
+/// What one frame made of what an editor holds of a document.
+struct Change {
+    id: u64,
+    label: String,
+    before: Working,
+    after: Working,
+    revert: bool,
+}
+
+/// Record `changes`, the frame's, under the gesture they belong to, and settle the
+/// timeline as the frame ends. `began` is the widget that had focus as the frame began.
+///
+/// A press ends the step before it. A change in its frame where a widget had focus is
+/// that widget committing: it joins the widget's step, which then closes. Otherwise the
+/// change, as a slider's jump to the pointer, begins the step the press goes on with. A
+/// revert is a step of its own.
+fn follow(
+    timeline: &mut Timeline,
+    ctx: &egui::Context,
+    began: Option<egui::Id>,
+    changes: Vec<Change>,
+    documents: &impl crate::timeline::Documents,
+) {
+    let gesture = gesture(ctx);
+    let pressed = ctx.input(|i| i.pointer.any_pressed());
+    let committed = began.filter(|_| pressed).map(Gesture::Focused);
+    if pressed && committed.is_none() {
+        timeline.close();
+    }
+    for change in changes {
+        let made = match change.revert {
+            true => Gesture::Over,
+            false => committed.unwrap_or(gesture),
+        };
+        timeline.record(change.id, change.label, change.before, change.after, made);
+    }
+    if committed.is_some() {
+        timeline.close();
+    }
+    timeline.settle(gesture, documents);
+}
+
+/// The gesture going on as a frame ends.
 fn gesture(ctx: &egui::Context) -> Gesture {
     if let Some(id) = ctx.memory(|memory| memory.focused()) {
         return Gesture::Focused(id);
     }
-    let pointer = |i: &egui::InputState| {
-        (i.pointer.any_down() || i.pointer.any_released()) && !i.pointer.any_pressed()
-    };
+    let pointer = |i: &egui::InputState| i.pointer.any_down() || i.pointer.any_released();
     match ctx.input(pointer) {
         true => Gesture::Dragging,
         false => Gesture::Over,
@@ -2276,8 +2317,8 @@ mod tests {
         );
         assert_eq!(
             gesture_of(vec![crate::testing::button(at, true)]),
-            Gesture::Over,
-            "a press begins a gesture in the frames after it"
+            Gesture::Dragging,
+            "a press begins a gesture in its own frame"
         );
         let below = at + egui::vec2(0.0, 30.0);
         assert_eq!(
@@ -2299,9 +2340,216 @@ mod tests {
         );
         assert_eq!(
             gesture_of(vec![crate::testing::button(at, true)]),
-            Gesture::Over,
+            Gesture::Dragging,
             "a press elsewhere takes the box's focus in the frame of the press"
         );
+    }
+
+    /// egui's own controls, drawn in the same places each frame, which change one
+    /// document.
+    #[derive(Default)]
+    struct Controls {
+        level: f64,
+        clicks: u32,
+        text: String,
+    }
+
+    const SLIDER: egui::Pos2 = egui::pos2(10.0, 100.0);
+    const A: egui::Pos2 = egui::pos2(40.0, 212.0);
+    const B: egui::Pos2 = egui::pos2(130.0, 212.0);
+    const BOX: egui::Pos2 = egui::pos2(60.0, 312.0);
+    const NOWHERE: egui::Pos2 = egui::pos2(300.0, 380.0);
+
+    impl Controls {
+        fn draw(&mut self, ui: &mut egui::Ui) {
+            let at = |left: egui::Pos2, width: f32| {
+                egui::Rect::from_min_size(left, egui::vec2(width, 24.0))
+            };
+            let slider = egui::Slider::new(&mut self.level, -12.7..=12.7).show_value(false);
+            ui.put(at(SLIDER, 200.0), slider);
+            if ui
+                .put(at(A - egui::vec2(30.0, 12.0), 60.0), egui::Button::new("A"))
+                .clicked()
+            {
+                self.clicks += 1;
+            }
+            if ui
+                .put(at(B - egui::vec2(30.0, 12.0), 60.0), egui::Button::new("B"))
+                .clicked()
+            {
+                self.clicks += 10;
+            }
+            let text = egui::TextEdit::singleline(&mut self.text).id(egui::Id::new("box"));
+            ui.put(at(BOX - egui::vec2(50.0, 12.0), 200.0), text);
+        }
+
+        fn working(&self) -> Working {
+            let held = format!("{} {} {}", self.level, self.clicks, self.text);
+            Working::Body(held.into_bytes().into())
+        }
+    }
+
+    impl crate::timeline::Documents for Controls {
+        fn holds(&self, _: u64, working: &mut Working) -> bool {
+            *working == self.working()
+        }
+
+        fn hold(&mut self, _: u64, _: &Working) -> bool {
+            false
+        }
+    }
+
+    /// [`Controls`] in a window, followed frame by frame as the app follows a document.
+    struct Bench {
+        ctx: egui::Context,
+        controls: Controls,
+        timeline: Timeline,
+    }
+
+    impl Bench {
+        fn new() -> Bench {
+            Bench {
+                ctx: crate::testing::context(),
+                controls: Controls::default(),
+                timeline: Timeline::default(),
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            let began = self.ctx.memory(|memory| memory.focused());
+            let before = self.controls.working();
+            let input = crate::testing::screen(egui::vec2(400.0, 400.0), events);
+            let controls = &mut self.controls;
+            crate::testing::run(&self.ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| controls.draw(ui));
+            });
+            let after = self.controls.working();
+            let change = Change {
+                id: 1,
+                label: "Edit".to_string(),
+                before,
+                after,
+                revert: false,
+            };
+            let changes = (change.before != change.after).then_some(change);
+            follow(
+                &mut self.timeline,
+                &self.ctx,
+                began,
+                changes.into_iter().collect(),
+                &self.controls,
+            );
+        }
+
+        /// The pointer goes down at `at` in one frame and up in the next.
+        fn click(&mut self, at: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                crate::testing::button(at, true),
+            ]);
+            self.frame(vec![crate::testing::button(at, false)]);
+        }
+
+        fn focused(&self) -> Option<egui::Id> {
+            self.ctx.memory(|memory| memory.focused())
+        }
+
+        fn steps(&self) -> usize {
+            self.timeline.shown().1
+        }
+    }
+
+    #[test]
+    fn two_clicks_with_no_idle_frame_between_are_two_steps() {
+        let mut bench = Bench::new();
+        bench.frame(Vec::new());
+
+        bench.click(A);
+        bench.click(A);
+        bench.frame(Vec::new());
+
+        assert_eq!(bench.controls.clicks, 2);
+        assert_eq!(bench.steps(), 2);
+    }
+
+    #[test]
+    fn a_slider_drag_is_one_step_from_its_press_to_its_release() {
+        let mut bench = Bench::new();
+        let off_the_handle = SLIDER + egui::vec2(20.0, 12.0);
+        bench.frame(vec![egui::Event::PointerMoved(off_the_handle)]);
+
+        bench.frame(vec![crate::testing::button(off_the_handle, true)]);
+        assert_ne!(bench.controls.level, 0.0, "the press moved the handle");
+        let mut at = off_the_handle;
+        for _ in 0..3 {
+            at += egui::vec2(20.0, 0.0);
+            bench.frame(vec![egui::Event::PointerMoved(at)]);
+        }
+        bench.frame(vec![crate::testing::button(at, false)]);
+        bench.frame(Vec::new());
+
+        assert_eq!(bench.steps(), 1);
+    }
+
+    #[test]
+    fn typing_in_a_box_is_one_step_until_the_pointer_is_pressed() {
+        let mut bench = Bench::new();
+        bench.frame(Vec::new());
+        bench.click(BOX);
+        for typed in ["a", "b"] {
+            bench.frame(vec![egui::Event::Text(typed.into())]);
+        }
+        assert_eq!(bench.steps(), 1, "the typing so far is one step");
+
+        bench.click(BOX + egui::vec2(-40.0, 0.0));
+        assert_eq!(bench.focused(), Some(egui::Id::new("box")));
+        bench.frame(vec![egui::Event::Text("c".into())]);
+        bench.click(NOWHERE);
+        bench.frame(Vec::new());
+
+        assert!(bench.controls.text.contains('c'));
+        assert_eq!(bench.steps(), 2);
+    }
+
+    #[test]
+    fn arrow_keys_on_a_focused_control_are_one_step_until_a_press() {
+        let mut bench = Bench::new();
+        bench.frame(Vec::new());
+        bench.frame(vec![crate::testing::key(egui::Key::Tab)]);
+        bench.frame(Vec::new());
+        assert!(bench.focused().is_some(), "Tab focused the slider");
+
+        for _ in 0..2 {
+            bench.frame(vec![crate::testing::key(egui::Key::ArrowRight)]);
+        }
+        assert!(bench.controls.level > 0.0, "the arrows moved the slider");
+        assert_eq!(bench.steps(), 1);
+        bench.click(B);
+        bench.frame(Vec::new());
+
+        assert_eq!(bench.controls.clicks, 10);
+        assert_eq!(bench.steps(), 2);
+    }
+
+    #[test]
+    fn a_focused_control_that_keeps_focus_while_controls_are_clicked_merges_nothing() {
+        let mut bench = Bench::new();
+        bench.frame(Vec::new());
+        for _ in 0..2 {
+            bench.frame(vec![crate::testing::key(egui::Key::Tab)]);
+        }
+        bench.frame(Vec::new());
+        let a = bench.focused().expect("Tab focused the button A");
+
+        bench.click(A);
+        bench.click(A);
+        assert_eq!(bench.focused(), Some(a), "a click on A leaves it focused");
+        bench.click(B);
+        assert_eq!(bench.focused(), None, "a press elsewhere takes its focus");
+        bench.frame(Vec::new());
+
+        assert_eq!(bench.controls.clicks, 12);
+        assert_eq!(bench.steps(), 3);
     }
 
     #[test]
@@ -2470,6 +2718,41 @@ mod tests {
         assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
     }
 
+    #[test]
+    fn a_revert_picked_while_typing_is_a_step_whose_undo_brings_the_typing_back() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Text);
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(600.0, 500.0)),
+        );
+        input(&ctx, &mut app, Vec::new());
+        for typed in ["a", "b"] {
+            input(&ctx, &mut app, vec![egui::Event::Text(typed.into())]);
+        }
+        let typing = app.timeline.open();
+        assert!(matches!(typing, Some(Gesture::Focused(_))), "{typing:?}");
+
+        let mut acts = Vec::new();
+        let mut window = eframe::Frame::_new_kittest();
+        app.run(&ctx, &mut window, crate::menu::Command::Revert, &mut acts);
+        act(&ctx, &mut app, acts);
+        input(&ctx, &mut app, Vec::new());
+        let focused = ctx.memory(|memory| memory.focused()).map(Gesture::Focused);
+        assert_eq!(focused, typing, "the page keeps its focus");
+        assert_eq!(bytes(&app, id), b"");
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(150.0, 600.0)),
+        );
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, id), b"ab");
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.txt”");
+    }
+
     /// Run `acts` as a frame runs what its panels asked for.
     fn act(ctx: &egui::Context, app: &mut DrawbarApp, acts: Vec<browser::Act>) {
         let acts = app
@@ -2562,6 +2845,45 @@ mod tests {
 
         assert_eq!(bytes(&app, id), changed);
         assert!(!app.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_save_and_an_undo_pressed_in_one_frame_save_the_edit_and_the_undo_waits_on_it() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        let before = bytes(&app, id);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        let save = egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+
+        input(&ctx, &mut app, vec![save, undo_key(false)]);
+        until(&ctx, &mut app, |app| {
+            idle(app) && root.read("untitled.ne5p") == changed
+        });
+        assert_eq!(bytes(&app, id), changed, "nothing was undone");
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        assert_eq!(bytes(&app, id), before);
+        assert_eq!(root.read("untitled.ne5p"), changed);
+    }
+
+    #[test]
+    fn an_undo_and_a_redo_pressed_in_one_frame_run_in_that_order() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, id, "40");
+        let last = turn_gain(&ctx, &mut app, id, "50");
+
+        input(&ctx, &mut app, vec![undo_key(false), undo_key(true)]);
+
+        assert_eq!(bytes(&app, id), last);
+        assert_eq!(steps(&app), (2, 0));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
