@@ -13,6 +13,8 @@ use crate::timeline::{Asked, Documents, Timeline, Went};
 use crate::workspace::{Cause, Fresh, Origin, VerifyState, Working};
 use nord_usb::{Location, ObjectClass};
 
+mod undo_walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
@@ -4641,6 +4643,133 @@ fn a_save_undone_at_its_files_length_and_time_still_moves_what_the_document_was_
     let entity = session.bench.workspace.get(id).expect("held");
     assert_eq!(*entity.saved.bytes(), made);
     assert!(entity.is_unsaved());
+}
+
+impl Session {
+    /// Undo the save step Undo names, and wait for the library's answer to it alone.
+    fn undo_answered(&mut self) {
+        self.press(false);
+        while self.store.changing() {
+            assert!(self.next(), "the undo answered");
+        }
+    }
+
+    /// Undo the save of the file at `at`, which leaves it holding `made`, and let
+    /// `outside` change the file before the answer is followed.
+    fn undo_then(&mut self, root: &Temp, at: &str, made: &[u8], outside: impl FnOnce()) {
+        self.press(false);
+        while fs::read(root.at(at)).ok().as_deref() != Some(made) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        outside();
+        self.decided();
+        self.settle();
+    }
+}
+
+#[test]
+#[ignore = "the baseline moves only once a rescan reads the file the undo left"]
+fn the_undo_of_a_save_moves_what_the_document_was_saved_as_when_the_library_answers() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+
+    session.undo_answered();
+    session.written();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    assert_eq!(session.bytes(id), edited);
+    assert_eq!(
+        *session.bench.workspace.get(id).expect("held").saved.bytes(),
+        made
+    );
+    assert!(session.unsaved(id));
+}
+
+#[test]
+#[ignore = "a file changed right after the undo of its save is taken over the edit"]
+fn a_file_changed_right_after_the_undo_of_its_save_asks_and_keeps_the_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    let theirs = with_gain(&edited, "12");
+
+    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, write);
+
+    assert_eq!(
+        session.bytes(id),
+        edited,
+        "the document keeps what it holds"
+    );
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "the user is asked"
+    );
+}
+
+#[test]
+#[ignore = "a file deleted right after the undo of its save takes its document"]
+fn a_file_deleted_right_after_the_undo_of_its_save_keeps_its_document_as_missing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+
+    let delete = || fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.undo_then(&root, "untitled.ne5p", &made, delete);
+
+    assert_eq!(
+        session.bytes(id),
+        edited,
+        "the document keeps what it holds"
+    );
+    assert!(session.bench.browser.folders.missing.contains(&id));
+}
+
+#[test]
+#[ignore = "with DRAWBAR_TEST_FOLDER=copying, a save right after a rename by copy asks"]
+fn a_save_right_after_a_rename_by_copy_lands_without_asking() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session
+        .bench
+        .workspace
+        .place(id, LibPath::root().join("Renamed.ne5p"));
+    session.written();
+    let edited = session.edit(id, "96");
+
+    session.bench.workspace.mark_saved(id);
+    session.written();
+
+    assert_eq!(root.read("Renamed.ne5p"), edited);
+    assert!(!session.unsaved(id));
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+#[ignore = "an undo refused because its file changed outside stays first in Undo, and every press fails"]
+fn an_undo_refused_because_its_file_changed_outside_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    let theirs = with_gain(&edited, "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.refocus();
+    let save = Some("Undo Save “untitled.ne5p”".to_string());
+    assert_eq!(session.undo_label(), save);
+
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), theirs);
+    assert_eq!(session.bytes(id), theirs);
+    assert_ne!(
+        session.undo_label(),
+        save,
+        "Undo goes on to the step before"
+    );
 }
 
 #[test]
