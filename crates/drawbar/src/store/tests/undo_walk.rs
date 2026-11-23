@@ -466,7 +466,6 @@ impl Walk {
         let place = LibPath::root().join(&to);
         self.session.bench.workspace.place(self.ids[doc], place);
         self.pump();
-        self.moved();
         self.model.state[doc].path = to;
         let after = self.model.placed(doc);
         let label = format!("Rename “{}”", leaf(&before.0));
@@ -480,18 +479,6 @@ impl Walk {
         let save = false;
         self.model.new_step(Step::Library { label, save, files });
         self.frame();
-    }
-
-    /// A file was renamed, or the rename undone or made again.
-    // ⚠️ Excluded: where the folder copies instead of renaming, a save before the next
-    // rescan asks whose to keep: `a_save_right_after_a_rename_by_copy_lands_without_asking`
-    // fails.
-    fn moved(&mut self) {
-        let all = toshokan::io::Capabilities::ALL;
-        if !crate::testing::abilities(toshokan::io::Root::Folder, all).rename_file {
-            self.session.refocus();
-            self.pump();
-        }
     }
 
     fn revert(&mut self, doc: usize) {
@@ -734,15 +721,6 @@ impl Walk {
             assert!(refused.is_none(), "{whence}: the library was asked");
         }
         self.pump();
-        // ⚠️ Excluded: the baseline moves only once a rescan reads the file back:
-        // `the_undo_of_a_save_moves_what_the_document_was_saved_as_when_the_library_answers`
-        // fails.
-        if matches!(step, Some(Step::Library { save: true, .. })) {
-            self.session.settle();
-        }
-        if matches!(step, Some(Step::Library { save: false, .. })) {
-            self.moved();
-        }
         let Some(Step::Library { label, .. }) = step else {
             return Answer::Taken;
         };

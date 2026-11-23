@@ -2280,10 +2280,10 @@ impl Workspace {
     pub fn refile(&mut self, id: u64, baseline: Baseline) {
         if self.on_file.contains_key(&id) || self.sent.contains_key(&id) {
             self.on_file.insert(id, baseline);
-        } else if let Some(entity) = self.get_mut(id) {
-            entity.resave(baseline);
+            self.revision += 1;
+        } else {
+            self.resave_as(id, baseline);
         }
-        self.revision += 1;
     }
 
     /// A save of an asset landed. A newer saved baseline still to be written leaves its
@@ -2342,7 +2342,7 @@ impl Workspace {
     /// Count an asset saved as `saved`, which its file holds. One whose bytes are those
     /// takes their stamp, or rests in the file, as a revert would leave it.
     ///
-    /// ⚠️ Compares two bodies, so it runs only when a save is refused.
+    /// ⚠️ Compares two bodies, so it runs only when a save is refused, undone or redone.
     fn resave_as(&mut self, id: u64, saved: Baseline) {
         if !self.apart(id) {
             return;

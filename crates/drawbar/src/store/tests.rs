@@ -4668,7 +4668,6 @@ impl Session {
 }
 
 #[test]
-#[ignore = "the baseline moves only once a rescan reads the file the undo left"]
 fn the_undo_of_a_save_moves_what_the_document_was_saved_as_when_the_library_answers() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -4687,7 +4686,6 @@ fn the_undo_of_a_save_moves_what_the_document_was_saved_as_when_the_library_answ
 }
 
 #[test]
-#[ignore = "a file changed right after the undo of its save is taken over the edit"]
 fn a_file_changed_right_after_the_undo_of_its_save_asks_and_keeps_the_edit() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -4709,7 +4707,6 @@ fn a_file_changed_right_after_the_undo_of_its_save_asks_and_keeps_the_edit() {
 }
 
 #[test]
-#[ignore = "a file deleted right after the undo of its save takes its document"]
 fn a_file_deleted_right_after_the_undo_of_its_save_keeps_its_document_as_missing() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -4727,7 +4724,6 @@ fn a_file_deleted_right_after_the_undo_of_its_save_keeps_its_document_as_missing
 }
 
 #[test]
-#[ignore = "with DRAWBAR_TEST_FOLDER=copying, a save right after a rename by copy asks"]
 fn a_save_right_after_a_rename_by_copy_lands_without_asking() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -4746,30 +4742,6 @@ fn a_save_right_after_a_rename_by_copy_lands_without_asking() {
     assert_eq!(root.read("Renamed.ne5p"), edited);
     assert!(!session.unsaved(id));
     assert_eq!(session.bench.browser.asking(), None);
-}
-
-#[test]
-#[ignore = "an undo refused because its file changed outside stays first in Undo, and every press fails"]
-fn an_undo_refused_because_its_file_changed_outside_is_let_go() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let (id, _, edited) = session.saved_once("96");
-    let theirs = with_gain(&edited, "12");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
-    session.refocus();
-    let save = Some("Undo Save “untitled.ne5p”".to_string());
-    assert_eq!(session.undo_label(), save);
-
-    session.undo();
-    session.settle();
-
-    assert_eq!(root.read("untitled.ne5p"), theirs);
-    assert_eq!(session.bytes(id), theirs);
-    assert_ne!(
-        session.undo_label(),
-        save,
-        "Undo goes on to the step before"
-    );
 }
 
 #[test]
