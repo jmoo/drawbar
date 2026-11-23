@@ -519,9 +519,14 @@ and they are why these documents lose their edit steps at a save.
 
 Steps 1 to 3 are one change. Step 4 is later work.
 
-[jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) is not needed. It
-would have given a commit that reports the identity of each file it wrote. The
-baselines a save's step holds do that work here.
+[jmoo/drawbar#357](https://github.com/jmoo/drawbar/pull/357) fixes one case of
+rule 2 on its own: an unsaved document keeps its edit, unasked, when this
+session's own undo or redo changes its file, which it tells by the length and
+time the step left the file at. The baselines a save's step holds cover that
+case and the saved document's, so that check goes when this lands.
+[jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300), which was closed,
+would have given a commit that reports the identity of each file it wrote, and
+is not needed either.
 
 ### Limits
 
@@ -688,8 +693,9 @@ list of whole states.
   steadiest name a document has. An asset that leaves and returns, as when a
   delete is undone, gets a new id, and the edit steps made before it left are
   let go. The file ids proposed in
-  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) would not help:
-  one is drawn anew when a file returns, and a view of a slot has none.
+  [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300), which was
+  closed, would not have helped: one was drawn anew when a file returned, and a
+  view of a slot had none.
 - Rule 2 changes how the workspace takes its own saves, and needs the baseline
   fixed after a refused save. The saved baseline still moves when a save is
   asked for and not when it lands, so the workspace keeps what the file holds
