@@ -888,7 +888,7 @@ impl Document {
         for id in ids {
             self.follow_sample(id, workspace);
         }
-        for id in self.piano.ids() {
+        for id in self.piano.moved(workspace) {
             if let Some(entity) = workspace.get(id) {
                 self.piano.follow(entity, held_plan(workspace, id));
             }
@@ -5114,6 +5114,27 @@ mod tests {
             told(&note.before),
             told(&open.working())
         );
+    }
+
+    /// A frame that moves no baseline allocates nothing to follow the plans it keeps.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_idle_settle_allocates_nothing_for_a_piano_it_keeps() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        renamed_piano(&mut open);
+        open.settled(Vec::new());
+        let ctx = open.ctx.clone();
+        let Open {
+            document,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut open;
+        let (ran, largest) = testing::largest_allocation(|| {
+            document.settle(&ctx, Vec::new(), workspace, queue, log)
+        });
+        assert_eq!((ran, largest), (Vec::new(), 0));
     }
 
     /// A piano library held whole over the file it was read from, as a kept draft of its

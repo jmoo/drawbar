@@ -1421,16 +1421,20 @@ impl State {
         self.plans.insert(id, plan);
     }
 
-    /// Every document a plan is kept of.
-    pub fn ids(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = self
-            .plans
-            .keys()
-            .chain(self.folded.keys())
-            .copied()
+    /// The documents [`State::follow`] would change: each whose plan is against another
+    /// baseline than its own, and each with no plan whose folded plan is against its own.
+    pub fn moved(&self, workspace: &Workspace) -> Vec<u64> {
+        let baseline = |id: &u64| workspace.get(*id).map(mark);
+        let stale = (self.plans.iter())
+            .filter(|(id, plan)| baseline(id).is_some_and(|baseline| plan.against != baseline));
+        let back = (self.folded.iter()).filter(|(id, folded)| {
+            !self.plans.contains_key(*id) && baseline(id) == Some(folded.plan.against)
+        });
+        let mut ids: Vec<u64> = stale
+            .map(|(id, _)| *id)
+            .chain(back.map(|(id, _)| *id))
             .collect();
         ids.sort_unstable();
-        ids.dedup();
         ids
     }
 
