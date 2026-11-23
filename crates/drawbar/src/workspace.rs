@@ -2178,10 +2178,19 @@ impl Workspace {
 
     /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
     /// writes the edit over them, and a revert takes them. An asset resting in its file
-    /// adopts them instead, and the edit held of it is made again over them.
+    /// adopts them instead, and the edit held of it is made again over them. Bytes it was
+    /// saved as leave the baseline, and its stamp, as they are.
+    ///
+    /// ⚠️ Compares two bodies, so it runs only when a file is read again.
     pub fn rebase(&mut self, id: u64, theirs: Vec<u8>, log: &mut Log) {
         if !self.apart(id) {
             return self.adopt(id, theirs, log);
+        }
+        if self
+            .get(id)
+            .is_some_and(|entity| entity.saved.holds(&theirs))
+        {
+            return self.forget_saves(id);
         }
         let stamp = self.stamp_for(id, &theirs);
         if let Some(entity) = self.get_mut(id) {

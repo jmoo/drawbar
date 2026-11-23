@@ -5189,6 +5189,36 @@ mod tests {
         open.shows_what_it_holds("after the old bytes were read back");
     }
 
+    /// The library reading a piano's file again and finding the bytes it was saved as,
+    /// as a copy or a browser's move does, moves nothing the user holds: an unsaved plan,
+    /// laid out or not, is still held and shown.
+    #[test]
+    fn a_piano_held_whole_keeps_its_plan_over_its_file_read_again() {
+        for (laid, unsaved) in [(false, false), (false, true), (true, true)] {
+            let mut open = filed_piano();
+            let saved = open.entity().saved.bytes().to_vec();
+            renamed_piano(&mut open);
+            if laid {
+                open.lay_out();
+            }
+            let planned = open.working();
+            let said = format!("laid {laid}, read as unsaved {unsaved}");
+            match unsaved {
+                true => open.workspace.rebase(open.id, saved, &mut open.log),
+                false => open.workspace.adopt(open.id, saved, &mut open.log),
+            }
+            open.act(Vec::new());
+            open.frame(Vec::new());
+            assert!(
+                open.working() == planned,
+                "{said}: it holds {}",
+                told(&open.working())
+            );
+            assert!(renames(&open) && open.entity().is_unsaved(), "{said}");
+            open.shows_what_it_holds(&said);
+        }
+    }
+
     /// An act waiting for a plan to be laid out is asked of that plan: a revert drops it,
     /// and so does an undo, so it never runs on content nobody asked to carry.
     #[cfg(not(target_arch = "wasm32"))]
