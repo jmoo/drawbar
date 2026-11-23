@@ -600,10 +600,14 @@ impl DrawbarApp {
             Command::Undo | Command::Redo => {
                 let store = self.store.as_ref();
                 // An edit step needs no library, but waits while a change sent to one, as
-                // a save of what it holds is, has not been answered.
+                // a save of what it holds is, has not been answered, and while a save of
+                // its document is asked and not sent.
                 let goes = |next: &Next| match next {
                     Next::Library { .. } => store.is_some_and(Store::undoes),
-                    Next::Edit { .. } => !store.is_some_and(Store::changing),
+                    Next::Edit { id, .. } => {
+                        !store.is_some_and(Store::changing)
+                            && !self.document.awaits_save(*id, &self.workspace)
+                    }
                 };
                 let next = match command {
                     Command::Undo => self.timeline.next_undo(),

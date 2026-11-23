@@ -3577,20 +3577,15 @@ impl Workspace {
     }
 
     /// Put back what an asset held, and return whether it holds exactly that now. An edit
-    /// over another baseline than the asset's is refused. A save asked of the edit it
-    /// replaces and not yet sent is let go: nobody asked to save what it puts back.
+    /// over another baseline than the asset's is refused.
     pub fn hold(&mut self, id: u64, working: &Working, log: &mut Log) -> bool {
         match working {
-            Working::Body(bytes) => {
-                self.unask_save(id);
-                self.put_bytes(id, bytes.clone(), Cause::Follow, log);
-            }
+            Working::Body(bytes) => self.put_bytes(id, bytes.clone(), Cause::Follow, log),
             Working::Edit { over, edit } => {
                 let Some(entity) = self.get(id).filter(|entity| entity.saved.stamp == *over) else {
                     return false;
                 };
                 let file = (entity.saved.file().cloned()).filter(|_| entity.rests().is_none());
-                self.unask_save(id);
                 if let Some(file) = file {
                     self.rest(id, file, *over);
                 }
@@ -3598,17 +3593,6 @@ impl Workspace {
             }
         }
         self.working(id).as_ref() == Some(working)
-    }
-
-    /// Let go of a save asked of an asset's edit that the store has not sent.
-    fn unask_save(&mut self, id: u64) {
-        if let Some(held) = self
-            .edits
-            .get_mut(&id)
-            .filter(|held| held.save == Save::Asked)
-        {
-            held.save = Save::No;
-        }
     }
 
     /// Note what an asset holds before the user changes it, unless it was noted since the
@@ -3641,9 +3625,14 @@ impl Workspace {
         std::mem::take(&mut self.notes)
     }
 
-    /// [`Workspace::drop_edits`], and say so where it changed anything.
+    /// [`Workspace::drop_edits`] as the user's, and say so where it changed anything.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
-        if !self.drop_edits(id, Cause::User) {
+        self.revert_as(id, Cause::User, log);
+    }
+
+    /// [`Workspace::revert`] for `cause`.
+    pub fn revert_as(&mut self, id: u64, cause: Cause, log: &mut Log) {
+        if !self.drop_edits(id, cause) {
             return;
         }
         if let Some(entity) = self.get(id) {
