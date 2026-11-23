@@ -10,7 +10,7 @@ exclude = ["power-loss/", "spec/"]
 keywords = ["metadata", "offline-first", "sync", "synced-folder", "tags"]
 license.workspace = true
 repository.workspace = true
-version = "0.1.0"
+version = "0.1.1"
 
 # Features the Nix build must enable when running tests: the wire encoding's tests
 # run natively, and Clippy reads the browser code. The browser suites run headless
