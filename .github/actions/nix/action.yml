@@ -23,6 +23,9 @@ runs:
     # ⚠️ A cache saved by a pull request is readable only by that pull request, yet
     # counts toward the repository's 10 GB. Past that, GitHub evicts the least
     # recently used cache, which can be master's.
+    # ⚠️ Above `store-size` the save collects garbage first, and only what an out-link
+    # roots is safe from it. A second `nix build` in one job replaces the default
+    # `result` links of the first.
     - if: inputs.save == 'true' && github.event_name != 'pull_request'
       uses: nix-community/cache-nix-action@v7
       with:

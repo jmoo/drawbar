@@ -31,26 +31,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # A change to Cargo.lock rebuilds every dependency, which takes Linux 40-45 minutes
-    # before its Windows cross build starts. A job that times out saves no cache.
-    timeout-minutes: 75
+    # A change to Cargo.lock rebuilds every dependency. A job that times out saves no
+    # cache, so its retry is as slow.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - if: runner.os != 'Windows'
         uses: ./.github/actions/nix
         with:
           cache: native
-          store-size: 8G
       - if: runner.os != 'Windows'
         run: nix build .#nord.tests .#nord.packages --print-build-logs
-      # What scripts/assets.bash attaches to each release from Linux.
-      - if: runner.os == 'Linux'
-        run: >-
-          nix build .#drawbar-windows .#nord-cli-windows
-          .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
-          .#drawbar-appimage
-          --print-build-logs
-      # And from macOS: drawbar's disk image, around the binary `nord.packages` built.
+      # What scripts/assets.bash attaches to each release from macOS: drawbar's disk
+      # image, around the binary `nord.packages` built.
       - if: runner.os == 'macOS'
         run: scripts/dmg.bash
       # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
@@ -70,6 +63,22 @@ jobs:
         shell: bash
         working-directory: crates
         run: bash ../scripts/test.bash
+
+  # What scripts/assets.bash attaches to each release from Linux.
+  downloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+        with:
+          cache: downloads
+          store-size: 8G
+      - run: >-
+          nix build .#drawbar-windows .#nord-cli-windows
+          .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
+          .#drawbar-appimage
+          --print-build-logs
 
   web:
     runs-on: ubuntu-latest
@@ -115,7 +124,7 @@ jobs:
   # `build` is a required status context on master.
   build:
     if: always()
-    needs: [native, web, corpus]
+    needs: [native, downloads, web, corpus]
     runs-on: ubuntu-latest
     steps:
       - name: required builds passed
@@ -150,8 +159,8 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           GH_TOKEN: ${{ github.token }}
 
-  # A release tagged in this run is this run's commit, whose builds `native`'s store
-  # already holds. Pages does not wait on this.
+  # A release tagged in this run is this run's commit, whose builds the `downloads`
+  # and `native` stores already hold. Pages does not wait on this.
   assets:
     if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [release]
@@ -170,7 +179,7 @@ jobs:
           fetch-depth: 0 # each crate's newest tag
       - uses: ./.github/actions/nix
         with:
-          cache: native
+          cache: ${{ runner.os == 'Linux' && 'downloads' || 'native' }}
           save: "false"
       # The identity and credentials scripts/dmg.bash signs and notarizes with.
       - if: runner.os == 'macOS'
