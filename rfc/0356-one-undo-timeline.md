@@ -725,6 +725,11 @@ list of whole states.
   write from outside that keeps its length and changes only bytes the identity
   does not sample is not seen, and an edit held over the file still matches its
   steps.
+- A change from outside to a file drawbar holds is noticed by the file's length
+  and the time it was written. On a volume that keeps that time to the second, a
+  write of the same length in the second of drawbar's own is not seen. The limit
+  is older than this change. The undo of a save, and the read that follows a
+  lost answer, now rest on it too, and a program file is always one length.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
   the trash keeps their bytes, until the next commit.
 - A long visit to a note is one step. The field's own undo covers the typing
