@@ -565,7 +565,7 @@ impl Store {
         let (open, opened) = (self.open(), self.opened());
         let unheld = self.unheld(workspace);
         let lost = unheld.filter(|entity| {
-            let undrafted = self.unsaved(entity) && self.base(entity.id).is_none();
+            let undrafted = self.unsaved(entity, workspace) && self.base(entity.id).is_none();
             let record = self.records.get(&entity.id);
             let written = record.is_some_and(|record| record.fingerprint.is_some());
             !opened || undrafted || (!open && !written)
@@ -587,7 +587,9 @@ impl Store {
             return;
         }
         for (id, kept) in std::mem::take(&mut self.drafted) {
-            let unsaved = workspace.get(id).is_some_and(|entity| self.unsaved(entity));
+            let unsaved = workspace
+                .get(id)
+                .is_some_and(|entity| self.unsaved(entity, workspace));
             let saving = self.records.get(&id).is_some_and(|record| record.saving);
             match (unsaved || saving, self.ids.key(id) == Some(&kept.0)) {
                 (true, true) => _ = self.drafted.insert(id, kept),
@@ -612,7 +614,7 @@ impl Store {
         let unsaved = |id: &u64| {
             workspace
                 .get(*id)
-                .is_some_and(|entity| self.unsaved(entity))
+                .is_some_and(|entity| self.unsaved(entity, workspace))
         };
         let saving = |id: &u64| self.records.get(id).is_some_and(|record| record.saving);
         let settled: Vec<u64> = self
@@ -628,7 +630,7 @@ impl Store {
         }
         let unsaved: Vec<&LocalEntity> = workspace
             .listed()
-            .filter(|entity| self.unsaved(entity))
+            .filter(|entity| self.unsaved(entity, workspace))
             .collect();
         for entity in unsaved {
             let (Some(key), Some(base)) = (self.ids.key(entity.id).cloned(), self.base(entity.id))
@@ -955,15 +957,14 @@ impl Store {
         workspace.listed().filter(|entity| {
             let record = self.records.get(&entity.id);
             let written = record.is_some_and(|record| record.fingerprint.is_some());
-            !written || self.unsaved(entity)
+            !written || self.unsaved(entity, workspace)
         })
     }
 
     /// Whether an asset holds an edit its file does not: one unsaved, or one saved where
     /// nothing may be written, which only memory holds.
-    fn unsaved(&self, entity: &LocalEntity) -> bool {
-        let held = |(ask, _): &(FileAsk, u64)| *ask == FileAsk::Save(entity.id);
-        entity.is_unsaved() || (!self.open() && self.asks.iter().any(held))
+    fn unsaved(&self, entity: &LocalEntity, workspace: &Workspace) -> bool {
+        entity.is_unsaved() || (!self.open() && workspace.unfiled(entity.id))
     }
 
     /// Where the library is, as the user would look for it.
@@ -1519,24 +1520,9 @@ impl Store {
         for kind in event.faults() {
             crate::telemetry::fault("library", kind);
         }
-        let released = match self.hold(event) {
+        match self.hold(event) {
             Some(event) => self.fold(event, workspace, browser, queue, timeline, log),
             None => false,
-        };
-        self.unwritten(workspace);
-        released
-    }
-
-    /// Let the workspace forget what its files held before each save asked for, where
-    /// none will be written: the library may not be written, or did not open.
-    fn unwritten(&self, workspace: &mut Workspace) {
-        if matches!(self.phase, Phase::Opening | Phase::Open) {
-            return;
-        }
-        for (ask, _) in &self.asks {
-            if let FileAsk::Save(id) = ask {
-                workspace.skip_save(*id);
-            }
         }
     }
 
@@ -1686,7 +1672,17 @@ impl Store {
             }
             Event::Unheard { label } => {
                 self.uncommit();
-                self.answering.pop_front();
+                let sent = self.answering.pop_front();
+                // What an undo or redo of a save, this one or one it may have finished,
+                // left in each file is not known until the file is read.
+                let asked = sent.iter().map(|sent| &sent.step).chain(timeline.waiting());
+                let left: Vec<u64> = asked
+                    .flat_map(timeline::Asked::leaves)
+                    .map(|(id, _)| id)
+                    .collect();
+                for id in left {
+                    self.unheard(id, workspace);
+                }
                 // The look below finds whether it landed, as it finds each of its files.
                 if let Some(taking) = self.taking_in.take_if(|_| label == TAKE_IN) {
                     self.follow_take_in(taking, false, workspace, browser, queue, timeline, log);
@@ -2879,6 +2875,18 @@ impl Store {
         std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
     }
 
+    /// An asset holding its body whose file a change went unheard over counts as unsaved,
+    /// and its file is read again.
+    fn unheard(&mut self, id: u64, workspace: &mut Workspace) {
+        let held = workspace.get(id);
+        let path = self.records.get(&id).and_then(|record| record.path.clone());
+        let (true, Some(path)) = (held.is_some_and(LocalEntity::holds_body), path) else {
+            return;
+        };
+        workspace.unfile(id);
+        self.read_unheard(id, path, workspace);
+    }
+
     /// Read again, quietly, the file of an asset whose save went unheard: one that holds
     /// the edit leaves the asset saved.
     fn read_unheard(&mut self, id: u64, path: LibPath, workspace: &mut Workspace) {
@@ -3496,8 +3504,16 @@ impl Store {
             None => found.identity.is_some() && found.identity == known,
         };
         if same {
-            if let (Some(file), true) = (found.file, rests) {
-                workspace.rest_again(id, file);
+            let unsaved = workspace.get(id).is_some_and(LocalEntity::is_unsaved);
+            match (found.file, rests) {
+                (Some(file), true) => workspace.rest_again(id, file),
+                // A body that is what its file holds reads saved again.
+                (_, false) if unsaved => {
+                    if let Some(filed) = workspace.filed(id).cloned() {
+                        workspace.refile(id, filed);
+                    }
+                }
+                _ => {}
             }
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(print);
@@ -3536,14 +3552,14 @@ impl Store {
 
     /// Follow the library's undo or redo of a save, which `asked` names: the file of each
     /// document it saved holds what the step left, and a document still holding its body
-    /// keeps it. One that no longer does follows its file when it is read.
+    /// keeps it. One that no longer does forgets what it remembered of its file, and
+    /// follows the file when it is read.
     fn refiled(&mut self, asked: &timeline::Asked, workspace: &mut Workspace) {
         for (id, filed) in asked.leaves() {
-            let held = workspace.get(id);
-            if !held.is_some_and(|entity| !entity.unread() && entity.rests().is_none()) {
-                continue;
+            match workspace.get(id).is_some_and(LocalEntity::holds_body) {
+                true => workspace.refile(id, filed.baseline.clone()),
+                false => workspace.stale(id),
             }
-            workspace.refile(id, filed.baseline.clone());
             let Some(record) = self.records.get_mut(&id) else {
                 continue;
             };
@@ -4116,7 +4132,6 @@ impl Store {
         }
         let take = self.passes;
         self.asks.extend(asks.into_iter().map(|ask| (ask, take)));
-        self.unwritten(workspace);
     }
 
     /// Send the changes gathered from one gesture as one change, with a tag waiting
@@ -4866,6 +4881,25 @@ fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_save_one_part_of_which_did_not_report_names_no_document() {
+        let filed = |byte: u8| timeline::Filed {
+            identity: toshokan::Identity::from_u128(byte.into()),
+            baseline: Baseline::read(vec![byte].into(), byte.into()),
+        };
+        let saving = |id: u64| (id, filed(1), filed(2).baseline);
+        let mut sent = Sent {
+            saving: vec![saving(1), saving(2)],
+            ..Sent::of(super::change("Save 2 files".to_string()), String::new())
+        };
+        sent.saved(1, toshokan::Identity::from_u128(2));
+
+        let timeline::Asked::Change { saved, .. } = sent.asked() else {
+            panic!("a change");
+        };
+        assert_eq!(saved, []);
+    }
 
     fn change(
         entity: u128,

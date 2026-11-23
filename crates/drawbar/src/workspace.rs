@@ -993,6 +993,11 @@ impl LocalEntity {
         (self.bytes.len() + saved) as u64
     }
 
+    /// Whether it holds its body whole, rather than resting in its file or unread.
+    pub fn holds_body(&self) -> bool {
+        !self.unread() && self.rests().is_none()
+    }
+
     /// Whether it holds `bytes`. Never, while it is unread.
     fn holds(&self, bytes: &[u8]) -> bool {
         match self.rests() {
@@ -2242,11 +2247,10 @@ impl Workspace {
         }
     }
 
-    /// Whether a save of an asset is asked and not answered.
+    /// Whether a save of an asset is asked and may still be answered: sent, or not yet
+    /// taken by the store.
     pub(crate) fn saves_asked(&self, id: u64) -> bool {
-        self.sent.contains_key(&id)
-            || self.on_file.contains_key(&id)
-            || self.file_asks.contains(&FileAsk::Save(id))
+        self.sent.contains_key(&id) || self.file_asks.contains(&FileAsk::Save(id))
     }
 
     /// What an asset's file is known to hold: what a save asked and not answered
@@ -2327,8 +2331,16 @@ impl Workspace {
             self.resave_as(id, on_file);
             return false;
         }
-        if !self.apart(id) {
-            return false;
+        self.unfile(id);
+        false
+    }
+
+    /// What an asset's file holds is not known: the asset counts as unsaved until a read
+    /// of the file finds what it holds. One a save of is asked and not answered counts so
+    /// already, and one resting in its file holds what the file holds.
+    pub fn unfile(&mut self, id: u64) {
+        if !self.apart(id) || self.on_file.contains_key(&id) || self.sent.contains_key(&id) {
+            return;
         }
         let stamp = self.stamp();
         if let Some(entity) = self.get_mut(id) {
@@ -2336,13 +2348,13 @@ impl Workspace {
                 entity.resave(Baseline::new(entity.saved.content.clone(), stamp));
             }
         }
-        false
     }
 
     /// Count an asset saved as `saved`, which its file holds. One whose bytes are those
     /// takes their stamp, or rests in the file, as a revert would leave it.
     ///
-    /// ⚠️ Compares two bodies, so it runs only when a save is refused, undone or redone.
+    /// ⚠️ Compares two bodies, so it runs only when a save is refused, undone or redone,
+    /// or a read finds the file holding what an unsaved asset was saved as.
     fn resave_as(&mut self, id: u64, saved: Baseline) {
         if !self.apart(id) {
             return;
