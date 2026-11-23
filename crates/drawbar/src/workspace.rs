@@ -2242,11 +2242,41 @@ impl Workspace {
         }
     }
 
-    /// Whether a save of an asset is asked and not answered, sent or not.
-    pub(crate) fn saves_asked(&self, id: u64) -> bool {
-        self.sent.contains_key(&id)
-            || self.on_file.contains_key(&id)
-            || self.file_asks.contains(&FileAsk::Save(id))
+    /// What an asset's file is known to hold: what a save asked and not answered
+    /// displaced, or else what the asset was saved as.
+    pub fn filed(&self, id: u64) -> Option<&Baseline> {
+        let saved = || self.get(id).map(|entity| &entity.saved);
+        self.on_file.get(&id).or_else(saved)
+    }
+
+    /// Whether an asset holds what its file does not: it is unsaved, or a save of it is
+    /// asked and not answered.
+    pub fn unfiled(&self, id: u64) -> bool {
+        let Some(entity) = self.get(id) else {
+            return false;
+        };
+        let filed = self.filed(id).map(Baseline::stamp);
+        entity.is_unsaved() || filed != Some(entity.saved.stamp)
+    }
+
+    /// The file an asset rests in was read again and holds what it held: the asset rests
+    /// in it under the stamp it had, and an edit held of it is made again over it.
+    pub fn rest_again(&mut self, id: u64, file: Arc<OnDisk>) {
+        let entity = self.get(id).filter(|entity| entity.rests().is_some());
+        if let Some(stamp) = entity.map(|entity| entity.saved.stamp) {
+            self.rest(id, file, stamp);
+        }
+    }
+
+    /// An asset's file now holds `baseline`, as the library's undo or redo of a save left
+    /// it. What the asset holds stays, and is unsaved where it is not that.
+    pub fn refile(&mut self, id: u64, baseline: Baseline) {
+        if self.on_file.contains_key(&id) || self.sent.contains_key(&id) {
+            self.on_file.insert(id, baseline);
+        } else if let Some(entity) = self.get_mut(id) {
+            entity.resave(baseline);
+        }
+        self.revision += 1;
     }
 
     /// A save of an asset landed. A newer saved baseline still to be written leaves its
