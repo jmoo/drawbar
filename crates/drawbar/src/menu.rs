@@ -675,6 +675,30 @@ impl DrawbarApp {
         })
     }
 
+    /// Whether a key or the Mac's menu bar may run `command` now. Undo and Redo ask their
+    /// offer when they run, once the frame's edits are recorded.
+    pub(crate) fn may_run(&self, ctx: &egui::Context, command: Command) -> bool {
+        undoes(command)
+            || self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+    }
+
+    /// Run the Undo and Redo asked for this frame, in order, once its edits are recorded,
+    /// so each takes the step its menu named after them. One no longer offered does
+    /// nothing.
+    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context) {
+        for command in std::mem::take(&mut self.undoing) {
+            if self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+            {
+                self.undo(command == Command::Redo);
+                ctx.request_repaint();
+            }
+        }
+    }
+
     /// Undo the step the timeline names next, or redo it `again`: a library step is asked
     /// of the library, and an edit step brings its document to the front.
     fn undo(&mut self, again: bool) {
@@ -705,7 +729,8 @@ impl DrawbarApp {
         }
     }
 
-    /// Do what `command` names, now.
+    /// Do what `command` names, now, except Undo and Redo, which wait for the frame's
+    /// edits to be recorded.
     ///
     /// ⚠️ Listening to MIDI starts here, inside the click: a browser tab may ask for MIDI
     /// access only while the click's user activation is live.
@@ -719,7 +744,7 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Import => acts.push(Act::OpenFiles),
-            Command::Undo | Command::Redo => self.undo(command == Command::Redo),
+            Command::Undo | Command::Redo => self.undoing.push(command),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
@@ -835,17 +860,8 @@ impl DrawbarApp {
             });
             pressed
         });
-        let queued = acts.len();
         for command in pressed {
-            // An act runs after the keys, so an undo after a key that asked for one, as
-            // a save, would run first; it waits as it would for that change in flight.
-            let waits = undoes(command) && acts.len() > queued;
-            if admit(command)
-                && !waits
-                && self
-                    .offer_now(ctx, command)
-                    .is_some_and(|offer| offer.enabled)
-            {
+            if admit(command) && self.may_run(ctx, command) {
                 self.run(ctx, frame, command, acts);
             }
         }
