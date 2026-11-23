@@ -40,18 +40,12 @@ jobs:
         uses: ./.github/actions/nix
         with:
           cache: native
-          store-size: 8G
       - if: runner.os != 'Windows'
         run: nix build .#nord.tests .#nord.packages --print-build-logs
       # What scripts/assets.bash attaches to each release from macOS: drawbar's disk
       # image, around the binary `nord.packages` built.
       - if: runner.os == 'macOS'
         run: scripts/dmg.bash
-      - if: runner.os != 'Windows'
-        run: |
-          du -sk /nix/store
-          nix-collect-garbage | tail -n 1
-          du -sk /nix/store
       # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
       - if: runner.os == 'Windows'
         shell: bash
@@ -85,10 +79,6 @@ jobs:
           .#nord-cli-linux-x86_64-tarball .#nord-cli-linux-aarch64-tarball
           .#drawbar-appimage
           --print-build-logs
-      - run: |
-          du -sk /nix/store
-          nix-collect-garbage | tail -n 1
-          du -sk /nix/store
 
   web:
     runs-on: ubuntu-latest
