@@ -319,6 +319,7 @@ impl Timeline {
     }
 
     /// The gesture that keeps the last step open, where one does.
+    #[cfg(test)]
     pub fn open(&self) -> Option<Gesture> {
         self.open
     }

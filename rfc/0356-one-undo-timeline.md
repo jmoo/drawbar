@@ -303,11 +303,19 @@ gesture off the frame's input:
 - a widget has keyboard focus, and the step stays open while that widget keeps
   it. A run of arrow-key nudges on one control is one step, and so is one visit
   to a text box.
-- otherwise a pointer button pressed in an earlier frame is down, or was let go
-  in this frame. A drag is one step, and so is a click. A change in the frame of
-  a press belongs to what came before it, such as a box that commits when a
-  press elsewhere takes its focus.
+- otherwise a pointer button is down, or was let go in this frame. A drag is one
+  step, and so is a click.
 - otherwise nothing goes on, and the change is a step of its own.
+
+A pointer press ends the step before it, whatever gesture made it. A change in
+the frame of the press, where a widget had focus as the frame began, is that
+widget committing as the press takes its focus: it joins the widget's step,
+which then closes. Any other change in that frame, such as a slider jumping to
+the pointer, begins the step the press goes on with. A click inside a text box
+therefore splits the typing in two.
+
+A revert is always a step of its own. It closes the open step and is never
+extended, so Undo always brings back what it reverted.
 
 A change extends the open step only if it is to the same document and starts
 from what the step left. The step closes at the end of the first frame with
