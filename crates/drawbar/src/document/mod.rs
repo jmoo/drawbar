@@ -4930,6 +4930,57 @@ mod tests {
         );
     }
 
+    impl Open {
+        /// The gain the open take's control reads, and whether the bytes the next gain
+        /// is applied to are `original`.
+        fn gain_over(&mut self, original: &[u8]) -> (f64, bool) {
+            self.frame(Vec::new());
+            let state = self.state().wav.as_ref().expect("a WAV state");
+            (state.gain, state.original() == original)
+        }
+    }
+
+    /// A take's gain is measured against the bytes it was saved as, wherever that
+    /// baseline moves: a save, its undo and redo, a refused save, and a change made
+    /// outside kept under the user's own.
+    #[test]
+    fn a_takes_gain_follows_its_saved_baseline_moving() {
+        let mut open = Open::file("take.wav", wav_bytes());
+        let path = crate::store::LibPath::parse("take.wav").unwrap();
+        open.workspace.place(open.id, path);
+        open.workspace.take_file_asks();
+        open.frame(Vec::new());
+        let (id, filed, first) = (open.id, wav_bytes(), open.entity().saved.clone());
+        open.apply(&[(wav::GAIN, "6.0")]);
+        let louder = open.entity().bytes.to_vec();
+        assert_eq!(open.gain_over(&filed), (6.0, true));
+
+        open.workspace.mark_saved(id);
+        assert_eq!(open.gain_over(&louder), (0.0, true), "saved");
+        let second = open.entity().saved.clone();
+        open.workspace.take_file_asks();
+        open.workspace.send_save(id, true);
+        open.workspace.save_landed(id);
+        open.workspace.refile(id, first);
+        assert!(open.entity().is_unsaved());
+        assert_eq!(open.gain_over(&filed), (6.0, true), "the save undone");
+        open.workspace.refile(id, second);
+        assert_eq!(open.gain_over(&louder), (0.0, true), "and redone");
+
+        open.apply(&[(wav::GAIN, "3.0")]);
+        open.workspace.mark_saved(id);
+        open.frame(Vec::new());
+        open.workspace.take_file_asks();
+        open.workspace.send_save(id, true);
+        assert!(!open.workspace.unsave(id));
+        assert_eq!(open.gain_over(&louder), (3.0, true), "the save refused");
+
+        let theirs = marked_take(&["069-b0-v22"]);
+        open.workspace.rebase(id, theirs, &mut open.log);
+        let mine = open.entity().bytes.to_vec();
+        assert_eq!(open.gain_over(&mine), (0.0, true), "theirs kept under mine");
+    }
+
     /// A take with two hits, both of key 69.
     fn marked_take(labels: &[&str]) -> Vec<u8> {
         use nord_format::wav as prep;
