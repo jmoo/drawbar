@@ -5278,6 +5278,24 @@ mod tests {
         }
     }
 
+    /// Opening another library waits for a piano's plan to be laid out, but does not
+    /// carry that piano: a revert of the plan leaves the switch to run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_revert_leaves_a_library_switch_waiting_on_the_lay_out_to_run() {
+        let mut open = filed_piano();
+        renamed_piano(&mut open);
+        let (ctx, id) = (open.ctx.clone(), open.id);
+        let switch = || crate::browser::Act::OpenLibrary("/elsewhere".into());
+        assert_eq!(
+            open.document.piano.hold(&ctx, switch(), &open.workspace),
+            None
+        );
+        assert!(open.document.waits_for_lay_out(id), "the switch waits");
+        let ran = open.settled(vec![crate::browser::Act::Revert(id)]);
+        assert_eq!(ran, [switch()], "the switch the user asked for runs");
+    }
+
     #[test]
     fn a_piano_held_whole_shows_what_its_body_holds_across_saves() {
         let plans = [

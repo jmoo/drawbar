@@ -1481,10 +1481,11 @@ impl State {
 
     /// Take `plan` up as the plan of `entity`, or none, as an undo or a revert leaves it.
     /// An apply in flight for another plan is dropped when it answers, and so is every act
-    /// waiting for one: it was asked of content the document no longer holds.
+    /// waiting for one that carries the document: it was asked of content the document no
+    /// longer holds. Any other act runs once nothing holds it.
     pub fn adopt(&mut self, entity: &LocalEntity, plan: Option<&Plan>) {
         let id = entity.id;
-        self.held.retain(|(held, _)| *held != id);
+        self.held.retain(|(_, act)| waits_on(act) != Some(id));
         match plan.filter(|plan| !plan.is_empty()) {
             Some(plan) => {
                 let against = mark(entity);
