@@ -12,16 +12,17 @@ use toshokan::io::Capabilities;
 use toshokan::report::Opened;
 use toshokan::simulator::Machine;
 use toshokan::{
-    Env, Identify, Identity, Io, IoError, IoResult, Layout, MemDisk, Register, RelPath, Root,
-    Schema, Set,
+    EntityId, Env, Identify, Identity, Io, IoError, IoResult, Layout, MemDisk, Register, RelPath,
+    Root, Schema, Set,
 };
 
 pub const ORIGIN: Register<String> = Register::new("origin");
 pub const NOTE: Register<Option<String>> = Register::new("note");
 pub const TAGS: Set<String> = Set::new("tags");
+pub const SOURCES: Set<EntityId> = Set::new("sources");
 
 pub fn schema() -> Schema {
-    Schema::of(&[ORIGIN.key(), NOTE.key(), TAGS.key()]).unwrap()
+    Schema::of(&[ORIGIN.key(), NOTE.key(), TAGS.key(), SOURCES.key()]).unwrap()
 }
 
 pub fn layout() -> Layout {
@@ -58,9 +59,10 @@ pub const COPYING: Capabilities = Capabilities {
 };
 
 /// Every state, each written by an earlier build.
-pub const STATES: [&str; 5] = [
+pub const STATES: [&str; 6] = [
     "one-writer-open",
     "one-writer-compacted",
+    "one-writer-joined",
     "two-writers-fork",
     "pending",
     "local",

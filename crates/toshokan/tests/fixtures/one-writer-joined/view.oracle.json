@@ -1,0 +1,33 @@
+{
+  "mode": "writable",
+  "start": "resumed 5f7d2632b5c3c32de8d8390f2793de8d",
+  "writers": { "5f7d2632b5c3c32de8d8390f2793de8d": "fixture" },
+  "entities": {
+    "5ddad83b4e8740685080e4863a45d029": {
+      "origin": "third",
+      "tags": ["second"],
+      "file": { "path": "low.syx", "state": "in-sync", "bytes": "low" }
+    },
+    "1075ae680a5510d0ff1f5fbbfe37b52a": {
+      "sources": [
+        { "names": "298b462709618e66eba33c15ce4f9c12", "resolves": null },
+        { "names": "86e61e03e02c16e9e4fc80a660511587", "resolves": "5ddad83b4e8740685080e4863a45d029" },
+        { "names": "bd907e1de6387201a8ca71f9526e3310", "resolves": "5ddad83b4e8740685080e4863a45d029" }
+      ],
+      "file": { "path": "built.syx", "state": "in-sync", "bytes": "built" }
+    }
+  },
+  "unbound": ["gone.syx", "second.syx", "third.syx"],
+  "items": [],
+  "forks": [],
+  "gaps": [],
+  "orphans": [],
+  "ignored": [],
+  "unreadable": [],
+  "settled": [
+    ["5f7d2632b5c3c32de8d8390f2793de8d", "98173a7f658806f5af90cb174f249347"]
+  ],
+  "trash": [],
+  "unknown": 0,
+  "extended": 0
+}
