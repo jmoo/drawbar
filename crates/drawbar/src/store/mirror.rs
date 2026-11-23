@@ -30,8 +30,8 @@ use crate::queue::Queue;
 use crate::tags::Asked;
 use crate::timeline::{self, Taken, Timeline};
 use crate::workspace::{
-    library_filename, precious, Cause, Content, FileAsk, Leaving, LocalEntity, Origin, Saved,
-    Workspace,
+    library_filename, precious, Baseline, Cause, Content, FileAsk, Leaving, LocalEntity, Origin,
+    Saved, Workspace,
 };
 
 /// How far opening has got.
@@ -126,9 +126,8 @@ struct Batch {
     /// The take of the asks they came in.
     take: u64,
     parts: Vec<Intent>,
-    /// The parts that save a document from its body over a file that existed, each with
-    /// the identity of that file.
-    saves: Vec<(u64, toshokan::Identity)>,
+    /// The parts that save a document from its body over a file that existed.
+    saves: Vec<Saving>,
 }
 
 /// The take-in of the list an older drawbar kept, sent and not answered: the assets it
@@ -227,11 +226,6 @@ pub struct Store {
     finishing: BTreeSet<LibPath>,
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
-    /// Assets whose file this session's undo or redo of a save left as the file of this
-    /// identity, each read again, whatever its length and time say, once nothing defers it.
-    /// A read in flight when the answer comes ran after the undo, as every command runs
-    /// in the order sent.
-    expected: BTreeMap<u64, toshokan::Identity>,
     /// A change of this session's own failed partway and waits for the next change to
     /// finish it. An undo or a redo would reverse that change, not the step it names.
     waits: bool,
@@ -389,7 +383,6 @@ impl Store {
             quietly: BTreeSet::new(),
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
-            expected: BTreeMap::new(),
             waits: false,
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
@@ -1397,9 +1390,8 @@ impl Store {
         let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
             if self.rechecking.remove(&id) {
-                let expected = self.expected.remove(&id);
                 match answer {
-                    Ok(found) => self.changed(id, found, expected, workspace, browser, log),
+                    Ok(found) => self.changed(id, found, workspace, browser, log),
                     Err(_) => self.rescan(),
                 }
                 continue;
@@ -1473,12 +1465,6 @@ impl Store {
                 self.ask(workspace, browser, queue, log);
             }
         }
-    }
-
-    /// How many assets' files an undo or a redo of a save left to be read again.
-    #[cfg(test)]
-    pub fn expecting(&self) -> usize {
-        self.expected.len()
     }
 
     /// Whether a rescan is waiting for its answer.
@@ -1627,17 +1613,11 @@ impl Store {
                 let landed = made.is_some();
                 self.waits = waiting != Waiting::Nothing;
                 let asked = self.answering.pop_front().map(Sent::asked);
-                if finished.is_some() {
-                    self.expected.extend(
-                        timeline
-                            .waiting()
-                            .map(timeline::Asked::leaves)
-                            .unwrap_or_default(),
-                    );
+                if let (Some(_), Some(earlier)) = (finished, timeline.waiting()) {
+                    self.refiled(earlier, workspace);
                 }
-                if landed {
-                    self.expected
-                        .extend(asked.iter().flat_map(timeline::Asked::leaves));
+                if let (true, Some(asked)) = (landed, &asked) {
+                    self.refiled(asked, workspace);
                 }
                 let answer = timeline::Answer {
                     made,
@@ -1714,7 +1694,6 @@ impl Store {
                 // Whether the library took a step is not known, so the Edit menu offers
                 // none it holds until the next one it hears of.
                 timeline.forget_library();
-                self.expected.clear();
                 log.say(format!(
                     "drawbar lost the library's answer to “{label}”, so it looks at the \
                      folder to see what changed."
@@ -1791,7 +1770,7 @@ impl Store {
             Event::Unkept(why) => self.say_unkept(&why, log),
             Event::Restarted => {
                 timeline.forget_library();
-                self.expected.clear();
+                self.waits = false;
                 // What waited to be finished never will be, but as the user settles it.
                 self.awaiting.clear();
                 log.say(
@@ -1874,13 +1853,13 @@ impl Store {
 
     /// Send a change to the files, which does nothing but save each of `saving` where it
     /// names any.
-    fn write(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
+    fn write(&mut self, intent: Intent, saving: Vec<Saving>) {
         self.sent += 1;
         self.commit(intent, saving);
     }
 
     /// Send a change to the facts.
-    fn commit(&mut self, intent: Intent, saving: Vec<(u64, toshokan::Identity)>) {
+    fn commit(&mut self, intent: Intent, saving: Vec<Saving>) {
         let step = match intent.lasting() {
             true => timeline::Asked::Lasting,
             false => change(intent.describe()),
@@ -2375,11 +2354,6 @@ impl Store {
             browser.folders.others = shown.others();
         }
         let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
-        // An expectation waits for a read in flight, or for a projection that no longer
-        // defers its asset.
-        let (rechecking, deferred) = (&self.rechecking, &self.deferred);
-        self.expected
-            .retain(|id, _| rechecking.contains(id) || deferred.contains(id));
         if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }
@@ -2399,7 +2373,6 @@ impl Store {
         browser.forget_gone(workspace);
         if retired {
             timeline.forget_library();
-            self.expected.clear();
             self.awaiting.clear();
             log.say(
                 "drawbar's own data for this library was copied and used elsewhere too, so \
@@ -2483,8 +2456,7 @@ impl Store {
             None => self.ids.iter().map(|(id, key)| (id, key.clone())).collect(),
             Some(keys) => {
                 let ids = keys.iter().filter_map(|key| self.ids.id(key));
-                let expected = self.expected.keys().copied();
-                let ids: BTreeSet<u64> = ids.chain(deferred).chain(expected).collect();
+                let ids: BTreeSet<u64> = ids.chain(deferred).collect();
                 let keyed = ids
                     .into_iter()
                     .filter_map(|id| Some((id, self.ids.key(id)?.clone())));
@@ -2562,8 +2534,7 @@ impl Store {
                 continue;
             };
             let known = record.fingerprint.map(|print| print.stat());
-            let expected = self.expected.contains_key(&id);
-            if let Some(stat) = stat.filter(|stat| expected || known != Some(*stat)) {
+            if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
                 touched.insert(id);
                 if self.quiet {
                     self.quietly.insert(id);
@@ -3485,14 +3456,12 @@ impl Store {
     }
 
     /// A file drawbar knew now holds something else. One drawbar has not read is only
-    /// looked at again: what it holds is not known, and nothing shows it. Where it is the
-    /// file of identity `expected`, as this session's undo or redo of a save left it, an
-    /// asset holding its body keeps it, and only what it was saved as moves.
+    /// looked at again: what it holds is not known, and nothing shows it. One found
+    /// holding what it is known to hold changes nothing.
     fn changed(
         &mut self,
         id: u64,
         found: Found,
-        expected: Option<toshokan::Identity>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
@@ -3513,16 +3482,29 @@ impl Store {
             print.crc = Some(nord_format::crc::crc32(bytes));
         }
         let name = entity.name.clone();
-        let unsaved = entity.is_unsaved() || self.saves_asked(id, workspace);
-        let holds = found.holds();
+        let rests = entity.rests().is_some();
+        let known = self
+            .records
+            .get(&id)
+            .and_then(|record| record.fingerprint?.identity);
+        let filed = |bytes: &[u8]| workspace.filed(id).is_some_and(|filed| filed.holds(bytes));
         // A copy, or a browser's move, gives a file a new time over the same bytes.
-        let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
-        let own = expected.is_some()
-            && expected == found.identity
-            && found.bytes.is_some()
-            && !entity.unread()
-            && entity.rests().is_none();
-        match (unsaved || own, found.bytes, found.file) {
+        let same = (found.identity.is_some() && found.identity == known)
+            || found.bytes.as_deref().is_some_and(filed);
+        if same {
+            if let (Some(file), true) = (found.file, rests) {
+                workspace.rest_again(id, file);
+            }
+            if let Some(record) = self.records.get_mut(&id) {
+                record.fingerprint = Some(print);
+                record.missing = false;
+            }
+            browser.folders.missing.remove(&id);
+            return;
+        }
+        let unfiled = workspace.unfiled(id);
+        let holds = found.holds();
+        match (unfiled, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
             (false, Some(bytes), _) => workspace.adopt(id, bytes, log),
@@ -3530,10 +3512,10 @@ impl Store {
             (_, None, None) => return,
         }
         // An edit held over the file the asset rests in is made again over the file as
-        // it is now, and one that file already holds leaves nothing to choose between.
-        match !own && !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        // it is now.
+        match unfiled && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
-            false if own || quietly || same => {}
+            false if quietly => {}
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
@@ -3548,12 +3530,29 @@ impl Store {
         }
     }
 
-    /// Whether a save of an asset is asked and not answered: it holds what its file does
-    /// not, even where it reads saved.
-    fn saves_asked(&self, id: u64, workspace: &Workspace) -> bool {
-        self.records.get(&id).is_some_and(|record| record.saving)
-            || self.asks.iter().any(|(ask, _)| *ask == FileAsk::Save(id))
-            || workspace.saves_asked(id)
+    /// Follow the library's undo or redo of a save, which `asked` names: the file of each
+    /// document it saved holds what the step left, and a document still holding its body
+    /// keeps it. One that no longer does follows its file when it is read.
+    fn refiled(&mut self, asked: &timeline::Asked, workspace: &mut Workspace) {
+        for (id, filed) in asked.leaves() {
+            let held = workspace.get(id);
+            if !held.is_some_and(|entity| !entity.unread() && entity.rests().is_none()) {
+                continue;
+            }
+            workspace.refile(id, filed.baseline.clone());
+            let Some(record) = self.records.get_mut(&id) else {
+                continue;
+            };
+            record.fingerprint = Some(Fingerprint {
+                len: filed.baseline.size(),
+                modified: record.fingerprint.and_then(|print| print.modified),
+                crc: filed.baseline.whole_crc(),
+                identity: Some(filed.identity),
+            });
+            if !record.saving {
+                record.saved = filed.baseline.stamp();
+            }
+        }
     }
 
     /// A file drawbar knew is gone, and nothing on disk holds what it held.
@@ -3565,7 +3564,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> Vanished {
-        let asked = self.saves_asked(id, workspace);
+        let unfiled = workspace.unfiled(id);
         let Some(record) = self.records.get_mut(&id) else {
             return Vanished::Untouched;
         };
@@ -3577,7 +3576,7 @@ impl Store {
         };
         let name = entity.name.clone();
         let keep = precious(entity, queue)
-            || asked
+            || unfiled
             || !browser.tags.worn(id).is_empty()
             || entity.origin.slot().is_some();
         if keep {
@@ -4245,6 +4244,11 @@ impl Store {
         // A piano or sample instrument's file is read back in place, and its editor shows
         // nothing but what it was saved as.
         let indexed = crate::ondisk::Index::tagged(entity.saved.bytes()).is_some();
+        let after = entity.saved.clone();
+        let filed = workspace
+            .filed(id)
+            .filter(|filed| filed.stamp() != stamp)
+            .cloned();
         self.part(Intent::Save {
             id,
             path: at,
@@ -4253,8 +4257,11 @@ impl Store {
             came: None,
         });
         let edited = workspace.send_save(id, over);
-        if let (toshokan::Expect::Holds(before), true, false) = (expect, edited, indexed) {
-            self.batch.saves.push((id, before));
+        if let (toshokan::Expect::Holds(identity), Some(baseline), true, false) =
+            (expect, filed, edited, indexed)
+        {
+            let before = timeline::Filed { identity, baseline };
+            self.batch.saves.push((id, before, after));
         }
         self.delete_with(id, workspace);
         true
@@ -4441,10 +4448,13 @@ fn settling(how: toshokan::log::Settlement) -> super::Verb {
 struct Sent {
     step: timeline::Asked,
     doing: String,
-    /// The documents a change that does nothing else saves from their bodies, each with
-    /// the identity of the file it replaces.
-    saving: Vec<(u64, toshokan::Identity)>,
+    /// The documents a change that does nothing else saves from their bodies.
+    saving: Vec<Saving>,
 }
+
+/// A document a save writes from its body over a file that existed: its id, what the file
+/// held, and the baseline the save writes.
+type Saving = (u64, timeline::Filed, Baseline);
 
 impl Sent {
     fn of(step: timeline::Asked, doing: String) -> Sent {
@@ -4455,12 +4465,17 @@ impl Sent {
         }
     }
 
-    /// Note that the change saved the document `id` as the file of identity `after`.
-    fn saved(&mut self, id: u64, after: toshokan::Identity) {
-        let before = self.saving.iter().find(|(saving, _)| *saving == id);
-        if let (Some(&(_, before)), timeline::Asked::Change { saved, .. }) =
-            (before, &mut self.step)
+    /// Note that the change saved the document `id` as the file of identity `identity`.
+    fn saved(&mut self, id: u64, identity: toshokan::Identity) {
+        let saving = self.saving.iter().find(|(saving, ..)| *saving == id);
+        if let (Some((_, before, baseline)), timeline::Asked::Change { saved, .. }) =
+            (saving, &mut self.step)
         {
+            let after = timeline::Filed {
+                identity,
+                baseline: baseline.clone(),
+            };
+            let before = before.clone();
             saved.push(timeline::Saved { id, before, after });
         }
     }

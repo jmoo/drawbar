@@ -4477,12 +4477,19 @@ fn a_save_step_names_the_document_with_the_file_it_replaced_and_the_file_it_left
     session.bench.workspace.mark_saved(id);
     session.sync();
 
-    let saved = crate::timeline::Saved {
-        id,
-        before: identity("untitled.ne5p", &made),
-        after: identity("untitled.ne5p", &edited),
+    let [saved] = &session.saved_by_next_undo()[..] else {
+        panic!("one document is saved");
     };
-    assert_eq!(session.saved_by_next_undo(), [saved]);
+    let files = |filed: &crate::timeline::Filed| (filed.identity, filed.baseline.bytes().to_vec());
+    assert_eq!(saved.id, id);
+    assert_eq!(
+        files(&saved.before),
+        (identity("untitled.ne5p", &made), made)
+    );
+    assert_eq!(
+        files(&saved.after),
+        (identity("untitled.ne5p", &edited), edited)
+    );
 }
 
 #[test]
@@ -4658,7 +4665,6 @@ fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
         session.bench.browser.asking().is_some(),
         "the user is asked"
     );
-    assert_eq!(session.store.expecting(), 0);
 }
 
 #[test]
@@ -4678,7 +4684,6 @@ fn a_file_the_undo_of_a_save_left_that_cannot_be_read_is_followed_as_one_gone_ou
 
     assert_eq!(session.said("is missing from the library folder"), 1);
     assert_eq!(session.bytes(id), edit);
-    assert_eq!(session.store.expecting(), 0);
 }
 
 #[test]
@@ -4701,7 +4706,6 @@ fn a_read_in_flight_when_the_undo_of_a_save_answers_moves_only_the_baseline() {
     assert_eq!(session.bench.workspace.working(id), held);
     assert!(entity.is_unsaved());
     assert_eq!(session.bench.browser.asking(), None);
-    assert_eq!(session.store.expecting(), 0);
 }
 
 /// A save sent behind the undo of the save before it expects the file that undo
@@ -4731,14 +4735,13 @@ fn a_save_sent_behind_the_undo_of_a_save_is_refused_and_leaves_the_file_as_the_u
     assert!(entity.is_unsaved());
     assert_eq!(session.bench.browser.asking(), None);
     assert_eq!(session.bench.workspace.saves_unanswered(), 0);
-    assert_eq!(session.store.expecting(), 0);
 }
 
 #[test]
-fn a_save_asked_while_its_undo_is_read_leaves_the_document_unsaved_over_the_file() {
+fn a_save_asked_once_its_undo_is_answered_lands_over_the_file_the_undo_left() {
     let root = Temp::new();
     let mut session = Session::open(&root);
-    let (id, made, _) = session.saved_once("96");
+    let (id, _, _) = session.saved_once("96");
 
     session.press(false);
     while session.store.changing() {
@@ -4752,11 +4755,8 @@ fn a_save_asked_while_its_undo_is_read_leaves_the_document_unsaved_over_the_file
     session.store.sync(workspace, browser, Pass::Files);
     session.settle();
 
-    assert_eq!(root.read("untitled.ne5p"), made);
-    assert_eq!(session.bytes(id), again);
-    let entity = session.bench.workspace.get(id).expect("held");
-    assert_eq!(*entity.saved.bytes(), made);
-    assert!(entity.is_unsaved());
+    assert_eq!(root.read("untitled.ne5p"), again);
+    assert!(!session.unsaved(id));
     assert_eq!(session.bench.workspace.saves_unanswered(), 0);
     assert_eq!(session.bench.browser.asking(), None);
 }
@@ -9738,7 +9738,6 @@ fn a_save_of_a_file_drawbar_did_not_make_undone_at_its_length_and_time_moves_the
     let entity = session.bench.workspace.get(id).expect("held");
     assert_eq!(*entity.saved.bytes(), made);
     assert_eq!(session.bytes(id), held);
-    assert_eq!(session.store.expecting(), 0);
 }
 
 impl Session {
@@ -9872,7 +9871,6 @@ fn an_undo_of_a_save_the_next_change_finishes_moves_only_the_baseline() {
     assert_eq!(session.bench.workspace.working(id), held);
     assert_eq!(session.bench.browser.asking(), None);
     assert_eq!(session.said("changed on disk"), 0);
-    assert_eq!(session.store.expecting(), 0);
 }
 
 #[test]
@@ -9900,5 +9898,165 @@ fn a_rename_sent_behind_the_undo_of_a_save_leaves_the_file_as_the_undo_did() {
     assert_eq!(*entity.saved.bytes(), made);
     assert_eq!(session.bench.workspace.working(id), held);
     assert_eq!(session.bench.browser.asking(), None);
-    assert_eq!(session.store.expecting(), 0);
+}
+
+#[test]
+fn a_file_deleted_outside_after_the_undo_of_a_save_keeps_the_document() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+
+    session.press(false);
+    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.decided();
+    session.settle();
+
+    assert!(session.bench.workspace.get(id).is_some());
+    assert_eq!(session.bytes(id), edited);
+}
+
+#[test]
+fn a_touch_read_while_a_save_is_asked_asks_nothing_and_leaves_it_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.store.rescan();
+    assert!(session.next(), "the rescan answered, and its read is sent");
+    let mine = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.written();
+    session.settle();
+
+    assert_eq!(session.said("changed on disk"), 0);
+    assert_eq!(session.bench.browser.asking(), None);
+    assert_eq!(root.read("untitled.ne5p"), mine, "the save landed");
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn another_writers_change_read_with_the_undo_of_a_save_asks_with_nothing_else_unsaved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    let theirs = with_gain(&edited, "40");
+
+    session.press(false);
+    while fs::read(root.at("untitled.ne5p")).ok() != Some(made.clone()) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.decided();
+    session.settle();
+
+    assert_eq!(session.bytes(id), edited);
+    assert!(
+        session.bench.browser.asking().is_some(),
+        "the user is asked"
+    );
+}
+
+#[test]
+fn a_document_reads_unsaved_to_the_quit_and_the_memory_limit_once_its_save_is_undone() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, _) = session.saved_once("96");
+    assert!(session.bench.workspace.evictable(id).is_some());
+    let Bench {
+        workspace, browser, ..
+    } = &session.bench;
+    assert!(!session.store.losing(workspace, browser));
+
+    session.press(false);
+    while session.store.changing() {
+        assert!(session.next(), "the undo answered");
+    }
+
+    assert!(session.unsaved(id));
+    assert_eq!(session.bench.workspace.evictable(id), None);
+    let Bench {
+        workspace, browser, ..
+    } = &session.bench;
+    assert!(session.store.losing(workspace, browser));
+}
+
+#[test]
+fn two_saves_undone_in_quick_succession_leave_the_first_file_and_the_last_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    let last = session.edit(id, "12");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    session.press(false);
+    while session.store.changing() {
+        assert!(session.next(), "the first undo answered");
+    }
+    session.press(false);
+    session.decided();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made);
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert_eq!(session.bytes(id), last);
+    assert_eq!(session.bench.browser.asking(), None);
+}
+
+#[test]
+fn an_undo_of_a_save_finished_by_a_change_that_fails_moves_only_the_baseline() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, other) = (session.create(), session.create());
+    session.sync();
+    assert_eq!(session.path(id).as_deref(), Some("untitled.ne5p"));
+    let made = session.bytes(id);
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let held = session.bench.workspace.working(id);
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    let path = session.path(other).expect("placed");
+    fs::write(root.at(&path), b"theirs").unwrap();
+    session.edit(other, "40");
+    session.bench.workspace.mark_saved(other);
+    session.decided();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    assert_eq!(
+        session.said("was not saved"),
+        1,
+        "the change that finished it failed"
+    );
+    let entity = session.bench.workspace.get(id).expect("held");
+    assert_eq!(*entity.saved.bytes(), made);
+    assert_eq!(session.bench.workspace.working(id), held);
+}
+
+#[test]
+fn a_resting_instrument_read_again_unchanged_keeps_what_it_holds() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    let sets = vec![("name".to_string(), "Vibes".to_string())];
+    let edit = Some(crate::rewrite::Edit::Sample(sets));
+    session.bench.workspace.hold_edit(id, edit, Cause::User);
+    let held = session.bench.workspace.working(id);
+
+    touch(&root, "Zoned.nsmp");
+    session.refocus();
+
+    assert_eq!(session.bench.workspace.working(id), held);
 }

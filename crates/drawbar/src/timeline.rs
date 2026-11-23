@@ -12,7 +12,7 @@ use eframe::egui;
 use toshokan::{EntryHash, Identity};
 
 use crate::store::Waiting;
-use crate::workspace::Working;
+use crate::workspace::{Baseline, Working};
 
 /// How many steps are kept, and how many bytes of working copies they may hold, counting
 /// both ends of each step. Past either, the oldest steps go.
@@ -40,14 +40,42 @@ pub enum Gesture {
     Focused(egui::Id),
 }
 
-/// A document a save wrote from its body: the file the save replaced and the file it
-/// left. The save's undo leaves the first and its redo the second, and neither changes
-/// what the editor holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What a file holds: the baseline the workspace knows it by, and the identity the library
+/// knows it by.
+#[derive(Clone)]
+pub struct Filed {
+    pub identity: Identity,
+    pub baseline: Baseline,
+}
+
+impl PartialEq for Filed {
+    fn eq(&self, other: &Filed) -> bool {
+        self.identity == other.identity && self.baseline.stamp() == other.baseline.stamp()
+    }
+}
+
+impl std::fmt::Debug for Filed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stamp = self.baseline.stamp();
+        write!(f, "Filed({:?}, stamp {stamp})", self.identity)
+    }
+}
+
+/// A document a save wrote from its body: what its file held before the save and after.
+/// The save's undo leaves the file holding the first and its redo the second, and
+/// neither changes what the editor holds.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Saved {
     pub id: u64,
-    pub before: Identity,
-    pub after: Identity,
+    pub before: Filed,
+    pub after: Filed,
+}
+
+impl Saved {
+    fn size(&self) -> usize {
+        let size = |filed: &Filed| usize::try_from(filed.baseline.size()).unwrap_or(usize::MAX);
+        size(&self.before).saturating_add(size(&self.after))
+    }
 }
 
 /// A change the library logged, which the library undoes.
@@ -78,7 +106,7 @@ enum Step {
 impl Step {
     fn size(&self) -> usize {
         match self {
-            Step::Library(_) => 0,
+            Step::Library(step) => step.saved.iter().map(Saved::size).sum(),
             Step::Edit(step) => step.before.size() + step.after.size(),
         }
     }
@@ -130,13 +158,12 @@ pub enum Asked {
 }
 
 impl Asked {
-    /// The file an undo or a redo of a save leaves each document it saved as: the file
-    /// the save replaced for an undo, the file it wrote for a redo, and nothing for
-    /// anything else.
-    pub fn leaves(&self) -> Vec<(u64, Identity)> {
+    /// What an undo or a redo of a save leaves each document's file holding: what the
+    /// save replaced for an undo, what it wrote for a redo, and nothing for anything else.
+    pub fn leaves(&self) -> Vec<(u64, &Filed)> {
         match self {
-            Asked::Undo(taken) => taken.saved().iter().map(|s| (s.id, s.before)).collect(),
-            Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, s.after)).collect(),
+            Asked::Undo(taken) => taken.saved().iter().map(|s| (s.id, &s.before)).collect(),
+            Asked::Redo(taken) => taken.saved().iter().map(|s| (s.id, &s.after)).collect(),
             Asked::Change { .. } | Asked::Lasting => Vec::new(),
         }
     }
@@ -365,7 +392,7 @@ impl Timeline {
             Asked::Undo(taken) => self.logged(taken.step),
             // A step recorded since the redo was asked ended redo, this one included.
             Asked::Redo(taken) if taken.recorded == self.recorded => {
-                self.undone.push(Step::Library(taken.step));
+                self.unlogged(taken.step);
             }
             Asked::Redo(_) | Asked::Change { .. } | Asked::Lasting => {}
         }
@@ -374,7 +401,17 @@ impl Timeline {
     /// Put a library step at the end of `done`, above a step no longer open.
     fn logged(&mut self, step: Logged) {
         self.close();
-        self.done.push_back(Step::Library(step));
+        let step = Step::Library(step);
+        self.bytes += step.size();
+        self.done.push_back(step);
+        self.limit();
+    }
+
+    /// Put a library step at the end of `undone`.
+    fn unlogged(&mut self, step: Logged) {
+        let step = Step::Library(step);
+        self.bytes += step.size();
+        self.undone.push(step);
         self.limit();
     }
 
@@ -423,12 +460,10 @@ impl Timeline {
             // Logging any step ends the library's redo, as a change does.
             Asked::Lasting => self.end_redo(),
             // A step recorded since the undo was asked ended redo, this one included.
-            Asked::Undo(taken) if taken.recorded == self.recorded => {
-                self.undone.push(Step::Library(Logged {
-                    entry,
-                    ..taken.step
-                }));
-            }
+            Asked::Undo(taken) if taken.recorded == self.recorded => self.unlogged(Logged {
+                entry,
+                ..taken.step
+            }),
             Asked::Undo(_) => {}
             Asked::Redo(taken) => self.logged(Logged {
                 entry,
@@ -600,14 +635,25 @@ mod tests {
     }
 
     fn save(id: u64) -> Asked {
-        let saved = Saved {
-            id,
-            before: Identity::from_u128(1),
-            after: Identity::from_u128(2),
-        };
         Asked::Change {
             label: format!("Save “{id}”"),
-            saved: vec![saved],
+            saved: vec![saved(id)],
+        }
+    }
+
+    fn filed(n: u8) -> Filed {
+        Filed {
+            identity: Identity::from_u128(n.into()),
+            baseline: Baseline::read(vec![n].into(), n.into()),
+        }
+    }
+
+    /// A save of document `id` from a one-byte file to another.
+    fn saved(id: u64) -> Saved {
+        Saved {
+            id,
+            before: filed(1),
+            after: filed(2),
         }
     }
 
@@ -1217,6 +1263,54 @@ mod tests {
         assert_eq!((timeline.bytes, timeline.open), (0, None));
     }
 
+    /// A save of document 1 between two files of `len` bytes.
+    fn large_save(len: usize) -> Asked {
+        let filed = |byte: u8| Filed {
+            identity: Identity::from_u128(byte.into()),
+            baseline: Baseline::read(vec![byte; len].into(), byte.into()),
+        };
+        let saved = Saved {
+            id: 1,
+            before: filed(1),
+            after: filed(2),
+        };
+        Asked::Change {
+            label: "Save “1”".to_string(),
+            saved: vec![saved],
+        }
+    }
+
+    #[test]
+    fn a_save_step_counts_both_files_while_it_is_kept_and_releases_them() {
+        let mut session = Session::default();
+        session.log(large_save(10));
+        assert_eq!(session.timeline.bytes, 20);
+
+        session.undo();
+        assert_eq!(session.timeline.bytes, 20, "it waits to be redone");
+        session.redo();
+        assert_eq!(session.timeline.bytes, 20);
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the save is undone by the library");
+        };
+        assert_eq!(session.timeline.bytes, 0, "out of the lists while asked");
+        session.timeline.put_back(Asked::Undo(taken));
+        assert_eq!(session.timeline.bytes, 20);
+
+        session.timeline.forget_library();
+        assert_eq!(session.timeline.bytes, 0);
+    }
+
+    #[test]
+    fn a_save_step_too_large_to_keep_ends_what_undo_reaches() {
+        let mut session = Session::default();
+        session.click(1, 3);
+        session.log(large_save(BYTES / 2 + 1));
+
+        assert_eq!(session.undo_reads(), None);
+        assert_eq!(session.timeline.bytes, 0);
+    }
+
     #[test]
     fn a_step_too_large_to_keep_ends_what_undo_reaches() {
         let large = |byte: u8| Working::Body(vec![byte; BYTES / 2 + 1].into());
@@ -1336,14 +1430,9 @@ mod tests {
                     let now = self.session.held.0.get(&id).cloned();
                     let now = now.unwrap_or_else(|| body(0));
                     self.library.commit(label.clone(), Some((id, now)));
-                    let saved = Saved {
-                        id,
-                        before: Identity::from_u128(1),
-                        after: Identity::from_u128(2),
-                    };
                     self.session.log(Asked::Change {
                         label,
-                        saved: vec![saved],
+                        saved: vec![saved(id)],
                     });
                 }
                 4 => {
