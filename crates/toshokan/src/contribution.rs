@@ -967,19 +967,12 @@ impl<'de> Deserialize<'de> for Contribution {
             let Ok(entry) = Entry::kept(raw.as_str().to_owned(), *hash) else {
                 continue;
             };
-            let mut written = BTreeSet::new();
+            let mut deleted = BTreeSet::new();
             for op in ops(entry.kind()).iter().rev() {
-                let (Op::Create { entity, .. } | Op::Delete { entity, .. }) = op else {
+                let Op::Delete { entity, into, .. } = op else {
                     continue;
                 };
-                let last = written.insert(*entity);
-                if let (
-                    true,
-                    Op::Delete {
-                        into: Some(into), ..
-                    },
-                ) = (last, op)
-                {
+                if let (true, Some(into)) = (deleted.insert(*entity), into) {
                     contribution.joined(*entity, entry.own(), *into);
                 }
             }

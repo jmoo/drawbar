@@ -1442,7 +1442,7 @@ fn an_intent_that_ends_an_entity_it_joins_or_joins_into_is_refused() {
         ("of one deleted", join(&[(high, low)]).delete(high), high),
         (
             "of one brought back",
-            join(&[(high, low)]).delete(high).revive(high),
+            join(&[(high, low)]).revive(high),
             high,
         ),
     ] {
@@ -1454,8 +1454,6 @@ fn an_intent_that_ends_an_entity_it_joins_or_joins_into_is_refused() {
     }
     let star = join(&[(high, low), (middle, low)]);
     assert!(ops(&plan(star), &a.folded, &schema()).is_ok());
-    let kept = join(&[(high, low)]).delete(low).revive(low);
-    assert!(ops(&plan(kept), &a.folded, &schema()).is_ok());
 }
 
 #[test]
@@ -1536,7 +1534,12 @@ fn undoing_the_return_of_a_joined_entity_joins_it_again() {
 /// Writers `a` and `b`, of whom `a` has seen both join `gone`, which `library`
 /// names: `a` into `first` at the clock reading `at.0`, `b` into `second` at
 /// `at.1`.
-fn joined_apart(first: EntityId, second: EntityId, gone: EntityId, at: (u64, u64)) -> Writer {
+fn joined_apart(
+    first: EntityId,
+    second: EntityId,
+    gone: EntityId,
+    at: (u64, u64),
+) -> (Writer, Writer) {
     let mut a = library_of(&[first, second, gone], entity(3), &[gone]);
     let mut b = Writer::new(0xb);
     b.sync(&a);
@@ -1545,7 +1548,7 @@ fn joined_apart(first: EntityId, second: EntityId, gone: EntityId, at: (u64, u64
     b.commit(plan(intent("Join").join(gone, second)), at.1)
         .unwrap();
     a.sync(&b);
-    a
+    (a, b)
 }
 
 #[test]
@@ -1556,8 +1559,9 @@ fn where_writers_join_one_entity_into_different_ones_the_later_join_is_followed(
         ((3, 4), second, "by clock"),
         ((3, 3), second, "by writer, where the clocks agree"),
     ] {
-        let mut a = joined_apart(first, second, gone, at);
-        for folded in [a.folded.clone(), a.compacted()] {
+        let (mut a, mut b) = joined_apart(first, second, gone, at);
+        b.sync(&a);
+        for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
             let view = view(folded);
             assert_eq!(view.resolve(gone), Some(later), "{why}");
             assert_eq!(sources(&view), [(library, vec![Some(later)])], "{why}");
@@ -1572,7 +1576,7 @@ fn where_writers_join_one_entity_into_different_ones_the_later_join_is_followed(
 fn undoing_the_return_of_an_entity_two_writers_joined_follows_the_later_join_again() {
     let [first, second, gone] = [entity(1), entity(2), entity(7)];
     for (at, later) in [((4, 3), first), ((3, 4), second)] {
-        let mut a = joined_apart(first, second, gone, at);
+        let (mut a, _) = joined_apart(first, second, gone, at);
         a.commit(plan(intent("Keep").revive(gone)), 5).unwrap();
         assert_eq!(a.view().resolve(gone), Some(gone));
         a.undo(6).unwrap();
@@ -1639,14 +1643,19 @@ fn undoing_a_delete_is_refused_once_another_writer_deleted_the_entity_otherwise(
         );
     }
 
-    let mut a = library_of(&[low, middle, high], library, &[high]);
-    let mut b = Writer::new(0xb);
-    b.sync(&a);
-    a.commit(plan(tidy()), 3).unwrap();
-    b.commit(plan(intent("Join").join(high, low)), 3).unwrap();
-    a.sync(&b);
-    a.undo(4).unwrap();
-    assert_eq!(a.view().resolve(high), Some(high), "the same join");
+    for (what, own, other) in [
+        ("the same join", tidy(), join(low)),
+        ("a delete beside a delete", delete(), delete()),
+    ] {
+        let mut a = library_of(&[low, middle, high], library, &[high]);
+        let mut b = Writer::new(0xb);
+        b.sync(&a);
+        a.commit(plan(own), 3).unwrap();
+        b.commit(plan(other), 3).unwrap();
+        a.sync(&b);
+        a.undo(4).unwrap();
+        assert_eq!(a.view().resolve(high), Some(high), "{what}");
+    }
 }
 
 #[test]

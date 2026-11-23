@@ -217,8 +217,9 @@ the delete that takes a join from a history kept apart (`FactChange::Delete` car
 it). Any other delete names no entity.
 
 Undo refuses to reverse a delete once another writer's delete of the same entity
-says otherwise: it names a different entity, or names one where this named none. It
-refuses in the same way to reverse a write another writer has changed since.
+says otherwise: it names another entity, or one where this named none, or none where
+this named one. It refuses in the same way to reverse a write another writer has
+changed since.
 
 One intent joins an entity once. It may not delete or join away an entity it joins
 or joins into, nor bring back one it joins. Such a plan is refused: a join would give

@@ -408,11 +408,12 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 ///
 /// Refuses a key the schema does not declare with the change's kind, a change
 /// to an entity that is neither shown, created nor revived by the plan, and a
-/// join of an entity not shown, into one not shown or into itself. A join of an
-/// entity the plan deletes, brings back or joins again, or into one it deletes or
-/// joins, is refused as of an entity not shown. Of several changes to one register of one
-/// entity, or to one entity's existence, the last is logged. A plan that changes
-/// nothing is refused unless it reverses an entry or dismisses a run.
+/// join of an entity not shown, into one not shown or into itself. Of several
+/// changes to one register of one entity, or to one entity's existence, the last
+/// is logged. A join of an entity the plan's ops delete, bring back or join
+/// again, or into one they delete or join, is refused as of an entity not shown.
+/// A plan that changes nothing is refused unless it reverses an entry or
+/// dismisses a run.
 pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Invalid> {
     let nothing = plan.created.is_empty()
         && plan.facts.is_empty()
@@ -536,15 +537,14 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         };
         ops.push(op);
     }
-    let existence = |created: bool| -> BTreeSet<EntityId> {
-        let written = ops.iter().filter_map(|op| match op {
-            Op::Create { entity, .. } if created => Some(*entity),
-            Op::Delete { entity, .. } if !created => Some(*entity),
-            _ => None,
-        });
-        written.collect()
-    };
-    let (made, mut ended) = (existence(true), existence(false));
+    let (mut made, mut ended) = (BTreeSet::new(), BTreeSet::new());
+    for op in &ops {
+        match op {
+            Op::Create { entity, .. } => made.insert(*entity),
+            Op::Delete { entity, .. } => ended.insert(*entity),
+            _ => false,
+        };
+    }
     for joined in &plan.joins {
         if made.contains(&joined.entity) || !ended.insert(joined.entity) {
             return Err(Invalid::NoEntity(joined.entity));

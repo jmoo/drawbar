@@ -420,9 +420,10 @@ other (see Relations). A register both hold a value of keeps the other's. Two
 writers joining the same entity converge: an add of a member already held and a
 second delete of one entity change nothing shown. An intent joins an entity
 once, neither deletes nor joins an entity it joins or joins into, and brings
-back none it joins; one that does is refused. The delete observes only the writes its writer saw, so a change
-to the joined entity another writer made without seeing the join is a deletion
-conflict. An intent that only joins entities is final (see Undo and redo).
+back none it joins; one that does is refused. The delete observes only the
+writes its writer saw, so a change to the joined entity another writer made
+without seeing the join is a deletion conflict. An intent that only joins
+entities is final (see Undo and redo).
 
 An intent may save, rename or trash a library file no entity is bound to, by its
 path, without making it an entity: a file nothing is said about stays without
