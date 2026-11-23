@@ -1738,6 +1738,9 @@ pub struct Workspace {
     on_file: std::collections::BTreeMap<u64, Baseline>,
     /// The baseline each save the store has sent, and not heard back on, carries.
     sent: std::collections::BTreeMap<u64, Baseline>,
+    /// The assets whose next save writes what a write of one sound over another put in
+    /// place of what the editor held, which is no save of an edit.
+    replaced: std::collections::BTreeSet<u64>,
     /// What each document the user changed held first, since they were last taken.
     notes: Vec<Note>,
     /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
@@ -1850,6 +1853,7 @@ impl Workspace {
             edits: Default::default(),
             on_file: Default::default(),
             sent: Default::default(),
+            replaced: Default::default(),
             notes: Vec::new(),
             frame: 1,
         }
@@ -2206,23 +2210,34 @@ impl Workspace {
     }
 
     /// Note that the store sends a save of an asset's saved baseline: over its file, or,
-    /// without `over`, as a file where none is known.
-    pub(crate) fn send_save(&mut self, id: u64, over: bool) {
+    /// without `over`, as a file where none is known. Returns whether it saves what the
+    /// editor held, rather than what a write of one sound over another put in its place.
+    pub(crate) fn send_save(&mut self, id: u64, over: bool) -> bool {
+        let edited = !self.replaced.remove(&id);
         let Some(saved) = self.get(id).map(|entity| entity.saved.clone()) else {
-            return;
+            return edited;
         };
         self.sent.insert(id, saved);
         if !over {
             self.on_file.remove(&id);
         }
+        edited
     }
 
     /// The store writes nothing for a save asked of an asset: its file holds the saved
     /// baseline already, or it has no file to write.
     pub(crate) fn skip_save(&mut self, id: u64) {
+        self.replaced.remove(&id);
         if !self.sent.contains_key(&id) {
             self.on_file.remove(&id);
         }
+    }
+
+    /// Whether a save of an asset is asked and not answered, sent or not.
+    pub(crate) fn saves_asked(&self, id: u64) -> bool {
+        self.sent.contains_key(&id)
+            || self.on_file.contains_key(&id)
+            || self.file_asks.contains(&FileAsk::Save(id))
     }
 
     /// A save of an asset landed. A newer saved baseline still to be written leaves its
@@ -3108,6 +3123,7 @@ impl Workspace {
             return from;
         };
         self.mark_saved(id);
+        self.replaced.insert(id);
         if let Some(leaving) = from.and_then(|from| self.leaving(from)) {
             self.saving_over.insert(id, (leaving, stamp));
         }
@@ -4060,6 +4076,7 @@ impl Workspace {
         self.edits.retain(|id, _| held(*id));
         self.on_file.retain(|id, _| held(*id));
         self.sent.retain(|id, _| held(*id));
+        self.replaced.retain(|id| held(*id));
         self.moving_over.retain(|id, _| held(*id));
         self.saving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
