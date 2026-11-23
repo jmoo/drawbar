@@ -203,7 +203,8 @@ the workspace gives a saved baseline, which moves whenever the baseline does.
 | Program, set list, project, note, WAV take | `Body` | Rule 2 |
 | Sample instrument held whole | `Body` | Its file is read back in place, so rule 3 |
 | Sample instrument resting in its file | `Edit`, its sets | The baseline moves, so rule 3 |
-| Piano library | `Edit`, its plan | The baseline moves, so rule 3 |
+| Piano library resting in its file | `Edit`, its plan | The baseline moves, so rule 3 |
+| Piano library held whole | None | No edit steps |
 
 A sample instrument or piano library is read back from its file once saved, and
 its editor then shows the file. Its save is an ordinary library step, and the
@@ -218,9 +219,11 @@ restored at open: a WAV take's gain figures, the bytes a piano library's plan
 was laid out into, decoded audio, a field view, a half-typed box, a picked row.
 Where the user is looking, such as a zoom or a scroll, is kept.
 
-A piano library held whole keeps its plan in its editor, and its bytes are laid
-out from the plan only when something needs them. Its working copy is the plan,
-so laying it out changes no working copy.
+A piano library held whole has no working copy and records no edit steps. Its
+content is its saved bytes under a plan that only its editor holds, laid out
+into bytes when something needs them, so no one value says what it holds. It is
+a short-lived state: a library just built and not yet reopened from its file, a
+restored draft, or a view of a slot. Giving it one value is later work.
 
 ### Steps
 
@@ -233,9 +236,12 @@ enum Step {
     Edit { label: String, id: u64, before: Working, after: Working },
 }
 
-/// A document a save wrote from its body: the file it replaced and the file it
-/// left, by content.
-struct Saved { id: u64, before: toshokan::Identity, after: toshokan::Identity }
+/// A document a save wrote from its body: what its file held before and after.
+struct Saved { id: u64, before: Filed, after: Filed }
+
+/// What a file holds: the baseline the workspace knows it by, and the identity
+/// the library knows it by.
+struct Filed { identity: toshokan::Identity, baseline: Baseline }
 
 struct Timeline {
     done: VecDeque<Step>,
@@ -431,25 +437,33 @@ toshokan's history, also out of reach.
 Three things, all in the workspace and the store's mirror. toshokan is not among
 them.
 
-- **The baseline is what the file is known to hold.** A save moved the baseline
-  when it was asked for, before the library answered, and a refused save left it
-  moved under a new stamp. With Undo able to bring back equal bytes, the
-  document would read saved over a file that does not hold them. The workspace
-  now keeps what the file holds while a save is unanswered, and a refused save
-  puts the baseline back.
-- **A save's own file is told by content.** A save's step records, for each
-  document, the identity of the file it replaced and of the file it left. Both
-  are known when the save is answered. When the step is undone or redone, the
-  file is read again whatever its length and time say, and rule 2 applies only
-  if what was read has the identity the step expects. Any other file is a change
-  from outside, and is followed as one is today. A mark on the whole answer is
-  not enough, because another writer's change can arrive with it.
-- **A save's own file moves only the baseline.** For such a file, the read-back
-  moves the baseline, leaves the working copy, and asks no conflict question.
-- **A save asked and not answered is unsaved work.** The baseline moves when a
-  save is asked for, so the document reads saved before its file holds the
-  bytes. A change found on disk in that window is never taken over them: the
-  document keeps what it holds, and the user is asked which side to keep.
+- **One answer to what a file holds.** A save moves the saved baseline when it
+  is asked for, before the library answers. While it is unanswered the workspace
+  keeps what the file is known to hold beside it, and one accessor gives that
+  value: the kept baseline, or else the saved one. A refused save puts it back.
+  A read of the file is compared against it, so a read that finds what the file
+  is known to hold changes nothing, and a document holds unsaved work whenever
+  it holds something else. That is the one test behind the conflict question,
+  keeping a document whose file was deleted, and what a quit would lose.
+- **A save step holds the baselines it moved between.** An edit step holds the
+  working copy before and after. A save step holds, for each document, the
+  baseline its file held before and the one it wrote, each with the identity the
+  library knows that file by. Both are in memory when the save is sent, and they
+  are allocations the document and the edit steps around the save usually share.
+  They keep their stamps, so a baseline that comes back is the same baseline.
+- **The undo and redo of a save move the baseline when the library answers.**
+  toshokan's undo of a save either restores the displaced file or refuses. When
+  it answers that it made the step, the file holds the other baseline of the
+  step, and the workspace takes it at once. The working copy stays, and the
+  document reads unsaved from that instant by the ordinary comparison. Nothing
+  waits for the file to be read again. The read that follows finds what the file
+  is known to hold, or finds another writer's change and is followed as any
+  change from outside is.
+
+An earlier draft told a save's own file by reading it back and matching its
+identity. That left a window between the library's answer and the read in which
+the document read saved over a file that no longer held its bytes. A change or a
+delete from outside in that window took the document's content without asking.
 
 For a document edited in its file to keep its edit steps across a save, its save
 must stop moving the ground its edit stands on. The edit a save was sent with
@@ -471,7 +485,8 @@ and they are why these documents lose their edit steps at a save.
 | An undo can never pass | The step is let go. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
 | A file changes from outside and the user keeps their side | A body is untouched and its steps stay. An edit over the file is made again over it, and its steps no longer match. |
-| The file read back after a save's undo is another file | It is followed as a change from outside. |
+| A file changes or is deleted from outside after a save of it is undone | The document holds unsaved work, so the user is asked, or the document is kept as missing. |
+| An edit is undone while a save, export or send of its document waits to be sent | What waited is dropped. It was asked of content the document no longer holds. |
 | The workspace no longer holds a document's body | There is no working copy. Its steps no longer match. |
 | An edit of a body is made while its save is in flight | It is recorded. The save's step lands after it, and the two are independent. |
 | An edit is made while an undo or redo is in flight | It is recorded. A redo in flight joins `done`. An undo in flight is dropped. |
@@ -490,13 +505,13 @@ Steps 1 to 3 are one change. Step 4 is later work.
 
 [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) is not needed. It
 would have given a commit that reports the identity of each file it wrote. The
-identities a save's step records, and the read-back checked against them, do
-that work here.
+baselines a save's step holds do that work here.
 
 ### Limits
 
 The timeline holds at most `STEPS` steps and at most `BYTES` bytes, counting
-both ends of each edit step, so a body two steps share counts twice. Past
+both ends of each edit step and both baselines of each save step, so a body two
+steps share counts twice. Past
 either, the oldest steps go. A single step larger than `BYTES` is not kept, and
 the timeline is cut there.
 
@@ -660,9 +675,19 @@ list of whole states.
   [jmoo/drawbar#300](https://github.com/jmoo/drawbar/pull/300) would not help:
   one is drawn anew when a file returns, and a view of a slot has none.
 - Rule 2 changes how the workspace takes its own saves, and needs the baseline
-  fixed after a refused save. The store tells its own file after an undo by
-  reading it again, so a read of that file already in flight has to be followed
-  by another.
+  fixed after a refused save. The saved baseline still moves when a save is
+  asked for and not when it lands, so the workspace keeps what the file holds
+  beside it for that window. Moving the baseline only when a save lands would
+  need no second value, and is a larger change to how saves work.
+- A save step keeps both baselines of each document it saved in memory, where
+  toshokan already keeps the displaced file in its trash.
+- A piano library held whole has no edit steps. Its plan cannot be edited in the
+  moment between asking for a save of it and the library's answer, because a
+  refused save gives the earlier plan back and two plans cannot be merged.
+- Undoing an edit drops a save, export or send of that document still waiting to
+  be sent.
+- Undo or Redo of an edit to a WAV take decodes the take again. On a five-minute
+  stereo take a redo measured about twice the cost of the edit.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
   the trash keeps their bytes, until the next commit.
 - A long visit to a note is one step. The field's own undo covers the typing
@@ -897,8 +922,15 @@ Sources:
 - **Kept slot views.** What lets go of an edit kept over a slot that is never
   viewed again, and of the bytes behind it: an age, a size, or a list the user
   can clear?
-- **Notes.** Is one step per visit to a note too coarse? The note editor could
-  close the step on its own terms.
+- **Notes.** Is one step per visit to a note too coarse? A pointer press already
+  closes it, and the note editor could close it on its own terms.
+- **One gesture over two documents.** A step extends only while it is the last
+  one, so a result that lands on another document in the middle of a drag splits
+  the drag in two.
+- **A piano library held whole.** Its editor shows its saved bytes under its
+  plan, so a body that differs from those with no plan, as a restored draft
+  does, is shown as the saved file. Showing the body where no plan applies would
+  give it one value, and edit steps with it.
 - **The label.** "Edit" names no field. The editor knows the field at the point
   of the change and could pass its name.
 
