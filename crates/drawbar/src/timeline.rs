@@ -548,13 +548,17 @@ impl Timeline {
         true
     }
 
-    /// Let the oldest steps go while there are more than the limits allow.
+    /// Let the oldest steps go while there are more than the limits allow: those Undo
+    /// reaches last, and then those Redo reaches last. The newest step stays.
     fn limit(&mut self) {
         while self.done.len() + self.undone.len() > STEPS || self.bytes > BYTES {
-            if self.done.is_empty() {
+            if self.done.len() > 1 {
+                self.let_go(0);
+            } else if !self.undone.is_empty() {
+                self.bytes -= self.undone.remove(0).size();
+            } else {
                 break;
             }
-            self.let_go(0);
         }
     }
 
@@ -1310,6 +1314,24 @@ mod tests {
 
         assert_eq!(session.undo_reads(), None);
         assert_eq!(session.timeline.bytes, 0);
+    }
+
+    #[test]
+    fn a_save_recorded_while_a_large_edit_waits_to_be_redone_is_kept() {
+        let large = |byte: u8| Working::Body(vec![byte; BYTES * 2 / 5].into());
+        let mut session = Session::default();
+        session.held.0.insert(1, large(1));
+        let label = "Edit “1”".to_string();
+        session
+            .timeline
+            .record(1, label, large(0), large(1), Gesture::Over);
+        session.undo();
+
+        session.log(large_save(BYTES / 5));
+
+        assert!(session.timeline.bytes <= BYTES);
+        assert_eq!(session.undo_reads(), Some("Save “1”"));
+        assert_eq!(session.redo_reads(), None, "the oldest step went");
     }
 
     #[test]
