@@ -2242,6 +2242,13 @@ impl Workspace {
         }
     }
 
+    /// Whether a save of an asset is asked and not answered.
+    pub(crate) fn saves_asked(&self, id: u64) -> bool {
+        self.sent.contains_key(&id)
+            || self.on_file.contains_key(&id)
+            || self.file_asks.contains(&FileAsk::Save(id))
+    }
+
     /// What an asset's file is known to hold: what a save asked and not answered
     /// displaced, or else what the asset was saved as.
     pub fn filed(&self, id: u64) -> Option<&Baseline> {
