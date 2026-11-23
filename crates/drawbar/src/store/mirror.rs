@@ -3489,8 +3489,12 @@ impl Store {
             .and_then(|record| record.fingerprint?.identity);
         let filed = |bytes: &[u8]| workspace.filed(id).is_some_and(|filed| filed.holds(bytes));
         // A copy, or a browser's move, gives a file a new time over the same bytes.
-        let same = (found.identity.is_some() && found.identity == known)
-            || found.bytes.as_deref().is_some_and(filed);
+        // Bytes read are compared with what the workspace holds of the file; a file left
+        // on disk is told by the identity the library gives it.
+        let same = match found.bytes.as_deref() {
+            Some(bytes) => filed(bytes),
+            None => found.identity.is_some() && found.identity == known,
+        };
         if same {
             if let (Some(file), true) = (found.file, rests) {
                 workspace.rest_again(id, file);
