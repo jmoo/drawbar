@@ -768,6 +768,9 @@ impl Document {
 
     /// Put back a working copy the document held, with no step, and return whether it
     /// holds it now. Every editor takes it up, and keeps where the user is looking.
+    ///
+    /// ⚠️ What was asked of the content it replaces is dropped: a save not yet sent, and
+    /// every act waiting on that save, each of which carries the document.
     pub fn hold(
         &mut self,
         id: u64,
@@ -781,6 +784,8 @@ impl Document {
         if workspace.get(id).is_none_or(piano::held_whole) || !workspace.hold(id, working, log) {
             return false;
         }
+        self.saving
+            .retain(|held| held.files.iter().all(|(file, _)| *file != id));
         self.take_up(id, workspace);
         self.replaced(id);
         self.note_pending(id, workspace);
@@ -4996,6 +5001,32 @@ mod tests {
             "Vibes"
         );
         assert_eq!(open.state().name, "Vibes");
+        assert!(open.entity().is_unsaved());
+    }
+
+    /// Undo puts back an edit nobody asked to save: the save asked of the edit it
+    /// replaces is let go unsent, and so is the act that waited on it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_undo_lets_go_of_a_save_asked_of_the_edit_it_replaces() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        let vibes = open.working();
+        open.apply(&[("name", "Bells")]);
+        let id = open.id;
+        assert_eq!(open.settled(vec![crate::browser::Act::SaveDoc(id)]), []);
+        assert!(
+            open.workspace.saving_edit(id),
+            "the save waits on the store"
+        );
+
+        assert!(open.hold(&vibes));
+        assert!(
+            !open.workspace.saving_edit(id),
+            "nothing asks to save Vibes"
+        );
+        assert!(open.workspace.edits_to_save().is_empty());
+        assert!(open.document.saving.is_empty(), "nothing waits on it");
         assert!(open.entity().is_unsaved());
     }
 
