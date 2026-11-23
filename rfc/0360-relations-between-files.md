@@ -11,10 +11,11 @@ toshokan gains relations. A relation is a register or a set whose values each na
 another entity by its id, such as the recordings a piano library was built from. A
 view says which entity each value names now, lists the entities that name a given
 one, and reports a value whose target is gone without dropping it. When two entities
-turn out to be one file and are joined, the survivor keeps the other's id, so what
-named either still names the file. A relation holds no path and no file name. Nothing
-changes in the format on disk or in the merge. drawbar declares no relation in this
-change; the mechanism is here for the features that need one.
+turn out to be one file and are joined, the delete that ends one says which entity it
+was joined into, so what named either still names the file. A relation holds no path
+and no file name. The format gains one optional member of the `delete` op and one
+member of a snapshot's state; the merge is as it was. drawbar declares no relation
+in this change; the mechanism is here for the features that need one.
 
 ## Motivation
 
@@ -104,8 +105,8 @@ let used_by = view.referrers(BUILT_FROM, take);
 ```
 
 - `View::resolve(id)` is the entity an id names now, or `None`.
-- `EntityView::relations(key)` is one entity's values with what each names, and
-  `View::relations(key)` every entity's.
+- `EntityView::relations(key)` is the members of one entity's set with what each
+  names, and `View::relations(key)` every entity's values.
 - `View::referrers(key, target)` is the entities that name `target`.
 
 ### What a relation survives
@@ -149,102 +150,153 @@ members that name one target with different data are two members, and both are
 shown. Data that changes often belongs in a register beside the relation, not in a
 set's members: a set keeps a record of every member it ever removed (see Drawbacks).
 
+A relation that may gain data later is best a struct from the start, even with the
+one field `to`. A field added later that is left out of the JSON when unset keeps
+every member written before it equal to the same member written after.
+
+A target that is deleted has nothing left to show but the value that names it: a
+delete ends the entity's fields. An app that wants to say what a missing target was
+keeps a name in the value.
+
+`EntityView::relations` reads a set. A register is read with `EntityView::get`,
+which says whether it holds one value or a conflict, and `View::resolve`.
+`View::relations` and `View::referrers` take either, and read each side of a
+register in conflict.
+
 ### Resolving
 
 An id resolves to an entity the view shows, or to none:
 
-1. The id of an entity shown resolves to that entity. Any other id resolves to the
-   lowest entity shown whose `joined` set holds it, and to none where no entity
-   shown holds it.
-2. Where binding reports the entity of step 1 joined into another
+1. The id of an entity shown resolves to that entity.
+2. The id of an entity not shown resolves to the lowest entity shown that its live
+   deletes lead to. A delete logged by a join names the entity joined into; where
+   that entity is not shown either, its own live deletes lead on. The id resolves
+   to none where they lead to no entity shown.
+3. Where binding reports the entity of step 1 or 2 joined into another
    (`View::joined`), the id resolves to that other.
 
-Step 2 covers the time between two computers adopting one file and a drawbar logging
-the join. Step 1 covers the time after. The rule has no cycle: step 1 ends at an
-entity shown, and binding joins only into the entity bound to the file.
+Step 3 covers the time between two computers adopting one file and a drawbar logging
+the join. Step 2 covers the time after. Step 2 ends: it visits each entity once.
+Binding joins only into the entity bound to the file, so step 3 is one step.
 
-An entity that is shown resolves to itself even when another holds its id, as after
-it is deleted by a join and then brought back. A deletion conflict on a joined
-entity therefore shows it as itself until the user settles the conflict.
+An entity that is shown resolves to itself. A joined entity brought back is itself
+again, and a deletion conflict on a joined entity shows it as itself until the
+conflict is settled.
 
-### Joined ids
+### What a join records
 
-A join logs one more op. Joining entity `B` into `A` already adds to `A` each set
-member `B` holds and `A` lacks, and deletes `B`. It now also adds `B`'s id to `A`'s
-`joined` set:
+A join already deletes the joined entity. Its `delete` op now names the entity
+joined into:
 
 ```json
-{"op":"add","entity":"<A>","key":"joined","value":"<B>","replaces":[]}
+{"op":"delete","entity":"<B>","replaces":[…],"observed":[…],"into":"<A>"}
 ```
 
-`joined` is a set like any other, in every schema, so the existing rule carries it:
-when `A` is later joined into another entity, that entity gains `A`'s id and every
-id `A` held. Two writers logging the same join add the same member, which merges to
-one. Deleting `A` ends its `joined` with its other fields, and undoing the delete
-brings it back, because undo already restores every member an entity held.
+The fact lives in the existence write it describes, so the rules for existence
+writes carry it without a rule of its own:
 
-`Schema::of` refuses an app key named `joined`.
+| What happens after `B` is joined into `A` | What `B`'s id resolves to |
+|---|---|
+| Nothing | `A` |
+| `A` is joined into `C` | `C`, through both deletes |
+| `A` is deleted | None. Undoing that delete resolves it to `A` again |
+| `B` is brought back | `B`: the create replaced the delete |
+| `B` is brought back and deleted | None: the later delete is not a join |
+| The intent that joined is undone, then redone | `B`, then `A` |
+| Two writers join `B` into `A` at once | `A`: both deletes say so |
+| Two writers join `B` into `A` and into `C` at once | The lower of `A` and `C` that is shown |
+| One writer joins `B` into `A` while another joins `A` into `C` | `C`, or `A` kept in a deletion conflict where it gained something its delete did not see |
+
+A plain delete names no entity. Two deletes do carry a join forward: the delete
+that undoes the return of a joined entity names what the replaced delete named, and
+taking a join from a history that is kept apart takes its `into` with it
+(`FactChange::Delete` carries it).
+
+A snapshot keeps, per field, one record whose members are frozen, so the entity
+joined into goes in a new member of snapshot state, `joined`, beside the records:
+one entry per delete that names one. A build that does not know `joined` keeps it
+as it keeps any member of state it does not know, and a reader ignores an entry
+whose delete the snapshot no longer holds.
+
+Where one intent joins `C` into `B` and `B` into `A`, it joins both into `A`, so
+nothing is given to an entity the same intent deletes. Joins that lead back to
+where they began are refused.
 
 ### Lookups and their cost
 
 Lookups read the merged state the view already holds. No index is stored or kept
-between views. The one thing a view keeps is the map from a joined id to its holder,
-built at the first `resolve` of an id that is not shown.
+between views, and a view computes nothing for relations until one is asked for.
 
 Measured on a release build, for a library of 2,020 entities where 20 hold 300
 values each of one relation (6,000 values):
 
 | Call | Time |
 |---|---|
-| `EntityView::relations`, one holder's 300 values | 52 µs |
-| `View::relations`, all 6,000 values | 1.1 ms |
-| `View::referrers`, one target | 1.1 ms |
-| `View::find` on a register every entity holds, for comparison | 0.25 ms |
+| `EntityView::relations`, one holder's 300 values | 46 µs |
+| `View::relations`, all 6,000 values | 0.91 ms |
+| `View::referrers`, one target | 0.75 ms |
+| `View::find` on a register every entity holds, before this change | 0.34 ms |
+| The same `View::find`, after | 0.06 ms |
 
-`referrers` visits every value of the key, as `find`, `with` and `values` visit
-every entity. An app that asks for many targets at once reads `View::relations`
-once and indexes it, as drawbar already mirrors each view into its own model.
+`referrers` visits every value of the key. `find`, `with` and `values` visit every
+entity, and now read only the key asked for, where they used to list every value of
+each entity first: `with` and `values` on a set every entity holds went from 0.33 ms
+and 0.36 ms to 0.08 ms and 0.11 ms. An app that asks for many targets at once reads
+`View::relations` once and indexes it, as drawbar already mirrors each view into its
+own model.
 
 ### What a change does not list
 
 `View::changed_since` lists the entities whose own state differs. A target that is
-deleted, joined or brought back is listed; the entities that name it are not, since
-nothing of theirs changed. An app that shows relations redraws the referrers of each
-changed entity.
+deleted, joined or brought back is listed, shown or not; the entities that name it
+are not, since nothing of theirs changed. An app that shows relations redraws, for
+each entity listed, its referrers in the earlier view and in the new one: a target
+that is gone has referrers only in the view that still resolved it.
 
-### What does not change
+### The format
 
-The line form, the ops, snapshots, compaction, the merge and retention are as they
-were. A `joined` member is an `add` to a set. So the model check, the retention
-sweep and the fixtures cover it without change, and a library written by this build
-reads in every build of format version 2.
+Two members are new, and both are additive under the format's compatibility rules:
 
-A join by a build that does not write `joined` leaves the ids it joined resolving to
-nothing. No such build writes relations.
+- `into` on the `delete` op, written only by a join.
+- `joined` in a snapshot's `state`.
+
+The line form, the other ops, the merge rule, compaction and retention are as they
+were: `into` is part of an existence write's value and changes nothing about which
+write is live. A build from before this change reads a library this build wrote,
+shows the same entities, and keeps both members. It folds a `delete` with `into` as
+a delete and keeps the whole entry, and a newer reader of its snapshot reads `into`
+from that entry.
+
+A join logged by a build from before this change names no entity, so the id it
+deleted resolves to none. No such build writes relations.
 
 ### drawbar
 
-drawbar declares no relation here. One thing in it changes. When another copy of an
-install's history is kept apart, Kept apart lists each change it would make. A join
-in that history now includes the id the survivor keeps. Kept apart does not show
-that as a row of its own: taking the removal of the joined asset takes the id with
-it.
+drawbar declares no relation and does not change. It already commits a join for
+each pair a scan reports, so its joins record `into` once it builds against this
+toshokan.
 
 ### Evidence
 
-- Fact-level tests in `tests/facts.rs` drive two and three writers through the real
-  merge: a value read with its target; a deleted target and its undo; a target whose
-  writer has not arrived; a join, a join by both writers, and a join of an entity
-  already joined into; a relation written without seeing the join; the survivor
-  deleted and brought back; an intent that joins and is undone; a joined entity
-  revived; two holders of one id; unreadable values; a register in conflict. Each
-  is read from the log and again from a snapshot where compaction could differ.
-- `tests/library.rs` runs a relation through a real library on both drivers and on
-  copying folders: two writers adopt one file, one names the higher entity, and
-  every reader resolves it to the entity bound to the file before any join is
-  logged and after.
-- The existing suites pass unchanged, the retention sweep and power-loss workloads
-  included.
+- `tests/facts.rs` drives two and three writers through the real merge, reading each
+  case from the log and again from a snapshot where compaction could differ. It
+  covers each row of the tables above, a target whose writer has not arrived,
+  values that do not decode, a register in conflict, and the redraw rule.
+- The same file runs 200 seeded walks of three writers that create, name, join,
+  delete, bring back and sync at random. Once all hold the same entries, every
+  writer and a reader of their snapshots resolve every id alike, to an entity they
+  show, and agree on who names it.
+- `tests/library.rs` runs relations through a real library on both drivers and on
+  copying folders: two writers adopt one file and every reader resolves the higher
+  entity to the one bound to the file before any join is logged and after; an
+  entity joined into one that a scan then joins; and a join taken from a forked
+  history.
+- Unit tests of the snapshot state cover an entry of `joined` whose delete is no
+  longer held, and a join that an older build kept as a whole entry.
+- A new format fixture, `one-writer-joined`, holds a snapshot with `joined` and a
+  log line whose `delete` has `into`. Every later build must read it as its oracle
+  says and encode it back byte for byte.
+- The existing suites pass, the retention sweep and power-loss workloads included.
 
 ## Drawbacks
 
@@ -259,12 +311,12 @@ it.
   [#325](https://github.com/jmoo/drawbar/pull/325) adds.
 - **Nothing checks a target when it is written.** A relation may name any id. An id
   that never existed reads the same as a deleted one: unresolved.
-- **A name is taken.** No app can call a key `joined`.
 - **Lookups by target visit every value.** See the measurements. A view could keep
   an index per key if an app needs one.
-- **Older builds.** A build from before this change that deletes an entity holding
-  `joined` cannot undo that delete, because its undo refuses a key its schema does
-  not declare. That is true of every key a newer build adds.
+- **A join is one fact on one delete.** Settling a deletion conflict on a joined
+  entity by deleting it again is a plain delete, and what named it then resolves to
+  none. Joining it again keeps what it names.
+- **Older builds.** A join by a build from before this change records nothing.
 
 ## Rationale and alternatives
 
@@ -277,7 +329,7 @@ through a join.
 | The app resolves ids itself with `View::find` and scans for referrers | It cannot follow a join, for the reason Motivation gives. Every app would write the same lookups |
 | A reference kind declared in the schema, with an index the view maintains | The typed key already says how to read a target. An index is derived state to build on every view, and the measurements do not call for it |
 | The join rewrites every value that names the joined entity | It sees only the values its writer has read, so one written elsewhere at the same time is left behind. It also needs toshokan to edit values it does not own |
-| Record the survivor on the joined entity's `delete` op | The same fact, but in the existence write, which a snapshot stores in a record whose members are frozen. It would need a new member of snapshot state and new retention rules, in the most delicate code, for no difference a reader can see |
+| The survivor keeps a set of the ids joined into it, under a key toshokan reserves | This was the first design here, and review took it apart. The fact sat on the survivor, apart from the delete it describes, so nothing ended it: after the joined entity was brought back and deleted for good, the survivor still answered for its id. The member was a field write on the survivor, so a join concurrent with the survivor's delete left the survivor shown in a deletion conflict over nothing a user did. Taking a forked join took the delete and the member as two changes that could be taken apart. It reserved a key name in every schema, and each later join copied every id again |
 | A new op or field kind for relations, such as a map from target to data | A second merge rule, snapshot record and retention term beside sets and registers. Sets and registers already merge the way a relation should |
 | Refuse a value whose target is not shown | Undoing a removal, taking a change from a kept-apart history, and naming a target whose entries have not arrived are all correct writes of a target not shown. An unresolved target is reported, never silent |
 | Values that name several entities, such as an ordered list in one register | No caller needs it. It can be added when one does |
@@ -290,9 +342,9 @@ address, carrying the checksums the two last shared. A relation ties an entity t
 entity. The link has nothing to resolve in the store, and the relation has no state
 to compare. Both are values in a set per file, which the store already provides, and
 neither needs the other's code. #325 also changes `join` to carry every key, declared
-or not. The two changes meet in that one function and agree: the joined id is one
-more member to add. This RFC uses "relation" and "target", and leaves "link" to
-RFC-0325.
+or not. The two changes meet in that one function and do not conflict: this one
+changes only the delete the join ends with. This RFC uses "relation" and "target",
+and leaves "link" to RFC-0325.
 
 **If nothing is done**, each feature that ties files together stores paths or names,
 and the take a library was built from is lost the first time someone tidies a folder.
@@ -309,15 +361,16 @@ and the take a library was built from is lost the first time someone tidies a fo
 - Obsidian links notes by path and rewrites every referrer on a rename made inside
   the app. A rename outside it breaks the link.
 - MediaWiki keeps a redirect at the old title when two pages are merged, so links
-  written before the merge, or by someone who has not seen it, still arrive. The
-  `joined` set is that redirect, kept on the page that survives.
+  written before the merge, or by someone who has not seen it, still arrive. A
+  delete's `into` is that redirect, kept at the old title.
 
 ## Unresolved questions
 
-- The name `joined`, and whether toshokan should reserve a prefix for names of its
-  own in place of one name.
-- Whether undo should restore keys the schema does not declare, so that an older
-  build can undo a delete of an entity that holds a newer build's keys.
+- Whether a plain delete that settles a deletion conflict on a joined entity should
+  keep the `into` of the delete it replaces. It does not here: a delete says only
+  what its intent said.
+- Whether a view should say that an entity shown was joined by another writer, so
+  an app other than drawbar can offer to join it again.
 
 ## Future possibilities
 

@@ -15,6 +15,8 @@ Dropbox, OneDrive, iCloud or on a network share.
   Their concurrent edits are kept and shown as conflicts.
 - Files keep their names, bytes and places unless the app asks, and opening a
   library writes nothing in the folder.
+- A file names another by an id, not a path, so the reference holds when either
+  is renamed, moved or edited.
 - It runs natively and in the browser, on the origin private file system or a
   folder the user picked.
 
