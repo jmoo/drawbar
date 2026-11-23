@@ -311,8 +311,9 @@ gesture off the frame's input:
 
 A change extends the open step only if it is to the same document and starts
 from what the step left. The step closes at the end of the first frame with
-another gesture, and before any library step, Undo or Redo. On closing, a step
-whose two ends are equal is dropped. A new step empties `undone`.
+another gesture, and before any library step, Undo or Redo. A step whose two
+ends become equal is dropped at once, so the menu never names it. A new step
+empties `undone`, unless it is a save.
 
 No timer takes part. A drag that pauses is still one step, and two quick clicks
 are two.
@@ -335,7 +336,10 @@ the way. Neither changes from today.
 An edit step is one comparison and one call:
 
 1. If the document holds exactly `after`, call `hold(id, before)`.
-2. Otherwise let the step go, and try the one behind it.
+2. Otherwise let the step go, and do nothing more.
+
+Undo takes the step the menu named or none. It never falls through to the step
+behind, which may be a library change the menu did not name.
 
 Redo is the same with `before` and `after` exchanged and `Cmd::Redo`.
 
@@ -381,6 +385,11 @@ undone in its turn.
 Redo takes the last step of `undone`, of either kind, and puts it at the end of
 `done`. An edit redone lands after the save it was taken from beneath, which is
 the same state by the same independence.
+
+A save is not a new edit, so it does not end the redo of one. A save recorded
+while an undone edit waits in `undone` leaves it there: the save changed nothing
+the edit step holds. It does end toshokan's redo, as every commit does, so the
+library steps of `undone` go, and every step undone before one of them.
 
 The command undoes one step and stops. Nothing here loops over the library or
 waits. An edit taken from beneath a save runs no commit and touches no file. A
