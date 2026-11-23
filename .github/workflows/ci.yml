@@ -31,9 +31,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # A change to Cargo.lock rebuilds every dependency, which takes Linux 40-45 minutes
-    # before its Windows cross build starts. A job that times out saves no cache.
-    timeout-minutes: 75
+    # A change to Cargo.lock rebuilds every dependency for each target Linux builds,
+    # which has taken it past 75 minutes. A job that times out saves no cache.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - if: runner.os != 'Windows'
