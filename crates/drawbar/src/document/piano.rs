@@ -33,11 +33,11 @@ use crate::led;
 use crate::midi;
 use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
-use crate::rewrite::{Edit, Rewrite};
+use crate::rewrite::Rewrite;
 use crate::room;
 use crate::strings;
 use crate::work;
-use crate::workspace::{Bytes, LocalEntity, Working, Workspace};
+use crate::workspace::{LocalEntity, Workspace};
 
 fn piano(entity: &Entity) -> Option<&npno::Piano> {
     match entity {
@@ -306,52 +306,11 @@ impl Plan {
     ///
     /// ⚠️ Every other field's default must be "no edit".
     pub fn is_empty(&self) -> bool {
-        self.edits_as(&Plan::default())
-    }
-
-    /// Whether both make the same edit, whatever baseline each is marked against.
-    fn edits_as(&self, other: &Plan) -> bool {
-        let Plan {
-            against: _,
-            banks,
-            layers,
-            roots,
-            range,
-            name,
-            variant,
-            fine_tune,
-            gain,
-            damper_top,
-            kind,
-            trims,
-            key_roots,
-        } = self;
-        (banks, layers, roots, range, name, variant)
-            == (
-                &other.banks,
-                &other.layers,
-                &other.roots,
-                &other.range,
-                &other.name,
-                &other.variant,
-            )
-            && (fine_tune, gain, damper_top, kind, trims, key_roots)
-                == (
-                    &other.fine_tune,
-                    &other.gain,
-                    &other.damper_top,
-                    &other.kind,
-                    &other.trims,
-                    &other.key_roots,
-                )
-    }
-
-    /// The edit alone, as a working copy holds it: marked against no baseline.
-    pub fn unmarked(&self) -> Plan {
-        Plan {
-            against: Mark::default(),
-            ..self.clone()
-        }
+        *self
+            == Plan {
+                against: self.against,
+                ..Plan::default()
+            }
     }
 
     /// About how many bytes it holds.
@@ -1316,12 +1275,6 @@ enum Standing {
     Applying,
 }
 
-/// What a library held whole holds, as [`State::whole`] reads it.
-enum Whole<'a> {
-    Planned(&'a Plan),
-    Body(&'a Bytes),
-}
-
 /// A plan against a baseline the document left, with the plan its body was laid out from
 /// then, which still holds while the body's stamp is `body`.
 struct Folded {
@@ -1526,51 +1479,13 @@ impl State {
         self.open.as_ref()?.facts.as_ref().ok()
     }
 
-    /// What a library held whole holds: a plan against its saved baseline that edits
-    /// anything, laid out or not; else the saved bytes, while an emptied plan has yet to
-    /// reach the body; else the body.
-    fn whole<'a>(&'a self, entity: &'a LocalEntity) -> Whole<'a> {
-        let plan = self
-            .plans
-            .get(&entity.id)
-            .filter(|plan| plan.against == mark(entity));
-        match plan {
-            Some(plan) if !plan.is_empty() => Whole::Planned(plan),
-            Some(_) if self.pending(entity.id) => Whole::Body(entity.saved.bytes()),
-            _ => Whole::Body(&entity.bytes),
-        }
-    }
-
-    /// The working copy of a library held whole. See [`State::whole`].
-    pub fn working(&self, entity: &LocalEntity) -> Working {
-        match self.whole(entity) {
-            Whole::Planned(plan) => Working::Edit {
-                over: entity.saved.stamp(),
-                edit: Some(Edit::Piano(plan.unmarked())),
-            },
-            Whole::Body(bytes) => Working::Body(bytes.clone()),
-        }
-    }
-
-    /// Whether a library held whole holds exactly `working`, which takes the body's
-    /// allocation where it holds an equal body.
-    pub fn holds(&self, entity: &LocalEntity, working: &mut Working) -> bool {
-        match (self.whole(entity), working) {
-            (Whole::Planned(plan), Working::Edit { over, edit }) => {
-                *over == entity.saved.stamp()
-                    && matches!(edit, Some(Edit::Piano(held)) if held.edits_as(plan))
-            }
-            (Whole::Body(bytes), Working::Body(held)) => super::shares(held, bytes),
-            (Whole::Planned(_), Working::Body(_)) | (Whole::Body(_), Working::Edit { .. }) => false,
-        }
-    }
-
     /// Take `plan` up as the plan of `entity`, or none, as an undo or a revert leaves it.
     /// An apply in flight for another plan is dropped when it answers, and so is every act
-    /// waiting for one: it was asked of content the document no longer holds.
+    /// waiting for one that carries the document: it was asked of content the document no
+    /// longer holds. Any other act runs once nothing holds it.
     pub fn adopt(&mut self, entity: &LocalEntity, plan: Option<&Plan>) {
         let id = entity.id;
-        self.held.retain(|(held, _)| *held != id);
+        self.held.retain(|(_, act)| waits_on(act) != Some(id));
         match plan.filter(|plan| !plan.is_empty()) {
             Some(plan) => {
                 let against = mark(entity);
