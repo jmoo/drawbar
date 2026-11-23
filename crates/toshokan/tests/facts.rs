@@ -1381,6 +1381,30 @@ fn a_relation_made_without_seeing_the_join_names_the_survivor_too() {
 }
 
 #[test]
+fn a_write_made_without_seeing_the_join_shows_the_joined_entity_until_it_is_joined_again() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.commit(plan(intent("Tag").add(high, TAGS, "late".into())), 3)
+        .unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.conflicts(), [Conflicted::Existence { entity: high }]);
+        assert_eq!(view.resolve(high), Some(high));
+        assert_eq!(sources(&view), [(library, vec![Some(high)])]);
+    }
+
+    a.commit(plan(intent("Join").join(high, low)), 4).unwrap();
+    let view = a.view();
+    assert_eq!(view.conflicts(), []);
+    assert_eq!(tags(&a, low), ["b", "late"]);
+    assert_eq!(view.resolve(high), Some(low));
+    assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+}
+
+#[test]
 fn writers_who_each_join_one_entity_agree_on_what_it_names() {
     let [low, high, library] = [entity(1), entity(2), entity(3)];
     let (mut a, mut b) = named_twice(low, high, library);
@@ -1609,7 +1633,11 @@ fn undoing_the_return_that_settled_a_conflict_over_a_join_joins_it_again() {
     b.commit(plan(intent("Keep").revive(high)), 4).unwrap();
     a.sync(&b);
     let conflict = Conflicted::Existence { entity: high };
-    assert_eq!(a.view().conflicts(), [conflict]);
+    for folded in [a.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.conflicts(), std::slice::from_ref(&conflict));
+        assert_eq!(view.resolve(high), Some(high), "it was brought back");
+    }
     a.commit(plan(intent("Keep").revive(high)), 5).unwrap();
     assert_eq!(a.view().conflicts(), []);
 

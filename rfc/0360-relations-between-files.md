@@ -185,6 +185,13 @@ An entity that is shown resolves to itself, or to the entity a scan joins it int
 joined entity brought back is shown again, and so is one in a deletion conflict,
 until the conflict is settled.
 
+That conflict is an ordinary one, and it matters here. A computer that has not seen
+a join may still write to the joined entity, a tag for one. The entity is then shown
+again, with that tag and no file, and what named it resolves to it and not to the
+entity with the file. Joining it again settles this: the join carries the tag as any
+join does, and the id resolves to the survivor again. Nothing joins it again by
+itself (see Drawbacks and Unresolved questions).
+
 ### What a join records
 
 A join already deletes the joined entity. Its `delete` op now names the entity
@@ -208,6 +215,7 @@ writes carry it without a rule of its own:
 | An intent that joined and did something else is undone, then redone | `B`, then `A` |
 | Two writers join `B` into `A` at once | `A`: both deletes say so |
 | Two writers join `B` into `A` and into `C` at once | The one the later join names. If that one is deleted, none |
+| Another writer adds a tag to `B` without seeing the join | `B`, shown in a deletion conflict. `A` again once `B` is joined again |
 | One writer joins `B` into `A` while another joins `A` into `C` | `C`, or `A` kept in a deletion conflict where it gained something its delete did not see |
 | Two writers join `A` into `B` and `B` into `A` at once | None for both, unless what one gained keeps it shown in a deletion conflict |
 
@@ -287,6 +295,11 @@ drawbar declares no relation and does not change. It already commits a join for
 each pair a scan reports, so its joins record `into` from the first release built
 against this toshokan, ahead of any feature that writes a relation.
 
+drawbar does not join again an entity that a write shows after a join, unless a
+scan reports it joined once more. A tag written to it is then not listed, as before
+this change. drawbar needs that step before it writes a relation, since until then
+a relation naming such an entity resolves to one with no file.
+
 ### Evidence
 
 - `tests/facts.rs` drives two and three writers through the real merge, reading
@@ -332,6 +345,13 @@ against this toshokan, ahead of any feature that writes a relation.
 - **A join is one fact on one delete.** Settling a deletion conflict on a joined
   entity by deleting it again is a plain delete, and what named it then resolves to
   none. Joining it again keeps what it names.
+- **A write that did not see a join undoes it for what names the entity.** A value,
+  a set member or a file written to the joined entity by a computer that had not
+  seen the join shows it again, and what named it resolves to it until the conflict
+  is settled. toshokan does not settle it, and no view says which entity it was
+  joined into.
+- **Joining two entities that name each other leaves one that names itself.** A
+  join copies values as written.
 - **Older builds.** A join by a build from before this change records nothing. Where
   an older drawbar is the one that joins a pair, what a newer one wrote naming the
   joined entity resolves to none, and nothing repairs it: the value is kept, and the
@@ -359,6 +379,7 @@ through a join.
 | A reference kind declared in the schema, with an index the view maintains | The typed key already says how to read a target. An index is derived state to build on every view, and the measurements do not call for it |
 | The join rewrites every value that names the joined entity | It sees only the values its writer has read, so one written elsewhere at the same time is left behind. It also needs toshokan to edit values it does not own |
 | Follow every live join of an entity and take the lowest entity shown | This was the second design here. With two joins into different entities, what an id resolved to changed when a scan's join was logged, and changed again when an unrelated entity was joined. Undo writes one delete and could not put back two. Following the later join alone has neither problem, and is how a register in conflict already picks what it shows |
+| The id of a joined entity resolves to the entity it was joined into while a write its join did not see shows it | A late tag would then leave what named the entity alone. But binding gives a file to any entity shown, so a scan could join a third entity into the one shown again, and that id resolved to an entity whose own id resolved elsewhere. Undo of a second join brought the entity back as itself and could not put back the first. Two reviews found both. The rule needs binding and undo to treat such an entity as deleted, and it holds a write a user made |
 | The survivor keeps a set of the ids joined into it, under a key toshokan reserves | This was the first design here, and review took it apart. The fact sat on the survivor, apart from the delete it describes, so nothing ended it: after the joined entity was brought back and deleted for good, the survivor still answered for its id. The member was a field write on the survivor, so a join concurrent with the survivor's delete left the survivor shown in a deletion conflict over nothing a user did. Taking a forked join took the delete and the member as two changes that could be taken apart. It reserved a key name in every schema, and each later join copied every id again |
 | A new op or field kind for relations, such as a map from target to data | A second merge rule, snapshot record and retention term beside sets and registers. Sets and registers already merge the way a relation should |
 | Refuse a value whose target is not shown | Undoing a removal, taking a change from a kept-apart history, and naming a target whose entries have not arrived are all correct writes of a target not shown. An unresolved target is reported, never silent |
@@ -399,8 +420,14 @@ and the take a library was built from is lost the first time someone tidies a fo
 - Whether a plain delete that settles a deletion conflict on a joined entity should
   keep the `into` of the delete it replaces. It does not here: a delete says only
   what its intent said.
-- Whether a view should say that an entity shown was joined by another writer, so
-  an app other than drawbar can offer to join it again.
+- How an app learns which entity to join again an entity that a write shows after
+  a join. The delete's `into` is in the log, and an accessor on the entity's view
+  that gave what it resolves to was tried. Review found it unsafe to act on
+  unattended. Two writers who follow it from both sides of two joins that lead back
+  to each other can delete both entities. A scan can join the same entity into
+  another in the same view, so the two disagree. A join that arrives later can win
+  after the tag was moved. It needs an ordering rule and an answer for a scan's
+  join, and belongs with the first app change that joins again.
 
 ## Future possibilities
 

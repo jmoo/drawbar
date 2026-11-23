@@ -482,8 +482,10 @@ entries that create it have not arrived. Undoing the delete, or the entries
 arriving, resolves it again. An entity deleted and brought back resolves to
 itself, and to none once it is deleted again by other than a join. Deleting the
 entity an id resolves to leaves it resolving to none, unless that delete is a
-join's. Where two writers join one entity into different ones, the later join
-alone is followed, so undo, which logs one delete, can put back what was shown.
+join's. A joined entity that a deletion conflict shows again resolves to itself
+until the conflict is settled, as joining it again does. Where two writers join
+one entity into different ones, the later join alone is followed, so undo, which
+logs one delete, can put back what was shown.
 
 The entities that name an entity are those whose value's target is its id, or
 resolves to what its id resolves to. Readers that hold the same merged state and
