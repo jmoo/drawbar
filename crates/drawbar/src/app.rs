@@ -19,7 +19,7 @@ use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
 use crate::timeline::{Gesture, Timeline};
-use crate::workspace::Workspace;
+use crate::workspace::{Working, Workspace};
 use crate::zoom::{Room, Zoom};
 
 /// A theme-specific success color with enough contrast for small text.
@@ -567,29 +567,31 @@ impl DrawbarApp {
     /// takes back, and let go of the steps Undo and Redo would take whose documents moved
     /// on.
     fn record(&mut self, ctx: &egui::Context) {
-        let gesture = gesture(ctx);
         let shown = self.timeline.shown();
         let documents = Editors {
             document: &mut self.document,
             workspace: &mut self.workspace,
             log: &mut self.log,
         };
-        for note in documents.workspace.take_notes() {
+        let notes = documents.workspace.take_notes();
+        let changes = notes.into_iter().filter_map(|note| {
             let workspace = &*documents.workspace;
-            let Some(after) = documents.document.working(workspace, note.id) else {
-                continue;
-            };
-            let Some(entity) = workspace.get(note.id) else {
-                continue;
-            };
+            let after = documents.document.working(workspace, note.id)?;
+            let name = &workspace.get(note.id)?.name;
             let label = match note.revert {
-                true => format!("Revert “{}”", entity.name),
-                false => format!("Edit “{}”", entity.name),
+                true => format!("Revert “{name}”"),
+                false => format!("Edit “{name}”"),
             };
-            self.timeline
-                .record(note.id, label, note.before, after, gesture);
-        }
-        self.timeline.settle(gesture, &documents);
+            Some(Change {
+                id: note.id,
+                label,
+                before: note.before,
+                after,
+                revert: note.revert,
+            })
+        });
+        let changes: Vec<_> = changes.collect();
+        follow(&mut self.timeline, ctx, changes, &documents);
         if self.timeline.shown() != shown {
             ctx.request_repaint();
         }
@@ -1477,6 +1479,34 @@ impl DrawbarApp {
             acts.push(browser::Act::Open(item));
         }
     }
+}
+
+/// What one frame made of what an editor holds of a document.
+struct Change {
+    id: u64,
+    label: String,
+    before: Working,
+    after: Working,
+    revert: bool,
+}
+
+/// Record `changes`, the frame's, under the gesture they belong to, and settle the
+/// timeline as the frame ends. A revert is a step of its own.
+fn follow(
+    timeline: &mut Timeline,
+    ctx: &egui::Context,
+    changes: Vec<Change>,
+    documents: &impl crate::timeline::Documents,
+) {
+    let gesture = gesture(ctx);
+    for change in changes {
+        let made = match change.revert {
+            true => Gesture::Over,
+            false => gesture,
+        };
+        timeline.record(change.id, change.label, change.before, change.after, made);
+    }
+    timeline.settle(gesture, documents);
 }
 
 /// The gesture going on as a frame ends. A drag changes nothing in the frame of its press
@@ -2468,6 +2498,41 @@ mod tests {
 
         assert_eq!(bytes(&app, id), changed);
         assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
+    }
+
+    #[test]
+    fn a_revert_picked_while_typing_is_a_step_whose_undo_brings_the_typing_back() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Text);
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(600.0, 500.0)),
+        );
+        input(&ctx, &mut app, Vec::new());
+        for typed in ["a", "b"] {
+            input(&ctx, &mut app, vec![egui::Event::Text(typed.into())]);
+        }
+        let typing = app.timeline.open();
+        assert!(matches!(typing, Some(Gesture::Focused(_))), "{typing:?}");
+
+        let mut acts = Vec::new();
+        let mut window = eframe::Frame::_new_kittest();
+        app.run(&ctx, &mut window, crate::menu::Command::Revert, &mut acts);
+        act(&ctx, &mut app, acts);
+        input(&ctx, &mut app, Vec::new());
+        let focused = ctx.memory(|memory| memory.focused()).map(Gesture::Focused);
+        assert_eq!(focused, typing, "the page keeps its focus");
+        assert_eq!(bytes(&app, id), b"");
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(150.0, 600.0)),
+        );
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, id), b"ab");
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.txt”");
     }
 
     /// Run `acts` as a frame runs what its panels asked for.
