@@ -1640,6 +1640,54 @@ fn an_edit_made_back_after_its_save_failed_partway_is_kept_when_the_save_is_fini
 }
 
 #[test]
+fn a_new_file_whose_first_save_the_next_change_finishes_reads_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    let id = session.create();
+    session.sync();
+    assert!(session.unsaved(id));
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), session.bytes(id));
+    assert!(!session.unsaved(id), "its file holds what it does");
+    let edited = session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(root.read("untitled.ne5p"), edited, "it is saved in place");
+    assert_eq!(session.bench.workspace.listed().count(), 1);
+}
+
+#[test]
+fn a_save_asked_behind_a_save_whose_answer_is_lost_is_written() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, _) = session.saved_once("96");
+    session.settle();
+    session.store.fault(Fault::Unread);
+    session.edit(id, "40");
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(session.store.sync(workspace, browser, Pass::Last));
+    let third = session.edit(id, "70");
+    session.bench.workspace.mark_saved(id);
+
+    session.settle();
+    session.sync();
+
+    assert_eq!(session.bench.browser.asking(), None);
+    assert_eq!(root.read("untitled.ne5p"), third);
+    assert_eq!(session.bytes(id), third);
+    assert!(!session.unsaved(id));
+}
+
+#[test]
 fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -10256,6 +10304,7 @@ fn an_undo_of_a_save_whose_answer_is_lost_keeps_what_the_document_holds() {
     assert_eq!(root.read("untitled.ne5p"), made, "the undo landed");
     assert_eq!(session.bytes(id), edited);
     assert!(session.unsaved(id), "it holds what its file does not");
+    assert_eq!(session.bench.browser.asking(), None);
     session.refocus();
     session.read_all();
     assert_eq!(session.bytes(id), edited);
