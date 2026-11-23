@@ -169,7 +169,8 @@ A save is passed over. Undo takes back the edit before it and leaves the file as
 you saved it, so the sound reads unsaved until you save again or redo. When the
 save itself is next, the menu reads **Undo Save**, which puts the file back as
 it was. A sample instrument or a piano library edited in its file is different:
-a save ends what Undo can take back of the edits before it.
+a save ends what Undo can take back of the edits before it. Edits to a piano
+library just made, or shown from the instrument, are not steps.
 
 A save, a new sound, a copy, a rename or move, a deletion, a new or removed
 folder, and a change to tags can each be undone. One action is one step:
