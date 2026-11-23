@@ -1473,6 +1473,7 @@ impl State {
     }
 
     /// Whether an act waits for the plan of `id` to be laid out.
+    #[cfg(test)]
     pub fn holds_for(&self, id: u64) -> bool {
         self.held.iter().any(|(held, _)| *held == id)
     }

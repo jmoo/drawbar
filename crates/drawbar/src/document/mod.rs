@@ -757,6 +757,7 @@ impl Document {
     }
 
     /// Whether an act waits for the plan of document `id` to be laid out.
+    #[cfg(test)]
     pub fn waits_for_lay_out(&self, id: u64) -> bool {
         self.piano.holds_for(id)
     }
