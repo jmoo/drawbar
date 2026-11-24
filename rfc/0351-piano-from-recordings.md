@@ -159,11 +159,15 @@ change what any take builds into, not only a project's:
   only on save, with only the cue, label and loop chunks rewritten and the audio and other chunks kept
   byte for byte. The files the recordings were copied from are never written. The project file holds
   nothing the WAVs already say.
-- What the whole set is built with is the project's, not each recording's: one gain, one category,
-  one choice of cleaning and one "Don't decay long notes", since they all become one `.npno`. They are
-  kept in the project file and applied when the library is built, so a project's gain never rewrites
-  a recording's audio, as a gain on a WAV opened on its own does today. **Build piano library…** from
-  a project starts on the project's category. The project file also keeps the long view's order.
+- What the whole set is built with is the project's, not each recording's: one category, one choice
+  of cleaning and one "Don't decay long notes", since they all become one `.npno`. They are kept in
+  the project file and applied when the library is built. **Build piano library…** from a project
+  starts on the project's category. The project file also keeps the long view's order.
+- The set's gain is the library's own Instrument gain, the `.npno` field the Nord applies in 0.1 dB
+  steps, as suggested in this PR, not a scaling of the audio before the build: a format 6 build
+  already raises every stroke to one peak before it is rounded to 16 bits, so a quiet recording with
+  headroom loses nothing. No recording's audio is rewritten for gain, unlike a gain on a WAV opened on
+  its own today.
 - The long view is built in memory from the recordings and never written as a WAV. Each recording
   keeps its own noise floor and its own place as a layer, and a region is held to the recording it
   lies mostly over. An edit reads and rewrites only the recordings whose marks it moved. A save that
@@ -204,8 +208,7 @@ change what any take builds into, not only a project's:
 ## Unresolved questions
 
 - Whether the `.drawbar-piano` file becomes a slim prep file naming its takes through #360's
-  "sources" relation, with the set's gain carried as the library's Instrument gain, as discussed in
-  this PR.
+  "sources" relation, as discussed in this PR.
 
 ## Future possibilities
 
