@@ -78,7 +78,9 @@ folder, so none overwrites another's. Several drawbars can therefore use one
 library at once: on two computers, in two windows, in two browser tabs, or in
 the browser and the desktop app on one folder. A tab shows another tab's changes
 as soon as they are made. Otherwise drawbar shows what the others changed when
-you come back to the window, and the activity log says so.
+you come back to the window, and the activity log says so. Update drawbar on all
+of them together: an older drawbar cannot undo some changes to sounds a newer
+one has linked.
 
 If two drawbars tag the same file before either sees the other's tags, as while
 a sync is paused, the file wears every tag either gave it once the sync catches

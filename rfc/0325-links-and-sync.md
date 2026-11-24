@@ -226,6 +226,12 @@ bundle unpacked into the library exports again with what its programs play.
   or as a refused write.
 - Every press reads every list. That is quick on an Electro 5 and unmeasured on
   instruments with more slots.
+- Storing a link ends Redo of a library change undone before it. Links are stored on
+  attach and as sends land, so Redo can end with no change of the user's. Nothing is
+  shown; Redo is no longer offered.
+- drawbar 0.12.0 does not know links. Where it shares a library with a drawbar that
+  stores them, it refuses to undo deleting a linked file and reports a fault. Every
+  drawbar sharing a library has to be updated together.
 - Plays rests on a hash confirmed on one model with ASCII names.
 
 ## Rationale and alternatives
@@ -281,6 +287,7 @@ come back because its file still exists.
 - Noticing panel changes while attached, by a read when idle.
 - Telling an undelivered file from an edit, by whether the file holds what the
   library last recorded for it.
+- Storing a link as a change that is no step of undo and leaves Redo as it was.
 - Bundle export resolving a set list's programs through links; it uses the slot in
   each program's header.
 - Bringing a piano or sample in from the keyboard.
