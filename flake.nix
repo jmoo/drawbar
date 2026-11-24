@@ -34,6 +34,17 @@
 
         perSystem =
           { system, pkgs, ... }:
+          let
+            telemetry = lib.fileset.toSource {
+              fileset = lib.fileset.unions [
+                ./crates/drawbar/telemetry.json
+                ./docs/feedback.js
+                ./docs/src/privacy.md
+                ./js/telemetry
+              ];
+              root = ./.;
+            };
+          in
           {
             _module.args.pkgs = import nixpkgs {
               inherit system;
@@ -45,6 +56,21 @@
             apps.drawbar-web = {
               meta.description = "serve the drawbar browser build with its guide and open it";
               program = pkgs.lib.getExe pkgs.nord.drawbar-web-launch;
+              type = "app";
+            };
+
+            apps.telemetry-dashboard = {
+              meta.description = "serve a private dashboard of drawbar.app's anonymous counts and open it";
+              program = pkgs.lib.getExe (
+                pkgs.writeShellApplication {
+                  name = "telemetry-dashboard";
+                  runtimeInputs = [
+                    pkgs.nodejs
+                    pkgs.wrangler
+                  ];
+                  text = "exec node ${telemetry}/js/telemetry/dashboard/dashboard.js";
+                }
+              );
               type = "app";
             };
 
@@ -102,18 +128,10 @@
                 pkgs.runCommand "check-telemetry"
                   {
                     nativeBuildInputs = [ pkgs.nodejs ];
-                    src = lib.fileset.toSource {
-                      fileset = lib.fileset.unions [
-                        ./crates/drawbar/telemetry.json
-                        ./docs/feedback.js
-                        ./docs/src/privacy.md
-                        ./js/telemetry
-                      ];
-                      root = ./.;
-                    };
+                    src = telemetry;
                   }
                   ''
-                    node --test "$src/js/telemetry/test/check.test.js"
+                    node --test "$src"/js/telemetry/test/*.test.js
                     touch "$out"
                   '';
               toshokan-spec = pkgs.nord.toshokan-spec;
