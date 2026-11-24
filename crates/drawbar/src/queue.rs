@@ -527,10 +527,9 @@ impl Queue {
 
     /// Which assets wait where, in order, and which of them stopped: everything the
     /// library's rows read of the queue, to tell when they are stale.
-    pub fn shape(&self) -> Vec<(Waiting, bool)> {
+    pub fn shape(&self) -> impl Iterator<Item = (Waiting, bool)> + '_ {
         let held = self.list.iter();
         held.map(|held| ((held.id, held.class, held.at), held.failure.is_some()))
-            .collect()
     }
 }
 

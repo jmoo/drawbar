@@ -284,7 +284,7 @@ impl Picked {
             picked: browser.picked().revision(),
             revision: workspace.revision(),
             device: device.revision(),
-            queue: queue.shape(),
+            queue: queue.shape().collect(),
             tags: browser.tags().revision(),
         };
         self.shown.take_if(|shown| shown.sources != sources);

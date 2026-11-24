@@ -880,7 +880,7 @@ impl Sources {
             revision: (narrows || !names).then(|| workspace.revision()),
             layout: workspace.layout(),
             device: device.revision(),
-            queue: queue.shape(),
+            queue: queue.shape().collect(),
             tags: tags.revision(),
             filter: filter.clone(),
             query: shell.omnibox.clone(),

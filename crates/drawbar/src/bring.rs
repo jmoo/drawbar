@@ -247,31 +247,27 @@ impl Rows {
     }
 }
 
-/// What the rows were worked out from.
-type Key = (u64, u64, Vec<(crate::queue::Waiting, bool)>, Vec<u64>);
-
-/// [`Rows`], worked out again only when the list, the keyboard, the queue or which files
-/// hold unsaved edits changed.
+/// [`Rows`], worked out again only when the list, the keyboard or the queue changed.
 #[derive(Default)]
-pub struct Synced(Option<(Key, Rc<Rows>)>);
+pub struct Synced(Option<Taken>);
+
+/// The rows, and what they were worked out from: the workspace's and the keyboard's
+/// revisions, and the queue's shape.
+type Taken = ((u64, u64), Vec<(crate::queue::Waiting, bool)>, Rc<Rows>);
 
 impl Synced {
+    /// ⚠️ The browser asks for every row it draws, so a hit must not walk the list.
     pub fn of(&mut self, workspace: &Workspace, device: &Device, queue: &Queue) -> Rc<Rows> {
-        let unsaved = workspace
-            .listed()
-            .filter(|it| it.is_unsaved())
-            .map(|it| it.id);
-        let key = (
-            workspace.revision(),
-            device.revision(),
-            queue.shape(),
-            unsaved.collect(),
-        );
-        if let Some((_, rows)) = self.0.as_ref().filter(|(at, _)| *at == key) {
+        let at = (workspace.revision(), device.revision());
+        let held = self
+            .0
+            .as_ref()
+            .filter(|(was, shape, _)| *was == at && queue.shape().eq(shape.iter().copied()));
+        if let Some((_, _, rows)) = held {
             return rows.clone();
         }
         let rows = Rc::new(Rows::of(&device.state, workspace, queue));
-        self.0 = Some((key, rows.clone()));
+        self.0 = Some((at, queue.shape().collect(), rows.clone()));
         rows
     }
 }
@@ -1579,6 +1575,28 @@ mod tests {
         bench.workspace.replace_bytes(id, gained("60"), log);
         assert_eq!(row.ways(&bench.workspace).allowed, [Way::Up]);
         assert_eq!(row.down_blocked(&bench.workspace), Some(Blocked::Unsaved));
+    }
+
+    #[test]
+    fn the_cached_rows_follow_an_edit_into_the_file_that_came_to_hold_it() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&gained("40")))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        bench
+            .workspace
+            .replace_bytes(id, gained("60"), &mut bench.log);
+        let mut synced = Synced::default();
+        let mut said = |bench: &Bench| {
+            let rows = synced.of(&bench.workspace, &bench.device, &bench.queue);
+            rows.mark(id).map(|(_, said)| said.to_string())
+        };
+        assert_eq!(
+            said(&bench).as_deref(),
+            Some("newer on the keyboard · save first")
+        );
+
+        bench.workspace.rebase(id, gained("60"), &mut bench.log);
+        assert_eq!(said(&bench).as_deref(), Some("both changed"));
     }
 
     #[test]

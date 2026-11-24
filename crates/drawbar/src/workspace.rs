@@ -2293,6 +2293,8 @@ impl Workspace {
         if let Some(entity) = self.get_mut(id) {
             entity.resave(Baseline::read(theirs.into(), stamp));
         }
+        // Over the bytes it already holds, the asset is saved and no stamp moved.
+        self.revision += 1;
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
