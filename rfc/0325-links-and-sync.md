@@ -88,8 +88,9 @@ A file sent to a slot that is not its own is placed there by hand and listed in 
 same sheet. A program going up lists the piano or sample it plays as a row of its
 own when the keyboard lacks it.
 
-Library undo, or Undo in the activity log, takes back a link made, moved or removed,
-and a file Sync brought in. A write to the keyboard has no undo.
+Undo in the activity log takes back a link made, moved or removed, and a file Sync
+brought in. Library undo takes back the file and leaves its link. A write to the
+keyboard has no undo.
 
 ### What a contributor sees
 
@@ -186,7 +187,9 @@ Pressing the sheet's button freezes a plan: each row, its direction, and the ver
 of the file, the link and the slot the row was shown with. Sync runs that plan and
 nothing else.
 
-- A step runs only while the file and the link are still as shown.
+- A step runs only while the link is still as shown. A bring-in also needs the file
+  untouched, and a write the same body. A file shown with unsaved edits is the
+  exception: Sync saves them first, so it goes up as it is when its step runs.
 - A write carries what its slot is expected to hold. The worker reads the slot's info
   just before the backup, delete and write, and refuses the write when the slot holds
   anything else. The check sits at the instrument boundary because a panel Store made

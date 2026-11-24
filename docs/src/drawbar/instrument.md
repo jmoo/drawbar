@@ -54,8 +54,8 @@ list opens by itself.
 A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
 `Africa-Split` on the panel.
 
-Library undo, or **Undo** in the activity log, puts back a file Sync brought in, or
-a link it moved or removed.
+Library undo puts back a file Sync brought in. **Undo** in the activity log does
+too, and puts back a link Sync moved or removed.
 
 ## Safety
 
