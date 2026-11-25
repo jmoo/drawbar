@@ -180,6 +180,9 @@ pub struct Row {
     /// none.
     pub at: Option<(ObjectClass, Location)>,
     pub size: u64,
+    /// When its file was last modified, as [`LocalEntity::modified`] counts it. A slot, and
+    /// an asset with no file on this computer, has none.
+    pub modified: Option<u64>,
     pub needs: Needs,
 }
 
@@ -324,6 +327,7 @@ fn local(
         where_: whereabouts(entity, device, queue),
         at: entity.spot(),
         size: entity.size(),
+        modified: entity.modified(),
         needs: wanted(entity, device),
     }
 }
@@ -340,6 +344,7 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
         where_: Where::Keyboard,
         at: Some((class, at)),
         size: u64::from(info.body_len),
+        modified: None,
         needs: played(class, at, device),
     }
 }
@@ -503,6 +508,7 @@ pub enum Column {
     Where,
     At,
     Size,
+    Modified,
     Needs,
 }
 
@@ -523,7 +529,7 @@ impl Order {
 }
 
 impl Column {
-    pub const ALL: [Column; 8] = [
+    pub const ALL: [Column; 9] = [
         Column::Glyph,
         Column::Kind,
         Column::Name,
@@ -531,6 +537,7 @@ impl Column {
         Column::Where,
         Column::At,
         Column::Size,
+        Column::Modified,
         Column::Needs,
     ];
 
@@ -544,6 +551,7 @@ impl Column {
             Column::Where => "Where",
             Column::At => "At",
             Column::Size => "Size",
+            Column::Modified => "Modified",
             Column::Needs => "Needs",
         }
     }
@@ -564,6 +572,7 @@ impl Column {
             Column::Where => Track::Px(72.0),
             Column::At => Track::Px(44.0),
             Column::Size => Track::Px(56.0),
+            Column::Modified => Track::Px(MODIFIED_W),
             Column::Needs => Track::Share(1.3),
         }
     }
@@ -585,13 +594,14 @@ impl Column {
             Column::Where => "where",
             Column::At => "at",
             Column::Size => "size",
+            Column::Modified => "modified",
             Column::Needs => "needs",
         }
     }
 }
 
 /// The widths columns were dragged to, by column; `None` keeps the column's own track.
-pub type Widths = [Option<f32>; 8];
+pub type Widths = [Option<f32>; 9];
 
 /// The gap between two columns.
 const GAP: f32 = 10.0;
@@ -604,7 +614,8 @@ const COLUMN_MOST: f32 = 480.0;
 const GRIP: f32 = 8.0;
 
 /// The columns that give way to the name in a narrow table, first to go first.
-const YIELDING: [Column; 6] = [
+const YIELDING: [Column; 7] = [
+    Column::Modified,
     Column::Needs,
     Column::Tags,
     Column::Size,
@@ -612,6 +623,9 @@ const YIELDING: [Column; 6] = [
     Column::At,
     Column::Where,
 ];
+
+/// The width of the Modified column, which holds a day and a time: `28 May 2026, 20:00`.
+const MODIFIED_W: f32 = 112.0;
 
 /// The width the name keeps while another column can give way: about 16 characters.
 const NAME_LEAST: f32 = 100.0;
@@ -625,7 +639,7 @@ const NAME_LEAST: f32 = 100.0;
 /// only while an instrument is `attached`, since only an instrument names what a sound
 /// plays. While Needs is hidden, the name takes its own share whatever it was dragged to,
 /// so the columns still fill the width.
-pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
+pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 9] {
     let wanted = Column::ALL.map(|column| match widths[column as usize] {
         Some(px) => Track::Px(px),
         None => column.track(),
@@ -645,9 +659,9 @@ pub fn tracks(width: f32, widths: &Widths, attached: bool) -> [Range<f32>; 8] {
 }
 
 /// The `shown` columns laid out across `width`, and the others empty.
-fn lay(width: f32, wanted: &[Track; 8], shown: &[bool; 8]) -> [Range<f32>; 8] {
+fn lay(width: f32, wanted: &[Track; 9], shown: &[bool; 9]) -> [Range<f32>; 9] {
     let fills = !shown[Column::Needs as usize];
-    let kept: Vec<Track> = (0..8)
+    let kept: Vec<Track> = (0..9)
         .filter(|&at| shown[at])
         .map(|at| match fills && at == Column::Name as usize {
             true => Column::Name.track(),
@@ -727,6 +741,8 @@ impl Key {
             Column::Where => Ranked::Count(u64::from(row.where_.rank())),
             Column::At => Ranked::Address(address(row)),
             Column::Size => Ranked::Count(row.size),
+            // A row with no time sorts as the oldest.
+            Column::Modified => Ranked::Count(row.modified.unwrap_or(0)),
             Column::Needs => Ranked::Text(row.needs.text()),
         };
         Key {
@@ -869,7 +885,7 @@ impl Default for Library {
         Library {
             by: Column::Name,
             order: Order::Up,
-            widths: [None; 8],
+            widths: [None; 9],
             table: None,
             counts: None,
             #[cfg(test)]
@@ -883,9 +899,9 @@ impl Default for Library {
 #[derive(PartialEq)]
 struct Sources {
     /// The list's revision, but only where the order or the narrowing reads what an asset
-    /// holds (its kind, where it is, its size, what it needs), which any change to the
-    /// list may move. The names, slots, tags and queue they read otherwise are covered by
-    /// the rest.
+    /// holds (its kind, where it is, its size, its file's time, what it needs), which any
+    /// change to the list may move. The names, slots, tags and queue they read otherwise
+    /// are covered by the rest.
     revision: Option<u64>,
     layout: u64,
     device: u64,
@@ -1132,7 +1148,7 @@ impl Library {
     /// column's width, and a double click gives the column back its own track.
     ///
     /// ⚠️ Added after the head, so a press on a grip drags it instead of sorting.
-    fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 8]) {
+    fn grips(&mut self, ui: &mut egui::Ui, content: egui::Rect, tracks: &[Range<f32>; 9]) {
         let fills = tracks[Column::Needs as usize].is_empty();
         for (column, track) in Column::ALL.iter().zip(tracks) {
             if !column.resizable() || track.is_empty() || (fills && *column == Column::Name) {
@@ -1166,7 +1182,7 @@ impl Library {
 
     /// The column heads. Clicking one sorts by that column, and clicking it again reverses
     /// the order.
-    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 8]) {
+    fn head(&mut self, ui: &mut egui::Ui, width: f32, tracks: &[Range<f32>; 9]) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, HEAD), egui::Sense::click());
         let visuals = ui.visuals().clone();
@@ -1377,7 +1393,7 @@ fn over(filter: &Filter) -> String {
 fn under(
     response: &egui::Response,
     content: egui::Rect,
-    tracks: &[Range<f32>; 8],
+    tracks: &[Range<f32>; 9],
 ) -> Option<Column> {
     let at = response.interact_pointer_pos().or(response.hover_pos())?;
     let x = at.x - content.left();
@@ -1421,7 +1437,7 @@ fn paint(
     ui: &mut egui::Ui,
     row: &Row,
     width: f32,
-    tracks: &[Range<f32>; 8],
+    tracks: &[Range<f32>; 9],
     browser: &mut Browser,
     list: &[Item],
     workspace: &Workspace,
@@ -1511,6 +1527,9 @@ fn paint(
         &crate::room::measure(row.size),
         mono(MONO),
     );
+    if let Some(modified) = row.modified {
+        write(cell(Column::Modified), &dated(modified), plain(TEXT, quiet));
+    }
     // ⚠️ Weak ink even for a bare id. An unresolved id is a question nobody has asked
     // the instrument, not a library reported missing.
     write(cell(Column::Needs), &row.needs.text(), plain(TEXT, quiet));
@@ -1587,8 +1606,18 @@ fn tooltip(
             None => "it never came off a slot".to_string(),
         },
         Column::Size => format!("{} bytes", row.size),
+        Column::Modified => match row.modified {
+            Some(modified) => dated(modified),
+            None => "no file on this computer".to_string(),
+        },
         Column::Needs => row.needs.sentence(),
     }
+}
+
+/// When a file was last modified, on the user's clock, from the nanoseconds since the
+/// Unix epoch that [`Row::modified`] holds.
+pub fn dated(modified: u64) -> String {
+    crate::when::at(modified / 1_000_000, crate::when::local_offset)
 }
 
 /// How many slots beyond the linked one hold this row's saved bytes. A slot row is not
@@ -1652,6 +1681,7 @@ mod tests {
             where_,
             at: at.map(|at| (ObjectClass::Program, at)),
             size,
+            modified: None,
             needs: Needs::Nothing,
         }
     }
@@ -1659,7 +1689,7 @@ mod tests {
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; 9], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(
                     track.start >= 0.0 && track.end >= track.start,
@@ -1677,7 +1707,7 @@ mod tests {
                 );
             }
         }
-        let wide = tracks(900.0, &[None; 8], true);
+        let wide = tracks(900.0, &[None; 9], true);
         for (column, track) in Column::ALL.iter().zip(&wide) {
             assert!(track.end - track.start > 0.0, "{column:?} vanished at 900");
         }
@@ -1688,7 +1718,7 @@ mod tests {
     fn a_narrow_table_hides_secondary_columns_before_the_name_shrinks() {
         let mut hidden_before = Vec::new();
         for width in (130..=900).rev().step_by(10).map(|width| width as f32) {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; 9], true);
             let name = &tracks[Column::Name as usize];
             assert!(
                 name.end - name.start >= NAME_LEAST,
@@ -1713,19 +1743,19 @@ mod tests {
 
     #[test]
     fn the_kind_reaches_120_px_when_wide_and_yields_to_the_name_when_narrow() {
-        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
+        let width_of = |tracks: &[Range<f32>; 9], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
 
-        let wide = tracks(900.0, &[None; 8], true);
+        let wide = tracks(1000.0, &[None; 9], true);
         assert!(
             (width_of(&wide, Column::Kind) - 120.0).abs() < 0.01,
-            "at 900 the kind holds the longest word: {}",
+            "at 1000 the kind holds the longest word: {}",
             width_of(&wide, Column::Kind)
         );
 
-        let narrow = tracks(430.0, &[None; 8], true);
+        let narrow = tracks(430.0, &[None; 9], true);
         assert!(
             width_of(&narrow, Column::Name) >= 40.0,
             "at 430 the name is unreadable: {}",
@@ -1739,13 +1769,13 @@ mod tests {
 
     #[test]
     fn needs_is_hidden_until_an_instrument_is_attached() {
-        let width_of = |tracks: &[Range<f32>; 8], column: Column| {
+        let width_of = |tracks: &[Range<f32>; 9], column: Column| {
             let track = &tracks[column as usize];
             track.end - track.start
         };
         let (attached, alone) = (
-            tracks(900.0, &[None; 8], true),
-            tracks(900.0, &[None; 8], false),
+            tracks(900.0, &[None; 9], true),
+            tracks(900.0, &[None; 9], false),
         );
         assert!(width_of(&attached, Column::Needs) > 0.0, "{attached:?}");
         assert_eq!(width_of(&alone, Column::Needs), 0.0, "{alone:?}");
@@ -1757,11 +1787,11 @@ mod tests {
 
     #[test]
     fn a_dragged_name_fills_the_width_while_needs_is_hidden() {
-        let mut widths = [None; 8];
+        let mut widths = [None; 9];
         widths[Column::Name as usize] = Some(200.0);
-        let name = |tracks: &[Range<f32>; 8]| tracks[Column::Name as usize].clone();
+        let name = |tracks: &[Range<f32>; 9]| tracks[Column::Name as usize].clone();
         let end =
-            |tracks: &[Range<f32>; 8]| tracks.iter().map(|track| track.end).fold(0.0, f32::max);
+            |tracks: &[Range<f32>; 9]| tracks.iter().map(|track| track.end).fold(0.0, f32::max);
 
         let attached = tracks(900.0, &widths, true);
         assert_eq!(
@@ -1809,7 +1839,7 @@ mod tests {
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
-            let tracks = tracks(width, &[None; 8], true);
+            let tracks = tracks(width, &[None; 9], true);
             for (column, track) in Column::ALL.iter().zip(&tracks) {
                 assert!(track.start >= 0.0, "{column:?} at {width}: {track:?}");
                 assert!(track.end >= track.start, "{column:?} at {width}: {track:?}");
@@ -1873,6 +1903,112 @@ mod tests {
         );
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, ["first", "later", "no slot"]);
+    }
+
+    /// 23 Oct 2026, 23:30 UTC, as a file's time is counted.
+    const LATE: u64 = 1_792_798_200_000_000_000;
+
+    #[test]
+    fn the_newest_file_sorts_first_and_a_row_with_no_time_last() {
+        let dated = |name: &str, size: u64, modified: Option<u64>| Row {
+            modified,
+            ..row(name, Kind::Program, Where::Computer, None, size)
+        };
+        let held = || {
+            vec![
+                dated("older", 1, Some(LATE - 1)),
+                dated("no file", 2, None),
+                dated("newest", 3, Some(LATE)),
+            ]
+        };
+        let names = |rows: &[Row]| -> Vec<String> { rows.iter().map(|r| r.name.clone()).collect() };
+
+        let newest = arrange(held(), "", Column::Modified, Order::Down);
+        assert_eq!(names(&newest), ["newest", "older", "no file"]);
+        let oldest = arrange(held(), "", Column::Modified, Order::Up);
+        assert_eq!(names(&oldest), ["no file", "older", "newest"]);
+    }
+
+    #[test]
+    fn a_file_on_this_computer_says_when_it_was_modified_and_a_slot_does_not() {
+        let mut bench = Bench::new();
+        let mut create = || {
+            bench
+                .workspace
+                .create(Fresh::Program, &mut bench.log)
+                .unwrap()
+        };
+        let (filed, unfiled) = (create(), create());
+        bench.workspace.dated(filed, Some(LATE));
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+
+        let held = rows(
+            &bench.workspace,
+            &bench.device.state,
+            &bench.queue,
+            bench.browser.tags(),
+            &Filter::default(),
+        );
+        let times: Vec<(Item, Option<u64>)> =
+            held.iter().map(|row| (row.item, row.modified)).collect();
+        let slot = Item::Slot {
+            class: ObjectClass::Program,
+            at: Location::from_user(7, 1),
+        };
+        assert_eq!(
+            times,
+            [
+                (Item::Local(filed), Some(LATE)),
+                (Item::Local(unfiled), None),
+                (slot, None),
+            ]
+        );
+
+        let mut library = Library::default();
+        let screen = egui::vec2(1000.0, 540.0);
+        let said = library_frame(&mut library, &mut bench, screen, Vec::new());
+        assert!(said.iter().any(|word| word.text == "Modified"), "{said:?}");
+        let on_the_clock = crate::when::at(LATE / 1_000_000, crate::when::local_offset);
+        let cells: Vec<&testing::Word> = said
+            .iter()
+            .filter(|word| word.text == on_the_clock)
+            .collect();
+        let [cell] = cells.as_slice() else {
+            panic!("one row says {on_the_clock}: {said:?}");
+        };
+        assert!(
+            !cell.galley.elided,
+            "the day and the time are written whole"
+        );
+    }
+
+    #[test]
+    fn the_modified_column_holds_any_day_and_time() {
+        let ctx = testing::context();
+        let mut widest = 0.0_f32;
+        testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            let font = egui::FontId::proportional(TEXT);
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            ctx.fonts(|fonts| {
+                for month in MONTHS {
+                    for digit in 0..=9 {
+                        let d = digit.to_string();
+                        let text = format!("{d}{d} {month} {d}{d}{d}{d}, {d}{d}:{d}{d}");
+                        let galley = fonts.layout_no_wrap(text, font.clone(), egui::Color32::WHITE);
+                        widest = widest.max(galley.size().x);
+                    }
+                }
+            });
+        });
+        assert!(
+            widest <= MODIFIED_W,
+            "the widest day and time is {widest} wide, and the column {MODIFIED_W}"
+        );
     }
 
     /// A kind, a place, and a tag narrow together, and an asset in both places passes a
@@ -3189,7 +3325,7 @@ mod tests {
             ],
         );
         let said = frame(&mut library, Vec::new());
-        assert_eq!(library.widths, [None; 8]);
+        assert_eq!(library.widths, [None; 9]);
         assert_eq!(testing::where_(&said, "Name").left(), name.left());
     }
 
@@ -3217,7 +3353,7 @@ mod tests {
         );
         let mut after = Library::default();
         after.restore(&store);
-        let mut only_at = [None; 8];
+        let mut only_at = [None; 9];
         only_at[Column::At as usize] = Some(60.0);
         assert_eq!(after.widths, only_at);
 
@@ -3228,7 +3364,7 @@ mod tests {
         );
         let mut after = Library::default();
         after.restore(&store);
-        assert_eq!(after.widths, [None; 8]);
+        assert_eq!(after.widths, [None; 9]);
     }
 
     /// Paints with both docks open and with none. Nothing checks pixels: this catches a layout
