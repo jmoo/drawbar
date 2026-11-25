@@ -1071,7 +1071,7 @@ fn name(
             variant,
             width,
         } => {
-            if settled(ui, typed, *width, *limit, false) && typed != stored {
+            if settled(ui, typed, *width, *limit, false).lost_focus() && typed != stored {
                 sets.push(("name".to_string(), typed.clone()));
             }
             if let Some(stored) = variant {
@@ -1080,16 +1080,22 @@ fn name(
                         .font(egui::FontId::monospace(12.0))
                         .color(caption(ui.visuals())),
                 );
-                if settled(ui, variant_box, VARIANT, None, true) && variant_box != stored {
+                let done = settled(ui, variant_box, VARIANT, None, true).lost_focus();
+                if done && variant_box != stored {
                     sets.push(("variant".to_string(), variant_box.clone()));
                 }
             }
             None
         }
         Named::Asset => {
-            let done = settled(ui, typed, NAME, None, false);
+            let response = settled(ui, typed, NAME, None, false);
             let wanted = tagged(&entity.name, typed);
-            (done && !typed.trim().is_empty() && wanted != entity.name).then_some(wanted)
+            let done = response.lost_focus() && !typed.trim().is_empty();
+            // A box out of focus shows the asset's name, whatever became of a rename.
+            if !response.has_focus() && typed != stored {
+                *typed = stored.to_string();
+            }
+            (done && wanted != entity.name).then_some(wanted)
         }
     }
 }
@@ -1106,7 +1112,7 @@ fn settled(
     width: f32,
     limit: Option<usize>,
     mono: bool,
-) -> bool {
+) -> egui::Response {
     let mut edit = egui::TextEdit::singleline(text)
         .desired_width(width)
         .margin(egui::Margin::symmetric(4, 1));
@@ -1117,7 +1123,7 @@ fn settled(
     if let Some(limit) = limit {
         controls::fits(text, limit);
     }
-    response.lost_focus()
+    response
 }
 
 /// The mono badge over a document, and the sentence behind it.
@@ -1471,7 +1477,7 @@ mod tests {
             let input = testing::screen(egui::vec2(400.0, 100.0), events);
             let output = testing::run(&ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    done = settled(ui, text, NAME, None, false);
+                    done = settled(ui, text, NAME, None, false).lost_focus();
                 });
             });
             (done, testing::painted(&output))
