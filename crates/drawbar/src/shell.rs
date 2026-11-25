@@ -551,6 +551,38 @@ impl DrawbarApp {
         }
     }
 
+    /// The window's frame alone, where the shell has no room: the edges that resize the
+    /// window, a bar that moves it, and its buttons. A browser tab has none.
+    pub(crate) fn frame_alone(&self, ctx: &egui::Context) {
+        if !self.platform.windowed() {
+            return;
+        }
+        if self.chrome.undecorated() {
+            crate::platform::edges(ctx);
+        }
+        bar_panel(self.platform, ctx)
+            .frame(egui::Frame::new().fill(ctx.style().visuals.panel_fill))
+            .show(ctx, |ui| {
+                self.moves_the_window(ui);
+                if let Frame::HeaderBar(layout) = &self.chrome {
+                    let mut left = bar_end(ui, egui::Layout::left_to_right(egui::Align::Center));
+                    round_left(&mut left, &layout.left);
+                }
+                let mut right = bar_end(ui, egui::Layout::right_to_left(egui::Align::Center));
+                self.right_frame(&mut right);
+            });
+    }
+
+    /// Let the bar's empty parts move the window, as a title bar does. Called first, so
+    /// every control drawn after it takes the pointer over it.
+    fn moves_the_window(&self, ui: &egui::Ui) {
+        let bar = ui.max_rect();
+        let empty = ui.interact(bar, ui.id().with("bar"), egui::Sense::click_and_drag());
+        if self.platform.windowed() {
+            crate::platform::title_bar(ui.ctx(), &empty);
+        }
+    }
+
     /// The top bar, as this platform arranges it.
     pub(crate) fn top_bar(
         &mut self,
@@ -558,32 +590,17 @@ impl DrawbarApp {
         frame: &mut eframe::Frame,
         acts: &mut Vec<Act>,
     ) {
-        egui::TopBottomPanel::top("topbar")
-            .resizable(false)
-            .exact_height(bar_height(self.platform, ctx.zoom_factor()))
-            .show_separator_line(false)
+        bar_panel(self.platform, ctx)
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 let bar = ui.max_rect();
-                // First, so every control drawn after it takes the pointer over it.
-                let empty = ui.interact(bar, ui.id().with("bar"), egui::Sense::click_and_drag());
-                if self.platform.windowed() {
-                    crate::platform::title_bar(ui.ctx(), &empty);
-                }
+                self.moves_the_window(ui);
                 self.focus_search(ui.ctx());
 
-                let mut left = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(bar)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
+                let mut left = bar_end(ui, egui::Layout::left_to_right(egui::Align::Center));
                 left.spacing_mut().item_spacing.x = 4.0;
                 self.left_edge(&mut left, frame, acts);
-                let mut right = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(bar)
-                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                );
+                let mut right = bar_end(ui, egui::Layout::right_to_left(egui::Align::Center));
                 right.spacing_mut().item_spacing.x = 6.0;
                 self.right_edge(&mut right, frame, acts);
 
@@ -611,13 +628,7 @@ impl DrawbarApp {
                 self.menu_bar(ui, frame, acts);
             }
             (Frame::HeaderBar(layout), Platform::Linux) if !layout.left.is_empty() => {
-                ui.add_space(BAR_PAD);
-                let left = ui.cursor().left();
-                let width = crate::platform::round_width(&layout.left);
-                let middle = ui.max_rect().center().y;
-                let buttons = layout.left.clone();
-                crate::platform::round_buttons(ui, &buttons, left, middle);
-                ui.add_space(width + 8.0);
+                round_left(ui, &layout.left);
             }
             (_, Platform::Linux) => ui.add_space(BAR_PAD),
             (_, Platform::Web) => {
@@ -668,10 +679,8 @@ impl DrawbarApp {
         }
     }
 
-    /// The bar's right end, laid out from the edge inward: what the platform puts at the
-    /// edge, the menu where the menus are one button, the theme, the instrument, the MIDI
-    /// controllers, and Send.
-    fn right_edge(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
+    /// What the window's frame puts at the bar's right edge.
+    fn right_frame(&self, ui: &mut egui::Ui) {
         match &self.chrome {
             Frame::Captions => {
                 let left = crate::platform::captions(ui, ui.max_rect());
@@ -682,12 +691,18 @@ impl DrawbarApp {
                 let width = crate::platform::round_width(&layout.right);
                 let left = ui.cursor().right() - width;
                 let middle = ui.max_rect().center().y;
-                let buttons = layout.right.clone();
-                crate::platform::round_buttons(ui, &buttons, left, middle);
+                crate::platform::round_buttons(ui, &layout.right, left, middle);
                 ui.add_space(width + 8.0);
             }
             Frame::System | Frame::HeaderBar(_) => ui.add_space(BAR_PAD),
         }
+    }
+
+    /// The bar's right end, laid out from the edge inward: what the platform puts at the
+    /// edge, the menu where the menus are one button, the theme, the instrument, the MIDI
+    /// controllers, and Send.
+    fn right_edge(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, acts: &mut Vec<Act>) {
+        self.right_frame(ui);
         if self.platform.one_menu() {
             self.menu_button(ui, frame, acts);
         }
@@ -1526,6 +1541,32 @@ fn zoom_id(part: &str) -> egui::Id {
     egui::Id::new(("zoom", part))
 }
 
+/// The top bar's panel, at this platform's height.
+fn bar_panel(platform: Platform, ctx: &egui::Context) -> egui::TopBottomPanel {
+    egui::TopBottomPanel::top("topbar")
+        .resizable(false)
+        .exact_height(bar_height(platform, ctx.zoom_factor()))
+        .show_separator_line(false)
+}
+
+/// One end of the bar, laid out from its edge inward.
+fn bar_end(ui: &mut egui::Ui, layout: egui::Layout) -> egui::Ui {
+    ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(ui.max_rect())
+            .layout(layout),
+    )
+}
+
+/// A header bar's window buttons at the bar's left end.
+fn round_left(ui: &mut egui::Ui, buttons: &[crate::platform::Button]) {
+    ui.add_space(BAR_PAD);
+    let left = ui.cursor().left();
+    let middle = ui.max_rect().center().y;
+    crate::platform::round_buttons(ui, buttons, left, middle);
+    ui.add_space(crate::platform::round_width(buttons) + 8.0);
+}
+
 /// The top bar's height in points at `zoom`.
 ///
 /// ⚠️ The Mac's bar shares the traffic lights' center line, and the system draws them the
@@ -2028,6 +2069,117 @@ mod tests {
         let gated = frame_of(&ctx, &mut app, small, vec![zoom_key(egui::Key::Minus)]);
         assert!(gated.wrote(TOO_SMALL));
         assert_eq!(app.zoom.percent(), 125);
+    }
+
+    /// What a window too small asks of the system over `frames`, each a frame's events,
+    /// after one frame that lays it out.
+    fn asked_while_too_small(
+        platform: Platform,
+        chrome: Frame,
+        frames: Vec<Vec<egui::Event>>,
+    ) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        app.platform = platform;
+        app.chrome = chrome;
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut asked = Vec::new();
+        for events in std::iter::once(Vec::new()).chain(frames) {
+            let output = testing::run(&ctx, testing::screen(TOO_SMALL_WINDOW, events), |ctx| {
+                app.update(ctx, &mut frame)
+            });
+            assert!(testing::words(&output).iter().any(|word| word == TOO_SMALL));
+            let root = &output.viewport_output[&egui::ViewportId::ROOT];
+            asked.extend(root.commands.iter().cloned());
+        }
+        asked
+    }
+
+    const TOO_SMALL_WINDOW: egui::Vec2 = egui::vec2(LEAST.x - 1.0, LEAST.y);
+
+    /// A press on the bar's empty middle, then the pointer carried off it.
+    fn bar_dragged() -> Vec<Vec<egui::Event>> {
+        let at = egui::pos2(TOO_SMALL_WINDOW.x / 2.0, 20.0);
+        vec![
+            vec![egui::Event::PointerMoved(at), testing::button(at, true)],
+            vec![egui::Event::PointerMoved(at + egui::vec2(40.0, 0.0))],
+        ]
+    }
+
+    /// A press on the window's left edge.
+    fn edge_pressed() -> Vec<Vec<egui::Event>> {
+        let at = egui::pos2(2.0, TOO_SMALL_WINDOW.y / 2.0);
+        vec![vec![
+            egui::Event::PointerMoved(at),
+            testing::button(at, true),
+        ]]
+    }
+
+    /// ⚠️ Where drawbar draws the window's frame, the notice must leave it working: a
+    /// window too small has no other edge to widen it by, bar to move it by, or button to
+    /// close it.
+    #[test]
+    fn a_window_too_small_can_still_be_resized_moved_and_closed() {
+        use crate::platform::{Button, Layout};
+        let header_bar = Frame::HeaderBar(Layout {
+            left: vec![Button::Close],
+            right: vec![Button::Maximize],
+        });
+        let far = TOO_SMALL_WINDOW.x - BAR_PAD - crate::platform::ROUND / 2.0;
+        let near = BAR_PAD + crate::platform::ROUND / 2.0;
+        let caption = crate::platform::CAPTION;
+        for (platform, chrome, close, maximize) in [
+            (
+                Platform::Windows,
+                Frame::Captions,
+                egui::pos2(TOO_SMALL_WINDOW.x - 0.5 * caption, 20.0),
+                egui::pos2(TOO_SMALL_WINDOW.x - 1.5 * caption, 20.0),
+            ),
+            (
+                Platform::Linux,
+                header_bar,
+                egui::pos2(near, Platform::Linux.top_bar() / 2.0),
+                egui::pos2(far, Platform::Linux.top_bar() / 2.0),
+            ),
+        ] {
+            let asked = |frames| asked_while_too_small(platform, chrome.clone(), frames);
+            assert_eq!(
+                asked(edge_pressed()),
+                [egui::ViewportCommand::BeginResize(
+                    egui::ResizeDirection::West
+                )],
+                "{platform:?}: its edge resizes it"
+            );
+            assert_eq!(
+                asked(bar_dragged()),
+                [egui::ViewportCommand::StartDrag],
+                "{platform:?}: its bar moves it"
+            );
+            assert_eq!(
+                asked(vec![testing::click(close)]),
+                [egui::ViewportCommand::Close],
+                "{platform:?}: its close button"
+            );
+            assert_eq!(
+                asked(vec![testing::click(maximize)]),
+                [egui::ViewportCommand::Maximized(true)],
+                "{platform:?}: its maximize button"
+            );
+        }
+    }
+
+    /// The system resizes and closes a window whose frame it draws, and the bar moves it.
+    /// A browser tab is not a window to move.
+    #[test]
+    fn a_window_too_small_is_moved_by_its_bar_where_the_system_draws_its_frame() {
+        for (platform, moved) in [
+            (Platform::Mac, vec![egui::ViewportCommand::StartDrag]),
+            (Platform::Web, Vec::new()),
+        ] {
+            let asked = |frames| asked_while_too_small(platform, Frame::System, frames);
+            assert_eq!(asked(bar_dragged()), moved, "{platform:?}");
+            assert_eq!(asked(edge_pressed()), [], "{platform:?}: the edge");
+        }
     }
 
     #[test]
