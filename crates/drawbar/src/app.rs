@@ -1917,17 +1917,28 @@ mod tests {
         (ctx, app)
     }
 
-    /// Run frames until `done`.
+    /// How long a test waits on the library's thread: far longer than a stalled CI runner
+    /// has kept one waiting, since only a failure waits it out.
     #[cfg(not(target_arch = "wasm32"))]
-    fn until(ctx: &egui::Context, app: &mut DrawbarApp, done: impl Fn(&DrawbarApp) -> bool) {
-        for _ in 0..500 {
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Run frames until `done`, which `what` names.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn until(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        what: &str,
+        done: impl Fn(&DrawbarApp) -> bool,
+    ) {
+        let began = std::time::Instant::now();
+        while began.elapsed() < PATIENCE {
             frame(ctx, app);
             if done(app) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("it never happened");
+        panic!("{what}: not after {PATIENCE:?}");
     }
 
     /// A sample instrument in a library over `root`, read and in front, renamed Vibes by
@@ -1943,10 +1954,12 @@ mod tests {
                 .find(|entity| entity.name == "Marimba.nsmp")
                 .map(|entity| entity.id)
         };
-        until(&ctx, &mut app, |app| named(app).is_some());
+        until(&ctx, &mut app, "the library lists the sample", |app| {
+            named(app).is_some()
+        });
         let id = named(&app).expect("listed");
         app.tabs.open(id);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the sample is read", |app| {
             idle(app)
                 && app
                     .workspace
@@ -1997,14 +2010,14 @@ mod tests {
         let root = crate::testing::Temp::new();
         let (ctx, mut app, id) = edited_sample(&root);
         input(&ctx, &mut app, vec![save_key()]);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the save keeps the edit", |app| {
             idle(app) && !app.workspace.saving_edit(id)
         });
         assert!(!app.workspace.get(id).unwrap().is_unsaved(), "it saved");
         // The edit is in the file now, so the save's undo takes it back.
         assert_eq!(undo_line(&app), ("Undo Save “Marimba.nsmp”".into(), true));
         input(&ctx, &mut app, vec![undo_key(false)]);
-        until(&ctx, &mut app, idle);
+        until(&ctx, &mut app, "the undo is answered", idle);
         assert!(root.read("Marimba.nsmp") == crate::testing::sample_bytes());
         let held = app.document.working(&app.workspace, id);
         assert!(
@@ -2041,7 +2054,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|store| store.has_taken_in(&hash))
         };
-        until(&ctx, &mut app, taken);
+        until(&ctx, &mut app, "the library takes the list in", taken);
         app.let_older_go(&mut storage);
         assert_eq!(crate::store::older::found(&storage), Found::Nothing);
         assert_eq!(
@@ -2064,7 +2077,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| !store.listing() && !store.deciding())
         };
-        until(&ctx, &mut app, idle);
+        until(&ctx, &mut app, "the library is idle", idle);
         app.let_older_go(&mut again);
         assert_eq!(crate::store::older::found(&again), Found::Nothing);
         assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"], "taken in once");
@@ -2098,7 +2111,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| store.has_taken_in(&hash))
         };
-        until(&ctx, &mut app, taken);
+        until(&ctx, &mut app, "the library takes the list in", taken);
         app.let_older_go(&mut storage);
         assert_eq!(
             held(&storage, "drawbar.this_computer"),
@@ -2111,7 +2124,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| store.handed_over(&hash, &app.workspace))
         };
-        until(&ctx, &mut app, kept);
+        until(&ctx, &mut app, "the save keeps the edit", kept);
         app.let_older_go(&mut storage);
         assert_eq!(crate::store::older::found(&storage), Found::Nothing);
     }
@@ -2132,7 +2145,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.text.contains("could not bring"))
         };
-        until(&ctx, &mut app, failed);
+        until(&ctx, &mut app, "the take-in is refused", failed);
         app.let_older_go(&mut storage);
         assert_eq!(held(&storage, "drawbar.this_computer"), assets);
         assert_eq!(root.names(""), [".drawbar"]);
@@ -2178,20 +2191,8 @@ mod tests {
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let backend = crate::testing::backend(&ctx, root);
         let mut app = DrawbarApp::with_library(&cc, Some(Store::start(backend)));
-        for _ in 0..500 {
-            frame(&ctx, &mut app);
-            if app
-                .browser
-                .folders
-                .place
-                .as_ref()
-                .is_some_and(|at| !at.opening)
-            {
-                return (ctx, app);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the library did not open");
+        until_open(&ctx, &mut app);
+        (ctx, app)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2269,26 +2270,19 @@ mod tests {
         let (ctx, mut app) = opened_over(&root);
         app.platform = crate::platform::Platform::Web;
         app.browser.tags.make("Live").expect("a new tag");
-        let until =
-            |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&DrawbarApp) -> bool| {
-                let mut window = eframe::Frame::_new_kittest();
-                let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
-                crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
-                for _ in 0..500 {
-                    if done(app) {
-                        return true;
-                    }
-                    frame(&ctx, app);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                false
-            };
+        type Done = fn(&DrawbarApp) -> bool;
+        let press = |app: &mut DrawbarApp, keys: Vec<egui::Event>, what: &str, done: Done| {
+            let mut window = eframe::Frame::_new_kittest();
+            let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+            until(&ctx, app, what, done);
+        };
         fn undoes(app: &DrawbarApp) -> bool {
             app.store.as_ref().is_some_and(Store::undoes)
         }
-        let undoable = |app: &DrawbarApp| app.timeline.next_undo().is_some() && undoes(app);
-        let redoable = |app: &DrawbarApp| app.timeline.next_redo().is_some() && undoes(app);
-        assert!(until(&mut app, Vec::new(), undoable), "the tag is made");
+        let undoable: Done = |app| app.timeline.next_undo().is_some() && undoes(app);
+        let redoable: Done = |app| app.timeline.next_redo().is_some() && undoes(app);
+        press(&mut app, Vec::new(), "the tag is made", undoable);
         let key = |modifiers| egui::Event::Key {
             key: egui::Key::Z,
             physical_key: None,
@@ -2297,16 +2291,10 @@ mod tests {
             modifiers,
         };
         let command = egui::Modifiers::COMMAND;
-        assert!(until(&mut app, vec![key(command)], redoable), "⌘Z undid it");
+        press(&mut app, vec![key(command)], "⌘Z undid it", redoable);
         let shift = command.plus(egui::Modifiers::SHIFT);
-        assert!(
-            until(&mut app, vec![key(shift)], |app| app
-                .timeline
-                .next_redo()
-                .is_none()
-                && undoes(app)),
-            "⇧⌘Z redid it"
-        );
+        let redone: Done = |app| app.timeline.next_redo().is_none() && undoes(app);
+        press(&mut app, vec![key(shift)], "⇧⌘Z redid it", redone);
     }
 
     /// The app over no library, taking its keys as the browser build does.
@@ -2921,7 +2909,7 @@ mod tests {
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
         app.tabs.open(id);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the library makes the file", |app| {
             idle(app) && app.timeline.next_undo().is_some()
         });
         (ctx, app, id)
@@ -2946,7 +2934,7 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND,
         };
         input(&ctx, &mut app, vec![save]);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the save writes the file", |app| {
             idle(app) && root.read("untitled.ne5p") == changed
         });
         assert_eq!(
@@ -2988,7 +2976,7 @@ mod tests {
         };
 
         input(&ctx, &mut app, vec![save, undo_key(false)]);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the save writes the file", |app| {
             idle(app) && root.read("untitled.ne5p") == changed
         });
         assert_eq!(bytes(&app, id), before);
@@ -3072,7 +3060,7 @@ mod tests {
 
         let name = "gospel".to_string();
         act(&ctx, &mut app, vec![browser::Act::RenameLocal { id, name }]);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the library renames the file", |app| {
             idle(app) && root.at("gospel.ne5p").exists()
         });
         assert_eq!(undo_line(&app).0, "Undo Rename “untitled.ne5p”");
@@ -3080,7 +3068,7 @@ mod tests {
         turn_gain(&ctx, &mut app, id, "50");
         assert_eq!(undo_line(&app).0, "Undo Edit “gospel.ne5p”");
         act(&ctx, &mut app, vec![browser::Act::SaveDoc(id)]);
-        until(&ctx, &mut app, |app| {
+        until(&ctx, &mut app, "the save keeps the edit", |app| {
             idle(app) && !app.workspace.get(id).unwrap().is_unsaved()
         });
         assert_eq!(undo_line(&app).0, "Undo Edit “gospel.ne5p”");
@@ -3136,7 +3124,7 @@ mod tests {
 
         app.open_library(&ctx, root.0.clone(), false);
         until_open(&ctx, &mut app);
-        until(&ctx, &mut app, idle);
+        until(&ctx, &mut app, "the library is idle", idle);
         input(&ctx, &mut app, vec![undo_key(false)]);
         assert_eq!(bytes(&app, id), program);
     }
@@ -3173,15 +3161,11 @@ mod tests {
     /// Run frames until the library just asked for has opened.
     #[cfg(not(target_arch = "wasm32"))]
     fn until_open(ctx: &egui::Context, app: &mut DrawbarApp) {
-        for _ in 0..500 {
-            frame(ctx, app);
+        let open = |app: &DrawbarApp| {
             let place = app.browser.folders.place.as_ref();
-            if place.is_some_and(|at| !at.opening) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the library did not open");
+            place.is_some_and(|at| !at.opening)
+        };
+        until(ctx, app, "the library opens", open);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
