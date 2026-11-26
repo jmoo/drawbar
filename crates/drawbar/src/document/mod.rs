@@ -1791,6 +1791,9 @@ mod tests {
         id: u64,
         /// The window width, which decides how far the header collapses.
         width: f32,
+        /// Whether the window has the keyboard, as it does not while another application
+        /// is in front.
+        focused: bool,
         /// What the last frame painted.
         said: Vec<Word>,
     }
@@ -1829,6 +1832,7 @@ mod tests {
                 document: Document::default(),
                 id: 0,
                 width: SCREEN.x,
+                focused: true,
                 said: Vec::new(),
             }
         }
@@ -1928,7 +1932,8 @@ mod tests {
         }
 
         fn run(&mut self, events: Vec<egui::Event>) -> (egui::FullOutput, Wants) {
-            let input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
+            let mut input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
+            input.focused = self.focused;
             let ctx = self.ctx.clone();
             let mut wants = Wants::default();
             let output = testing::run(&ctx, input, |ctx| {
@@ -2421,6 +2426,26 @@ mod tests {
         assert_eq!(open.entity().name, "Gig.ne5p");
         assert!(words.iter().any(|word| word == "Gig"), "{words:?}");
         assert!(!words.iter().any(|word| word == "untitled"), "{words:?}");
+    }
+
+    /// A name still being typed stays in its box while another application is in front,
+    /// and settles once the window is back.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unfinished_name_is_still_in_its_box_after_the_window_was_left() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.place();
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("untitled")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+
+        open.focused = false;
+        let away = open.twice();
+        open.focused = true;
+        let wanted = open.wants(vec![testing::key(egui::Key::Enter)]).rename;
+
+        assert!(away.iter().any(|word| word == "Xuntitled"), "{away:?}");
+        assert_eq!(wanted.as_deref(), Some("Xuntitled.ne5p"));
     }
 
     /// Where the file stores the name, the box writes it through the format and leaves

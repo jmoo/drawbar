@@ -1091,8 +1091,10 @@ fn name(
             let response = settled(ui, typed, NAME, None, false);
             let wanted = tagged(&entity.name, typed);
             let done = response.lost_focus() && !typed.trim().is_empty();
-            // A box out of focus shows the asset's name, whatever became of a rename.
-            if !response.has_focus() && typed != stored {
+            // A box the keyboard left shows the asset's name, whatever became of a rename.
+            // ⚠️ Not `Response::has_focus`, which is false while another application is in front.
+            let editing = ui.memory(|memory| memory.has_focus(response.id));
+            if !editing && typed != stored {
                 *typed = stored.to_string();
             }
             (done && wanted != entity.name).then_some(wanted)
