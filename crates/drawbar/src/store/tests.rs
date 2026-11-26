@@ -858,6 +858,25 @@ fn puts(io: &toshokan::Io, at: &str) -> bool {
     }
 }
 
+/// Write `bytes` over the file at `at` at a time the file did not have, as another program
+/// does later. A clock that ticks slowly gives two writes close together one time, and
+/// bodies of one length then look alike.
+fn write_later(root: &Temp, at: &str, bytes: &[u8]) {
+    let path = root.at(at);
+    let modified = || fs::metadata(&path).and_then(|file| file.modified()).ok();
+    let before = modified();
+    let patience = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        fs::write(&path, bytes).unwrap();
+        if modified() != before {
+            return;
+        }
+        let waited = std::time::Instant::now() < patience;
+        assert!(waited, "{at}: the clock moved on");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Give the file at `at` another modification time, as a browser's move does.
 fn touch(root: &Temp, at: &str) {
     let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
@@ -4113,7 +4132,7 @@ fn a_resting_sample_changed_outside_under_an_edit_is_never_read_whole() {
         .unwrap()
         .clone();
     let theirs = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184);
-    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+    write_later(&root, "Zoned.nsmp", &theirs);
 
     session.settle();
 
@@ -4893,7 +4912,7 @@ fn a_file_changed_right_after_the_undo_of_its_save_asks_and_keeps_the_edit() {
     let (id, made, edited) = session.saved_once("96");
     let theirs = with_gain(&edited, "12");
 
-    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let write = || write_later(&root, "untitled.ne5p", &theirs);
     session.undo_then(&root, "untitled.ne5p", &made, write);
 
     assert_eq!(
@@ -4953,7 +4972,7 @@ fn another_writers_change_read_with_the_undo_of_a_save_is_followed_as_one() {
     session.edit(id, "12");
     let theirs = with_gain(&edited, "40");
 
-    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let write = || write_later(&root, "untitled.ne5p", &theirs);
     session.undo_then(&root, "untitled.ne5p", &made, write);
 
     let entity = session.bench.workspace.get(id).expect("held");
@@ -10260,7 +10279,7 @@ fn another_writers_change_read_with_the_undo_of_a_save_asks_with_nothing_else_un
     let (id, made, edited) = session.saved_once("96");
     let theirs = with_gain(&edited, "40");
 
-    let write = || fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    let write = || write_later(&root, "untitled.ne5p", &theirs);
     session.undo_then(&root, "untitled.ne5p", &made, write);
 
     assert_eq!(session.bytes(id), edited);
