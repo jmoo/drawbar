@@ -114,7 +114,20 @@ impl Held {
 
     /// Whether the slot is known to have held a body with this checksum.
     pub fn knew(&self, crc: u32) -> bool {
-        self.base.crc == crc || self.past.contains(&crc)
+        self.age(crc).is_some()
+    }
+
+    /// How many agreed versions ago the two held a body with this checksum: none for
+    /// the base, and `None` for a body they never agreed on.
+    fn age(&self, crc: u32) -> Option<usize> {
+        match self.base.crc == crc {
+            true => Some(0),
+            false => self
+                .past
+                .iter()
+                .position(|past| *past == crc)
+                .map(|at| at + 1),
+        }
     }
 
     /// This link once the file and the slot, called `name`, agree on `print`.
@@ -182,14 +195,16 @@ pub enum Standing {
     /// Not known yet: the slot's bank, or the file, has not been read.
     Unread,
     Same,
-    /// The file is newer: the slot holds an earlier version. A send settles it.
+    /// The file is newer: the slot holds an earlier version, or the one they agreed on
+    /// while the file holds one they never did. A send settles it.
     Ahead,
     /// The slot is empty: its sound was deleted on the keyboard or moved off it. Only an
     /// explicit send puts it back.
     Gone,
-    /// The slot holds a version the file never had, and the file has not changed.
+    /// The slot is newer: the file holds an earlier version, or the one they agreed on
+    /// while the slot holds one they never did.
     Theirs,
-    /// The slot holds a version the file never had, and the file has changed too.
+    /// Each holds a version they never agreed on.
     Both,
 }
 
@@ -207,8 +222,13 @@ pub fn standing(held: &Held, here: Option<Print>, there: There) -> Standing {
         There::Unread => Standing::Unread,
         There::Vacant => Standing::Gone,
         There::Holds { crc: Some(crc), .. } if crc == here.crc => Standing::Same,
-        There::Holds { crc: Some(crc), .. } if held.knew(crc) => Standing::Ahead,
-        There::Holds { crc: Some(_), .. } => changed_there(unchanged_here),
+        There::Holds { crc: Some(crc), .. } => match (held.age(here.crc), held.age(crc)) {
+            (None, None) => Standing::Both,
+            (None, Some(_)) => Standing::Ahead,
+            (Some(_), None) => Standing::Theirs,
+            (Some(here), Some(there)) if here < there => Standing::Ahead,
+            (Some(_), Some(_)) => Standing::Theirs,
+        },
         There::Holds { crc: None, len } => match (unchanged_here, len == held.base.len) {
             (true, true) => Standing::Same,
             (false, true) => Standing::Ahead,
@@ -263,6 +283,24 @@ mod tests {
     fn a_slot_holding_an_earlier_version_is_behind_a_file_sent_elsewhere_since() {
         let sent_twice = program(V1).agreed(V2, "Tine").agreed(V3, "Tine");
         assert_eq!(standing(&sent_twice, Some(V3), holds(V1)), Standing::Ahead);
+    }
+
+    #[test]
+    fn a_file_holding_an_earlier_version_is_behind_its_slot() {
+        let brought_in = program(V1).agreed(V2, "Tine");
+        assert_eq!(standing(&brought_in, Some(V1), holds(V2)), Standing::Theirs);
+        assert_eq!(
+            standing(&brought_in, Some(V1), holds(V3)),
+            Standing::Theirs,
+            "and behind a version the keyboard made since"
+        );
+    }
+
+    #[test]
+    fn of_two_earlier_versions_the_one_agreed_later_is_the_newer() {
+        let twice = program(V1).agreed(V2, "Tine").agreed(V3, "Tine");
+        assert_eq!(standing(&twice, Some(V2), holds(V1)), Standing::Ahead);
+        assert_eq!(standing(&twice, Some(V1), holds(V2)), Standing::Theirs);
     }
 
     #[test]

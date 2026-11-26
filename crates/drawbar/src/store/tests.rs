@@ -9546,7 +9546,7 @@ impl Session {
 }
 
 #[test]
-fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() {
+fn bringing_in_a_slot_is_one_undo_and_once_undone_the_slot_is_newer_and_stays_there() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
@@ -9589,7 +9589,9 @@ fn bringing_in_a_slot_is_one_undo_and_once_undone_the_file_is_ahead_and_stays() 
     assert_eq!(root.read("untitled.ne5p"), old, "one step takes it back");
     assert_eq!(session.only(), id);
     assert_eq!(session.bytes(id), old);
-    assert_eq!(standing(&session), Some(crate::link::Standing::Ahead));
+    let unsaved = session.bench.workspace.get(id).unwrap().is_unsaved();
+    assert!(!unsaved, "the document took its file back");
+    assert_eq!(standing(&session), Some(crate::link::Standing::Theirs));
     session.heard();
     let pulls = session.bench.device.queued().into_iter().filter(|cmd| {
         matches!(

@@ -89,8 +89,8 @@ same sheet. A program going up lists the piano or sample it plays as a row of it
 own when the keyboard lacks it.
 
 Undo in the activity log takes back a link made, moved or removed, and a file Sync
-brought in. Library undo takes back the file and leaves its link. A write to the
-keyboard has no undo.
+brought in. Library undo takes back the file and leaves its link. Either way the file
+then reads as older than its slot. A write to the keyboard has no undo.
 
 ### What a contributor sees
 
@@ -137,14 +137,20 @@ the slot's name, and unlinks the rest, with Undo.
 
 ### Standing
 
-| Slot holds | File | Standing | Mark |
+The link orders the versions the two have agreed on: `base` is the newest, then
+`past`, newest first. A checksum the link never knew is newer than all of them.
+
+| Slot holds | File holds | Standing | Mark |
 |---|---|---|---|
-| The file's checksum | any | `Same` | none |
-| Another checksum the link knows, in `base` or `past` | any | `Ahead` | `↑` |
-| A checksum the link never knew | unchanged since `base` | `Theirs` | `↓` |
-| A checksum the link never knew | changed | `Both` | `!` |
+| The file's checksum | the same | `Same` | none |
+| An older version than the file's | a newer one | `Ahead` | `↑` |
+| A newer version than the file's | an older one | `Theirs` | `↓` |
+| A checksum the link never knew | another it never knew | `Both` | `!` |
 | Nothing | any | `Gone` | `!` |
 | Not read yet | any | `Unread` | dimmed address |
+
+So a file put back to an earlier version, by undo or by a sync client that has not
+delivered the newer one, reads as older than its slot.
 
 A slot that reports no checksum, such as Settings, is compared by length against
 `base`.
@@ -219,9 +225,8 @@ bundle unpacked into the library exports again with what its programs play.
 - History is eight checksums and no bytes. A slot holding a version older than those
   reads as changed on the keyboard. Turning a `↓` row to `↑`, or picking the file on a
   both-changed row, discards the keyboard's version.
-- A file older than its link reads as newer than its slot. That is right for a file
-  put back by undo, and wrong for one a sync client has not delivered yet when the
-  link another drawbar wrote for it arrives first.
+- A file edited back to bytes it held before reads as older than its slot, and Sync
+  offers the slot's version. Turning the row to `↑` sends the file.
 - A change made at the panel while drawbar is attached shows at the next Sync press,
   or as a refused write.
 - Every press reads every list. That is quick on an Electro 5 and unmeasured on
@@ -285,8 +290,6 @@ come back because its file still exists.
 - A bounded store of version bytes, which would give Restore and an undo for a write
   to the keyboard.
 - Noticing panel changes while attached, by a read when idle.
-- Telling an undelivered file from an edit, by whether the file holds what the
-  library last recorded for it.
 - Storing a link as a change that is no step of undo and leaves Redo as it was.
 - Bundle export resolving a set list's programs through links; it uses the slot in
   each program's header.
