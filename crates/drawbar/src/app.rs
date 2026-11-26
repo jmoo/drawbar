@@ -412,8 +412,9 @@ impl DrawbarApp {
     /// A screen too small for the shell: a browser tab of any size, or a window too small
     /// at this zoom.
     ///
-    /// Only the notice draws, so no input reaches a shell with no room to lay out, and its
-    /// state is untouched. The zoom alone still answers its keys and menu items.
+    /// Only the notice and the window's frame draw, so no input reaches a shell with no
+    /// room to lay out, and its state is untouched. The zoom alone still answers its keys
+    /// and menu items.
     fn gated(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // A press in a frame not drawn is never seen, so the gesture it began must not
         // join the one before it.
@@ -425,6 +426,7 @@ impl DrawbarApp {
         self.menu_bar_events(ctx, frame, zooms, &mut acts);
         self.shortcuts(ctx, frame, zooms, &mut acts);
         let smaller = self.zoom.after(crate::zoom::Step::Out, self.room).ok();
+        self.frame_alone(ctx);
         if let Some(zoom) = crate::shell::too_small_notice(ctx, smaller) {
             self.pick_zoom(ctx, frame, zoom);
         }
@@ -1479,6 +1481,9 @@ impl DrawbarApp {
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));
+        }
+        if let Some(name) = wants.rename {
+            acts.push(browser::Act::RenameLocal { id, name });
         }
     }
 }

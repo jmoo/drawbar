@@ -1673,6 +1673,7 @@ impl Store {
                     };
                     deleted.retain(|key| !finishing(key));
                     let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
+                    self.date(&shown, Some(&deleted), workspace);
                     if failed || back > 0 {
                         self.project_tags(&shown, browser);
                         browser.forget_gone(workspace);
@@ -2374,6 +2375,7 @@ impl Store {
             browser.folders.others = shown.others();
         }
         let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
+        self.date(&shown, reach.as_ref(), workspace);
         if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }
@@ -2571,6 +2573,31 @@ impl Store {
         // A file gone missing keeps the status line, which asks for it to be saved.
         let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
         (touched, said)
+    }
+
+    /// Show each asset the view reached when its file was last modified, as the view
+    /// lists it, and none where the view lists no file for it.
+    fn date(&self, listed: &Shown, reach: Option<&BTreeSet<Key>>, workspace: &mut Workspace) {
+        let modified = |key: &Key| {
+            listed
+                .files
+                .get(key)
+                .and_then(|(_, stat)| (*stat)?.modified)
+        };
+        match reach {
+            None => {
+                for (id, key) in self.ids.iter() {
+                    workspace.dated(id, modified(key));
+                }
+            }
+            Some(keys) => {
+                for key in keys {
+                    if let Some(id) = self.ids.id(key) {
+                        workspace.dated(id, modified(key));
+                    }
+                }
+            }
+        }
     }
 
     /// Give each asset the key the library knows its file by now, where that changed: a

@@ -656,6 +656,10 @@ pub struct LocalEntity {
     /// ⚠️ While it is set, [`LocalEntity::name`] is its last component. Set both through
     /// [`Workspace::place`].
     pub path: Option<LibPath>,
+    /// When the library's listing says its file was last modified, as
+    /// [`crate::store::Stat::modified`] counts it. `None` while the library lists no file
+    /// for it. [`Workspace::dated`] sets it.
+    modified: Option<u64>,
     pub origin: Origin,
     /// ⚠️ Empty while the asset [`rests`](LocalEntity::rests) in its file. Anything that
     /// needs the whole body asks [`LocalEntity::whole`], and its length is
@@ -762,6 +766,7 @@ impl LocalEntity {
             id,
             name,
             path: None,
+            modified: None,
             origin,
             saved: Baseline::new(
                 Content::Resident {
@@ -1071,6 +1076,12 @@ impl LocalEntity {
         };
         let bytes = self.bytes.clone();
         Baseline::new(Content::Resident { bytes, facts }, self.stamp)
+    }
+
+    /// When its file was last modified, in nanoseconds since the Unix epoch, where the
+    /// library lists a file for it and the system gave that file a time.
+    pub fn modified(&self) -> Option<u64> {
+        self.modified
     }
 
     /// The slot this asset stands for: its link, or else the slot it came off.
@@ -2127,6 +2138,19 @@ impl Workspace {
         self.moved();
     }
 
+    /// Show when the library's listing says an asset's file was last modified, or that it
+    /// lists no file for it.
+    pub fn dated(&mut self, id: u64, modified: Option<u64>) {
+        let Some(entity) = self
+            .get_mut(id)
+            .filter(|entity| entity.modified != modified)
+        else {
+            return;
+        };
+        entity.modified = modified;
+        self.revision += 1;
+    }
+
     /// Show an asset's file where the library found it, asking for nothing.
     pub fn follow(&mut self, id: u64, path: LibPath) {
         if let Some(entity) = self.get_mut(id) {
@@ -2419,8 +2443,8 @@ impl Workspace {
     }
 
     /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
-    /// holds: where its file is, whether it is kept, its link, its last write and its
-    /// pending edit.
+    /// holds: where its file is and when the listing dates it, whether it is kept, its
+    /// link, its last write and its pending edit.
     fn swap(&mut self, id: u64, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
         let Some(entity) = self.get_mut(id) else {
             return;
@@ -2428,6 +2452,7 @@ impl Workspace {
         let made = made(entity);
         *entity = LocalEntity {
             path: entity.path.take(),
+            modified: entity.modified,
             kept: entity.kept,
             link: entity.link,
             wrote: entity.wrote,
@@ -4073,6 +4098,7 @@ impl Workspace {
             wrote,
             pending,
             path,
+            modified: entity.modified,
             seen: entity.seen.clone(),
             ..replaced
         };

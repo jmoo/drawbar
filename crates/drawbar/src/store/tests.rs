@@ -884,6 +884,84 @@ fn a_file_whose_time_alone_changed_is_not_said_to_have_changed() {
     assert_eq!(session.bytes(id), theirs, "a change after it is still seen");
 }
 
+/// When the disk says the file at `at` was last modified, as [`Stat::modified`] counts it.
+fn modified_on_disk(root: &Temp, at: &str) -> Option<u64> {
+    let modified = fs::metadata(root.at(at)).and_then(|meta| meta.modified());
+    let since = modified.unwrap().duration_since(std::time::UNIX_EPOCH);
+    u64::try_from(since.unwrap().as_nanos()).ok()
+}
+
+#[test]
+fn an_asset_shows_when_its_file_was_last_modified_once_it_has_one() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let modified = |session: &Session| session.bench.workspace.get(id).unwrap().modified();
+    assert_eq!(modified(&session), None, "no file is written yet");
+
+    session.sync();
+    let written = modified_on_disk(&root, "untitled.ne5p");
+    assert!(written.is_some(), "the disk dates the file");
+    assert_eq!(modified(&session), written);
+
+    session.close();
+    let again = Session::listed(&root);
+    let id = again.named("untitled.ne5p");
+    let listed = again.bench.workspace.get(id).unwrap().modified();
+    assert_eq!(listed, written, "a file only listed is dated too");
+}
+
+#[test]
+fn the_time_an_asset_shows_follows_a_change_outside_and_a_save() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let modified = |session: &Session| session.bench.workspace.get(id).unwrap().modified();
+
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+    let touched = Some(1_000_000_000 * 1_000_000_000);
+    assert_eq!(modified(&session), touched, "the time `touch` gave it");
+
+    let mine = with_gain(&session.bytes(id), "96");
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, mine, Cause::User, log);
+    assert_eq!(
+        modified(&session),
+        touched,
+        "an edit leaves the file's time"
+    );
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let saved = modified_on_disk(&root, "untitled.ne5p");
+    assert_ne!(saved, touched, "the save dated the file again");
+    assert_eq!(modified(&session), saved);
+}
+
+#[test]
+fn an_asset_kept_after_its_file_was_deleted_outside_shows_no_time() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.tag(&[id], "Sunday");
+    assert!(session
+        .bench
+        .workspace
+        .get(id)
+        .unwrap()
+        .modified()
+        .is_some());
+
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&id));
+    assert_eq!(session.bench.workspace.get(id).unwrap().modified(), None);
+}
+
 #[test]
 fn an_edit_over_a_file_whose_time_alone_changed_asks_nothing() {
     let root = Temp::new();
@@ -9400,6 +9478,8 @@ fn a_file_whose_delete_is_refused_comes_back_once_the_library_answers() {
     let back = session.named("untitled.ne5p");
     assert_eq!(session.path(back).as_deref(), Some("untitled.ne5p"));
     assert!(root.at("untitled.ne5p").exists(), "the file stays");
+    let entity = session.bench.workspace.get(back).unwrap();
+    assert!(entity.modified().is_some(), "and shows its time again");
 }
 
 /// A take-in after an Undo ends Redo, as the library's own redo ends with it.
