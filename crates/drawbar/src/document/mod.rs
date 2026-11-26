@@ -178,6 +178,10 @@ pub struct Wants {
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
+    /// The name the asset's name box settled on. The browser renames the asset.
+    ///
+    /// ⚠️ Never by reopening the document, which would discard everything else it keeps.
+    pub rename: Option<String>,
 }
 
 /// Requests from the Basic face that cannot run while the asset is borrowed for drawing:
@@ -491,6 +495,7 @@ impl Document {
             load: act.load,
             build: act.build,
             sync: act.sync,
+            rename: act.rename,
             ..Wants::default()
         };
         let mut details = None;
@@ -587,11 +592,6 @@ impl Document {
                     }
                 }
             }
-        }
-        if let Some(name) = act.rename {
-            // ⚠️ Rename only. The box already holds what was typed, and reopening the
-            // document would discard everything else it keeps.
-            workspace.rename(id, name);
         }
         if act.export {
             self.export(ui.ctx(), id, workspace, log);
@@ -1769,6 +1769,9 @@ mod tests {
         id: u64,
         /// The window width, which decides how far the header collapses.
         width: f32,
+        /// Whether the window has the keyboard, as it does not while another application
+        /// is in front.
+        focused: bool,
         /// What the last frame painted.
         said: Vec<Word>,
     }
@@ -1807,6 +1810,7 @@ mod tests {
                 document: Document::default(),
                 id: 0,
                 width: SCREEN.x,
+                focused: true,
                 said: Vec::new(),
             }
         }
@@ -1873,6 +1877,29 @@ mod tests {
             testing::button(egui::pos2(rect.left() + 1.0, rect.center().y), true)
         }
 
+        /// Click the start of the name box showing `shown`, type `typed` there, and settle
+        /// the box, returning the rename the last frame asked for.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn type_in_name_box(&mut self, shown: &str, typed: &str) -> Option<String> {
+            self.frame(Vec::new());
+            self.frame(vec![self.on_name_box(shown)]);
+            self.frame(vec![egui::Event::Text(typed.to_string())]);
+            self.wants(vec![testing::key(egui::Key::Enter)]).rename
+        }
+
+        /// Run the rename the name box asked for, as the app runs it.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn rename(&mut self, name: String) {
+            let id = self.id;
+            self.act(vec![crate::browser::Act::RenameLocal { id, name }]);
+        }
+
+        /// Give the asset a file in the library folder, as a kept asset has.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn place(&mut self) {
+            crate::folders::place_new(&mut self.workspace, &crate::folders::Folders::default());
+        }
+
         /// One frame, and every shape it painted.
         fn output(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
             self.run(events).0
@@ -1884,7 +1911,8 @@ mod tests {
         }
 
         fn run(&mut self, events: Vec<egui::Event>) -> (egui::FullOutput, Wants) {
-            let input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
+            let mut input = testing::screen(egui::vec2(self.width, SCREEN.y), events);
+            input.focused = self.focused;
             let ctx = self.ctx.clone();
             let mut wants = Wants::default();
             let output = testing::run(&ctx, input, |ctx| {
@@ -2283,21 +2311,133 @@ mod tests {
         );
     }
 
-    /// The name box edits the asset's name where the file stores none, and the name
+    /// The name box of a kept asset asks the browser to rename its file, and the name
     /// keeps the extension the box does not show.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn typing_in_the_name_box_renames_the_asset_and_keeps_its_extension() {
+    fn typing_in_the_name_box_asks_to_rename_the_file_and_keeps_its_extension() {
         let mut open = Open::fresh(Fresh::Program);
+        open.place();
         assert_eq!(open.entity().name, "untitled.ne5p");
+
+        let wanted = open.type_in_name_box("untitled", "X");
+        assert_eq!(wanted.as_deref(), Some("Xuntitled.ne5p"));
+        assert_eq!(
+            open.entity().name,
+            "untitled.ne5p",
+            "the browser renames it, not the document"
+        );
+
+        open.rename(wanted.unwrap());
+        let path = open
+            .entity()
+            .path
+            .as_ref()
+            .map(crate::store::LibPath::to_string);
+        assert_eq!(path.as_deref(), Some("Xuntitled.ne5p"), "the file moves");
+    }
+
+    /// A rename from the name box leaves the document open as it was: its unsaved edit
+    /// and the morph lens it shows.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unsaved_edit_and_the_lens_survive_a_rename_from_the_name_box() {
+        let mut open = Open::file("blank.ns4y", Fresh::Stage4Synth.bytes().unwrap());
+        open.place();
+        open.set(&[("synth_a_volume", "40"), ("synth_a_volume_wheel", "211")]);
+        let edited = open.entity().bytes.to_vec();
+        open.twice();
+        open.state().fields.pretend_lens(0);
+
+        let wanted = open.type_in_name_box("blank", "X").expect("a rename");
+        open.rename(wanted);
+        let words = open.twice();
+
+        assert_eq!(open.entity().name, "Xblank.ns4y");
+        assert!(open.entity().bytes[..] == edited[..], "the edit is kept");
+        assert!(open.entity().is_unsaved(), "and still unsaved");
+        assert!(
+            words.iter().any(|word| word == "211"),
+            "the lens still shows the wheel: {words:?}"
+        );
+    }
+
+    /// A view of a keyboard slot has no file, so its name box renames it here only.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_view_of_a_slot_is_renamed_from_its_name_box_without_a_file() {
+        let mut open = Open::empty();
+        open.id = open.workspace.view(
+            "Africa-Split.ne5p".into(),
+            Origin::Device {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+            Fresh::Program.bytes().unwrap(),
+            &mut open.log,
+        );
+
+        let wanted = open
+            .type_in_name_box("Africa-Split", "X")
+            .expect("a rename");
+        open.rename(wanted);
+
+        assert_eq!(open.entity().name, "XAfrica-Split.ne5p");
+        assert!(open.workspace.is_view(open.id), "still a view");
+        assert_eq!(open.entity().path, None, "with no file");
+    }
+
+    /// A name the library refuses leaves the asset as it was, and the box shows its name
+    /// again rather than what was typed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_name_leaves_the_name_box_showing_the_assets_name() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.place();
+
+        let wanted = open.type_in_name_box("untitled", ":").expect("a rename");
+        open.rename(wanted);
+        let words = open.twice();
+
+        assert_eq!(open.entity().name, "untitled.ne5p");
+        assert!(words.iter().any(|word| word == "untitled"), "{words:?}");
+        assert!(!words.iter().any(|word| word.contains(':')), "{words:?}");
+    }
+
+    /// The name box follows a rename made elsewhere, such as in the browser.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_name_box_follows_a_rename_made_in_the_browser() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.place();
+        open.twice();
+
+        open.rename("Gig".into());
+        let words = open.twice();
+
+        assert_eq!(open.entity().name, "Gig.ne5p");
+        assert!(words.iter().any(|word| word == "Gig"), "{words:?}");
+        assert!(!words.iter().any(|word| word == "untitled"), "{words:?}");
+    }
+
+    /// A name still being typed stays in its box while another application is in front,
+    /// and settles once the window is back.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unfinished_name_is_still_in_its_box_after_the_window_was_left() {
+        let mut open = Open::fresh(Fresh::Program);
+        open.place();
         open.frame(Vec::new());
         open.frame(vec![open.on_name_box("untitled")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![testing::key(egui::Key::Enter)]);
 
-        let renamed = open.entity().name.clone();
-        assert_ne!(renamed, "untitled.ne5p", "the box was typed into");
-        assert!(renamed.ends_with(".ne5p"), "the extension stays: {renamed}");
-        assert!(renamed.contains('X'), "X is in the name: {renamed}");
+        open.focused = false;
+        let away = open.twice();
+        open.focused = true;
+        let wanted = open.wants(vec![testing::key(egui::Key::Enter)]).rename;
+
+        assert!(away.iter().any(|word| word == "Xuntitled"), "{away:?}");
+        assert_eq!(wanted.as_deref(), Some("Xuntitled.ne5p"));
     }
 
     /// Where the file stores the name, the box writes it through the format and leaves
@@ -2329,13 +2469,12 @@ mod tests {
 
     /// Where the instrument stores no name, its name box renames the asset, the only
     /// name such an instrument has.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_sample_storing_no_name_renames_the_asset_from_its_name_box() {
         let mut open = Open::file("whatever.nsmp", nameless_sample_bytes());
-        open.frame(Vec::new());
-        open.frame(vec![open.on_name_box("whatever")]);
-        open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![testing::key(egui::Key::Enter)]);
+        let wanted = open.type_in_name_box("whatever", "X").expect("a rename");
+        open.rename(wanted);
 
         assert_eq!(open.document.refusal(), None);
         let renamed = open.entity().name.clone();
