@@ -156,8 +156,7 @@ fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Opt
             changed.push(id);
             continue;
         }
-        workspace.replace_bytes(id, bytes, log);
-        workspace.mark_saved(id);
+        workspace.save_over(id, bytes, None, log);
         workspace.link(id, &keyboard, before);
         put.push(id);
     }

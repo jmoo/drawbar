@@ -1141,8 +1141,7 @@ fn bring(
         before,
         after: after.clone(),
     };
-    workspace.replace_bytes(id, bytes, log);
-    workspace.mark_saved(id);
+    workspace.save_over(id, bytes, None, log);
     workspace.link(id, keyboard, after);
     Some(restored)
 }
