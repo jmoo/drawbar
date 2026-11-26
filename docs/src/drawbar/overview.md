@@ -41,7 +41,8 @@ shows how many files it has.
 The **Where** column says where a sound lives: on this computer, on the keyboard,
 or both, with `=` when the two copies match and `≠` when they differ. It turns
 red when a send is waiting. While an instrument is attached, the **Needs** column
-names the sample or piano a sound plays. A name in italics with a `*` has unsaved
+names the sample or piano a sound plays. The **Modified** column says when a file
+on this computer was last changed. A name in italics with a `*` has unsaved
 edits. Hover anything for an explanation.
 
 ## Folders and tags
