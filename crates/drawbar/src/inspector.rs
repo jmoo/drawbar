@@ -425,6 +425,13 @@ pub fn facts(row: &Row, fit: &Fit) -> Vec<Fact> {
             hint: None,
         },
     ];
+    if let Some(modified) = row.modified {
+        said.push(Fact {
+            what: "modified",
+            said: crate::library::dated(modified),
+            hint: None,
+        });
+    }
     if let Fit::Refuses(why) = fit {
         said.push(Fact {
             what: "refused",
@@ -1123,6 +1130,7 @@ mod tests {
             where_: Where::Both(Some(false)),
             at: None,
             size: 2_048,
+            modified: None,
             needs: crate::library::Needs::Nothing,
         };
 
@@ -1156,6 +1164,20 @@ mod tests {
             facts(&row, &Fit::Warn("untried".into())).len(),
             said.len(),
             "an untried write is the queue's warning, not a fact about the asset"
+        );
+
+        let modified = 1_792_798_200_000_000_000;
+        let filed = Row {
+            modified: Some(modified),
+            ..row
+        };
+        let dated = facts(&filed, &Fit::Takes);
+        assert_eq!(dated.len(), said.len() + 1);
+        assert_eq!(dated[4].what, "modified");
+        assert_eq!(
+            dated[4].said,
+            crate::library::dated(modified),
+            "the table's own text for the file's time"
         );
     }
 
@@ -1204,6 +1226,7 @@ mod tests {
             where_,
             at: None,
             size: 0,
+            modified: None,
             needs: crate::library::Needs::Nothing,
         };
         let rows = [

@@ -62,7 +62,8 @@ merge the two. Removing a tag leaves its sounds in place.
 ## Find a sound
 
 Click the search box at the top, or press Command-K (Ctrl-K), and type part of a
-name. In **Library**, click a column heading to sort. Choose a kind or tag on the
+name. In **Library**, click a column heading to sort. The **Modified** column
+says when a file on this computer was last changed. Choose a kind or tag on the
 left to narrow the list. Two tags show the sounds that have both. Click a
 selected filter again to remove it.
 

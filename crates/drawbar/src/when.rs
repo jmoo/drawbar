@@ -88,6 +88,18 @@ pub fn span(from: u64, to: u64, offset: impl Fn(u64) -> Option<i32>) -> String {
     }
 }
 
+/// When `ms` milliseconds after the Unix epoch was, as "23 Oct 2026, 14:05" says it, in
+/// the zone `offset` gives it, in minutes east of UTC. In UTC, and saying so, where it
+/// gives none.
+pub fn at(ms: u64, offset: impl Fn(u64) -> Option<i32>) -> String {
+    let (zone, utc) = match offset(ms) {
+        Some(zone) => (zone, ""),
+        None => (0, " UTC"),
+    };
+    let (day, time) = moment(ms, zone);
+    format!("{day}, {time}{utc}")
+}
+
 /// The day and the time of day of `ms` milliseconds after the Unix epoch, `offset`
 /// minutes east of UTC, as "23 Oct 2026" and "14:05" say them.
 fn moment(ms: u64, offset: i32) -> (String, String) {
@@ -154,6 +166,15 @@ mod tests {
             span(summer, winter, zone),
             "between 23 Oct 2026, 02:00 and 6 Nov 2026, 01:00"
         );
+    }
+
+    #[test]
+    fn one_moment_is_said_as_its_day_and_time_in_its_zone() {
+        assert_eq!(at(LATE, |_| Some(0)), "23 Oct 2026, 23:30");
+        assert_eq!(at(LATE, |_| Some(60)), "24 Oct 2026, 00:30");
+        assert_eq!(at(LATE, |_| Some(-300)), "23 Oct 2026, 18:30");
+        assert_eq!(at(LATE, |_| Some(330)), "24 Oct 2026, 05:00");
+        assert_eq!(at(LATE, |_| None), "23 Oct 2026, 23:30 UTC");
     }
 
     #[test]
