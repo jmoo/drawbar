@@ -506,6 +506,25 @@ impl Walk {
         self.frame();
     }
 
+    /// Write `bytes` to the file at `path` at a time the file did not have. A clock that
+    /// ticks slowly gives two writes close together one time, and bodies of one length
+    /// then look alike.
+    fn write_later(&self, path: &str, bytes: &[u8]) {
+        let at = self.root.at(path);
+        let modified = || fs::metadata(&at).and_then(|file| file.modified()).ok();
+        let before = modified();
+        let patience = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            fs::write(&at, bytes).unwrap();
+            if modified() != before {
+                return;
+            }
+            let waited = std::time::Instant::now() < patience;
+            assert!(waited, "{}: the clock moved on", self.whence());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// Another program writes the file. A document with nothing unsaved shows it, and one
     /// holding an edit asks, and keeps the edit or takes theirs as a revert does. Undo or
     /// Redo may follow in the same frame.
@@ -513,7 +532,7 @@ impl Walk {
         self.unwinds = false;
         let whole = self.model.state[doc].clone();
         let theirs = self.other(&[&whole.file, &whole.working]);
-        fs::write(self.root.at(&whole.path), &theirs).unwrap();
+        self.write_later(&whole.path, &theirs);
         self.session.refocus();
         self.pump();
         self.model.outside[doc] += 1;
