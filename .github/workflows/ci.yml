@@ -212,7 +212,7 @@ jobs:
       group: pages
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -226,8 +226,16 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+      # The list deploy-pages reads can lack the artifact for most of a minute after its
+      # upload, and the action reads it once: https://github.com/actions/deploy-pages/issues/451
       - uses: actions/deploy-pages@v4
         id: deployment
+        continue-on-error: true
+      - if: steps.deployment.outcome == 'failure'
+        run: sleep 60
+      - if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        id: retry
 
   # Pages waits on this, so no app that reports is published before its collector.
   telemetry:
