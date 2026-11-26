@@ -49,7 +49,8 @@ change a link.
 The mark before a name says how a file stands with its slot: `↑` when the file is
 newer, `↓` when the slot is, and `!` when it waits for your pick. An address in gray is a slot not read yet, or the slot on a
 keyboard that is not attached. The **Needs** column names the piano or sample a
-program plays, once it is on this computer or on the keyboard. A name in italics
+program plays, once it is on this computer or on the keyboard. The **Modified**
+column says when a file on this computer was last changed. A name in italics
 with a `*` has unsaved edits. Hover anything for an explanation.
 
 Select one program and the inspector's **Plays** card lists the piano and sample it

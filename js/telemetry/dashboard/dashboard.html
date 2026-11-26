@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>drawbar telemetry</title>
+    <style>
+      /* The guide's palette, from docs/theme/drawbar.css. */
+      :root {
+        color-scheme: light dark;
+        --page: light-dark(#fbfaf8, #121316);
+        --card: light-dark(#ffffff, #1f2024);
+        --wash: light-dark(#f4f3f0, #2c2d31);
+        --rule: light-dark(#dedad2, #2c2d31);
+        --ink: light-dark(#282828, #e2e0da);
+        --ink-weak: light-dark(#56534d, #a8a5a0);
+        --ink-strong: light-dark(#000000, #f5f3ee);
+        --mark: light-dark(#b01e12, #d6463a);
+      }
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+        font:
+          14px/1.45 "Ubuntu",
+          system-ui,
+          sans-serif;
+      }
+      header,
+      main {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 16px;
+        padding-top: 32px;
+      }
+      main {
+        padding-bottom: 64px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        color: var(--ink-strong);
+      }
+      h1 span {
+        font-weight: 400;
+        color: var(--ink-weak);
+      }
+      #pulled {
+        flex: 1;
+        font-size: 12px;
+        color: var(--ink-weak);
+      }
+      nav {
+        display: flex;
+        gap: 2px;
+        padding: 2px;
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        background: var(--card);
+      }
+      button {
+        padding: 3px 10px;
+        border: 0;
+        border-radius: 6px;
+        background: none;
+        color: var(--ink-weak);
+        font: inherit;
+        cursor: pointer;
+      }
+      button[aria-pressed="true"] {
+        background: var(--wash);
+        color: var(--ink-strong);
+      }
+      h2 {
+        margin: 32px 0 12px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-weak);
+      }
+      h3 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        color: var(--ink-strong);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 12px;
+      }
+      .tiles {
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        margin-top: 24px;
+      }
+      .card {
+        min-width: 0;
+        padding: 16px;
+        border: 1px solid var(--rule);
+        border-radius: 10px;
+        background: var(--card);
+      }
+      .wide {
+        grid-column: 1 / -1;
+      }
+      .tile b {
+        display: block;
+        font-size: 28px;
+        line-height: 1.3;
+        color: var(--ink-strong);
+      }
+      small,
+      .none {
+        margin: 0;
+        font-size: 12px;
+        color: var(--ink-weak);
+      }
+
+      .plot {
+        position: relative;
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        height: 180px;
+        margin: 16px 8px 24px 36px;
+        border-bottom: 1px solid var(--ink-weak);
+        font-size: 11px;
+        color: var(--ink-weak);
+        font-variant-numeric: tabular-nums;
+      }
+      .tick {
+        position: absolute;
+        left: 0;
+        right: 0;
+        border-top: 1px solid var(--rule);
+      }
+      .tick span {
+        position: absolute;
+        right: 100%;
+        margin-right: 8px;
+        transform: translateY(-50%);
+      }
+      .column {
+        position: relative;
+        display: flex;
+        flex: 1;
+        align-items: flex-end;
+        justify-content: center;
+        height: 100%;
+      }
+      .column:hover {
+        background: var(--wash);
+      }
+      .column i {
+        width: 70%;
+        max-width: 24px;
+        border-radius: 4px 4px 0 0;
+        background: var(--mark);
+      }
+      .column span {
+        position: absolute;
+        top: 100%;
+        margin-top: 6px;
+        white-space: nowrap;
+      }
+
+      .list {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 0 12px;
+      }
+      .list span {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: var(--ink-weak);
+      }
+      .list .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: left;
+        color: var(--ink);
+      }
+      .bar {
+        grid-column: 1 / -1;
+        height: 4px;
+        margin: 4px 0 10px;
+        border-radius: 2px;
+        background: var(--wash);
+      }
+      .bar i {
+        display: block;
+        height: 100%;
+        border-radius: 2px;
+        background: var(--mark);
+      }
+
+      .scroll {
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        padding: 6px 16px 6px 0;
+        text-align: left;
+        white-space: nowrap;
+      }
+      th {
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--ink-weak);
+      }
+      td {
+        border-top: 1px solid var(--rule);
+      }
+
+      #tip {
+        position: fixed;
+        padding: 8px 10px;
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        background: var(--card);
+        box-shadow: 0 4px 16px rgb(0 0 0 / 0.15);
+        font-size: 12px;
+        color: var(--ink-weak);
+        pointer-events: none;
+      }
+      #tip b {
+        display: block;
+        font-size: 14px;
+        color: var(--ink-strong);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>drawbar <span>telemetry</span></h1>
+      <div id="pulled"></div>
+      <nav></nav>
+    </header>
+    <main></main>
+    <div id="tip" hidden></div>
+    <script type="application/json" id="data">
+      __DATA__
+    </script>
+    <script>
+      const { pulled, events } = JSON.parse(document.getElementById("data").textContent);
+      const DAY = 86_400_000;
+      const RANGES = { "7 days": 7, "30 days": 30, "90 days": 90 };
+      // Names in one list before the rest fold into a last row.
+      const MOST_NAMES = 8;
+      // Fields the latest table gives a column of their own.
+      const COLUMNS = new Set(["event", "version", "model", "firmware", "browser", "os"]);
+
+      // Days are UTC days, and the last is the day of the pull.
+      const end = (Math.floor(Date.parse(pulled) / DAY) + 1) * DAY;
+      for (const event of events) {
+        event.t = Date.parse(`${event.at.replace(" ", "T")}Z`);
+      }
+
+      const page = document.querySelector("main");
+      const tip = document.getElementById("tip");
+      const count = new Intl.NumberFormat("en-US").format;
+      const day = new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      }).format;
+      const minute = new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+        timeZone: "UTC",
+      }).format;
+      const total = (rows) => rows.reduce((sum, event) => sum + event.weight, 0);
+      const share = (part, whole) => (whole ? `${Math.round((100 * part) / whole)}%` : "–");
+      const plural = (n, word) => `${count(n)} ${word}${n === 1 ? "" : "s"}`;
+
+      // ⚠️ Every string in `events` was posted to a public endpoint. `append` and the
+      // properties used here take it as text; none of them parses HTML.
+      function h(tag, properties = {}, ...children) {
+        const node = Object.assign(document.createElement(tag), properties);
+        node.append(...children);
+        return node;
+      }
+
+      function card(title, body, wide = "") {
+        return h("section", { className: `card ${wide}` }, h("h3", {}, title), body);
+      }
+
+      const none = () => h("p", { className: "none" }, "None");
+
+      function tile(label, value, hint) {
+        return h("div", { className: "card tile" }, label, h("b", {}, value), h("small", {}, hint));
+      }
+
+      function hover(node, ...lines) {
+        node.addEventListener("pointermove", (pointer) => {
+          tip.replaceChildren(...lines);
+          tip.hidden = false;
+          tip.style.left = `${Math.min(pointer.clientX + 12, innerWidth - tip.offsetWidth - 8)}px`;
+          tip.style.top = `${pointer.clientY + 12}px`;
+        });
+        node.addEventListener("pointerleave", () => (tip.hidden = true));
+      }
+
+      // The smallest of 1, 2, 5, 10, 20, 50… that reaches `most` within four steps.
+      function step(most) {
+        for (let unit = 1; ; unit *= 10) {
+          const found = [1, 2, 5].find((multiple) => multiple * unit * 4 >= most);
+          if (found) {
+            return found * unit;
+          }
+        }
+      }
+
+      // Visitors in each of `days` days from `from`.
+      function chart(visits, from, days) {
+        const buckets = Array.from({ length: days }, (_, i) => ({
+          start: from + i * DAY,
+          visitors: 0,
+          visits: 0,
+        }));
+        for (const { t, weight, row } of visits) {
+          const bucket = buckets[Math.floor((t - from) / DAY)];
+          bucket.visitors += row.first_day ? weight : 0;
+          bucket.visits += row.navigation === "navigate" ? weight : 0;
+        }
+        const most = Math.max(...buckets.map((bucket) => bucket.visitors));
+        const unit = step(most);
+        const top = unit * Math.max(1, Math.ceil(most / unit));
+        const every = Math.ceil(days / 8);
+
+        const plot = h("div", { className: "plot" });
+        for (let tick = unit; tick <= top; tick += unit) {
+          const line = { className: "tick", style: `bottom: ${(100 * tick) / top}%` };
+          plot.append(h("div", line, h("span", {}, count(tick))));
+        }
+        buckets.forEach((bucket, i) => {
+          const column = h(
+            "div",
+            { className: "column" },
+            h("i", { style: `height: ${(100 * bucket.visitors) / top}%` }),
+            h("span", {}, i % every === 0 ? day(bucket.start) : ""),
+          );
+          hover(
+            column,
+            h("b", {}, plural(bucket.visitors, "visitor")),
+            plural(bucket.visits, "visit"),
+            h("div", {}, day(bucket.start)),
+          );
+          plot.append(column);
+        });
+        return card("Visitors per day", plot, "wide");
+      }
+
+      // `rows` counted under the name `label` gives each, most first.
+      function ranked(title, rows, label) {
+        const counts = new Map();
+        for (const { weight, row } of rows) {
+          const name = label(row) || "unknown";
+          counts.set(name, (counts.get(name) ?? 0) + weight);
+        }
+        const sorted = [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b));
+        const rest = sorted.splice(MOST_NAMES);
+        if (rest.length > 0) {
+          sorted.push([`${rest.length} more`, rest.reduce((sum, [, n]) => sum + n, 0)]);
+        }
+        const whole = total(rows);
+        const lines = sorted.flatMap(([name, n]) => [
+          h("span", { className: "name", title: name }, name),
+          h("span", {}, count(n)),
+          h("span", {}, share(n, whole)),
+          h("div", { className: "bar" }, h("i", { style: `width: ${(100 * n) / whole}%` })),
+        ]);
+        return card(title, lines.length > 0 ? h("div", { className: "list" }, ...lines) : none());
+      }
+
+      function latest(rows) {
+        const cells = ({ t, row }) => [
+          minute(t),
+          row.event,
+          Object.entries(row)
+            .filter(([name]) => !COLUMNS.has(name))
+            .map(([, value]) => value)
+            .join(" · "),
+          row.version,
+          [row.model, row.firmware].filter(Boolean).join(" "),
+          `${row.browser} · ${row.os}`,
+        ];
+        const line = (tag, texts) => h("tr", {}, ...texts.map((text) => h(tag, {}, text)));
+        const table = h(
+          "table",
+          {},
+          line("th", ["When (UTC)", "Event", "What", "Version", "Instrument", "Browser"]),
+          ...rows
+            .slice(-25)
+            .reverse()
+            .map((event) => line("td", cells(event))),
+        );
+        return card(
+          "Latest",
+          rows.length > 0 ? h("div", { className: "scroll" }, table) : none(),
+          "wide",
+        );
+      }
+
+      function render(days) {
+        const from = end - days * DAY;
+        const shown = events.filter((event) => event.t >= from && event.t < end);
+        const of = (kind) => shown.filter((event) => event.row.event === kind);
+        const visits = of("visit");
+        const visitors = visits.filter((event) => event.row.first_day);
+        const having = (flag) =>
+          share(total(visitors.filter((event) => event.row[flag])), total(visitors));
+        const [errors, failed, panics, ops] = ["error", "start_failed", "panic", "op"].map(of);
+
+        page.replaceChildren(
+          h(
+            "div",
+            { className: "grid tiles" },
+            tile(
+              "Visits",
+              count(total(visits.filter((event) => event.row.navigation === "navigate"))),
+              "new page loads",
+            ),
+            tile("Visitors", count(total(visitors)), "browsers, once a day"),
+            tile("Can connect", having("webusb"), "have WebUSB"),
+            tile("Window fits", having("fits"), "is large enough"),
+            tile("Errors", count(total(errors)), "outside an operation"),
+            tile("Start failures", count(total(failed)), "the app did not open"),
+            tile("Panics", count(total(panics)), "the app crashed"),
+          ),
+          h("h2", {}, "Visitors"),
+          h(
+            "div",
+            { className: "grid" },
+            chart(visits, from, days),
+            ranked("Version", visitors, (row) => row.version),
+            ranked("Browser", visitors, (row) => row.browser.split(" ")[0]),
+            ranked("System", visitors, (row) => row.os),
+            ranked("Country", visitors, (row) => row.country),
+            ranked("Referrer", visitors, (row) => row.referrer || "direct"),
+            ranked("Language", visitors, (row) => row.language),
+          ),
+          h("h2", {}, "Health"),
+          h(
+            "div",
+            { className: "grid" },
+            ranked("Errors", errors, (row) => `${row.domain}: ${row.kind}`),
+            ranked("Start failures", failed, (row) => `${row.step}: ${row.error}`),
+            ranked("Panics", panics, (row) => row.location),
+            ranked("Operations", ops, (row) => `${row.op} ${row.class}: ${row.outcome}`),
+            latest(shown.filter((event) => event.row.event !== "visit")),
+          ),
+        );
+      }
+
+      const buttons = Object.entries(RANGES).map(([name, days]) => [
+        h("button", { type: "button" }, name),
+        days,
+      ]);
+      function choose(chosen) {
+        for (const [button, days] of buttons) {
+          button.setAttribute("aria-pressed", days === chosen);
+        }
+        render(chosen);
+      }
+      for (const [button, days] of buttons) {
+        button.addEventListener("click", () => choose(days));
+        document.querySelector("nav").append(button);
+      }
+      document.getElementById("pulled").textContent = `Pulled ${minute(Date.parse(pulled))} UTC`;
+      choose(30);
+    </script>
+  </body>
+</html>

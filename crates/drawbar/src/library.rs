@@ -164,6 +164,9 @@ pub struct Row {
     pub mark: Option<Mark>,
     pub said: String,
     pub size: u64,
+    /// When its file was last modified, as [`LocalEntity::modified`] counts it. A slot, and
+    /// an asset with no file on this computer, has none.
+    pub modified: Option<u64>,
     pub needs: Needs,
 }
 
@@ -326,6 +329,7 @@ fn local(
         mark: marked.map(|(mark, _)| mark),
         said: marked.map_or_else(String::new, |(_, said)| said.to_string()),
         size: entity.size(),
+        modified: entity.modified(),
         needs: wanted(entity, catalog),
     }
 }
@@ -345,6 +349,7 @@ fn slot(class: ObjectClass, at: Location, info: &ProgramInfo, device: &DeviceSta
         mark: None,
         said: String::new(),
         size: u64::from(info.body_len),
+        modified: None,
         needs: played(class, at, device),
     }
 }
@@ -458,6 +463,7 @@ pub enum Column {
     Where,
     At,
     Size,
+    Modified,
     Needs,
 }
 
@@ -487,6 +493,7 @@ impl Column {
         Column::Where,
         Column::At,
         Column::Size,
+        Column::Modified,
         Column::Needs,
     ];
 
@@ -500,6 +507,7 @@ impl Column {
             Column::Where => "Where",
             Column::At => "At",
             Column::Size => "Size",
+            Column::Modified => "Modified",
             Column::Needs => "Needs",
         }
     }
@@ -521,6 +529,7 @@ impl Column {
             Column::Where => Track::Px(72.0),
             Column::At => Track::Px(44.0),
             Column::Size => Track::Px(56.0),
+            Column::Modified => Track::Px(MODIFIED_W),
             Column::Needs => Track::Share(1.3),
         }
     }
@@ -543,12 +552,13 @@ impl Column {
             Column::Where => "where",
             Column::At => "at",
             Column::Size => "size",
+            Column::Modified => "modified",
             Column::Needs => "needs",
         }
     }
 }
 
-const COLUMNS: usize = 9;
+const COLUMNS: usize = 10;
 
 /// The widths columns were dragged to, by column; `None` keeps the column's own track.
 pub type Widths = [Option<f32>; COLUMNS];
@@ -564,7 +574,8 @@ const COLUMN_MOST: f32 = 480.0;
 const GRIP: f32 = 8.0;
 
 /// The columns that give way to the name in a narrow table, first to go first.
-const YIELDING: [Column; 7] = [
+const YIELDING: [Column; 8] = [
+    Column::Modified,
     Column::Needs,
     Column::Tags,
     Column::Size,
@@ -573,6 +584,9 @@ const YIELDING: [Column; 7] = [
     Column::Where,
     Column::Mark,
 ];
+
+/// The width of the Modified column, which holds a day and a time: `28 May 2026, 20:00`.
+const MODIFIED_W: f32 = 112.0;
 
 /// The width the name keeps while another column can give way: about 16 characters.
 const NAME_LEAST: f32 = 100.0;
@@ -688,6 +702,8 @@ impl Key {
             Column::Mark | Column::Where => Ranked::Count(u64::from(row.where_.rank())),
             Column::At => Ranked::Address(address(row)),
             Column::Size => Ranked::Count(row.size),
+            // A row with no time sorts as the oldest.
+            Column::Modified => Ranked::Count(row.modified.unwrap_or(0)),
             Column::Needs => Ranked::Text(row.needs.text()),
         };
         Key {
@@ -850,9 +866,9 @@ impl Default for Library {
 #[derive(PartialEq)]
 struct Sources {
     /// The list's revision, but only where the order or the narrowing reads what an asset
-    /// holds (its kind, where it is, its size, what it needs), which any change to the
-    /// list may move. The names, slots, tags and queue they read otherwise are covered by
-    /// the rest.
+    /// holds (its kind, where it is, its size, its file's time, what it needs), which any
+    /// change to the list may move. The names, slots, tags and queue they read otherwise
+    /// are covered by the rest.
     revision: Option<u64>,
     layout: u64,
     device: u64,
@@ -1488,6 +1504,9 @@ fn paint(
         &crate::room::measure(row.size),
         mono(MONO),
     );
+    if let Some(modified) = row.modified {
+        write(cell(Column::Modified), &dated(modified), plain(TEXT, quiet));
+    }
     // ⚠️ Weak ink even for a bare id: an instrument not attached or not fully read may
     // still hold it.
     write(cell(Column::Needs), &row.needs.text(), plain(TEXT, quiet));
@@ -1543,8 +1562,18 @@ fn tooltip(
             (None, also) => format!("Also at {}", also.join(", ")),
         },
         Column::Size => format!("{} bytes", row.size),
+        Column::Modified => match row.modified {
+            Some(modified) => dated(modified),
+            None => "no file on this computer".to_string(),
+        },
         Column::Needs => row.needs.sentence(),
     }
+}
+
+/// When a file was last modified, on the user's clock, from the nanoseconds since the
+/// Unix epoch that [`Row::modified`] holds.
+pub fn dated(modified: u64) -> String {
+    crate::when::at(modified / 1_000_000, crate::when::local_offset)
 }
 
 /// The addresses of the slots holding what an unlinked row holds. See
@@ -1609,6 +1638,7 @@ mod tests {
             mark: None,
             said: String::new(),
             size,
+            modified: None,
             needs: Needs::Nothing,
         }
     }
@@ -1683,10 +1713,10 @@ mod tests {
             track.end - track.start
         };
 
-        let wide = tracks(900.0, &[None; COLUMNS], true);
+        let wide = tracks(1000.0, &[None; COLUMNS], true);
         assert!(
             (width_of(&wide, Column::Kind) - 120.0).abs() < 0.01,
-            "at 900 the kind holds the longest word: {}",
+            "at 1000 the kind holds the longest word: {}",
             width_of(&wide, Column::Kind)
         );
 
@@ -1730,9 +1760,8 @@ mod tests {
         };
 
         let attached = tracks(900.0, &widths, true);
-        assert_eq!(
-            name(&attached).end - name(&attached).start,
-            200.0,
+        assert!(
+            (name(&attached).end - name(&attached).start - 200.0).abs() < 0.01,
             "{attached:?}"
         );
         assert_eq!(end(&attached), 900.0, "{attached:?}");
@@ -1839,6 +1868,112 @@ mod tests {
         );
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(names, ["first", "later", "no slot"]);
+    }
+
+    /// 23 Oct 2026, 23:30 UTC, as a file's time is counted.
+    const LATE: u64 = 1_792_798_200_000_000_000;
+
+    #[test]
+    fn the_newest_file_sorts_first_and_a_row_with_no_time_last() {
+        let dated = |name: &str, size: u64, modified: Option<u64>| Row {
+            modified,
+            ..row(name, Kind::Program, Where::Computer, None, size)
+        };
+        let held = || {
+            vec![
+                dated("older", 1, Some(LATE - 1)),
+                dated("no file", 2, None),
+                dated("newest", 3, Some(LATE)),
+            ]
+        };
+        let names = |rows: &[Row]| -> Vec<String> { rows.iter().map(|r| r.name.clone()).collect() };
+
+        let newest = arrange(held(), "", Column::Modified, Order::Down);
+        assert_eq!(names(&newest), ["newest", "older", "no file"]);
+        let oldest = arrange(held(), "", Column::Modified, Order::Up);
+        assert_eq!(names(&oldest), ["no file", "older", "newest"]);
+    }
+
+    #[test]
+    fn a_file_on_this_computer_says_when_it_was_modified_and_a_slot_does_not() {
+        let mut bench = Bench::new();
+        let mut create = || {
+            bench
+                .workspace
+                .create(Fresh::Program, &mut bench.log)
+                .unwrap()
+        };
+        let (filed, unfiled) = (create(), create());
+        bench.workspace.dated(filed, Some(LATE));
+        bench.device.pretend_partitions(&crate::device::ELECTRO5);
+        bench
+            .device
+            .pretend_scanned(ObjectClass::Program, 7, &["Africa Split"]);
+
+        let held = rows(
+            &bench.workspace,
+            &bench.device.state,
+            bench.browser.tags(),
+            &Filter::default(),
+            &Rows::of(&bench.device.state, &bench.workspace, &bench.queue),
+        );
+        let times: Vec<(Item, Option<u64>)> =
+            held.iter().map(|row| (row.item, row.modified)).collect();
+        let slot = Item::Slot {
+            class: ObjectClass::Program,
+            at: Location::from_user(7, 1),
+        };
+        assert_eq!(
+            times,
+            [
+                (Item::Local(filed), Some(LATE)),
+                (Item::Local(unfiled), None),
+                (slot, None),
+            ]
+        );
+
+        let mut library = Library::default();
+        let screen = egui::vec2(1000.0, 540.0);
+        let said = library_frame(&mut library, &mut bench, screen, Vec::new());
+        assert!(said.iter().any(|word| word.text == "Modified"), "{said:?}");
+        let on_the_clock = crate::when::at(LATE / 1_000_000, crate::when::local_offset);
+        let cells: Vec<&testing::Word> = said
+            .iter()
+            .filter(|word| word.text == on_the_clock)
+            .collect();
+        let [cell] = cells.as_slice() else {
+            panic!("one row says {on_the_clock}: {said:?}");
+        };
+        assert!(
+            !cell.galley.elided,
+            "the day and the time are written whole"
+        );
+    }
+
+    #[test]
+    fn the_modified_column_holds_any_day_and_time() {
+        let ctx = testing::context();
+        let mut widest = 0.0_f32;
+        testing::run(&ctx, egui::RawInput::default(), |ctx| {
+            let font = egui::FontId::proportional(TEXT);
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            ctx.fonts(|fonts| {
+                for month in MONTHS {
+                    for digit in 0..=9 {
+                        let d = digit.to_string();
+                        let text = format!("{d}{d} {month} {d}{d}{d}{d}, {d}{d}:{d}{d}");
+                        let galley = fonts.layout_no_wrap(text, font.clone(), egui::Color32::WHITE);
+                        widest = widest.max(galley.size().x);
+                    }
+                }
+            });
+        });
+        assert!(
+            widest <= MODIFIED_W,
+            "the widest day and time is {widest} wide, and the column {MODIFIED_W}"
+        );
     }
 
     /// A kind, a place, and a tag narrow together, and an asset in both places passes a

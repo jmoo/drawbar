@@ -53,10 +53,11 @@ the house rules.
 | Job | Runs |
 |---|---|
 | `check` | `nix flake check` |
-| `native` | `nix build .#nord.tests .#nord.packages` on Linux and macOS, and `scripts/test.bash` on Windows; on Linux and macOS also the files releases attach |
+| `native` | `nix build .#nord.tests .#nord.packages` on Linux and macOS, and `scripts/test.bash` on Windows; on macOS also the disk image releases attach |
+| `downloads` | The files releases attach from Linux |
 | `web` | `nix build .#site .#nord.browser-tests`: the production browser bundle, this guide and the browser suites |
 | `corpus` | `nix build .#nord.all-corpus`, on `master` and in-repository pull requests |
-| `build` | Passes when `native`, `web` and `corpus` pass, or `corpus` is skipped |
+| `build` | Passes when `native`, `downloads`, `web` and `corpus` pass, or `corpus` is skipped |
 
 On `master`, `release` publishes the crates and creates their GitHub releases,
 `assets` attaches the files in `scripts/assets.tsv` to them, signing and notarizing

@@ -443,10 +443,15 @@ pub struct Fact {
     pub hint: Option<String>,
 }
 
-/// A row's kind and size, as the library's table shows them.
+/// A row's kind and size, and when its file was last modified, as the library's table
+/// shows them.
 pub fn about_row(row: &Row) -> String {
     let kind = kind_word(row.kind, row.qualifier);
-    format!("{kind} · {}", room::measure(row.size))
+    let about = format!("{kind} · {}", room::measure(row.size));
+    match row.modified {
+        Some(modified) => format!("{about} · {}", crate::library::dated(modified)),
+        None => about,
+    }
 }
 
 /// The summary of a multiple selection: how many rows are picked, and of the assets among
@@ -528,7 +533,8 @@ fn clicked(click: Click, id: u64) -> Option<Act> {
 }
 
 /// One picked row: its name, where it is with its mark, the slots that also hold its
-/// bytes, and why the instrument refuses it. Its kind and size are the name's hover.
+/// bytes, and why the instrument refuses it. Its kind, size and file time are the name's
+/// hover.
 fn one(ui: &mut egui::Ui, picked: &Single, acts: &mut Vec<Act>) {
     let name = crate::strings::display_name(&picked.name);
     ui.label(egui::RichText::new(name).font(egui::FontId::new(14.0, bold())))
@@ -1734,10 +1740,25 @@ mod tests {
             mark: None,
             said: String::new(),
             size: 2_048,
+            modified: None,
             needs: crate::library::Needs::Nothing,
         };
 
         assert_eq!(about_row(&row), "Stage 4 program · 2.0 kB");
+
+        let modified = 1_792_798_200_000_000_000;
+        let filed = Row {
+            modified: Some(modified),
+            ..row
+        };
+        assert_eq!(
+            about_row(&filed),
+            format!(
+                "Stage 4 program · 2.0 kB · {}",
+                crate::library::dated(modified)
+            ),
+            "the table's own text for the file's time"
+        );
     }
 
     #[test]
@@ -1788,6 +1809,7 @@ mod tests {
             mark: None,
             said: String::new(),
             size: 0,
+            modified: None,
             needs: crate::library::Needs::Nothing,
         };
         let rows = [

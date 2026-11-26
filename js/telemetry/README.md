@@ -22,8 +22,20 @@ Cloudflare Email Routing, and reports@drawbar.app must be a verified destination
 address. Email Routing sends to a verified address on the free plan; Email Sending
 is not needed.
 
-`node --test test/check.test.js` runs the tests; `nix flake check` runs them too. CI
+`node --test test/*.test.js` runs the tests; `nix flake check` runs them too. CI
 deploys from `master`.
+
+## Dashboard
+
+`nix run .#telemetry-dashboard` serves a page of charts from `drawbar_events` on
+<http://127.0.0.1:8788/> and opens it. Set `PORT` for another port. It reads the dataset
+with the login of `wrangler login`, or with `CLOUDFLARE_API_TOKEN` when that is set to a
+token that can read Account Analytics, and `CLOUDFLARE_ACCOUNT_ID` when the token reads
+more than one account.
+
+Each load reads the dataset again, and nothing is stored on this machine: the dataset
+alone keeps rows, for the three months [Privacy](../../docs/src/privacy.md) says. Rows
+with version `0.0.0-test` are left out.
 
 ## Testing against a running collector
 
