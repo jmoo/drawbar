@@ -1433,6 +1433,9 @@ impl DrawbarApp {
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));
         }
+        if let Some(name) = wants.rename {
+            acts.push(browser::Act::RenameLocal { id, name });
+        }
     }
 }
 

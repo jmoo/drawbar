@@ -2784,6 +2784,45 @@ mod tests {
         assert_eq!(app.tabs.showing(), Spot::Document(id));
     }
 
+    /// ⚠️ A kept asset's name is its file's: a name the box gave the asset alone would be
+    /// gone when the library is next opened.
+    #[test]
+    fn typing_in_an_open_files_name_box_renames_its_file() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        crate::folders::place_new(&mut app.workspace, &app.browser.folders);
+        app.tabs.open(id);
+        let _ = drawn(&ctx, &mut app);
+        let shown = drawn(&ctx, &mut app);
+        // The tab's title is the same word, above the document.
+        let name_box = shown
+            .words
+            .iter()
+            .filter(|word| word.text == "untitled" && shown.center.contains_rect(word.rect))
+            .map(|word| word.rect)
+            .max_by(|a, b| a.top().total_cmp(&b.top()))
+            .expect("the name box");
+
+        let start = egui::pos2(name_box.left() + 1.0, name_box.center().y);
+        for events in [
+            testing::click(start),
+            vec![egui::Event::Text("X".into())],
+            vec![testing::key(egui::Key::Enter)],
+        ] {
+            let _ = frame_of(&ctx, &mut app, SCREEN, events);
+        }
+
+        let path = app.workspace.get(id).and_then(|entity| entity.path.clone());
+        assert_eq!(
+            path,
+            Some(crate::store::LibPath::root().join("Xuntitled.ne5p"))
+        );
+    }
+
     /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
     /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to review the send queue would then
     /// mark the open document saved and lose its revert.
