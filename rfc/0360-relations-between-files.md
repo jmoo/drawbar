@@ -393,9 +393,10 @@ address, carrying the checksums the two last shared. A relation ties an entity t
 entity. The link has nothing to resolve in the store, and the relation has no state
 to compare. Both are values in a set per file, which the store already provides, and
 neither needs the other's code. #325 also changes `join` to carry every key, declared
-or not. The two changes meet in that one function and do not conflict: this one
-changes only the delete the join ends with. This RFC uses "relation" and "target",
-and leaves "link" to RFC-0325.
+or not. The two changes meet in that one function, where they overlap in text and
+not in meaning: this one changes the delete the join ends with and which plans are
+refused, and #325 changes which keys are carried. This RFC uses "relation" and
+"target", and leaves "link" to RFC-0325.
 
 **If nothing is done**, each feature that ties files together stores paths or names,
 and the take a library was built from is lost the first time someone tidies a folder.
