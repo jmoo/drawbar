@@ -1477,10 +1477,17 @@ impl Store {
         self.ids.key(id).cloned()
     }
 
-    /// Whether the library's thread has run through every command sent, answered or not.
+    /// Whether the library's thread has run through every command sent. Their answers
+    /// may still wait, not folded in.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub fn idle(&self) -> bool {
         self.backend.idle()
+    }
+
+    /// How many commands have been sent to the library's thread so far.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub fn sent(&self) -> usize {
+        self.backend.sent()
     }
 
     /// Whether a change to the facts waits to be sent or answered.

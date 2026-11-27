@@ -149,6 +149,9 @@ pub struct Backend {
     /// Commands sent and not yet run through.
     #[cfg(test)]
     queued: Arc<AtomicUsize>,
+    /// Commands sent so far.
+    #[cfg(test)]
+    sent: usize,
 }
 
 /// Whether the library's thread is running a command, and since when.
@@ -305,6 +308,8 @@ impl Backend {
             fault,
             #[cfg(test)]
             queued,
+            #[cfg(test)]
+            sent: 0,
         }
     }
 
@@ -377,6 +382,10 @@ impl Backend {
             self.unrun.fetch_add(writes, Ordering::AcqRel);
             #[cfg(test)]
             self.queued.fetch_add(1, Ordering::AcqRel);
+            #[cfg(test)]
+            {
+                self.sent += 1;
+            }
             if tx.send(cmd).is_err() {
                 self.unrun.fetch_sub(writes, Ordering::AcqRel);
                 #[cfg(test)]
@@ -395,10 +404,17 @@ impl Backend {
         self.unrun.load(Ordering::Acquire) != 0
     }
 
-    /// Whether the library's thread has run through every command sent.
+    /// Whether the library's thread has run through every command sent. Their answers
+    /// may still wait to be taken.
     #[cfg(test)]
     pub fn idle(&self) -> bool {
         self.queued.load(Ordering::Acquire) == 0
+    }
+
+    /// How many commands have been sent so far.
+    #[cfg(test)]
+    pub fn sent(&self) -> usize {
+        self.sent
     }
 
     pub fn try_recv(&mut self) -> Option<Event> {
