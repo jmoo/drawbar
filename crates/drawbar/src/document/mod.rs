@@ -643,7 +643,7 @@ impl Document {
 
     /// Commit the plan a piano library's frame drafted, if the library accepts it.
     ///
-    /// ⚠️ Nothing is rebuilt here. The plan is only checked against the saved bytes, so a
+    /// ⚠️ Nothing is rebuilt here. The plan is only checked against the bytes it edits, so a
     /// name the format refuses, or a switch that would leave no strokes, is refused now
     /// and cannot block every later edit. The bytes are laid out only when something
     /// needs them; see [`piano::State::start`].
@@ -652,7 +652,10 @@ impl Document {
             return;
         };
         let checked = match workspace.get(id) {
-            Some(entity) => piano::check(entity, &plan).map(|()| entity.rests().is_some()),
+            Some(entity) => self
+                .piano
+                .check(entity, &plan)
+                .map(|()| entity.rests().is_some()),
             None => return,
         };
         match checked {
@@ -4567,6 +4570,87 @@ mod tests {
         assert!(
             !open.entity().is_unsaved(),
             "the saved bytes include the plan",
+        );
+    }
+
+    /// Type `X` in front of the piano library's name.
+    fn rename_with_an_x(open: &mut Open) {
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("Test Piano")]);
+        open.frame(vec![egui::Event::Text("X".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+        assert!(open.document.pends(open.id), "the rename is a plan");
+    }
+
+    /// Lay the piano library's plan out as a save does, without saving, and return the
+    /// name its body then stores.
+    fn lay_out(open: &mut Open) -> String {
+        let ctx = open.ctx.clone();
+        let acts = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::SaveDoc(open.id)],
+            &mut open.workspace,
+            &open.queue,
+            &mut open.log,
+        );
+        if acts.is_empty() {
+            let applied = open
+                .document
+                .piano
+                .awaited(&ctx, &open.workspace)
+                .expect("the lay-out the save waits on is in flight");
+            open.document
+                .put_back(applied, &mut open.workspace, &mut open.log);
+        }
+        assert!(!open.document.pends(open.id), "the plan is laid out");
+        piano::snapshot(open.entity().entity.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .name
+    }
+
+    #[test]
+    fn a_piano_body_unlike_its_file_shows_the_roots_the_body_holds() {
+        use nord_format::formats::npno::synthetic::{take, Build};
+        use nord_format::formats::npno::Bank;
+
+        let mut saved = Build::new();
+        saved.takes.push(take(84, Bank::Attack, 0, 3));
+        saved.map.push((84, 84));
+        let draft = Build::new().bytes().unwrap();
+
+        let mut open = Open::file("Test Piano.npno", saved.bytes().unwrap());
+        open.twice();
+        open.workspace.replace_bytes(open.id, draft, &mut open.log);
+        let words = open.twice();
+        let roots: Vec<&String> = words
+            .iter()
+            .filter(|word| word.ends_with(" roots"))
+            .collect();
+        assert_eq!(roots, ["2 roots"], "the file holds 3 and the body 2");
+    }
+
+    #[test]
+    fn a_piano_plan_outlives_a_change_to_its_file_from_outside() {
+        use nord_format::formats::npno::synthetic::{take, Build};
+        use nord_format::formats::npno::Bank;
+
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+
+        let mut theirs = Build::new();
+        theirs.takes.push(take(84, Bank::Attack, 0, 3));
+        theirs.map.push((84, 84));
+        open.workspace
+            .rebase(open.id, theirs.bytes().unwrap(), &mut open.log);
+        open.twice();
+
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
+        assert_eq!(
+            lay_out(&mut open),
+            "XTest Piano",
+            "keeping mine keeps the rename"
         );
     }
 

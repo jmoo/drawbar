@@ -37,7 +37,7 @@ use crate::rewrite::Rewrite;
 use crate::room;
 use crate::strings;
 use crate::work;
-use crate::workspace::{LocalEntity, Workspace};
+use crate::workspace::{Bytes, LocalEntity, Workspace};
 
 fn piano(entity: &Entity) -> Option<&npno::Piano> {
     match entity {
@@ -90,22 +90,15 @@ const SPAN: Span = Span { low: 21, high: 108 };
 /// the file is checked: a mark that moved when the check answered would discard the plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mark {
-    /// Bytes held whole: their length, and the checksum a slot holding them reports.
-    Held(u64, Option<u32>),
+    /// Bytes held whole, by the [`LocalEntity::stamp`] of the body the plan was begun on.
+    Held(u64),
     /// A file left on disk, by its [`crate::ondisk::OnDisk::serial`].
     Resting(u64),
 }
 
 impl Default for Mark {
     fn default() -> Mark {
-        Mark::Held(0, None)
-    }
-}
-
-fn mark(entity: &LocalEntity) -> Mark {
-    match entity.saved.file() {
-        Some(file) => Mark::Resting(file.serial),
-        None => Mark::Held(entity.saved.bytes().len() as u64, entity.saved.crc32()),
+        Mark::Held(0)
     }
 }
 
@@ -121,14 +114,6 @@ impl<'a> Source<'a> {
     /// The bytes the asset holds now.
     fn of(entity: &'a LocalEntity) -> Source<'a> {
         Source::from(entity.rests().map(|file| &**file), &entity.bytes)
-    }
-
-    /// The bytes the asset was last saved as.
-    fn saved(entity: &'a LocalEntity) -> Source<'a> {
-        Source::from(
-            entity.saved.file().map(|file| &**file),
-            entity.saved.bytes(),
-        )
     }
 
     fn from(file: Option<&'a OnDisk>, bytes: &'a [u8]) -> Source<'a> {
@@ -436,16 +421,10 @@ pub fn planned<'a>(saved: &'a [u8], plan: &Plan) -> Result<npno::Library<'a>, St
     )
 }
 
-/// Whether the library the asset was last saved as takes `plan`, checked as [`planned`]
-/// checks it. No audio is read, so a library resting in its file is checked through its
-/// index alone.
-pub fn check(entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
-    Source::saved(entity).with(|library| replanned(library.clone(), plan).map(|_| ()))?
-}
-
 /// The rewrite that saves `plan` into the library `index` read, laid out from the index,
 /// which reads no audio: `None` where it leaves the library as the index read it, as
-/// over a file that already holds the plan. The plan is checked as [`check`] checks it.
+/// over a file that already holds the plan. The plan is checked as [`State::check`]
+/// checks it.
 pub fn rewrite_over(index: &npno::Index, plan: &Plan) -> Result<Option<Rewrite>, String> {
     let library = replanned(index.library().clone(), plan)?;
     Ok((library != *index.library()).then_some(Rewrite::Piano(library)))
@@ -588,7 +567,7 @@ fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
         .then_some((below * npno::DECAY_PER_UNIT) as f32)
 }
 
-/// Everything the piano editor draws from, read once out of the saved baseline.
+/// Everything the piano editor draws from, read once out of the baseline the plan edits.
 ///
 /// ⚠️ Read from the baseline, not the working bytes: the plan drops strokes, and every
 /// row must still offer what turning its switch back on would restore.
@@ -626,9 +605,8 @@ struct Facts {
 }
 
 impl Facts {
-    /// The facts of what the asset was last saved as.
-    fn saved(entity: &LocalEntity) -> Result<Facts, String> {
-        match Source::saved(entity) {
+    fn from(source: Source<'_>) -> Result<Facts, String> {
+        match source {
             Source::Held(bytes) => Facts::of(bytes),
             Source::File(file, index) => {
                 let sizes: Vec<u64> = index
@@ -1242,6 +1220,8 @@ struct Laying {
     id: u64,
     /// What it is laying out, so an answer over a plan that has since moved is dropped.
     plan: Plan,
+    /// The body it is laid out over.
+    over: Bytes,
     job: work::Job<Result<Vec<u8>, String>>,
 }
 
@@ -1276,9 +1256,10 @@ pub struct State {
     /// ⚠️ Not dropped when the tab changes. The plan is the only record of what the
     /// working bytes were trimmed from, so leaving the tab must not throw it away.
     plans: HashMap<u64, Plan>,
-    /// The plan each document's working bytes were laid out from. A plan they already
-    /// hold is not pending, and laying it again would copy the body for nothing.
-    laid: HashMap<u64, Plan>,
+    /// The plan each document's working bytes were laid out from, and the body it was
+    /// laid out over. A plan they already hold is not pending, and laying it again would
+    /// copy the body for nothing.
+    laid: HashMap<u64, (Plan, Bytes)>,
     /// The apply in flight, and the acts held until it answers.
     job: Option<Laying>,
     held: Vec<Held>,
@@ -1312,7 +1293,21 @@ impl State {
             self.open = None;
             return Extras::default();
         }
-        let baseline = mark(entity);
+        let baseline = self.baseline(entity);
+        // A save makes the drops permanent: the rows show the file as it now is, and
+        // there is nothing left to put back but a plan the workspace made again over it.
+        if self
+            .plans
+            .get(&id)
+            .is_none_or(|plan| plan.against != baseline)
+        {
+            let plan = Plan {
+                against: baseline,
+                ..held.cloned().unwrap_or_default()
+            };
+            self.plans.insert(id, plan);
+            self.laid.remove(&id);
+        }
         let moved = self
             .open
             .as_ref()
@@ -1321,22 +1316,13 @@ impl State {
             self.open = Some(Open {
                 id,
                 baseline,
-                facts: Facts::saved(entity),
+                facts: Facts::from(self.base(entity)),
             });
             self.view = View::default();
             // The figures go with the facts they were worked out from.
             self.summary = None;
         }
-        let plan = self.plans.entry(id).or_default();
-        // A save makes the drops permanent: the rows show the file as it now is, and
-        // there is nothing left to put back but a plan the workspace made again over it.
-        if plan.against != baseline {
-            *plan = Plan {
-                against: baseline,
-                ..held.cloned().unwrap_or_default()
-            };
-            self.laid.remove(&id);
-        }
+        let plan = &self.plans[&id];
         self.draft = plan.clone();
         self.audio.follow(id, entity.stamp);
         self.audio.replan(Source::of(entity), plan);
@@ -1383,13 +1369,48 @@ impl State {
         }
     }
 
+    /// What this document's plan edits. A plan of a library held whole edits the body it
+    /// was begun on until that body, or the plan's own lay-out, is saved, or the body is
+    /// replaced by anything else.
+    fn baseline(&self, entity: &LocalEntity) -> Mark {
+        if let Some(file) = entity.saved.file() {
+            return Mark::Resting(file.serial);
+        }
+        let laid = self.laid.contains_key(&entity.id) && entity.stamp != entity.saved.stamp();
+        match self.plans.get(&entity.id).map(|plan| plan.against) {
+            Some(Mark::Held(begun)) if begun == entity.stamp || laid => Mark::Held(begun),
+            _ => Mark::Held(entity.stamp),
+        }
+    }
+
+    /// The body this document's plan edits: the working bytes, until a lay-out of the
+    /// plan replaces them.
+    fn body<'a>(&'a self, entity: &'a LocalEntity) -> &'a Bytes {
+        self.laid
+            .get(&entity.id)
+            .map_or(&entity.bytes, |(_, over)| over)
+    }
+
+    /// The bytes this document's plan edits.
+    fn base<'a>(&'a self, entity: &'a LocalEntity) -> Source<'a> {
+        Source::from(entity.saved.file().map(|file| &**file), self.body(entity))
+    }
+
+    /// Whether the library this document's plan edits takes `plan`, checked as
+    /// [`planned`] checks it. No audio is read, so a library resting in its file is
+    /// checked through its index alone.
+    pub fn check(&self, entity: &LocalEntity, plan: &Plan) -> Result<(), String> {
+        self.base(entity)
+            .with(|library| replanned(library.clone(), plan).map(|_| ()))?
+    }
+
     /// Whether this document's plan has yet to reach its working bytes.
     pub fn pending(&self, id: u64) -> bool {
         let Some(plan) = self.plans.get(&id) else {
             return false;
         };
         match self.laid.get(&id) {
-            Some(laid) => plan != laid,
+            Some((laid, _)) => plan != laid,
             None => !plan.is_empty(),
         }
     }
@@ -1424,7 +1445,7 @@ impl State {
         let plan = self
             .plans
             .get(&entity.id)
-            .filter(|plan| plan.against == mark(entity));
+            .filter(|plan| plan.against == self.baseline(entity));
         (
             plan.and_then(|plan| plan.name.clone()),
             plan.and_then(|plan| plan.variant.clone()),
@@ -1533,14 +1554,19 @@ impl State {
         if entity.saved.file().is_some() {
             return;
         }
-        let laying = plan.clone();
-        let held = entity.saved.bytes().clone();
+        let over = self.body(entity).clone();
+        let (laying, held) = (plan.clone(), over.clone());
         let job = work::run(ctx, move |progress| {
             let library = planned(&held, &laying)?;
             progress.say(format!("laying out {} strokes", library.strokes().len()));
             materialize(&library)
         });
-        self.job = Some(Laying { id, plan, job });
+        self.job = Some(Laying {
+            id,
+            plan,
+            over,
+            job,
+        });
     }
 
     /// The apply that has answered, where one has.
@@ -1578,7 +1604,7 @@ impl State {
             workspace.get(laying.id).is_some() && self.plans.get(&laying.id) == Some(&laying.plan);
         match (fresh, made.is_ok()) {
             (true, true) => {
-                self.laid.insert(laying.id, laying.plan);
+                self.laid.insert(laying.id, (laying.plan, laying.over));
             }
             // A refusal is the end of the wait: nothing can carry bytes the format
             // would not make, and asking again would only produce it a second time.
@@ -4750,7 +4776,10 @@ mod tests {
             // What [`Document::replan`] does with the plan a frame left behind: try it
             // over the baseline, and keep it where the library takes it.
             if let Some(plan) = self.state.drafted() {
-                match check(self.workspace.get(self.id).unwrap(), &plan) {
+                match self
+                    .state
+                    .check(self.workspace.get(self.id).unwrap(), &plan)
+                {
                     Ok(()) => self.state.commit(plan),
                     Err(_) => self.state.discard(),
                 }
