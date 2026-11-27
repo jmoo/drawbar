@@ -400,8 +400,9 @@ compared once.
 
 At the end of each frame the timeline makes the same comparison for the step
 Undo would take and the step Redo would take, and lets go of one that no longer
-matches. The menu therefore names only a step that would apply. That is a
-pointer comparison in a frame where nothing changed.
+matches. The menu therefore names only a step that would apply. For a body,
+that is a pointer comparison in a frame where nothing changed. For a document
+resting in its file, it compares the baseline's stamp and the edit's sets.
 
 Undo and Redo run at the end of the frame they are asked in, after the frame's
 edits are recorded, and the offer is checked then. A click and ⌘Z that reach one

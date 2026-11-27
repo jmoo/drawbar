@@ -1624,36 +1624,14 @@ pub enum FileAsk {
 
 /// What the editor holds of a document. It is all of the document's content: a body is
 /// whole, and an edit names the baseline it is over.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Working {
     /// The whole body.
     Body(Bytes),
     /// An edit over the saved baseline stamped `over`, or none, where the document holds
-    /// what that baseline does. `stamp` is the held edit's, or 0 for none, as it was last
-    /// seen holding this edit; it is no part of what the editor holds.
-    Edit {
-        over: u64,
-        edit: Option<Edit>,
-        stamp: u64,
-    },
-}
-
-impl PartialEq for Working {
-    fn eq(&self, other: &Working) -> bool {
-        match (self, other) {
-            (Working::Body(a), Working::Body(b)) => a == b,
-            (
-                Working::Edit { over, edit, .. },
-                Working::Edit {
-                    over: theirs,
-                    edit: their_edit,
-                    ..
-                },
-            ) => over == theirs && edit == their_edit,
-            _ => false,
-        }
-    }
+    /// what that baseline does.
+    Edit { over: u64, edit: Option<Edit> },
 }
 
 impl Working {
@@ -3628,14 +3606,10 @@ impl Workspace {
     pub fn working(&self, id: u64) -> Option<Working> {
         let entity = self.get(id).filter(|entity| !entity.unread())?;
         Some(match entity.rests() {
-            Some(_) => {
-                let (edit, stamp) = self.kept_edit(id).unzip();
-                Working::Edit {
-                    over: entity.saved.stamp,
-                    edit: edit.cloned(),
-                    stamp: stamp.unwrap_or(0),
-                }
-            }
+            Some(_) => Working::Edit {
+                over: entity.saved.stamp,
+                edit: self.edit(id).cloned(),
+            },
             None => Working::Body(entity.bytes.clone()),
         })
     }
@@ -3645,7 +3619,7 @@ impl Workspace {
     pub fn hold(&mut self, id: u64, working: &Working, log: &mut Log) -> bool {
         match working {
             Working::Body(bytes) => self.put_bytes(id, bytes.clone(), Cause::Follow, log),
-            Working::Edit { over, edit, .. } => {
+            Working::Edit { over, edit } => {
                 let Some(entity) = self.get(id).filter(|entity| entity.saved.stamp == *over) else {
                     return false;
                 };
@@ -4559,25 +4533,11 @@ mod tests {
         let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
         let over = workspace.get(id).unwrap().saved.stamp();
         let edit = None;
-        assert_eq!(
-            workspace.working(id),
-            Some(Working::Edit {
-                over,
-                edit,
-                stamp: 0
-            })
-        );
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
 
         workspace.hold_edit(id, Some(renamed("Vibes")), Cause::User);
         let edit = Some(renamed("Vibes"));
-        assert_eq!(
-            workspace.working(id),
-            Some(Working::Edit {
-                over,
-                edit,
-                stamp: 0
-            })
-        );
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
     }
 
     #[test]
@@ -4649,15 +4609,7 @@ mod tests {
         let over = workspace.get(id).unwrap().saved.stamp() + 1;
         let edit = Some(renamed("Vibes"));
 
-        assert!(!workspace.hold(
-            id,
-            &Working::Edit {
-                over,
-                edit,
-                stamp: 0
-            },
-            &mut log
-        ));
+        assert!(!workspace.hold(id, &Working::Edit { over, edit }, &mut log));
         assert_eq!(workspace.working(id), held);
     }
 
