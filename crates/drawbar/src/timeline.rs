@@ -347,10 +347,6 @@ impl Timeline {
         self.open
     }
 
-    pub fn waiting(&self) -> Option<&Asked> {
-        self.waiting.as_ref()
-    }
-
     pub fn next_undo(&self) -> Option<Next<'_>> {
         self.undoes().map(|at| next(&self.done[at]))
     }
