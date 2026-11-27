@@ -4647,17 +4647,6 @@ mod tests {
             .collect()
     }
 
-    /// Save `theirs` over the piano library's file outside drawbar, as the store finds
-    /// it: a file it indexes and leaves on disk. The file lives as long as the folder
-    /// returned.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn saved_over_outside(open: &mut Open, theirs: &[u8]) -> crate::testing::Temp {
-        let dir = crate::testing::Temp::new();
-        let file = crate::testing::on_disk(&dir, "Test Piano.npno", theirs);
-        open.workspace.rebase_file(open.id, file);
-        dir
-    }
-
     #[test]
     fn a_piano_body_unlike_its_file_shows_the_roots_the_body_holds() {
         let mut open = Open::file("Test Piano.npno", three_root_piano());
@@ -4706,76 +4695,6 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_pending_piano_plan_outlives_a_change_outside_and_keeping_mine_saves_it() {
-        let mut open = Open::file("Test Piano.npno", piano_bytes());
-        rename_with_an_x(&mut open);
-        let _theirs = saved_over_outside(&mut open, &three_root_piano());
-        let words = open.twice();
-
-        assert_eq!(roots(&words), ["2 roots"], "the rows show the body");
-        let (renamed, _) = open.document.piano.renaming(open.entity());
-        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
-        assert_eq!(
-            lay_out(&mut open),
-            "XTest Piano",
-            "a save writes the rename"
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn a_laid_out_piano_plan_outlives_a_change_outside() {
-        let mut open = Open::file("Test Piano.npno", piano_bytes());
-        rename_with_an_x(&mut open);
-        assert_eq!(lay_out(&mut open), "XTest Piano");
-        let _theirs = saved_over_outside(&mut open, &three_root_piano());
-        let words = open.twice();
-
-        assert_eq!(roots(&words), ["2 roots"], "the rows show the body");
-        let (renamed, _) = open.document.piano.renaming(open.entity());
-        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
-        assert!(!open.pends());
-        assert_eq!(stored_name(&open), "XTest Piano", "a save writes the body");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn keeping_both_copies_a_piano_with_its_pending_plan() {
-        let mut open = Open::file("Test Piano.npno", piano_bytes());
-        rename_with_an_x(&mut open);
-        let _theirs = saved_over_outside(&mut open, &three_root_piano());
-        open.twice();
-
-        let id = open.id;
-        open.act(vec![crate::browser::Act::KeepBoth(id)]);
-        let ctx = open.ctx.clone();
-        if let Some(applied) = open
-            .document
-            .piano
-            .awaited(&ctx, &mut open.workspace, &mut open.log)
-        {
-            let acts = open
-                .document
-                .put_back(applied, &mut open.workspace, &mut open.log);
-            open.act(acts);
-        }
-        let copies: Vec<String> = open
-            .workspace
-            .entities()
-            .iter()
-            .filter(|entity| entity.id != id)
-            .filter_map(|entity| piano::snapshot(entity.entity.as_deref()?)?.ok())
-            .map(|snapshot| snapshot.name)
-            .collect();
-        assert_eq!(copies, ["XTest Piano"], "the copy holds the rename");
-        assert!(
-            open.entity().rests().is_some(),
-            "the file is taken as it is"
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
     fn a_piano_body_restored_over_a_lay_out_shows_what_it_holds() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         rename_with_an_x(&mut open);
@@ -4795,6 +4714,196 @@ mod tests {
         let (renamed, _) = open.document.piano.renaming(open.entity());
         assert_eq!(renamed, None, "a save writes the restored name");
         assert!(!open.pends());
+    }
+
+    /// The library folder a piano library held in memory is saved into, as the store
+    /// writes it and finds it changed.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct Library {
+        store: crate::store::Store,
+        browser: crate::browser::Browser,
+        root: testing::Temp,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Library {
+        /// A library holding "Test Piano.npno", saved from [`piano_bytes`] held in memory.
+        fn with_a_held_piano() -> (Open, Library) {
+            let mut open = Open::empty();
+            let root = testing::Temp::new();
+            let store = crate::store::Store::start(testing::backend(&open.ctx, &root));
+            let browser = crate::browser::Browser::default();
+            let mut library = Library {
+                store,
+                browser,
+                root,
+            };
+            assert!(library.next(&mut open), "the library opens");
+            while library.store.listing() || library.store.scanning() {
+                assert!(library.next(&mut open), "the listing answers");
+            }
+            open.id = open.workspace.ingest(
+                "Test Piano.npno".into(),
+                Origin::File("Test Piano.npno".into()),
+                piano_bytes(),
+                &mut open.log,
+            );
+            crate::folders::place_new(&mut open.workspace, &library.browser.folders);
+            library.sync(&mut open);
+            assert!(library.file() == piano_bytes());
+            assert!(open.entity().rests().is_none(), "held in memory");
+            (open, library)
+        }
+
+        fn next(&mut self, open: &mut Open) -> bool {
+            let (workspace, log) = (&mut open.workspace, &mut open.log);
+            self.store
+                .next(workspace, &mut self.browser, &open.queue, log)
+        }
+
+        /// Write everything, and wait until the disk has it.
+        fn sync(&mut self, open: &mut Open) {
+            let pass = crate::store::Pass::Last;
+            assert!(self
+                .store
+                .sync(&mut open.workspace, &mut self.browser, pass));
+            self.store.rescan();
+            while self.store.scanning() {
+                assert!(self.next(open), "the rescan answers");
+            }
+        }
+
+        /// Another program saves a three-root library over the file, and the window gets
+        /// the focus back.
+        fn saved_over_outside(&mut self, open: &mut Open) {
+            std::fs::write(self.root.at("Test Piano.npno"), three_root_piano()).unwrap();
+            self.store.focus(false);
+            self.store.focus(true);
+            while self.store.scanning() {
+                assert!(self.next(open), "the rescan answers");
+            }
+            let (title, _) = self.browser.asking().expect("a question");
+            assert_eq!(title, "“Test Piano.npno” changed on disk");
+        }
+
+        /// Answer the question, and run what the answer asks as the app runs a frame's
+        /// acts, through every lay-out they wait on.
+        fn answer(&mut self, open: &mut Open, answer: &str) {
+            let acts = self.browser.answer(answer);
+            self.act(open, acts);
+        }
+
+        fn act(&mut self, open: &mut Open, acts: Vec<crate::browser::Act>) {
+            let ctx = open.ctx.clone();
+            let mut acts = acts;
+            loop {
+                let ran = open.document.settle(
+                    &ctx,
+                    acts,
+                    &mut open.workspace,
+                    &open.queue,
+                    &mut open.log,
+                );
+                crate::browser::apply(
+                    &mut self.browser,
+                    &mut crate::shell::Shell::default(),
+                    ran,
+                    &mut open.workspace,
+                    &mut open.device,
+                    &mut crate::tabs::Tabs::default(),
+                    &mut open.queue,
+                    &mut open.builds,
+                    &mut open.log,
+                );
+                let piano = &mut open.document.piano;
+                let Some(applied) = piano.awaited(&ctx, &mut open.workspace, &mut open.log) else {
+                    return;
+                };
+                acts = open
+                    .document
+                    .put_back(applied, &mut open.workspace, &mut open.log);
+            }
+        }
+
+        fn file(&self) -> Vec<u8> {
+            self.root.read("Test Piano.npno")
+        }
+
+        /// The files in the library folder, without its own state.
+        fn files(&self) -> Vec<String> {
+            let mut names = self.root.names("");
+            names.retain(|name| !name.starts_with('.'));
+            names
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn name_in(bytes: &[u8]) -> String {
+        nord_format::formats::npno::Library::borrow(bytes)
+            .unwrap()
+            .name()
+            .0
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn keeping_mine_after_a_change_outside_saves_my_piano_plan(laid: bool) {
+        let (mut open, mut library) = Library::with_a_held_piano();
+        rename_with_an_x(&mut open);
+        if laid {
+            assert_eq!(lay_out(&mut open), "XTest Piano");
+        }
+        library.saved_over_outside(&mut open);
+        let words = open.twice();
+        assert_eq!(roots(&words), ["2 roots"], "the rows show mine");
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
+
+        library.answer(&mut open, "Keep mine");
+        let id = open.id;
+        library.act(&mut open, vec![crate::browser::Act::SaveDoc(id)]);
+        library.sync(&mut open);
+        assert_eq!(
+            name_in(&library.file()),
+            "XTest Piano",
+            "the save writes mine"
+        );
+        assert!(!open.entity().is_unsaved());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_mine_after_a_change_outside_saves_a_pending_piano_plan() {
+        keeping_mine_after_a_change_outside_saves_my_piano_plan(false);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_mine_after_a_change_outside_saves_a_laid_out_piano_plan() {
+        keeping_mine_after_a_change_outside_saves_my_piano_plan(true);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_both_after_a_change_outside_writes_a_pending_piano_plan_beside_theirs() {
+        let (mut open, mut library) = Library::with_a_held_piano();
+        rename_with_an_x(&mut open);
+        library.saved_over_outside(&mut open);
+        open.twice();
+
+        library.answer(&mut open, "Keep both");
+        library.sync(&mut open);
+        assert_eq!(library.files(), ["Test Piano 2.npno", "Test Piano.npno"]);
+        assert_eq!(
+            name_in(&library.root.read("Test Piano 2.npno")),
+            "XTest Piano"
+        );
+        assert!(
+            library.file() == three_root_piano(),
+            "theirs is left as it is"
+        );
+        let words = open.twice();
+        assert_eq!(roots(&words), ["3 roots"], "the original shows theirs");
+        assert!(!open.entity().is_unsaved());
     }
 
     /// A plan over a piano library resting in its file is saved through that file: the
