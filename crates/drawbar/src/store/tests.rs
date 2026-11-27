@@ -849,7 +849,7 @@ fn a_send_held_for_a_look_that_cannot_read_a_changed_file_does_not_go() {
 
     assert!(!released && !session.store.holds_send());
     assert_eq!(
-        session.said("changed on disk and could not be read, so nothing was sent"),
+        session.said("“untitled.ne5p” could not be read again, so nothing was sent"),
         1
     );
 }
