@@ -1,171 +1,133 @@
-# Samples and pianos
+# Work with samples and pianos
 
-Sample instruments (`.nsmp`) and piano libraries (`.npno`) hold encoded audio.
-Both move to and from the instrument with `get` and `put`, like a program. The
-verbs below reach the audio.
+Choose the file type by where you want the result to play. A sample instrument
+maps recordings to keyboard zones. A piano library can give each note several
+layers for different playing strengths, plus separate resonance and release
+sounds.
 
 ## Samples
 
+For a one-zone instrument from a recording of middle C:
+
 ```sh
-nord sample decode inst.nsmp -o out/                 # every zone as a WAV
-nord sample verify --deep inst.nsmp                  # walk every encoded stroke too
-nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimba.nsmpproj
-nord sample build marimba.nsmpproj -o marimba.nsmp   # render a Sample Editor project
+nord sample encode c4.wav --root-key C4 -o marimba.nsmp
+nord sample verify --deep marimba.nsmp
 ```
 
-`decode` names each zone it cannot read and why, and ends with a count of what
-decoded. `encode` turns a single WAV into an instrument, and `build` renders a whole
-project, loops and stereo included. A project's relative audio paths resolve from
-the project's folder, with `/` or `\` between folders. `--generation 2`, `3` or
-`4` picks the layout, and v2 is the default. v3 and v4 also need `--unverified`,
-because they have not been played on an instrument.
+For several zones, keep the mapping in a Sample Editor project so you can
+adjust it and rebuild:
 
-Both take 16-bit PCM WAVs at 44.1 kHz, mono or stereo, in the plain or the
-extensible WAV format. Convert anything else first.
+```sh
+nord sample project new --zone c3.wav=C3 --zone c4.wav=C4 --name Marimba -o marimba.nsmpproj
+nord sample build marimba.nsmpproj -o marimba.nsmp
+```
+
+Use 16-bit PCM WAVs at 44.1 kHz, mono or stereo, for `encode` and `build`.
+The project finds relative WAV paths from its own folder. Both commands write
+v2 by default. For v3 or v4, specify `--generation 3` or `--generation 4`
+and acknowledge the playback status with `--unverified`. [Sample format support](../getting-started/support.md#files).
+
+To extract the audio from an existing instrument, run
+`nord sample decode marimba.nsmp -o zones/`. You get one WAV per decoded zone.
+Read the summary for zones the decoder couldn't read.
 
 ## Pianos
 
+Inspect a library first to find which roots, banks and layers it holds. A
+*stroke* is one recording identified by those three values.
+
 ```sh
-nord piano inspect grand.npno                      # roots, layers, keys, tuning
-nord piano inspect grand.npno --keys               # every key, its root and fine tune
-nord piano decode grand.npno --key C4 --layer 0 -o c4.wav
-nord piano edit grand.npno --name "My Grand" --tune C4=-2 --map C8=C7 -o out.npno
-nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
-nord piano split grand.npno --at C4 -o halves/
-nord piano verify --deep grand.npno
+nord piano inspect grand.npno --keys
+nord piano decode grand.npno --key C4 --bank attack --layer 0 -o c4.wav
 ```
 
-`edit`, `trim` and `split` rewrite the library without touching its audio:
-rename it, retune or reroute a key, drop a bank or the quieter layers, narrow the
-range, or cut it in two. `trim` and `split` never write over their input, and
-`edit` does so only with `--yes`.
+To make a smaller library, drop release recordings or limit the number of
+layers per root. Only request a bank the library contains. Inspect the result for keys left silent. To split a library
+at middle C, use `split` with an output directory.
+
+```sh
+nord piano trim grand.npno --drop-bank release --layers 3 -o small.npno
+nord piano inspect small.npno
+nord piano split grand.npno --at C4 -o halves/
+```
+
+Use `nord piano edit` to rename, retune or remap. For example,
+`nord piano edit grand.npno --name "My Grand" --tune C4=-2c -o tuned.npno`
+lowers middle C by about two cents. For a remap such as `--map C8=C7`, choose
+a destination root that the library actually contains. These edits, trimming
+and splitting preserve the retained audio. Use `nord piano verify --deep` with
+the resulting filename to check every stroke.
 
 ## Building a piano library
 
-`build` makes a library from a directory of WAVs, one per stroke, named
-`<root>-b<bank>-l<layer>.wav`. `060-b0-l00.wav` is MIDI note 60, the attack bank,
-the loudest layer. Banks are 0 for attack, 1 for pedal resonance and 2 for
-release. The WAVs must be 16-bit PCM, mono or stereo, in the plain or the
-extensible WAV format. Any sample rate is accepted.
+For individual recordings, put your WAVs in one directory. Use 16-bit PCM,
+mono or stereo, at any sample rate. A name like `060-b0-l00.wav` describes
+the recording:
+
+| Part | Meaning |
+|---|---|
+| `060` | MIDI root note. 60 is middle C. |
+| `b0` | Bank. Use 0 for the attack, 1 for pedal resonance and 2 for release. |
+| `l00` | Loudest layer. Use `l01`, `l02` and so on for softer strikes. Use `v12`, for example, to give an explicit layer value. |
 
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
-nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno
-nord piano build strokes/ --template grand.npno --name Marimba -o marimba.npno
-nord piano rebuild grand.npno -o again.npno        # re-encode a library's own strokes
+nord piano inspect marimba.npno --keys
 ```
 
-Every key up to a semitone above the highest root plays the nearest root at or
-above it. Keys beyond that are silent. Within a root, velocity picks the layer,
-with the layers spread across the velocity range in order. To set a layer's
-velocity value directly, name the file with `v12` in place of `l00`.
+The new library uses format 6. Use `--format 5` for an instrument that needs
+the older format. To borrow the playback settings and format of an existing
+library, pass `--template grand.npno`. To re-encode a library's own strokes,
+use `nord piano rebuild grand.npno -o rebuilt.npno`.
 
-`build` writes piano format 6 unless `--format 5` asks for the older format, for
-an instrument that does not play format 6. A template's format decides when you
-give one. In format 6, `l00`, `l01`, … step 20 apart, spanning at least 0 to 50
-and at most 0 to 100, and format 5 uses a fifth of each value. `nord piano inspect`
-names a library's format.
-
-A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
-stroke that loops there while the key is held. Audio after the loop's end is not
-used, and the loop's last four samples are replaced by the four just before its
-start, which a seamless loop already has. While the key is held, the loop fades
-the way the instrument's own pianos of that `--kind` do, faster on higher keys.
-`--loop-fade` sets the rate at middle C in decibels per second, and `0` holds the
-loop at its level. A stroke without a loop plays to its end, and a release stroke
-cannot loop. A release plays at the level the note has fallen to at key-up, and
-not at all when the attack recording is silent there.
-A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
-nearest frame of the resampled audio.
-
-Whatever the audio does not decide, such as decay and per-note tables, comes from
-`--template` when you give one, and each stroke's level follows its layer. Without a
-template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
-values. Without `--kind`, the kind the takes state, as drawbar's take editor saves
-it, decides, and otherwise grand; takes that state different kinds need `--kind`.
-Each stroke decays from note-on as the instrument's own pianos of that kind do,
-faster on higher keys. For a sound that sustains, such as organ, strings or pads,
-`--no-decay` holds every note and loop at its level, so a note has only its
-recording's own decay, and lets each release ring out its recorded tail. The
-instrument has no organ kind: build an organ, a pad or strings with
-`--kind hybrid --no-decay`. In format 6, each layer is trimmed to play at the level of
-its root's loudest layer, softer layers a little louder as that kind's are, up to 6
-dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
-layer or release needs more boost than the instrument gives at `--gain`, the whole
-library is turned down to fit, but a release from a take just plays quieter. In
-format 5, each stroke's level follows its layer.
+An attack WAV with a sample loop repeats while its key is held. The build uses
+audio through the loop end. For pads and organs, use `--kind hybrid --no-decay`
+to hold the loop steady and let releases ring out. For finer control,
+`--loop-fade` sets the fade at middle C in decibels per second. Release strokes
+cannot loop.
 
 ## Building from a recorded take
 
-`prep` finds the strokes in a recording of you playing, and `build` makes a library
-of them:
+For one long recording, leave three to five seconds of quiet at the start,
+keep peaks around −6 dBFS, and play notes individually. Strike a note at
+different strengths to capture several layers. Use a separate output file to
+keep the original recording. To try this with the guide's three-note example,
+<a href="../assets/tine-take.wav" download>download the practice WAV</a>
+and use `tine-take.wav` in place of `take.wav`.
 
 ```sh
 nord piano prep take.wav -o regions.wav
 nord piano build regions.wav --kind wurlitzer --name Wurli -o wurli.npno
+nord piano verify --deep wurli.npno
 ```
 
-`prep` names each hit's note by its pitch, and lists the notes it found. A note read
-an octave off the notes played either side of it is put back in line. Each note may
-be hit several times, loud to soft or in any order. Where the pitches mislead, give
-the notes in the order you played them, as `--notes B1,D2,F#2,A2`: each hit then goes
-to the nearest note in the list. Each note keeps the hits left after the checks below
-as its layers, so a note played three times at three levels has three layers.
-`--layers N` keeps at most N, spread evenly in level, or the first ones played with
-`--order played`. `--min-layer-gap`, 1 dB
-unless you change it, drops a hit too close in level to a louder one, and `--skip`
-leaves out hits by their number in the listing. A hit less than 54 dB over the
-take's noise is left out as too quiet, since the build raises it and its hiss with
-it; `--min-snr` sets that limit.
-`--max-seconds` and `--release-seconds` limit each attack and release.
+`prep` writes a WAV with marks for attacks, loops, fades and releases. Read
+its listing for misidentified pitches, skipped strikes and poor loop matches.
+You can open that WAV in drawbar to [hear and adjust the cuts](../drawbar/recording.md#check-a-hit-by-ear)
+before building. PCM takes from 8 to 32 bits and floating-point takes are
+accepted. A take at another rate is resampled to 35,002 Hz.
 
-The listing shows every hit: its note and pitch, its level, what became of it, and
-how it sustains. A note still sounding at its key-up is looped, with a warning where
-the loop matches poorly. A note that dies first fades to silence instead.
+| If the listing shows… | Try |
+|---|---|
+| A pitch assigned to the wrong note | Supply the notes you played in order, for example `--notes B1,D2,F#2,A2`. |
+| Too many nearly identical layers | Use `--layers` to limit the count or increase `--min-layer-gap` to separate their levels. |
+| A good quiet hit was skipped | Adjust `--min-snr`. The default requires a hit to stand 54 dB above the noise because boosting it also boosts hiss. |
+| A stray hit or an overlong release | Use `--skip` with the hit number in the listing, or set `--release-seconds`. |
 
-Or record one take per velocity layer, each playing every note once, and give them
-loudest first:
+**One take per layer.** Record the same notes once per take and give the takes
+loudest first. Each take keeps its layer wherever its recorded level falls.
 
 ```sh
 nord piano prep loud.wav medium.wav soft.wav -o regions/
 nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
 ```
 
-Each take is one layer, whatever its level, so you may raise the gain for the softer
-ones. A note played twice in a take keeps its last hit. `--skip 2:12` leaves out hit
-12 of the second take.
+**A folder of one-note recordings.** Run `nord piano prep "Upright Piano/" -o regions/`.
+It searches subfolders, groups hits by pitch and level, and prints the build
+command for the files it prepared. Check the listing for files it left out.
 
-Or give a folder of one-note files, such as a free sample set, its subfolders too:
-
-```sh
-nord piano prep "Upright Piano/" -o regions/
-```
-
-Each file's loudest hit is its note, named by its pitch in the octave it was read
-in, so file names are never read. A note's files become its layers by level, all of
-them or at most `--layers`, and a file within `--min-layer-gap` dB of a louder one, such as a second
-round-robin, is left out. Each file placed is written under `-o` at its own path, with the build
-command for them all. A file that does not read, or has no hit, no pitch, or too
-little level over its own noise, is listed and left out. Linked folders are not
-followed. A file that rests under half a second has no noise
-to read: its floor is listed as `-`, and it is kept however quiet.
-
-`prep` never changes a take. A take at another rate is resampled to the instrument's
-35,002 Hz in `-o`, with its other chunks. A take already at 35,002 Hz may be its own
-`-o`, and only its regions and loops are replaced.
-
-A take works best opening with 3 to 5 seconds of silence, free of ground loops,
-peaking around -6 dBFS, and with each note held until it has died.
-
-`build` makes a stroke of each region of a take, labeled as a stroke's WAV is named
-(`060-b0-l00`), with a loop inside it as that stroke's loop. A region labeled
-`084-b0-l00-fade` marks where that attack fades to silence. The take may be PCM of 8
-to 32 bits or float. Each stroke is cleaned of the take's hum and hiss, its ends and
-loop are shaped, and it is dithered to 16 bits. In a format 6 library without a
-template, every region is also brought to one level, and the lowest and highest roots
-are pitched out to reach all 88 keys. A take whose **Clean audio** drawbar's take
-editor turned off is built as recorded. [Takes](../reference/takes.md) gives the
-details.
-
-[What is supported](../getting-started/support.md) says which of these libraries
-have been played on an instrument.
+**Playback and cleaning.** A take saved with **Clean audio** off in drawbar
+keeps its recorded noise. Otherwise the build reduces hum and hiss where it
+can. With no template, `--kind` sets the playback defaults. If you omit it,
+the build uses the category saved in the takes, or grand if none is set.
+[Takes](../reference/takes.md) describes detection, cleaning and leveling in detail.

@@ -201,6 +201,18 @@ kbd,
   color: var(--inline-code-color);
 }
 
+.content kbd {
+  display: inline-block;
+  font-size: 0.82em;
+  line-height: 1.3;
+  padding: 0.12em 0.45em;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-panel-fill);
+  color: var(--db-ink-strong);
+  white-space: nowrap;
+}
+
 .content pre {
   border: 1px solid var(--db-rule);
   border-radius: var(--db-radius);
@@ -384,6 +396,7 @@ html.js .sidebar .sidebar-resize-handle {
   padding: 0.5rem 0.9rem;
   border: 1px solid var(--table-border-color);
 }
+.content table :is(td, th) code { overflow-wrap: anywhere; }
 .content table tbody tr:nth-child(2n) { background: var(--table-alternate-bg); }
 .content table tbody tr:nth-child(2n+1) { background: transparent; }
 
@@ -435,6 +448,96 @@ html.js .sidebar .sidebar-resize-handle {
 .theme-popup .theme#mdbook-theme-rust,
 .theme-popup .theme#mdbook-theme-navy,
 .theme-popup .theme#mdbook-theme-ayu { display: none; }
+
+/* --- images, buttons, cards, details ------------------------------------- */
+
+.content img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-row-radius);
+}
+
+/* A screenshot comes as a pair, `name-light.png#gh-light-mode-only` and
+   `name-dark.png#gh-dark-mode-only`. GitHub shows the one that fits its theme
+   by that suffix, and these rules do the same for the guide's two faces. */
+html.light .content img[src$="#gh-dark-mode-only"],
+html.rust .content img[src$="#gh-dark-mode-only"],
+html.coal .content img[src$="#gh-light-mode-only"],
+html.navy .content img[src$="#gh-light-mode-only"],
+html.ayu .content img[src$="#gh-light-mode-only"] { display: none; }
+
+.content .button {
+  display: inline-block;
+  margin: 0.4rem 0.6rem 0.4rem 0;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-panel-fill);
+  color: var(--db-ink-strong);
+  font-weight: 700;
+  text-decoration: none;
+}
+.content .button:hover { background: var(--db-hovered); }
+.content .button.primary {
+  border-color: var(--db-accent);
+  background: var(--db-accent);
+  color: #ffffff;
+}
+.content .button.primary:hover { filter: brightness(1.1); }
+
+.content button.button { font: inherit; font-weight: 700; cursor: pointer; }
+.content button.button:disabled { opacity: 0.5; cursor: default; }
+
+.content form.feedback label {
+  display: block;
+  margin: 1.6rem 0 0.4rem;
+  font-weight: 700;
+  color: var(--db-ink-strong);
+}
+.content form.feedback :is(textarea, input) {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-extreme-bg);
+  color: var(--db-ink);
+  font: inherit;
+}
+.content form.feedback textarea { resize: vertical; }
+.content form.feedback [role="status"] { margin-left: 0.8rem; color: var(--db-ink-weak); }
+
+.content .cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
+  gap: 1.6rem;
+  margin: 2rem 0;
+}
+.content .card {
+  padding: 1.4rem 1.6rem;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-row-radius);
+  background: var(--db-panel-fill);
+}
+.content .card > :first-child { margin-top: 0; }
+.content .card > :last-child { margin-bottom: 0; }
+.content .card h3 { margin-bottom: 0.6rem; }
+
+.content details {
+  margin: 1.6rem 0;
+  padding: 0.8rem 1.6rem;
+  border: 1px solid var(--db-rule);
+  border-radius: var(--db-radius);
+  background: var(--db-panel-fill);
+}
+.content details > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--db-ink-strong);
+}
+.content details[open] > summary { margin-bottom: 0.8rem; }
+.content details > :last-child { margin-bottom: 0.4rem; }
 
 /* --- selection, focus, misc --------------------------------------------- */
 

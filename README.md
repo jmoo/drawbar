@@ -5,7 +5,7 @@ your terminal, or from your own code.
 
 [**Open drawbar**](https://drawbar.app/) · [User guide](docs/src/introduction.md) · [What is supported](docs/src/getting-started/support.md)
 
-![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](docs/src/assets/screenshot.png)
 
 > ⚠️ **Alpha.** Back up your instrument and your files first.
 > [What is supported](docs/src/getting-started/support.md) lists what has been
@@ -32,7 +32,12 @@ nix run github:jmoo/drawbar#drawbar              # the desktop app
 nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 ```
 
-Windows builds of both are attached to their [releases](https://github.com/jmoo/drawbar/releases).
+Download drawbar for [Windows](https://drawbar.app/download/windows),
+[macOS](https://drawbar.app/download/macos) or
+[Linux](https://drawbar.app/download/linux), and `nord` for
+[Windows](https://drawbar.app/download/nord-windows) or Linux
+([x86-64](https://drawbar.app/download/nord-linux-x86_64),
+[ARM64](https://drawbar.app/download/nord-linux-aarch64)).
 
 The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and

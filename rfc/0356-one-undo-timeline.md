@@ -1014,8 +1014,9 @@ Sources:
 - **The label.** "Edit" names no field. The editor knows the field at the point
   of the change and could pass its name.
 
-Implementation updates the guide's Undo section in
-`docs/src/drawbar/this-computer.md` in the same change.
+Implementation updates the guide's Undo sections in
+`docs/src/drawbar/editing.md` and `docs/src/drawbar/organize.md` in the same
+change.
 
 ## Future possibilities
 
