@@ -84,7 +84,7 @@ fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
 /// The stretch of keyboard the map draws: a full piano, A0 to C8.
 const SPAN: Span = Span { low: 21, high: 108 };
 
-/// What tells two baselines apart. A save changes it.
+/// What a plan edits.
 ///
 /// ⚠️ A baseline resting in its file is marked by the indexing of the file, which a rescan
 /// replaces whenever the file changed, and not by a checksum, which is known only once
