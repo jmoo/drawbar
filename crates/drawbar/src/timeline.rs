@@ -391,7 +391,7 @@ impl Timeline {
         }
     }
 
-    /// Put a step the library was not asked about, or refused to change, back at the
+    /// Put a step the library was not asked about, or could not change, back at the
     /// end of the list it left.
     pub fn put_back(&mut self, asked: Asked) {
         match asked {
@@ -638,7 +638,7 @@ mod tests {
         }
     }
 
-    fn refused() -> Answer {
+    fn not_made() -> Answer {
         Answer {
             made: None,
             undoable: false,
@@ -1029,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_redo_stays_ended_by_an_edit_made_while_it_was_asked() {
+    fn a_redo_that_failed_stays_ended_by_an_edit_made_while_it_was_asked() {
         let mut session = Session::default();
         session.log(change("Rename “1”"));
         session.undo();
@@ -1040,14 +1040,14 @@ mod tests {
 
         session
             .timeline
-            .answered(Some(Asked::Redo(taken)), refused());
+            .answered(Some(Asked::Redo(taken)), not_made());
 
         assert_eq!(session.redo_reads(), None, "the edit ended redo");
         assert_eq!(session.undo_reads(), Some("Edit “1”"));
     }
 
     #[test]
-    fn a_refused_undo_closes_the_drag_made_while_it_was_asked() {
+    fn an_undo_that_failed_closes_the_drag_made_while_it_was_asked() {
         let mut session = Session::default();
         session.log(change("Rename “1”"));
         let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
@@ -1056,7 +1056,7 @@ mod tests {
         session.edit(1, 3, Gesture::Dragging);
         session
             .timeline
-            .answered(Some(Asked::Undo(taken)), refused());
+            .answered(Some(Asked::Undo(taken)), not_made());
         assert_eq!(session.undo().as_deref(), Some("Rename “1”"));
 
         session.edit(1, 4, Gesture::Dragging);
@@ -1066,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_undo_leaves_its_step_to_be_undone() {
+    fn an_undo_that_failed_leaves_its_step_to_be_undone() {
         let mut session = Session::default();
         session.log(change("Rename “1”"));
         let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
@@ -1080,14 +1080,14 @@ mod tests {
 
         let said = session
             .timeline
-            .answered(Some(Asked::Undo(taken)), refused());
+            .answered(Some(Asked::Undo(taken)), not_made());
 
         assert_eq!(said, None);
         assert_eq!(session.undo_reads(), Some("Rename “1”"));
     }
 
     #[test]
-    fn an_undo_refused_after_the_library_history_ended_stays_gone() {
+    fn an_undo_that_failed_after_the_library_history_ended_stays_gone() {
         let mut session = Session::default();
         session.log(change("Rename “1”"));
         let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
@@ -1097,7 +1097,7 @@ mod tests {
 
         let said = session
             .timeline
-            .answered(Some(Asked::Undo(taken)), refused());
+            .answered(Some(Asked::Undo(taken)), not_made());
 
         assert_eq!(said, None);
         assert_eq!(session.undo_reads(), None);
@@ -1113,7 +1113,7 @@ mod tests {
         };
         let forgot = Answer {
             forgot: true,
-            ..refused()
+            ..not_made()
         };
 
         let said = session.timeline.answered(Some(Asked::Undo(taken)), forgot);
@@ -1176,14 +1176,14 @@ mod tests {
         };
         let partway = Answer {
             waiting: Waiting::This,
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(Some(Asked::Undo(taken)), partway);
         assert_eq!(session.undo_reads(), Some("Save “a”"));
 
         let finishing = Answer {
             finished: Some(entry(8)),
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(None, finishing);
 
@@ -1200,12 +1200,12 @@ mod tests {
         };
         let partway = Answer {
             waiting: Waiting::This,
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(Some(Asked::Undo(taken)), partway);
         let finishing = Answer {
             finished: Some(entry(8)),
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(None, finishing);
 
@@ -1220,19 +1220,19 @@ mod tests {
         let mut session = Session::default();
         let partway = Answer {
             waiting: Waiting::This,
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(Some(save(1)), partway);
         let untried = Answer {
             waiting: Waiting::Earlier,
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(None, untried);
         assert_eq!(session.undo_reads(), None, "it still waits");
 
         let finishing = Answer {
             finished: Some(entry(8)),
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(None, finishing);
 
@@ -1244,14 +1244,14 @@ mod tests {
         let mut session = Session::default();
         let partway = Answer {
             waiting: Waiting::This,
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(Some(save(1)), partway);
 
-        session.timeline.answered(None, refused());
+        session.timeline.answered(None, not_made());
         let finishing = Answer {
             finished: Some(entry(8)),
-            ..refused()
+            ..not_made()
         };
         session.timeline.answered(None, finishing);
 
