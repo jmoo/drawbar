@@ -978,11 +978,12 @@ impl Store {
     }
 
     /// Whether an asset holds an edit its file may not: one unsaved, one saved where
-    /// nothing may be written, which only memory holds, or one whose file a change that
-    /// waits to finish names.
+    /// nothing may be written, which only memory holds, or a body whose file a change
+    /// that waits to finish names.
     fn unsaved(&self, entity: &LocalEntity, workspace: &Workspace) -> bool {
         let unfiled = !self.open() && workspace.unfiled(entity.id);
-        entity.is_unsaved() || unfiled || self.unsettled.contains(&entity.id)
+        let unsettled = self.unsettled.contains(&entity.id) && entity.holds_body();
+        entity.is_unsaved() || unfiled || unsettled
     }
 
     /// Where the library is, as the user would look for it.

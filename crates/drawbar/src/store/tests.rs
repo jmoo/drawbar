@@ -11085,3 +11085,62 @@ fn with_two_changes_in_flight_a_save_is_named_by_the_one_that_made_it() {
     let ids: Vec<u64> = saved.iter().map(|saved| saved.id).collect();
     assert_eq!(ids, [a]);
 }
+
+#[test]
+fn an_undo_of_a_save_that_stops_partway_keeps_no_draft_of_a_document_let_go_of() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, _) = session.saved_once("96");
+    session.settle();
+    session.later();
+    assert!(
+        session.bench.workspace.evict(id).is_some(),
+        "it is let go of"
+    );
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    session.close();
+
+    let mut again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    let id = again.only();
+    again.read(&[id]);
+    assert_eq!(again.said("has the unsaved edit it had"), 0);
+    assert_eq!(
+        again.bytes(id),
+        made,
+        "the document holds what its file does"
+    );
+    assert!(!again.unsaved(id));
+}
+
+#[test]
+fn a_rescan_while_an_undo_of_a_save_waits_to_finish_leaves_the_edit_unsaved_and_kept() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = session.bytes(id);
+    let mut longer = with_gain(&made, "96");
+    longer.push(0);
+    session.save(id, &longer);
+    session.sync();
+    assert_eq!(session.saved_by_next_undo().len(), 1, "a save undo takes");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    assert!(session.unsaved(id), "the undo stopped partway");
+    session.refocus();
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    assert_eq!(session.bytes(id), longer);
+    assert!(session.unsaved(id));
+    session.close();
+    let again = Session::open(&root);
+    assert_eq!(again.bytes(again.only()), longer, "the edit is kept");
+}
