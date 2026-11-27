@@ -1856,12 +1856,14 @@ mod tests {
             class: ObjectClass::Program,
             at: Some(at(0)),
             change: Change::Placed { waits: None },
+            fits: true,
         };
         let played = Row {
             id: piano,
             class: ObjectClass::Piano,
             at: Some(Location::from_user(1, 2)),
             change: Change::Plays { by: vec![program] },
+            fits: true,
         };
         let mut device = pianos_read(&workspace, 2, "Grand");
         assert_eq!(rows(&mut device), [placed.clone(), played.clone()]);

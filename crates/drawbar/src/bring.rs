@@ -9,7 +9,7 @@ use nord_usb::{Location, ObjectClass};
 
 use crate::device::Expect;
 use crate::device::{
-    occupied, slot_label, standing_of, there, Device, DeviceCmd, DeviceState, Purpose,
+    fit, occupied, slot_label, standing_of, there, Device, DeviceCmd, DeviceState, Purpose,
 };
 use crate::link::{Held, Keyboard, Print, Spot, Standing, There};
 use crate::log::{Log, Relinked, Restored, Undo};
@@ -65,6 +65,9 @@ pub struct Row {
     /// go to, has none.
     pub at: Option<Location>,
     pub change: Change,
+    /// Whether the attached keyboard takes the file, by [`fit`]. One it refuses goes up
+    /// nowhere.
+    pub fits: bool,
 }
 
 /// Which way Sync takes a row: the file to the keyboard, or the keyboard's side to the
@@ -96,7 +99,8 @@ pub enum Sign {
 impl Row {
     /// The brief's table: each change's own way and the ways it may go. A slot's version
     /// is brought in only where [`Row::down_blocked`] says nothing. A send the keyboard
-    /// refuses, and a piano or sample with no room, go nowhere.
+    /// refuses, and a piano or sample with no room, go nowhere, and no file it refuses
+    /// goes up.
     pub fn ways(&self, workspace: &Workspace) -> Ways {
         use Way::{Down, Up};
         let down = self.down_blocked(workspace).is_none();
@@ -114,7 +118,11 @@ impl Row {
             (Change::Removed, _, None) => (None, vec![Down]),
             (Change::Moved { .. } | Change::Replaced { .. }, ..) => (Some(Down), vec![Down]),
         };
-        Ways { taken, allowed }
+        let goes = |way: &Way| self.fits || *way == Down;
+        Ways {
+            taken: taken.filter(goes),
+            allowed: allowed.into_iter().filter(goes).collect(),
+        }
     }
 
     /// Why the keyboard's version cannot be brought into the file, if it cannot.
@@ -146,6 +154,10 @@ impl Row {
             (Change::Theirs | Change::Both, Some(blocked)) => blocked.words(),
             _ => "",
         };
+        let refused = match (&self.change, self.fits) {
+            (Change::Placed { .. }, _) | (_, true) => "",
+            (_, false) => " · not for this keyboard",
+        };
         let said = match &self.change {
             Change::Placed {
                 waits: Some(Waits::OwnRow),
@@ -174,7 +186,7 @@ impl Row {
             Change::Replaced { by } => format!("replaced by “{by}”"),
             Change::Removed => "removed on the keyboard".into(),
         };
-        format!("{said}{blocked}")
+        format!("{said}{blocked}{refused}")
     }
 }
 
@@ -289,6 +301,7 @@ pub fn rows(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Vec<Ro
         own.iter()
             .any(|row| row.id == id && row.change != Change::Ahead)
     };
+    let fits = |id: u64| workspace.get(id).is_some_and(|it| fit(state, it).allowed());
     let placed: Vec<Row> = queue
         .entries()
         .iter()
@@ -296,6 +309,7 @@ pub fn rows(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Vec<Ro
             id: held.id,
             class: held.class,
             at: Some(held.at),
+            fits: fits(held.id),
             change: Change::Placed {
                 waits: match (held.failure.is_some(), keyboard_side(held.id)) {
                     (true, _) => Some(Waits::Refused),
@@ -387,6 +401,7 @@ fn played(state: &DeviceState, workspace: &Workspace, queue: &Queue, rows: &[Row
                 change: Change::Plays {
                     by: vec![program.id],
                 },
+                fits: fit(state, file).allowed(),
             });
         }
     }
@@ -418,6 +433,7 @@ fn linked_row(
         class: linked.class,
         at: linked.at.or(held.location()),
         change,
+        fits: fit(state, entity).allowed(),
     })
 }
 /// Where a linked file's sound went, judged by what its slot holds now and whether it
@@ -1602,6 +1618,7 @@ mod tests {
                 class: PROGRAM,
                 at: Some(at(1)),
                 change,
+                fits: true,
             };
             row.ways(workspace).taken
         };
@@ -1824,6 +1841,27 @@ mod tests {
         bench.press();
         let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [id]);
+    }
+
+    #[test]
+    fn a_linked_file_the_keyboard_refuses_goes_up_nowhere() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body()))]);
+        let stage4 = crate::workspace::Fresh::Stage4Program.bytes().unwrap();
+        let id = linked(&mut bench, "A.ne5p", stage4, 1, &body());
+
+        let row = row(&bench, id);
+        let ways = row.ways(&bench.workspace);
+        assert_eq!(row.change, Change::Ahead);
+        assert_eq!((ways.taken, ways.allowed), (None, vec![Way::Down]));
+        assert_eq!(
+            row.said(&bench.workspace, &bench.queue),
+            "newer here · not for this keyboard"
+        );
+
+        open_read(&mut bench);
+        bench.press();
+        assert_eq!((written(&bench), pulls(&bench)), (vec![], vec![]));
     }
 
     #[test]
