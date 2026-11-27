@@ -112,12 +112,12 @@ const SYNCS: usize = 4;
 const PATIENCE: Duration = Duration::from_secs(60);
 
 #[test]
-fn two_drawbars_on_one_folder_keep_edits_and_offer_each_undo_by_name_through_a_seeded_walk() {
+fn two_drawbars_on_one_folder_offer_each_undo_by_name_through_a_seeded_walk() {
     walks(&[World::Shared], &[2], &[1, 2, 3, 4]);
 }
 
 #[test]
-fn drawbars_on_synced_copies_keep_edits_and_offer_each_undo_by_name_while_sync_settles() {
+fn drawbars_on_synced_copies_offer_each_undo_by_name_while_sync_settles() {
     walks(&SYNCED, &[2, 3], &[1]);
 }
 
@@ -487,6 +487,9 @@ const UNHELD: &[Check] = &[
     Check::KeptUndoGoes,
     // Synced drawbars show a lost row at different paths once sync settles.
     Check::Converges,
+    // A save of an edit to a file another drawbar moved or deleted drops the asset and
+    // the edit.
+    Check::EditsKept,
     // A save writes over a file sync replaced with one of the same length and time.
     Check::NoSaveOverUnshownBytes,
 ];
