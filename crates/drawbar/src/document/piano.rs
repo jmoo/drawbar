@@ -1525,6 +1525,21 @@ impl State {
         }
     }
 
+    /// Let go of each body a lay-out kept once the working bytes no longer hold that
+    /// lay-out or its plan has ended, whether or not the document is drawn again.
+    pub fn let_go(&mut self, workspace: &Workspace) {
+        let spent: Vec<u64> = (self.laid.keys().copied())
+            .filter(|id| {
+                workspace
+                    .get(*id)
+                    .is_none_or(|entity| self.laid(entity).is_none() || self.plan(entity).is_none())
+            })
+            .collect();
+        for id in spent {
+            self.laid.remove(&id);
+        }
+    }
+
     /// Nothing is open anymore: the selection, the open rows, the key table, and the
     /// audition go. The plans stay, and so does an apply in flight.
     pub fn leave(&mut self) {
@@ -5450,6 +5465,24 @@ mod tests {
             "the plan starts again from what is now saved",
         );
         assert!(!editor.workspace.get(editor.id).unwrap().is_unsaved());
+    }
+
+    #[test]
+    fn a_saved_lay_out_lets_go_of_the_body_it_was_laid_over_while_another_tab_shows() {
+        let mut editor = Editor::new(facts().total * 2);
+        editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
+        editor.apply();
+        editor.state.leave();
+
+        editor.state.let_go(&editor.workspace);
+        assert_eq!(
+            editor.state.laid.len(),
+            1,
+            "an unsaved lay-out can be taken back"
+        );
+        editor.workspace.mark_saved(editor.id);
+        editor.state.let_go(&editor.workspace);
+        assert_eq!(editor.state.laid.len(), 0, "a saved one cannot");
     }
 
     /// A library whose audio the codec can read: the same three roots of three attack

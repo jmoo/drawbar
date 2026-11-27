@@ -857,6 +857,7 @@ impl Document {
         workspace: &mut Workspace,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
+        self.piano.let_go(workspace);
         match self.piano.answered(ctx, workspace, log) {
             Some(applied) => self.put_back(applied, workspace, log),
             None => Vec::new(),
