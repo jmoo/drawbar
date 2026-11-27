@@ -1375,14 +1375,17 @@ impl Document {
         let (before, edited) = (entity.stamp, shape(entity));
         let mut gained = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
-            if let Err(why) = self.samples.take(id, file, index, &sets) {
-                log.error(why.clone());
-                self.refused(Some(why.clone()));
-                return Err(why);
-            }
+            let all = match self.samples.take(id, file, index, &sets) {
+                Ok(all) => all,
+                Err(why) => {
+                    log.error(why.clone());
+                    self.refused(Some(why.clone()));
+                    return Err(why);
+                }
+            };
             self.refused(None);
             if !self.samples.pending(id) {
-                workspace.hold_edit(id, None);
+                workspace.hold_edit(id, Some(Edit::Sample(all)));
             }
             self.follow_sample(id, workspace);
             return Ok(());
@@ -4712,6 +4715,61 @@ mod tests {
             open.log.status().1.contains("back as it was last saved"),
             "{}",
             open.log.status().1,
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_renamed_back_while_its_save_is_in_flight_keeps_the_last_name() {
+        use crate::browser::Act;
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+        open.id = id;
+        open.twice();
+
+        let rename = |open: &mut Open, name: &str| {
+            let sets = vec![("name".to_string(), name.to_string())];
+            let Open {
+                document,
+                workspace,
+                log,
+                ..
+            } = open;
+            document.apply(id, sets, workspace, log).unwrap();
+            open.twice();
+        };
+        rename(&mut open, "Vibes");
+        let ctx = open.ctx.clone();
+        let Open {
+            document,
+            workspace,
+            queue,
+            log,
+            ..
+        } = &mut open;
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        assert_eq!(ran, [], "the save waits for the file");
+        let (from, edit) = workspace.send_edit(id).expect("the store sends it");
+
+        rename(&mut open, "Marimba");
+        let during = open.document.instrument_name(id, &open.workspace);
+        assert_eq!(during, "Marimba", "the box keeps the name typed");
+
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved);
+        open.twice();
+
+        let after = open.document.instrument_name(id, &open.workspace);
+        assert_eq!(after, "Marimba", "the name typed during the save stands");
+        assert!(
+            open.entity().is_unsaved(),
+            "as an edit of the file the save wrote"
         );
     }
 }
