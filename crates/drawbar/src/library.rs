@@ -2218,6 +2218,7 @@ mod tests {
             class: ObjectClass::Program,
             at: Some(at(6, 0)),
             change,
+            fits: true,
         };
         let marked = |change| {
             let row = row(change);

@@ -3823,7 +3823,11 @@ impl Workspace {
             Some(false) => {
                 self.respell(id, sent.clone().into());
             }
-            None if self.get(id).is_some_and(|it| it.saved.holds(&sent)) => {
+            // The asset moved on from what its file holds: nothing to save.
+            None if self
+                .get(id)
+                .is_some_and(|it| it.saved.holds(&sent) && !it.holds(&sent)) =>
+            {
                 self.revision += 1;
                 return;
             }
@@ -5035,6 +5039,22 @@ mod tests {
         assert_eq!(*workspace.get(id).unwrap().saved.bytes(), sent);
 
         workspace.landed(id, edited);
+        assert!(
+            !workspace.get(id).unwrap().is_unsaved(),
+            "a write of what it holds leaves nothing owed"
+        );
+    }
+
+    #[test]
+    fn a_write_that_landed_saves_an_asset_whose_save_did_not_land() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
+        workspace.unsave(id);
+        assert!(workspace.get(id).unwrap().is_unsaved());
+
+        workspace.landed(id, sent);
         assert!(
             !workspace.get(id).unwrap().is_unsaved(),
             "a write of what it holds leaves nothing owed"
