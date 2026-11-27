@@ -144,18 +144,19 @@ picked in Brave. The default, `desktop`, does what the disk reports.
 
 drawbar's walks put two or three drawbars on one library folder, or on copies that a
 simulated sync keeps in step, and take seeded random steps. After each step they
-check that Undo and Redo are offered right after a change and Undo not once the walk
-has undone every step, that the Edit menu names the step they take back, that an
-edit not yet saved stays with its asset, that another drawbar's save under an
-unsaved edit asks whose to keep, and that questions end. On copies, they also check
-that sync settles and that only a log's writer changes it. Each test fails if its
-own seeds never evaluate one of those checks. `UNHELD` in
-`crates/drawbar/src/store/tests/walk.rs` lists the checks the library does not pass
-yet: a walk notes their failures and goes on, and `--nocapture` prints the first
-failure of each. A failed walk ends with the command that walks it again.
-`DRAWBAR_WALK_SEEDS=1..=500` runs the walks from each seed in the range, and the
-ignored test `every_unheld_check_still_fails_in_some_walk` names a listed check that
-no walk fails.
+check that Undo and Redo are offered right after a change and for every step the
+walk knows no reason to drop, and Undo not once the walk has undone every step, that
+the Edit menu names the step they take back, that an edit not yet saved stays with
+its asset, that another drawbar's save under an unsaved edit asks whose to keep,
+that Take theirs and Keep both do what they say, and that questions end and an
+answered one is not asked again. On copies, they also check that sync settles and
+that only a log's writer changes it. Each test fails if its own seeds never evaluate
+one of those checks. `UNHELD` in `crates/drawbar/src/store/tests/walk.rs` lists the
+checks the library does not pass yet: a walk notes their failures and goes on, and
+`--nocapture` prints the first failure of each. A failed walk ends with the command
+that walks it again. `DRAWBAR_WALK_SEEDS=1..=500` runs the walks from each seed in
+the range, and the ignored test `every_unheld_check_still_fails_in_some_walk` names
+a listed check that no walk fails.
 
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the

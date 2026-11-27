@@ -117,7 +117,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 
 #[test]
 fn two_drawbars_on_one_folder_offer_each_undo_by_name_through_a_seeded_walk() {
-    let (_, reached) = walks(&[World::Shared], &[2], &[1, 2, 6, 7]);
+    let (_, reached) = walks(&[World::Shared], &[2], &[4, 6, 7, 19]);
     reaches(&reached, &HELD_ON_ONE_FOLDER);
 }
 
@@ -129,13 +129,14 @@ fn drawbars_on_synced_copies_offer_each_undo_by_name_while_sync_settles() {
 }
 
 /// The held checks every world's walks evaluate.
-const HELD_ON_ONE_FOLDER: [Check; 6] = [
+const HELD_ON_ONE_FOLDER: [Check; 7] = [
     Check::MenuNamesTheStep,
     Check::OffersUndoAndRedo,
     Check::UndoEndsWithHistory,
     Check::EditsKept,
     Check::AsksOverAnEdit,
     Check::QuestionsEnd,
+    Check::AnswersTakeEffect,
 ];
 
 /// The held checks only a synced world's walks evaluate.
@@ -493,8 +494,12 @@ enum Check {
     /// No save writes over bytes sync brought that the drawbar never showed, and a save
     /// refused for them asks.
     NoSaveOverUnshownBytes,
-    /// A drawbar stops asking questions.
+    /// A drawbar stops asking questions, and asks none again once it is answered, but
+    /// for another asset of the same name.
     QuestionsEnd,
+    /// Take theirs leaves the asset asked about with no unsaved edit, and Keep both
+    /// keeps the edit in a file.
+    AnswersTakeEffect,
     /// Once sync settles and every drawbar rescans, all agree with each other and with
     /// every copy.
     Converges,
@@ -1015,11 +1020,12 @@ struct Kept {
 }
 
 /// An edit the walk made, until its asset is saved as it: its gain, the bytes it left,
-/// and whether the walk asked to save it.
+/// whether the walk asked to save it, and the path of its asset then.
 struct Edit {
     gain: usize,
     bytes: Vec<u8>,
     saving: bool,
+    path: String,
 }
 
 struct Walk {
@@ -1514,19 +1520,11 @@ impl Walk {
     }
 
     /// Drawbar `who` asks what to do with each unsaved edit whose file another drawbar
-    /// rewrote, once what it was saved as moves to that drawbar's bytes: it asked, by the
-    /// asset's name, whether `bases` say the edit was over other bytes before, since its
-    /// log was `log` entries long.
-    fn asked_over_edits(&self, who: usize, bases: Vec<(u64, Vec<u8>)>, log: usize) {
+    /// rewrote, once what it was saved as moves to that drawbar's bytes: a question by the
+    /// asset's name waits, where `bases` say the edit was over other bytes before.
+    fn asked_over_edits(&self, who: usize, bases: Vec<(u64, Vec<u8>)>) {
         let session = &self.drawbars[who];
-        let said = session
-            .bench
-            .log
-            .iter()
-            .skip(log)
-            .map(|entry| entry.text.as_str());
-        let said = said.filter(|text| text.contains("changed on disk while"));
-        let asked: Vec<&str> = session.bench.browser.questions().chain(said).collect();
+        let asked: Vec<&str> = session.bench.browser.questions().collect();
         for (id, was) in bases {
             let Some(entity) = session.bench.workspace.get(id).filter(|e| e.is_unsaved()) else {
                 continue;
@@ -1773,11 +1771,15 @@ impl Walk {
             return;
         };
         let copies = self.drawbars.len();
+        let logged = sync.logged();
         let recorded: Result<Vec<Vec<String>>, String> =
             (0..copies).map(|copy| sync.record(copy)).collect();
+        let compared = sync.logged() > logged;
         match recorded {
             Ok(notes) => {
-                self.reach(Check::OnlyItsWriterChangesALog);
+                if compared {
+                    self.reach(Check::OnlyItsWriterChangesALog);
+                }
                 let step = self.step;
                 (self.steps).extend(notes.into_iter().flatten().map(|note| (step, note)));
             }
@@ -1804,10 +1806,25 @@ impl Walk {
             if round > 0 && behind.is_empty() {
                 break;
             }
-            self.reach(Check::SyncSettles);
+            if !behind.is_empty() {
+                self.reach(Check::SyncSettles);
+            }
             if round == ROUNDS {
-                let names: Vec<char> = behind.iter().map(|copy| name(*copy)).collect();
-                let details = format!("after {ROUNDS} rounds, {names:?} still lag");
+                let lag = behind.iter().map(|copy| {
+                    let paths = sync
+                        .deliveries(*copy)
+                        .into_iter()
+                        .map(|event| described(&event));
+                    format!(
+                        "{}'s copy waits for {:?}",
+                        name(*copy),
+                        paths.collect::<Vec<_>>()
+                    )
+                });
+                let details = format!(
+                    "after {ROUNDS} rounds, {}",
+                    lag.collect::<Vec<_>>().join("; ")
+                );
                 self.fail(Check::SyncSettles, "sync does not settle", details);
                 break;
             }
@@ -1905,7 +1922,7 @@ impl Walk {
         self.trashes(who, &held);
         self.learn_whether_refused(who);
         self.vet(who);
-        self.asked_over_edits(who, bases, log);
+        self.asked_over_edits(who, bases);
         self.answer_questions(who);
         // What sync changed that the drawbar has not looked at may still surprise it.
         if self.looked(who) {
@@ -2802,7 +2819,7 @@ impl Walk {
     /// walk has emptied, with no refusal still to learn, offers no Undo.
     fn not_stuck(&self, who: usize) {
         let known = self.chosen[who].is_none() && self.history[who].done.is_empty();
-        if known {
+        if known && self.changed[who] > 0 {
             self.reach(Check::UndoEndsWithHistory);
         }
         let offered = self.drawbars[who].store.undo_label();
@@ -2948,17 +2965,19 @@ impl Walk {
                     continue;
                 }
                 let entity = session.bench.workspace.get(*id);
-                let path = entity.and_then(|_| session.path(*id)).unwrap_or_default();
                 let what = format!(
-                    "{}'s edit setting the gain of {path} to {} is gone",
+                    "{}'s edit setting the gain of {} to {} is gone",
                     name(who),
+                    edit.path,
                     edit.gain
                 );
                 let listed = session.bench.workspace.listed().any(|e| e.id == *id);
                 let details = match (listed, entity) {
                     (true, Some(entity)) => {
                         let saved = ["", " and saved"][usize::from(!entity.is_unsaved())];
-                        format!("the asset is listed{saved}, holding other bytes")
+                        let at = session.path(*id).unwrap_or_else(|| "no file".into());
+                        let gain = gain_of(&entity.bytes);
+                        format!("the asset is listed{saved} at {at}, holding gain {gain}")
                     }
                     _ => "the asset is no longer listed, and no asset holds the edit".into(),
                 };
@@ -2969,11 +2988,20 @@ impl Walk {
 
     /// Answer each question `who` asks, as the seed chooses.
     fn answer_questions(&mut self, who: usize) {
+        let mut given: Vec<(String, &'static str)> = Vec::new();
+        let mut allowed: BTreeMap<String, usize> = BTreeMap::new();
         for _ in 0..8 {
             let Some((title, answers)) = self.drawbars[who].bench.browser.asking() else {
                 return;
             };
             self.reach(Check::QuestionsEnd);
+            let edits = self.edits_named(who, names(&title).first().copied());
+            let allowed = *allowed.entry(title.clone()).or_insert(edits.len().max(1));
+            if given.iter().filter(|(asked, _)| *asked == title).count() >= allowed {
+                let what = format!("{} asks {title} again", name(who));
+                self.fail(Check::QuestionsEnd, &what, format!("answered {given:?}"));
+                return;
+            }
             let answer = self.dice.pick(&answers).expect("a question has answers");
             let session = &mut self.drawbars[who];
             let held = holdings(session);
@@ -2981,11 +3009,15 @@ impl Walk {
             perform(session, acts);
             session.sync_all();
             self.said(format!("{} answers “{title}” with {answer}", name(who)));
+            given.push((title.clone(), answer));
             self.changed(who, &held);
             if matches!(self.folders, Folders::Shared(_)) {
                 for other in self.others(who).collect::<Vec<_>>() {
                     self.current[other] = false;
                 }
+            }
+            if title.ends_with("” changed on disk") {
+                self.answered(who, &title, answer, &edits);
             }
             if answer == "Keep both" || answer == "Take theirs" {
                 let named = names(&title);
@@ -3010,11 +3042,46 @@ impl Walk {
             }
             self.check();
         }
-        self.fail(
-            Check::QuestionsEnd,
-            &format!("{} asks on and on", name(who)),
-            String::new(),
-        );
+        let what = format!("{} asks on and on", name(who));
+        self.fail(Check::QuestionsEnd, &what, format!("answered {given:?}"));
+    }
+
+    /// Each asset drawbar `who` lists by `name` that holds an unsaved edit, with its bytes.
+    fn edits_named(&self, who: usize, name: Option<&str>) -> Vec<(u64, Vec<u8>)> {
+        let listed = self.drawbars[who].bench.workspace.listed();
+        let edited = listed.filter(|e| Some(e.name.as_str()) == name && e.is_unsaved());
+        edited.map(|e| (e.id, e.bytes.to_vec())).collect()
+    }
+
+    /// Drawbar `who` answered `title`, a file changed on disk under an unsaved edit of one
+    /// of `edits`, with `answer`: Take theirs leaves one of them saved as the file holds
+    /// it, and Keep both leaves one edit's bytes in a file.
+    fn answered(&mut self, who: usize, title: &str, answer: &str, edits: &[(u64, Vec<u8>)]) {
+        let workspace = &self.drawbars[who].bench.workspace;
+        let settled = |(id, _): &&(u64, Vec<u8>)| {
+            let entity = workspace.get(*id);
+            entity.is_some_and(|e| !e.is_unsaved() && e.saved.holds(&e.bytes))
+        };
+        let filed = |(_, bytes): &&(u64, Vec<u8>)| workspace.listed().any(|e| e.saved.holds(bytes));
+        let took: Vec<u64> = match answer {
+            "Take theirs" => edits.iter().filter(settled).map(|(id, _)| *id).collect(),
+            "Keep both" => edits.iter().filter(filed).map(|(id, _)| *id).collect(),
+            _ => return,
+        };
+        self.reach(Check::AnswersTakeEffect);
+        if took.is_empty() {
+            let what = format!("{} answers {title} with {answer}", name(who));
+            let left = ["no edit held in a file", "the edit unsaved"]
+                [usize::from(answer == "Take theirs")];
+            self.fail(
+                Check::AnswersTakeEffect,
+                &what,
+                format!("and that leaves {left}"),
+            );
+        }
+        for id in took {
+            self.unsaved[who].remove(&id);
+        }
     }
 
     /// Do `action` as drawbar `who`, where it has something to act on: what it made of
@@ -3087,6 +3154,7 @@ impl Walk {
                     gain,
                     bytes: edited.clone(),
                     saving: saves,
+                    path: at.clone(),
                 });
                 Done {
                     made: [Made::Nothing, Made::One]
@@ -3349,6 +3417,7 @@ impl Walk {
             true => &self.history[who].undone,
         }
         .last()?;
+        let knows = self.knows_its_history(who, made_at);
         self.expose(who, made_at);
         self.kept[who] = None;
         // Its answers may land only once another drawbar looks.
@@ -3357,15 +3426,31 @@ impl Walk {
             let leaves = touched.iter().map(|path| leaf(path).to_string());
             self.retagged[other].extend(leaves);
         }
+        let session = &mut self.drawbars[who];
+        let offered = match redo {
+            false => session.store.undo_label(),
+            true => session.store.redo_label(),
+        };
+        if knows {
+            self.reach(Check::OffersUndoAndRedo);
+        }
+        let Some(offered) = offered else {
+            if knows {
+                self.said(format!(
+                    "{} looks for {action:?} in the Edit menu",
+                    name(who)
+                ));
+                let what = format!("{} offers no {action:?}", name(who));
+                let menu = self.menu.get(&made_at).map_or("a change", String::as_str);
+                let details = format!("where the walk's history holds {menu}");
+                self.fail(Check::OffersUndoAndRedo, &what, details);
+            }
+            return None;
+        };
         let History { done, undone } = &mut self.history[who];
         let from = match redo {
             false => done,
             true => undone,
-        };
-        let session = &mut self.drawbars[who];
-        let offered = match redo {
-            false => session.store.undo_label()?,
-            true => session.store.redo_label()?,
         };
         from.pop();
         let hurried = self.dice.one_in(2);
@@ -3382,6 +3467,20 @@ impl Walk {
             hurried,
             ..Done::nothing()
         })
+    }
+
+    /// Whether drawbar `who` has nothing the walk knows of that lets it drop the step at
+    /// `made_at` from its Edit menu: it is current, chose no undo or redo still to learn
+    /// of, kept none, hurried on from no change, and no chaos and no other drawbar's change
+    /// came since.
+    fn knows_its_history(&self, who: usize, made_at: usize) -> bool {
+        let theirs = (self.changes.iter()).any(|(clock, by, _)| *clock > made_at && *by != who);
+        self.current[who]
+            && self.chosen[who].is_none()
+            && self.kept[who].is_none()
+            && self.hurried[who].is_empty()
+            && !self.odd[who]
+            && !theirs
     }
 
     /// The clock up to which every drawbar had every other's changes when the change at
@@ -3612,6 +3711,15 @@ fn perform(session: &mut Session, acts: Vec<Act>) {
     session.bench.act(acts);
     session.answer_reads();
     session.bench.act(Vec::new());
+}
+
+/// The gain `bytes` hold, as the registry spells it.
+fn gain_of(bytes: &[u8]) -> String {
+    let fields = crate::fields::decoded(bytes).unwrap_or_default();
+    let gain = fields
+        .into_iter()
+        .find(|field| field.path == "center_panel.gain");
+    gain.map_or_else(|| "that does not decode".into(), |field| field.value)
 }
 
 fn hurry(hurried: bool) -> &'static str {
