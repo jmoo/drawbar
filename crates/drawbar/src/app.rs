@@ -3770,8 +3770,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_save_refused_in_a_read_only_library_is_said_once_for_save_and_for_export() {
-        let refused =
-            "“Marimba.nsmp” was not saved. The library is read-only, so its file is unchanged.";
+        let refused = "“Marimba.nsmp” was not saved, because the library is read-only. The edit \
+                       is kept and still unsaved.";
         for (press, carry) in [
             ("Save", browser::Act::SaveDoc as fn(u64) -> browser::Act),
             ("Export", browser::Act::Export),

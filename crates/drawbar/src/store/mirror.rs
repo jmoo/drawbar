@@ -1081,10 +1081,7 @@ impl Store {
             let Some(entity) = workspace.get(id) else {
                 continue;
             };
-            log.trouble(format!(
-                "“{}” was not saved. The library is read-only, so its file is unchanged.",
-                entity.name
-            ));
+            not_saved(log, &entity.name, "the library is read-only");
         }
         self.tell_unfinished(workspace.ctx(), browser, log);
         self.watch(browser);
@@ -3800,9 +3797,7 @@ impl Store {
             return;
         };
         log.error(format!("saving {path}: {why}"));
-        log.trouble(format!(
-            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-        ));
+        not_saved(log, &name, &why);
     }
 
     /// Take in what the save of an edit of a file resting in the library wrote: the asset
@@ -3857,9 +3852,7 @@ impl Store {
             .get(id)
             .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
         log.error(format!("saving {path}: {why}"));
-        log.trouble(format!(
-            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-        ));
+        not_saved(log, &name, &why);
     }
 
     /// Send the saves asked for of edits of files resting in the library, each once the
@@ -4630,6 +4623,13 @@ impl Sent {
             step => step,
         }
     }
+}
+
+/// Say that the asset `name` was not saved, because of `why`.
+fn not_saved(log: &mut Log, name: &str, why: &str) {
+    log.trouble(format!(
+        "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
+    ));
 }
 
 /// What the library is asked by a change the Edit menu calls `label`.
