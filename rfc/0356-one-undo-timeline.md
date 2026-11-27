@@ -731,6 +731,12 @@ list of whole states.
   write of the same length in the second of drawbar's own is not seen. The limit
   is older than this change. The undo of a save, and the read that follows a
   lost answer, now rest on it too, and a program file is always one length.
+- The library checks a file before it changes it, and does not look again as
+  it moves the file away. A write from another program in between goes to the
+  trash unseen, in a save as in an undo (#382). When that happens in the undo of
+  a save, redoing the save puts the other program's bytes back. The document
+  reads saved by then and follows them, so its edit is lost. The answer to a
+  redo does not say what was put.
 - After an edit ends Redo, toshokan keeps the steps it would have redone, and
   the trash keeps their bytes, until the next commit.
 - A long visit to a note is one step. The field's own undo covers the typing
