@@ -1226,6 +1226,7 @@ fn bring(
         keyboard: keyboard.clone(),
         before,
         after: after.clone(),
+        whole: nord_format::crc::crc32(&bytes),
     };
     workspace.save_over(id, bytes, None, log);
     workspace.link(id, keyboard, after);
@@ -1980,6 +1981,26 @@ mod tests {
         assert_eq!(undo(&mut bench, "Brought in"), "Put back “A”.");
         assert_eq!(bench.workspace.get(id).unwrap().bytes.to_vec(), body());
         assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+    }
+
+    #[test]
+    fn undoing_a_bringing_in_leaves_a_file_saved_since_with_another_header() {
+        let mut bench = Bench::new();
+        let theirs = gained("40");
+        walked(&mut bench, &[Some(crc(&theirs))]);
+        let id = linked(&mut bench, "A.ne5p", body(), 1, &body());
+        bench.sync();
+        got(&mut bench, 1, theirs.clone(), Purpose::Pull);
+        // The slot address in a CBIN header, which no slot's checksum covers.
+        let mut addressed = theirs;
+        addressed[12..16].copy_from_slice(&0x0001_0000_u32.to_le_bytes());
+        let log = &mut bench.log;
+        bench.workspace.save_over(id, addressed.clone(), None, log);
+        assert_eq!(standing(&bench, id), Some(Standing::Same));
+
+        let said = undo(&mut bench, "Brought in");
+        assert_eq!(said, "Not undone: “A” changed since.");
+        assert!(bench.workspace.get(id).unwrap().bytes.to_vec() == addressed);
     }
 
     #[test]

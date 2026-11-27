@@ -92,8 +92,10 @@ pub struct Restored {
     pub bytes: Vec<u8>,
     pub keyboard: Keyboard,
     pub before: Held,
-    /// The link it was brought in under. Its base is what the file was saved as.
+    /// The link it was brought in under.
     pub after: Held,
+    /// CRC-32 over the whole file as brought in, its header included.
+    pub whole: u32,
 }
 
 impl Undo {
@@ -158,8 +160,8 @@ impl Undo {
     }
 }
 
-/// Put back each file still as bringing it in left it: saved as what it was brought in as,
-/// and linked as bringing it in linked it.
+/// Put back each file still as bringing it in left it: saved as the bytes brought in, and
+/// linked as bringing it in linked it.
 fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
     let mut put = Vec::new();
     let mut changed = Vec::new();
@@ -169,13 +171,15 @@ fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Opt
         keyboard,
         before,
         after,
+        whole,
     } in kept
     {
         let Some(entity) = workspace.get(id) else {
             continue;
         };
         let left = !entity.is_unsaved()
-            && entity.saved_print() == Some(after.base)
+            && !entity.unread()
+            && nord_format::crc::crc32(&entity.bytes) == whole
             && entity.held_on(&keyboard) == Some(&after);
         if !left {
             changed.push(id);
