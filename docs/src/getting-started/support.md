@@ -24,6 +24,7 @@ Notes stay on the computer.
 | Instrument | Confirmed on hardware |
 |---|---|
 | Electro 5 | Reading and writing programs, set lists, live slots, settings, samples and pianos from macOS, Linux and the browser. Moving, deleting, renaming, duplicating and selecting slots from macOS. The [write safeguards](../drawbar/instrument.md#safety) have also been tested here. |
+| Electro 7 | Connected and listed storage from Windows. File reads and writes on this model remain untested. |
 | Stage 4 | Connected and listed storage from Windows. File reads and writes on this model remain untested. |
 | Other models | No USB connection has been tested. |
 
