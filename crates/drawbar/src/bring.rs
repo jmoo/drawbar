@@ -1161,7 +1161,7 @@ fn follow_moves(
         before,
         left: workspace
             .get(row.id)
-            .and_then(|it| it.held_on(keyboard))
+            .and_then(|it| it.link_on(keyboard))
             .cloned(),
     });
     log.offer(Undo::Relink {

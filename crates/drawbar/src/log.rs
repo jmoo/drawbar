@@ -11,7 +11,7 @@ use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
 use crate::icon::{painted, sized, Glyph};
-use crate::link::{Held, Keyboard};
+use crate::link::{Held, Keyboard, Link, Spot};
 use crate::strings::{display_name, place};
 use crate::workspace::Workspace;
 
@@ -68,7 +68,8 @@ pub enum Undo {
         links: Vec<Relinked>,
     },
     /// Files unlinked from a slot another file kept, each with that file: link back
-    /// each still unlinked, in place of that one and of no other file.
+    /// each with nothing stored for that keyboard since, in place of that one and of no
+    /// other file.
     Reclaim {
         keyboard: Keyboard,
         links: Vec<(u64, Held, u64)>,
@@ -80,8 +81,8 @@ pub enum Undo {
 pub struct Relinked {
     pub id: u64,
     pub before: Held,
-    /// The link the change left the file with, if any.
-    pub left: Option<Held>,
+    /// What the change left stored for the file on that keyboard.
+    pub left: Option<Link>,
 }
 
 /// A file as it was before it was brought in, and the link bringing it in left.
@@ -104,8 +105,8 @@ impl Undo {
             Undo::Unlink { keyboard, links } => {
                 let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
                 let (links, changed): (Vec<_>, Vec<_>) = links.partition(|(id, held)| {
-                    let stands = |left| stands(workspace, &keyboard, *id, left);
-                    stands(Some(held)) || stands(None)
+                    let now = workspace.get(*id).and_then(|it| it.held_on(&keyboard));
+                    now.is_none_or(|now| slot(now) == slot(held))
                 });
                 let unlinked = files(&links);
                 for id in &unlinked {
@@ -225,12 +226,16 @@ fn relink(
     said(done, workspace, changed)
 }
 
-/// Whether `id` is linked on `keyboard` as the change being taken back left it: to the
-/// slot `left` names, or to none.
-fn stands(workspace: &Workspace, keyboard: &Keyboard, id: u64, left: Option<&Held>) -> bool {
-    let slot = |held: &Held| (held.class(), held.spot.clone());
-    let now = workspace.get(id).and_then(|it| it.held_on(keyboard));
+/// Whether what is stored for `id` on `keyboard` is as the change being taken back left
+/// it: a link to the same slot, that it is kept off, or nothing.
+fn stands(workspace: &Workspace, keyboard: &Keyboard, id: u64, left: Option<&Link>) -> bool {
+    let slot = |link: &Link| link.held.as_ref().map(slot);
+    let now = workspace.get(id).and_then(|it| it.link_on(keyboard));
     now.map(slot) == left.map(slot)
+}
+
+fn slot(held: &Held) -> (nord_usb::ObjectClass, Spot) {
+    (held.class(), held.spot.clone())
 }
 
 /// The files `links` name.

@@ -4263,6 +4263,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn undoing_a_settled_claim_leaves_a_file_kept_off_the_keyboard_since() {
+        let (mut bench, ids) = claiming(&[("A.ne5p", body()), ("B.ne5p", gained("40"))]);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        bench.workspace.keep_off(ids[1], &keyboard);
+        assert!(bench
+            .log
+            .press("1 file unlinked from a slot another file is linked to."));
+        bench.log.undo_pressed(&mut bench.workspace);
+        let linked = [ids[0], ids[1]].map(|id| held_at(&bench, id).is_some());
+        assert_eq!(linked, [true, false]);
+        assert_eq!(bench.log.status().1, "Not undone: “B” changed since.");
+    }
+
     /// Linking one back unlinks the kept one, so of several only the last would end up
     /// linked.
     #[test]

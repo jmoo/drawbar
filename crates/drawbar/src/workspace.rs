@@ -1120,7 +1120,8 @@ impl LocalEntity {
             .is_some_and(|link| link.held.is_none())
     }
 
-    fn link_on(&self, keyboard: &Keyboard) -> Option<&Link> {
+    /// What is stored for it on `keyboard`: a link to a slot, or that it is kept off.
+    pub fn link_on(&self, keyboard: &Keyboard) -> Option<&Link> {
         self.links.iter().find(|link| link.keyboard == *keyboard)
     }
 

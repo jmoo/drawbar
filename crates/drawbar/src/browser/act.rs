@@ -1718,10 +1718,11 @@ fn unlink(workspace: &mut Workspace, state: &DeviceState, log: &mut Log, id: u64
     log.say(said);
     if let Some(held) = before {
         let keyboard = keyboard.clone();
+        let left = workspace.get(id).and_then(|it| it.link_on(&keyboard));
         let links = vec![crate::log::Relinked {
             id,
             before: held,
-            left: None,
+            left: left.cloned(),
         }];
         log.offer(crate::log::Undo::Relink { keyboard, links });
     }
