@@ -671,10 +671,9 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            // A step another drawbar changed since, or whose trash item went, can
-            // never be taken back; any other refusal may pass once the files are
-            // looked at again.
-            Err(e @ Error::Refused(Refusal::ChangedSince { .. } | Refusal::Emptied)) => {
+            // toshokan refuses over what the folder and the library's history hold,
+            // which waiting does not change. A read or write that failed may pass.
+            Err(e @ Error::Refused(_)) => {
                 match again {
                     true => library.forget_redo(),
                     false => library.forget_undo(),

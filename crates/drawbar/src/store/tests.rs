@@ -7030,6 +7030,125 @@ fn undo_and_redo_say_what_they_take_back() {
     );
 }
 
+/// An undo the library refuses is let go when it is asked, with a word, and Undo names
+/// the change before it. Nothing is written.
+#[test]
+fn an_undo_of_a_save_whose_file_changed_outside_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.make_tag("Sunday");
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let theirs = with_gain(&edited, "12");
+    write_later(&root, "untitled.ne5p", &theirs);
+    session.refocus();
+    let save = "Undo Save “untitled.ne5p”";
+    assert_eq!(session.undo_label().as_deref(), Some(save));
+
+    session.undo();
+
+    let told = "Save “untitled.ne5p” cannot be undone: “untitled.ne5p” is not as drawbar \
+                last saw it.";
+    assert_eq!(session.said(told), 1);
+    assert_eq!(root.read("untitled.ne5p"), theirs, "their file stands");
+    assert_eq!(session.tag_names(), ["Sunday"]);
+    session.undo();
+    assert_eq!(
+        session.tag_names(),
+        [""; 0],
+        "Undo reaches the tag made before"
+    );
+}
+
+#[test]
+fn an_undo_of_a_new_file_deleted_outside_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.make_tag("Sunday");
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Gig");
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.refocus();
+    session.undo();
+    let new = "Undo New “untitled.ne5p”";
+    assert_eq!(session.undo_label().as_deref(), Some(new));
+
+    session.undo();
+
+    assert_eq!(
+        session.said("New “untitled.ne5p” cannot be undone: it has no file."),
+        1
+    );
+    assert_eq!(session.tag_names(), ["Sunday"]);
+    session.undo();
+    assert_eq!(
+        session.tag_names(),
+        [""; 0],
+        "Undo reaches the tag made before"
+    );
+}
+
+#[test]
+fn a_redo_of_a_save_whose_file_changed_outside_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.make_tag("Sunday");
+    let edited = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.undo();
+    let theirs = with_gain(&edited, "12");
+    write_later(&root, "untitled.ne5p", &theirs);
+    session.refocus();
+    let save = "Redo Save “untitled.ne5p”";
+    assert_eq!(session.redo_label().as_deref(), Some(save));
+
+    session.redo();
+
+    let told = "Save “untitled.ne5p” cannot be made again: “untitled.ne5p” is not as \
+                drawbar last saw it.";
+    assert_eq!(session.said(told), 1);
+    assert_eq!(session.redo_label(), None);
+    assert_eq!(root.read("untitled.ne5p"), theirs, "their file stands");
+    assert_eq!(
+        session.bytes(id),
+        edited,
+        "the document keeps what it holds"
+    );
+}
+
+/// An undo that fails where the folder could not be read may pass later, so its step
+/// stays.
+#[test]
+fn an_undo_the_folder_could_not_be_read_for_stays_to_be_taken() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = root.read("untitled.ne5p");
+    let saved = session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let save = "Undo Save “untitled.ne5p”";
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Stat { path, .. } if path.as_str() == "untitled.ne5p"),
+    ));
+
+    session.undo();
+
+    assert_eq!(root.read("untitled.ne5p"), saved, "nothing was undone");
+    assert_eq!(session.said("cannot be undone"), 0);
+    assert_eq!(session.undo_label().as_deref(), Some(save));
+    session.undo();
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is taken");
+}
+
 /// Undoing a folder's rename puts its files back under the old name and leaves no
 /// folder of the new one; a redo moves them back under it.
 #[test]

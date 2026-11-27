@@ -268,7 +268,8 @@ A library step leaves its list when its undo or redo is sent, and the store
 holds it until the library answers. An edit made meanwhile is recorded as usual.
 When the answer comes, a step that was redone joins `done`. A step that was
 undone joins `undone`, unless a step was recorded after it was sent, and then it
-is dropped. A refused step goes back to the end of the list it left.
+is dropped. A step that failed goes back to the end of the list it left, and a
+step the library refused is let go, as the next section says.
 
 | Action | Step |
 |---|---|
@@ -347,9 +348,29 @@ over a take, is a `User` change when it lands.
 Undo takes the last step of `done`, or an edit step beneath the saves that end
 `done`, as the next section says.
 
-A library step sends `Cmd::Undo`, as today. A refusal that can never pass lets
-the step go and says so. Any other refusal keeps the step and says what is in
-the way. Neither changes from today.
+A library step sends `Cmd::Undo`, as today, and the library answers one of
+three ways:
+
+- It makes the step.
+- It refuses the step before anything is written, over what the folder or its
+  own history holds. The file a save wrote holds other bytes or is gone,
+  something is where the step would put a file, another drawbar changed the
+  same thing since, or the trash no longer holds what the step needs. Waiting
+  changes none of these, so the step is let go with a word that says why, and
+  Undo names the step before it.
+- The step fails, because the folder could not be read or written or the
+  library is read-only. That may pass, so the step goes back to the list it
+  left, and the log says what is in the way.
+
+toshokan draws the same line: a refusal is its own kind of error, apart from a
+failed read or write. Today drawbar lets a step go only for the last two
+refusals above, and a step refused for any other reason stays first in Undo and
+is refused at every press. In one timeline that would shut off every step
+behind it, edits included.
+
+A library step is checked when it is asked, since only the library can look at
+the folder. A step whose file is put back as the step left it before Undo is
+pressed is taken as any other.
 
 An edit step is one comparison and one call:
 
@@ -499,8 +520,8 @@ and they are why these documents lose their edit steps at a save.
 | An undo or redo of a save stops partway | What the file holds is unknown until the next write, or the next open, finishes it. Each document the save wrote that holds its body reads unsaved until then, so a quit keeps what it holds. |
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
-| An undo is refused and may pass later | The step stays, and the log says what is in the way. |
-| An undo can never pass | The step is let go. |
+| The library refuses an undo or redo over what the folder or its history holds | The step is let go, and the log says why. Nothing is written, and Undo names the step before it. |
+| An undo or redo fails because the folder could not be read or written, or the library is read-only | The step stays, and the log says what is in the way. |
 | The library's history ends while an undo or redo waits for its answer | The step is let go with the rest of that history, whatever the answer. |
 | The answer to a save is lost, or a save fails partway and a later write finishes it | The baseline goes back, and the file is read again once what it holds can be known. That read moves only the baseline, so an edit made or undone since stays, unsaved where the file holds something else. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |
@@ -681,6 +702,11 @@ list of whole states.
   jump the user did not ask for by name.
 - A step whose document moved on is let go without a word. The menu stops
   offering it, and nothing says why.
+- A library step is let go the first time the library refuses it, and is not
+  offered again if its file is later put back as the step left it. What the
+  step displaced stays in the trash, where no Undo reaches it. Some refusals
+  are judged from the folder as drawbar last looked at it, so a file that was
+  missing at that look and has come back since still costs its step.
 - Undo treats a save two ways. It leaves the save alone to reach an edit of a
   body, and stops at it to reach anything else. The label says which, but a
   user meets the rule without being told.

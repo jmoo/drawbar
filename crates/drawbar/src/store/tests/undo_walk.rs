@@ -8,8 +8,6 @@ use crate::timeline::{Gesture, Next};
 const DOCUMENTS: usize = 3;
 const SEEDS: std::ops::RangeInclusive<u64> = 1..=12;
 const STEPS: usize = 60;
-/// What the library says of an undo or redo whose file changed since.
-const STUCK: &str = "is not as drawbar last saw it";
 const GAINS: [&str; 6] = ["10", "30", "50", "70", "90", "110"];
 
 /// What one document is, on disk and in the editor.
@@ -63,8 +61,6 @@ enum Answer {
     Taken,
     /// The library refused it and let it go.
     Forgotten,
-    /// The library refused it and keeps it, so Undo or Redo names it again.
-    Kept,
 }
 
 /// The steps Undo and Redo take, over the state they take them in.
@@ -198,8 +194,6 @@ impl Model {
 
     /// Follow what became of the step at `at` of the list Undo, or Redo where `again`,
     /// takes from.
-    // ⚠️ A step the library keeps stays where it is, and Undo names it again:
-    // `an_undo_refused_because_its_file_changed_outside_is_let_go` fails.
     fn answered(&mut self, again: bool, at: usize, answer: Answer) {
         let mut step = match again {
             false => self.done.remove(at),
@@ -215,10 +209,6 @@ impl Model {
                 }
             }
             Answer::Forgotten => self.let_go += 1,
-            Answer::Kept => match again {
-                false => self.done.insert(at, step),
-                true => self.undone.insert(at, step),
-            },
         }
     }
 }
@@ -731,14 +721,9 @@ impl Walk {
             return Answer::Taken;
         };
         let verb = if again { "made again" } else { "undone" };
-        let answer = match (
-            self.session.said(&format!("{label} cannot be {verb}: ")),
-            self.session.said(STUCK),
-        ) {
-            (0, 0) => Answer::Taken,
-            (_, 0) => Answer::Forgotten,
-            (0, _) => Answer::Kept,
-            _ => panic!("{whence}: the library both let go of {label} and kept it"),
+        let answer = match self.session.said(&format!("{label} cannot be {verb}: ")) {
+            0 => Answer::Taken,
+            _ => Answer::Forgotten,
         };
         let moved_on = step.is_some_and(|step| self.model.moved_on(step));
         assert!(
