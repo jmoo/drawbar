@@ -20,7 +20,7 @@ use crate::shell::Dock;
 use crate::store::Store;
 use crate::strings::folder;
 use crate::tabs::Spot;
-use crate::timeline::{Asked, Next, Went};
+use crate::timeline::{Asked, LetGo, Next, Went};
 use crate::workspace::Fresh;
 use crate::zoom::Step;
 
@@ -689,13 +689,18 @@ impl DrawbarApp {
     }
 
     /// Run the Undo and Redo asked for this frame, in order, once its edits are recorded,
-    /// so each takes the step its menu named after them. One no longer offered does
-    /// nothing.
-    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context) {
+    /// so each takes the step its menu named after them. One no longer offered, or whose
+    /// named step `let_go` says this frame let go of, does nothing.
+    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context, let_go: LetGo) {
         for command in std::mem::take(&mut self.undoing) {
-            if self
-                .offer_now(ctx, command)
-                .is_some_and(|offer| offer.enabled)
+            let gone = match command {
+                Command::Redo => let_go.redo,
+                _ => let_go.undo,
+            };
+            if !gone
+                && self
+                    .offer_now(ctx, command)
+                    .is_some_and(|offer| offer.enabled)
             {
                 self.undo(command == Command::Redo);
                 ctx.request_repaint();

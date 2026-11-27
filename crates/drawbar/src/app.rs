@@ -18,7 +18,7 @@ use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
-use crate::timeline::{Gesture, Timeline};
+use crate::timeline::{Gesture, LetGo, Timeline};
 use crate::workspace::{Working, Workspace};
 use crate::zoom::{Room, Zoom};
 
@@ -568,7 +568,7 @@ impl DrawbarApp {
     /// Record what this frame's edits made of each document they changed, as steps Undo
     /// takes back, and let go of the steps Undo and Redo would take whose documents moved
     /// on.
-    fn record(&mut self, ctx: &egui::Context, began: Option<egui::Id>) {
+    fn record(&mut self, ctx: &egui::Context, began: Option<egui::Id>) -> LetGo {
         let shown = self.timeline.shown();
         let documents = Editors {
             document: &mut self.document,
@@ -593,10 +593,11 @@ impl DrawbarApp {
             })
         });
         let changes: Vec<_> = changes.collect();
-        follow(&mut self.timeline, ctx, began, changes, &documents);
+        let let_go = follow(&mut self.timeline, ctx, began, changes, &documents);
         if self.timeline.shown() != shown {
             ctx.request_repaint();
         }
+        let_go
     }
 
     /// Hold a send to the instrument until the library's files have been checked for
@@ -1337,8 +1338,8 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.log,
         );
-        self.record(ctx, began);
-        self.undo_asked(ctx);
+        let let_go = self.record(ctx, began);
+        self.undo_asked(ctx, let_go);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1516,7 +1517,7 @@ fn follow(
     began: Option<egui::Id>,
     changes: Vec<Change>,
     documents: &impl crate::timeline::Documents,
-) {
+) -> LetGo {
     let gesture = gesture(ctx);
     let pressed = ctx.input(|i| i.pointer.any_pressed());
     let left = |began: &egui::Id| pressed || gesture != Gesture::Focused(*began);
@@ -1534,7 +1535,7 @@ fn follow(
     if committed.is_some() {
         timeline.close();
     }
-    timeline.settle(gesture, documents);
+    timeline.settle(gesture, documents)
 }
 
 /// The gesture going on as a frame ends.
@@ -2995,6 +2996,45 @@ mod tests {
 
         assert_eq!(bytes(&app, id), changed);
         assert!(!app.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_undo_whose_named_step_was_let_go_in_its_frame_takes_back_nothing() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app, id) = filed(&root);
+        let changed = turn_gain(&ctx, &mut app, id, "40");
+        let save = egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        input(&ctx, &mut app, vec![save]);
+        until(&ctx, &mut app, "the save writes the file", |app| {
+            idle(app) && root.read("untitled.ne5p") == changed
+        });
+        assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
+        let outside = crate::fields::apply(&changed, &[("center_panel.gain".into(), "12".into())])
+            .unwrap()
+            .1;
+        app.workspace.replace_bytes(
+            id,
+            outside.clone(),
+            crate::workspace::Cause::Follow,
+            &mut app.log,
+        );
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        until(&ctx, &mut app, "the library is idle", idle);
+
+        assert_eq!(bytes(&app, id), outside);
+        assert!(
+            root.read("untitled.ne5p") == changed,
+            "the file stays as saved"
+        );
+        assert_eq!(undo_line(&app).0, "Undo Save “untitled.ne5p”");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

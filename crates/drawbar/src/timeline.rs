@@ -40,6 +40,13 @@ pub enum Gesture {
     Focused(egui::Id),
 }
 
+/// Whether a frame's end let go of the step Undo, or Redo, would have taken.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct LetGo {
+    pub undo: bool,
+    pub redo: bool,
+}
+
 /// What a file holds: the baseline the workspace knows it by, and the identity the library
 /// knows it by.
 #[derive(Clone)]
@@ -283,11 +290,12 @@ impl Timeline {
 
     /// The frame ended with `gesture` going on. A step another gesture opened closes,
     /// and the steps Undo and Redo would take next are let go where their documents no
-    /// longer hold what they recorded.
-    pub fn settle(&mut self, gesture: Gesture, documents: &impl Documents) {
+    /// longer hold what they recorded. Returns which of the two it let go of.
+    pub fn settle(&mut self, gesture: Gesture, documents: &impl Documents) -> LetGo {
         if self.open.is_some_and(|open| open != gesture) {
             self.close();
         }
+        let mut let_go = LetGo::default();
         while let Some(at) = self.undoes() {
             let Step::Edit(step) = &mut self.done[at] else {
                 break;
@@ -296,13 +304,16 @@ impl Timeline {
                 break;
             }
             self.let_go(at);
+            let_go.undo = true;
         }
         while let Some(Step::Edit(step)) = self.undone.last_mut() {
             if documents.holds(step.id, &mut step.before) {
                 break;
             }
             self.bytes -= self.undone.pop().map_or(0, |step| step.size());
+            let_go.redo = true;
         }
+        let_go
     }
 
     /// The step Undo takes: the last, or an edit beneath the saves that end the list,
