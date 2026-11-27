@@ -1375,9 +1375,8 @@ impl Document {
         let (before, edited) = (entity.stamp, shape(entity));
         let mut gained = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
-            // An edit that does not apply to the file is replaced by the next one.
             let kept = match workspace.edit(id) {
-                Some(Edit::Sample(kept)) if workspace.unapplied(id).is_none() => kept.as_slice(),
+                Some(Edit::Sample(kept)) => kept.as_slice(),
                 _ => &[],
             };
             let all = match self.samples.take(id, file, index, kept, &sets) {
@@ -4977,5 +4976,36 @@ mod tests {
         let renamed = Edit::Sample(vec![("name".to_string(), "Vibes".to_string())]);
         assert_eq!(open.workspace.edit(id), Some(&renamed));
         assert_eq!(open.workspace.unapplied(id), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_made_while_a_save_is_out_over_a_file_changed_outside_is_taken() {
+        use crate::browser::Act;
+
+        let zoned = testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Zoned.nsmp", &zoned);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Zoned.nsmp", file);
+        open.id = id;
+        open.twice();
+        let sets = vec![("zone3.root_key".to_string(), "C5".to_string())];
+        let (document, workspace) = (&mut open.document, &mut open.workspace);
+        document.apply(id, sets, workspace, &mut open.log).unwrap();
+        open.act(vec![Act::SaveDoc(id)]);
+        open.workspace.send_edit(id).expect("the store sends it");
+
+        let theirs = testing::on_disk(&dir, "Theirs.nsmp", &sample_bytes());
+        open.workspace.rebase_file(id, theirs);
+        open.twice();
+        open.rename_sample("Vibes");
+
+        let renamed = Edit::Sample(vec![("name".to_string(), "Vibes".to_string())]);
+        assert_eq!(
+            open.workspace.edit(id),
+            Some(&renamed),
+            "their file has one zone, so the rename alone is the edit"
+        );
     }
 }
