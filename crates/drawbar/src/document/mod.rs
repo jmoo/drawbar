@@ -4873,6 +4873,28 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_duplicate_of_a_piano_holds_its_pending_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.place();
+        rename_with_an_x(&mut open);
+        let id = open.id;
+        open.act(vec![crate::browser::Act::DuplicateLocal(id)]);
+        let ctx = open.ctx.clone();
+        let applied = open
+            .document
+            .piano
+            .awaited(&ctx, &mut open.workspace, &mut open.log)
+            .expect("the duplicate waits for the lay-out");
+        let acts = open
+            .document
+            .put_back(applied, &mut open.workspace, &mut open.log);
+        open.act(acts);
+
+        assert_eq!(copies(&open), ["XTest Piano"]);
+    }
+
     /// The library folder a piano library held in memory is saved into, as the store
     /// writes it and finds it changed.
     #[cfg(not(target_arch = "wasm32"))]

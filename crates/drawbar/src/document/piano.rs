@@ -1747,7 +1747,8 @@ pub(super) fn waits_on(act: &Act) -> Option<u64> {
         | Act::WriteBack(id)
         | Act::Export(id)
         | Act::Send { id, .. }
-        | Act::KeepBoth(id) => Some(*id),
+        | Act::KeepBoth(id)
+        | Act::DuplicateLocal(id) => Some(*id),
         _ => None,
     }
 }
