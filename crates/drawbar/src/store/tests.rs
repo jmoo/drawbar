@@ -52,20 +52,6 @@ impl Session {
         session
     }
 
-    /// Open the library with this install's own state at `local`, telling the time and
-    /// drawing ids as `ambient` does.
-    fn ambient(root: &Temp, local: &std::path::Path, ambient: super::native::Ambient) -> Session {
-        let bench = Bench::new();
-        let (root, local) = (root.0.clone(), local.to_path_buf());
-        let backend = Backend::start_with(&bench.ctx, root, local, ambient);
-        let mut session = Session {
-            store: Store::start(backend),
-            bench,
-        };
-        session.opened();
-        session
-    }
-
     /// [`Session::listed`], holding at most `budget` bytes whole.
     fn within(root: &Temp, budget: u64) -> Session {
         let bench = Bench::new();

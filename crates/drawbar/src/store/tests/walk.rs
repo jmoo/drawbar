@@ -108,25 +108,45 @@ const ROUNDS: usize = 4;
 /// How many times a drawbar sends what waits before the walk says a change still waits.
 const SYNCS: usize = 4;
 
+/// How many frames may each send the library's thread more before the walk says the
+/// answers never end.
+const POLLS: usize = 16;
+
 /// How long a library's thread may take to run what it was sent.
 const PATIENCE: Duration = Duration::from_secs(60);
 
 #[test]
 fn two_drawbars_on_one_folder_offer_each_undo_by_name_through_a_seeded_walk() {
-    walks(&[World::Shared], &[2], &[1, 2, 3, 4]);
+    let (_, reached) = walks(&[World::Shared], &[2], &[1, 2, 6, 7]);
+    reaches(&reached, &HELD_ON_ONE_FOLDER);
 }
 
 #[test]
 fn drawbars_on_synced_copies_offer_each_undo_by_name_while_sync_settles() {
-    walks(&SYNCED, &[2, 3], &[1]);
+    let (_, reached) = walks(&SYNCED, &[2, 3], &[2]);
+    reaches(&reached, &HELD_ON_ONE_FOLDER);
+    reaches(&reached, &HELD_IN_SYNC);
 }
+
+/// The held checks every world's walks evaluate.
+const HELD_ON_ONE_FOLDER: [Check; 6] = [
+    Check::MenuNamesTheStep,
+    Check::OffersUndoAndRedo,
+    Check::UndoEndsWithHistory,
+    Check::EditsKept,
+    Check::AsksOverAnEdit,
+    Check::QuestionsEnd,
+];
+
+/// The held checks only a synced world's walks evaluate.
+const HELD_IN_SYNC: [Check; 2] = [Check::SyncSettles, Check::OnlyItsWriterChangesALog];
 
 #[test]
 #[ignore = "walks a hundred seeds; run it to see which unheld checks now hold"]
 fn every_unheld_check_still_fails_in_some_walk() {
     let seeds: Vec<u64> = (1..=100).collect();
-    let mut found = walks(&[World::Shared], &[2], &seeds);
-    found.append(&mut walks(&SYNCED, &[2, 3], &seeds));
+    let (mut found, _) = walks(&[World::Shared], &[2], &seeds);
+    found.append(&mut walks(&SYNCED, &[2, 3], &seeds).0);
     let held: Vec<&Check> = (UNHELD.iter())
         .filter(|check| !found.contains_key(check))
         .collect();
@@ -164,8 +184,8 @@ impl World {
 /// Walk each of `worlds` with each of `counts` drawbars, from each seed of
 /// `DRAWBAR_WALK_SEEDS`, a range such as `1..=500`, or of `seeds` where it is unset; say
 /// every walk that failed, and return the first failure of each [`UNHELD`] check, which
-/// it prints.
-fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> Unheld {
+/// it prints, with every check some walk evaluated.
+fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> (Unheld, Reached) {
     let seeds = match std::env::var("DRAWBAR_WALK_SEEDS") {
         Ok(range) => seed_range(&range).collect(),
         Err(std::env::VarError::NotPresent) => seeds.to_vec(),
@@ -173,17 +193,22 @@ fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> Unheld {
     };
     let test = std::thread::current();
     let test = test.name().expect("a test names its thread");
+    let folder =
+        std::env::var("DRAWBAR_TEST_FOLDER").map(|folder| format!("DRAWBAR_TEST_FOLDER={folder} "));
+    let folder = folder.unwrap_or_default();
     let mut failed = Vec::new();
     let mut unheld = Unheld::new();
+    let mut reached = Reached::new();
     let mut walked = 0;
     for seed in seeds {
-        let again = format!("\nto walk it again: DRAWBAR_WALK_SEEDS={seed}..={seed} cargo test -p drawbar --lib {test}");
+        let again = format!("\nto walk it again: {folder}DRAWBAR_WALK_SEEDS={seed}..={seed} cargo test -p drawbar --lib {test}");
         for world in worlds {
             for count in counts {
                 walked += 1;
                 let walk = || Walk::new(*world, *count, seed).run();
                 match panic::catch_unwind(AssertUnwindSafe(walk)) {
-                    Ok(found) => {
+                    Ok((found, evaluated)) => {
+                        reached.extend(evaluated);
                         for (check, said) in found {
                             unheld.entry(check).or_insert(said + &again);
                         }
@@ -210,7 +235,20 @@ fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> Unheld {
     for (check, said) in &unheld {
         println!("{check:?}, which UNHELD lists, fails first in {said}\n");
     }
-    unheld
+    (unheld, reached)
+}
+
+/// Every one of `checks` was evaluated in `reached`, the walks from the test's own seeds:
+/// walks from `DRAWBAR_WALK_SEEDS` need not reach them.
+fn reaches(reached: &Reached, checks: &[Check]) {
+    if std::env::var_os("DRAWBAR_WALK_SEEDS").is_some() {
+        return;
+    }
+    let missed: Vec<&Check> = checks.iter().filter(|c| !reached.contains(c)).collect();
+    assert!(
+        missed.is_empty(),
+        "no walk evaluated {missed:?}: choose other seeds"
+    );
 }
 
 /// What `DRAWBAR_WALK_SEEDS` must be.
@@ -444,8 +482,12 @@ enum Check {
     UndoRestoresTheView,
     /// An undo or redo kept for what was in its way goes once that moves or sync settles.
     KeptUndoGoes,
-    /// Every unsaved edit stays in the list with its asset.
+    /// An edit the walk has not asked to save stays in the list with its asset, which
+    /// holds the edit's bytes.
     EditsKept,
+    /// An edit the walk asked to save stays in the list with its asset until the asset
+    /// is saved as it.
+    SavingKeepsTheEdit,
     /// Another drawbar's save under an unsaved edit asks whose to keep.
     AsksOverAnEdit,
     /// No save writes over bytes sync brought that the drawbar never showed, and a save
@@ -489,13 +531,16 @@ const UNHELD: &[Check] = &[
     Check::Converges,
     // A save of an edit to a file another drawbar moved or deleted drops the asset and
     // the edit.
-    Check::EditsKept,
+    Check::SavingKeepsTheEdit,
     // A save writes over a file sync replaced with one of the same length and time.
     Check::NoSaveOverUnshownBytes,
 ];
 
 /// What a walk found of [`UNHELD`] checks: the first failure of each.
 type Unheld = BTreeMap<Check, String>;
+
+/// The checks a walk evaluated.
+type Reached = BTreeSet<Check>;
 
 /// What an action did to the library.
 #[derive(Clone, Copy, PartialEq)]
@@ -969,10 +1014,12 @@ struct Kept {
     why: String,
 }
 
-/// An edit the walk made, until its asset is saved as it: its gain and the bytes it left.
+/// An edit the walk made, until its asset is saved as it: its gain, the bytes it left,
+/// and whether the walk asked to save it.
 struct Edit {
     gain: usize,
     bytes: Vec<u8>,
+    saving: bool,
 }
 
 struct Walk {
@@ -1083,6 +1130,7 @@ struct Walk {
     /// What the Edit menu calls the change made at each clock, where the walk knows.
     menu: BTreeMap<usize, String>,
     unheld: std::cell::RefCell<Unheld>,
+    reached: std::cell::RefCell<Reached>,
 }
 
 impl Walk {
@@ -1106,6 +1154,7 @@ impl Walk {
         let root = folders.root(0);
         let mut drawbars = vec![Session::ambient(root, &root.local(), times.ambient())];
         drawbars[0].read_all();
+        drawbars[0].quiet();
         let others = (1..count)
             .map(|who| Session::ambient(folders.root(who), &locals[who - 1].0, times.ambient()));
         drawbars.extend(others);
@@ -1159,10 +1208,11 @@ impl Walk {
             named: 0,
             menu: BTreeMap::new(),
             unheld: Default::default(),
+            reached: Default::default(),
         }
     }
 
-    fn run(mut self) -> Unheld {
+    fn run(mut self) -> (Unheld, Reached) {
         for _ in 0..self.world.steps() {
             self.step();
         }
@@ -1183,7 +1233,12 @@ impl Walk {
         for session in self.drawbars {
             session.close();
         }
-        self.unheld.into_inner()
+        (self.unheld.into_inner(), self.reached.into_inner())
+    }
+
+    /// Note that the walk evaluated `check`: its precondition held and it compared.
+    fn reach(&self, check: Check) {
+        self.reached.borrow_mut().insert(check);
     }
 
     /// Fail the walk where `check` broke, or, where it is [`UNHELD`], note its first
@@ -1484,6 +1539,9 @@ impl Walk {
                     .iter()
                     .any(|n| self.rewritten[who].contains(n));
             let asked = asked.iter().any(|text| names(text).contains(&named[0]));
+            if moved && theirs {
+                self.reach(Check::AsksOverAnEdit);
+            }
             if moved && theirs && !asked {
                 let what = format!(
                     "{} took another drawbar's save under the edit of {}",
@@ -1719,6 +1777,7 @@ impl Walk {
             (0..copies).map(|copy| sync.record(copy)).collect();
         match recorded {
             Ok(notes) => {
+                self.reach(Check::OnlyItsWriterChangesALog);
                 let step = self.step;
                 (self.steps).extend(notes.into_iter().flatten().map(|note| (step, note)));
             }
@@ -1745,6 +1804,7 @@ impl Walk {
             if round > 0 && behind.is_empty() {
                 break;
             }
+            self.reach(Check::SyncSettles);
             if round == ROUNDS {
                 let names: Vec<char> = behind.iter().map(|copy| name(*copy)).collect();
                 let details = format!("after {ROUNDS} rounds, {names:?} still lag");
@@ -2422,6 +2482,7 @@ impl Walk {
                 false => session.store.undo_label(),
                 true => session.store.redo_label(),
             };
+            self.reach(Check::OffersUndoAndRedo);
             let Some(label) = label else {
                 let what = format!("{name} offers no {offered}");
                 self.fail(Check::OffersUndoAndRedo, &what, "after the change".into());
@@ -2741,6 +2802,9 @@ impl Walk {
     /// walk has emptied, with no refusal still to learn, offers no Undo.
     fn not_stuck(&self, who: usize) {
         let known = self.chosen[who].is_none() && self.history[who].done.is_empty();
+        if known {
+            self.reach(Check::UndoEndsWithHistory);
+        }
         let offered = self.drawbars[who].store.undo_label();
         if let Some(label) = offered.filter(|_| known) {
             let what = format!("{} offers {label} after every step was undone", name(who));
@@ -2874,6 +2938,11 @@ impl Walk {
         for (who, edits) in self.unsaved.iter().enumerate() {
             let session = &self.drawbars[who];
             for (id, edit) in edits {
+                let check = match edit.saving {
+                    false => Check::EditsKept,
+                    true => Check::SavingKeepsTheEdit,
+                };
+                self.reach(check);
                 let mut listed = session.bench.workspace.listed();
                 if listed.any(|entity| entity.id == *id && entity.bytes.to_vec() == edit.bytes) {
                     continue;
@@ -2893,7 +2962,7 @@ impl Walk {
                     }
                     _ => "the asset is no longer listed, and no asset holds the edit".into(),
                 };
-                self.fail(Check::EditsKept, &what, details);
+                self.fail(check, &what, details);
             }
         }
     }
@@ -2904,6 +2973,7 @@ impl Walk {
             let Some((title, answers)) = self.drawbars[who].bench.browser.asking() else {
                 return;
             };
+            self.reach(Check::QuestionsEnd);
             let answer = self.dice.pick(&answers).expect("a question has answers");
             let session = &mut self.drawbars[who];
             let held = holdings(session);
@@ -3016,6 +3086,7 @@ impl Walk {
                 let edit = (edited != saved).then(|| Edit {
                     gain,
                     bytes: edited.clone(),
+                    saving: saves,
                 });
                 Done {
                     made: [Made::Nothing, Made::One]
@@ -3360,6 +3431,7 @@ impl Walk {
         let Some(change) = self.menu.get(&made_at) else {
             return;
         };
+        self.reach(Check::MenuNamesTheStep);
         let expected = format!("{} {change}", ["Undo", "Redo"][usize::from(redo)]);
         if label != expected {
             let what = format!("the Edit menu offers {label}");
@@ -3412,6 +3484,22 @@ impl Walk {
 }
 
 impl Session {
+    /// Open the library with this install's own state at `local`, telling the time and
+    /// drawing ids as `ambient` does, and wait until its thread has run what the open
+    /// sent.
+    fn ambient(root: &Temp, local: &std::path::Path, ambient: Ambient) -> Session {
+        let bench = Bench::new();
+        let (root, local) = (root.0.clone(), local.to_path_buf());
+        let backend = Backend::start_with(&bench.ctx, root, local, ambient);
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session.quiet();
+        session
+    }
+
     /// Write everything, sending again each change that waited for the answer to one
     /// before it, and wait until the disk has it and every answer is folded in.
     fn sync_all(&mut self) {
@@ -3438,6 +3526,9 @@ impl Session {
     fn quiet(&self) {
         let since = std::time::Instant::now();
         while !self.store.idle() {
+            if let Some(why) = self.store.stopped() {
+                panic!("{why} before it ran what it was sent");
+            }
             assert!(
                 since.elapsed() < PATIENCE,
                 "the library's thread runs what it is sent"
@@ -3447,15 +3538,18 @@ impl Session {
     }
 
     /// Fold in every answer, as a frame does once the library's thread has run every
-    /// command sent, until the answers send no more.
+    /// command sent, until a frame sends nothing more.
     fn caught_up(&mut self) {
-        loop {
+        for _ in 0..POLLS {
             self.quiet();
+            let sent = self.store.sent();
             self.poll();
-            if self.store.idle() {
+            if self.store.sent() == sent {
                 return;
             }
         }
+        let waits = self.waiting().unwrap_or("nothing the store names");
+        panic!("the store sends commands at each of {POLLS} frames, while {waits} waits");
     }
 
     /// Send the files the workspace needs written and the changes to the facts asked for,
@@ -3522,7 +3616,7 @@ fn perform(session: &mut Session, acts: Vec<Act>) {
 
 fn hurry(hurried: bool) -> &'static str {
     match hurried {
-        true => ", and the user goes on without waiting",
+        true => ", and the user goes on before drawbar rescans",
         false => "",
     }
 }
