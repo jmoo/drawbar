@@ -235,7 +235,7 @@ pub struct Store {
     waits: bool,
     /// The assets whose files such a change, an undo or redo of a save, names. Each is
     /// kept as a draft while it waits, whatever it reads, since the change may never
-    /// finish.
+    /// finish, and its file is read again if the change goes unfinished.
     unsettled: BTreeSet<u64>,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
@@ -1636,15 +1636,16 @@ impl Store {
                 let landed = made.is_some();
                 self.waits = waiting != Waiting::Nothing;
                 let asked = self.answering.pop_front().map(Sent::asked);
-                // A step that waited and is not finished first never landed.
-                match (finished, timeline.waiting()) {
-                    (None, Some(earlier)) if waiting != Waiting::Earlier => {
-                        self.refiled(unlanded(earlier), workspace);
+                let settled = match waiting {
+                    Waiting::Earlier => BTreeSet::new(),
+                    Waiting::Nothing | Waiting::This => std::mem::take(&mut self.unsettled),
+                };
+                // A step that waited and is not finished first never landed, or was given
+                // up partway.
+                if finished.is_none() {
+                    for id in settled {
+                        self.unheard(id, workspace);
                     }
-                    _ => {}
-                }
-                if waiting != Waiting::Earlier {
-                    self.unsettled.clear();
                 }
                 // A step that stopped partway is taken to finish at the next write or open.
                 match (&asked, landed, waiting) {
@@ -1726,12 +1727,12 @@ impl Store {
                 let sent = self.answering.pop_front();
                 // What an undo or redo of a save, this one or one it may have finished,
                 // left in each file is not known until the file is read.
-                let asked = sent.iter().map(|sent| &sent.step).chain(timeline.waiting());
-                let left: Vec<u64> = asked
+                let asked = sent.iter().map(|sent| &sent.step);
+                let mut left: BTreeSet<u64> = asked
                     .flat_map(timeline::Asked::leaves)
                     .map(|(id, _)| id)
                     .collect();
-                self.unsettled.clear();
+                left.append(&mut self.unsettled);
                 for id in left {
                     self.unheard(id, workspace);
                 }
@@ -4628,20 +4629,6 @@ impl Sent {
             }
             step => step,
         }
-    }
-}
-
-/// What the file of each document an undo or redo of a save names holds where the step
-/// never landed: what it held before the step was asked.
-fn unlanded(asked: &timeline::Asked) -> Vec<(u64, &timeline::Filed)> {
-    match asked {
-        timeline::Asked::Undo(taken) => (taken.saved().iter())
-            .map(|saved| (saved.id, &saved.after))
-            .collect(),
-        timeline::Asked::Redo(taken) => (taken.saved().iter())
-            .map(|saved| (saved.id, &saved.before))
-            .collect(),
-        timeline::Asked::Change { .. } | timeline::Asked::Lasting => Vec::new(),
     }
 }
 

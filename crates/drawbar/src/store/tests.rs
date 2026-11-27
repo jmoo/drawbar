@@ -10459,6 +10459,7 @@ fn drop_pending(root: &Temp) {
     }
 }
 
+/// Empty the trash of each writer of the library at `root`, so that the next write gives
 /// up a change that waits to put back what it holds.
 fn drop_trash(root: &Temp) {
     let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
@@ -10513,6 +10514,47 @@ fn a_quit_while_a_redo_of_a_save_that_never_lands_waits_keeps_the_edit() {
     assert_eq!(again.bytes(id), edited, "the edit is kept");
     assert!(again.unsaved(id));
     assert!(again.bench.browser.asking().is_some(), "the user is asked");
+}
+
+#[test]
+fn an_undo_of_a_save_given_up_partway_leaves_the_document_its_edit_unsaved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    drop_trash(&root);
+    session.make_tag("Sunday");
+
+    assert_eq!(
+        session.said("so it began a new one"),
+        1,
+        "the undo is given up"
+    );
+    assert_eq!(session.bytes(id), edited);
+    assert!(session.unsaved(id));
+}
+
+#[test]
+fn a_redo_of_a_save_given_up_partway_keeps_the_edit_through_a_quit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.redo_stopped(&root, |io| puts(io, "untitled.ne5p"));
+    drop_trash(&root);
+    session.make_tag("Sunday");
+    assert_eq!(
+        session.said("so it began a new one"),
+        1,
+        "the redo is given up"
+    );
+    assert_eq!(session.bytes(id), edited);
+    assert!(session.unsaved(id));
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.said("It is kept for when the file is back."), 1);
 }
 
 /// Another program puts a file where the undo of a save was putting one back. The library
