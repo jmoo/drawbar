@@ -1375,7 +1375,12 @@ impl Document {
         let (before, edited) = (entity.stamp, shape(entity));
         let mut gained = None;
         if let (Shape::Sample, Some((file, index))) = (edited, sample::resting(entity)) {
-            let all = match self.samples.take(id, file, index, &sets) {
+            // An edit that does not apply to the file is replaced by the next one.
+            let kept = match workspace.edit(id) {
+                Some(Edit::Sample(kept)) if workspace.unapplied(id).is_none() => kept.as_slice(),
+                _ => &[],
+            };
+            let all = match self.samples.take(id, file, index, kept, &sets) {
                 Ok(all) => all,
                 Err(why) => {
                     log.error(why.clone());
@@ -4897,5 +4902,80 @@ mod tests {
             assert_eq!(shown, back);
             assert!(!open.entity().is_unsaved(), "{back:?} is saved");
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_resting_sample_renamed_back_then_edited_again_while_its_save_is_in_flight_keeps_both() {
+        use crate::browser::Act;
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.twice();
+
+        open.rename_sample("Vibes");
+        open.act(vec![Act::SaveDoc(id)]);
+        let (from, edit) = open.workspace.send_edit(id).expect("the store sends it");
+        open.rename_sample("Marimba");
+        let sets = vec![("zone1.top_note".to_string(), "C6".to_string())];
+        let (document, workspace) = (&mut open.document, &mut open.workspace);
+        document.apply(id, sets, workspace, &mut open.log).unwrap();
+        open.twice();
+
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved);
+        open.act(Vec::new());
+        open.twice();
+
+        let sets = match open.workspace.edit(id) {
+            Some(Edit::Sample(sets)) => sets.clone(),
+            other => panic!("an edit is held: {other:?}"),
+        };
+        let last = |path: &str| {
+            let set = sets.iter().rev().find(|(at, _)| at == path);
+            set.map(|(_, value)| value.as_str())
+        };
+        assert_eq!(
+            (last("name"), last("zone1.top_note")),
+            (Some("Marimba"), Some("C6")),
+            "the name typed back and the note set after it are both held: {sets:?}"
+        );
+        assert!(open.entity().is_unsaved());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_made_again_replaces_one_that_no_longer_applies_to_its_file() {
+        let zoned = testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Zoned.nsmp", &zoned);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Zoned.nsmp", file);
+        open.id = id;
+        open.twice();
+        let sets = vec![("zone3.root_key".to_string(), "C5".to_string())];
+        let (document, workspace) = (&mut open.document, &mut open.workspace);
+        document.apply(id, sets, workspace, &mut open.log).unwrap();
+        open.twice();
+
+        let theirs = testing::on_disk(&dir, "Theirs.nsmp", &sample_bytes());
+        open.workspace.rebase_file(id, theirs);
+        open.twice();
+        assert!(
+            open.workspace.unapplied(id).is_some(),
+            "their file has one zone"
+        );
+
+        open.rename_sample("Vibes");
+
+        let renamed = Edit::Sample(vec![("name".to_string(), "Vibes".to_string())]);
+        assert_eq!(open.workspace.edit(id), Some(&renamed));
+        assert_eq!(open.workspace.unapplied(id), None);
     }
 }
