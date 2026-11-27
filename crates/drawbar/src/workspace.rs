@@ -1035,6 +1035,13 @@ impl LocalEntity {
         }
     }
 
+    /// Whether a write of `sent` that landed leaves it nothing to save: it has moved on
+    /// from `sent`, and its file holds `sent` already or a save made since.
+    fn saved_past(&self, sent: &[u8]) -> bool {
+        let saved_since = self.kept && self.path.is_some() && !self.is_unsaved();
+        !self.holds(sent) && (self.saved.holds(sent) || saved_since)
+    }
+
     /// The extension its bytes call for. See `format_tag`. One not read yet takes the
     /// one its name carries.
     pub fn format_tag(&self) -> String {
@@ -3806,8 +3813,8 @@ impl Workspace {
     ///
     /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. An edit
     /// made while the write was in flight exists only on this computer, and calling it
-    /// saved would let it be discarded with its tab.
-    ///
+    /// saved would let it be discarded with its tab. One saved to its file since keeps
+    /// that save.
     pub fn landed(&mut self, id: u64, sent: Vec<u8>) {
         let resting = self
             .get(id)
@@ -3823,11 +3830,7 @@ impl Workspace {
             Some(false) => {
                 self.respell(id, sent.clone().into());
             }
-            // The asset moved on from what its file holds: nothing to save.
-            None if self
-                .get(id)
-                .is_some_and(|it| it.saved.holds(&sent) && !it.holds(&sent)) =>
-            {
+            None if self.get(id).is_some_and(|it| it.saved_past(&sent)) => {
                 self.revision += 1;
                 return;
             }

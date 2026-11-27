@@ -495,6 +495,29 @@ fn a_send_landing_what_the_file_already_holds_saves_nothing() {
     assert!(workspace.get(id).unwrap().is_unsaved());
 }
 
+#[test]
+fn a_send_landing_after_a_newer_save_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let sent = with_gain(&session.bytes(id), "40");
+    let saved = with_gain(&sent, "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    session.sync();
+
+    session.bench.workspace.landed(id, sent);
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == saved,
+        "the file keeps the newer save"
+    );
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
 /// A browser cannot wait for its library's answers, so it lets a library go only once it
 /// is settled, after one last pass whose answers nothing reads. That pass sends no save,
 /// so the index it writes holds what each save answered.
