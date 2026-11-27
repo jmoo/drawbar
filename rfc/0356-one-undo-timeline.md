@@ -521,7 +521,7 @@ and they are why these documents lose their edit steps at a save.
 | A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
 | A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
 | The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. That read moves only the baseline: equal bytes read saved again, and other bytes leave the document unsaved over them. |
-| An undo or redo of a save stops partway | What the file holds is unknown until the next write, or the next open, finishes it. Each document the save wrote that holds its body reads unsaved until then, so a quit keeps what it holds. |
+| An undo or redo of a save stops partway | The next write, or the next open, finishes it, so each file the save wrote is taken to hold what the step leaves. A document holding its body is unsaved where it holds something else. A Save writes it once the step is finished, and a quit keeps it as a draft over that file. |
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
 | The library refuses an undo or redo over what the folder or its history holds | The step is let go, and the log says why. Nothing is written, and Undo names the step before it. |

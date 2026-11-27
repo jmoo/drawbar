@@ -10349,6 +10349,61 @@ fn an_undo_of_a_save_the_next_change_finishes_moves_only_the_baseline() {
     assert_eq!(session.said("changed on disk"), 0);
 }
 
+#[test]
+fn a_save_asked_while_an_undo_of_a_save_waits_to_finish_writes_what_the_document_holds() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    assert_eq!(root.read("untitled.ne5p"), edited);
+    assert!(!session.unsaved(id));
+}
+
+#[test]
+fn an_edit_made_back_while_an_undo_of_a_save_waits_to_finish_stays_unsaved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    session.edit(id, "40");
+    assert_eq!(session.edit(id, "96"), edited);
+
+    assert!(session.unsaved(id), "its file is not known to hold it");
+    session.close();
+    let again = Session::open(&root);
+    assert_eq!(again.bytes(again.only()), edited);
+}
+
+#[test]
+fn a_quit_while_an_undo_of_a_save_waits_to_finish_keeps_the_edit_and_asks_nothing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, made, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    session.refocus();
+    assert_eq!(session.bench.browser.asking(), None);
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    let id = again.only();
+    assert_eq!(again.bytes(id), edited, "the document holds its edit");
+    assert!(again.unsaved(id));
+    assert_eq!(again.bench.browser.asking(), None);
+}
+
 /// Another program puts a file where the undo of a save was putting one back. The library
 /// turns read-only until it is opened again, and the document keeps what it held.
 #[test]
