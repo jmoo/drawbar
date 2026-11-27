@@ -1403,7 +1403,10 @@ impl Store {
             if self.rechecking.remove(&id) {
                 match answer {
                     Ok(found) => self.changed(id, found, workspace, browser, log),
-                    Err(_) => self.rescan(),
+                    Err(_) => {
+                        self.refuse_send(id, workspace, log);
+                        self.rescan();
+                    }
                 }
                 continue;
             }
@@ -2040,6 +2043,17 @@ impl Store {
         log: &mut Log,
     ) {
         self.close(workspace, browser, queue, log);
+    }
+
+    /// Refuse a held send, since what the changed file of `id` holds now is not known.
+    fn refuse_send(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+        if !std::mem::take(&mut self.send_waits) {
+            return;
+        }
+        let name = workspace.get(id).map_or("", |it| it.name.as_str());
+        log.trouble(format!(
+            "“{name}” changed on disk and could not be read, so nothing was sent."
+        ));
     }
 
     /// A held send goes ahead unless something waiting to be sent changed on disk.

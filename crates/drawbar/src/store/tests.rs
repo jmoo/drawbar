@@ -824,6 +824,36 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
+#[test]
+fn a_send_held_for_a_look_that_cannot_read_a_changed_file_does_not_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let theirs = with_gain(&session.bytes(id), "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.store.fault(Fault::Next(Box::new(Fault::Unread)));
+
+    assert!(session.store.hold_send());
+    let mut released = false;
+    while session.store.scanning() {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut session.bench;
+        released |= session.store.poll(workspace, browser, queue, log);
+    }
+
+    assert!(!released && !session.store.holds_send());
+    assert_eq!(
+        session.said("changed on disk and could not be read, so nothing was sent"),
+        1
+    );
+}
+
 /// Whether `io` puts a file at `at`: renames it into place, or, where the folder renames
 /// nothing, makes the copy there.
 fn puts(io: &toshokan::Io, at: &str) -> bool {
