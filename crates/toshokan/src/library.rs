@@ -2727,7 +2727,8 @@ fn carry_out<'a>(
         Ok(Ok(())) => {
             let applied = effects::apply(&layout, name, Rc::clone(&record), 0, identify);
             flow::run(applied).then(move |applied| match applied {
-                Ok(applied) => ok((library, record, applied)),
+                Ok(Ok(applied)) => ok((library, record, applied)),
+                Ok(Err(changed)) => withdraw(library, name, record, changed),
                 Err(error) => {
                     if journaled {
                         library.interrupted(name, &record);
@@ -2748,6 +2749,30 @@ fn carry_out<'a>(
             })
         }
         Err(error) => Flow::Done(Err(error)),
+    })
+}
+
+/// Refuses the intent whose record `name` a run of its steps stopped as `changed`
+/// says. A run stopped at its first step changed nothing, and its record and
+/// staging are removed; one stopped later leaves its record to settle before the
+/// next write.
+fn withdraw<'a, T: 'a>(
+    library: &'a mut Library,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    changed: effects::Changed,
+) -> Fallible<'a, T> {
+    let refused = Error::Refused(changed.refusal);
+    if changed.step > 0 {
+        library.interrupted(name, &record);
+        return Flow::Done(Err(refused));
+    }
+    let withdrawn = effects::withdraw(&library.layout, name, &record);
+    flow::run(withdrawn).then(move |withdrawn| {
+        if withdrawn.is_err() {
+            library.interrupted(name, &record);
+        }
+        Flow::Done(withdrawn.and(Err(refused)))
     })
 }
 

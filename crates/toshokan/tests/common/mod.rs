@@ -501,13 +501,15 @@ pub fn closed(writer: WriterId, name: Nonce) -> RelPath {
 /// Runs the steps, appends the closing entry (a marker here) and removes the record.
 pub fn complete(d: &mut impl Driven, run: &Run) -> Result<Applied, Error> {
     let layout = layout();
-    let applied = d.run(effects::apply(
-        &layout,
-        run.plan.record,
-        Rc::clone(&run.record),
-        0,
-        identify(),
-    ))?;
+    let applied = d
+        .run(effects::apply(
+            &layout,
+            run.plan.record,
+            Rc::clone(&run.record),
+            0,
+            identify(),
+        ))?
+        .expect("nothing changes the folder during the steps");
     close(d, run.record.writer, run.plan.record)?;
     d.run(effects::finish(&layout, run.plan.record, &run.record))?;
     Ok(applied)

@@ -520,6 +520,19 @@ A writer carries out an intent's steps in this order:
    the length and modification time it had when the copy began; otherwise the
    source stays, the copy is removed, and the step fails. A copy that fails
    removes what it wrote. Each step runs alone.
+
+   Once a `to_trash` whose item no later step takes back out is done, the
+   writer reads the item's identity, which the entry's `displaced` needs anyway,
+   and checks it against the step's `held` contents: the identity the app
+   expected, or for a file the app has not read, the length a scan listed. An
+   item that holds anything else, as where another program wrote the file after
+   step 2, is moved back and no later step is carried out. Where it was the
+   first step, the writer removes the record, after its markers, then the staged
+   files, and the intent is refused as a failed precondition is. Otherwise the
+   record stays open to settle, and settling gives it up (see Recovery). Between the
+   copy's last check of the source and the source's removal, a write is lost
+   where moves copy, since no request removes a file only while it holds what
+   was checked.
 5. Append the intent's entry.
 6. Remove the pending record, after its markers, once the entry is durable. Its
    entry is logged, so a record a crash or a failed removal leaves is spent: no
@@ -632,7 +645,13 @@ as where a tool replaces it by removing it first, gives the record up as well. A
 `to_trash` whose path holds nothing is skipped rather than gone. A record is given
 up the same way when a remaining `to_trash` finds its source holding other than
 its `held` contents, as when another writer saved over the file since, so that
-newer bytes never go to the trash on the strength of an old check.
+newer bytes never go to the trash on the strength of an old check. It is given
+up too when the check of step 4 fails on a resumed `to_trash`, or, where moves
+rename, on the last done step where that is a `to_trash`, since a crash may have
+come between its move and its check; the item goes back first. Where moves copy,
+that step's item may be a copy cut short whose source is gone since, so it is not
+checked, and a write such a crash leaves unchecked stays in the trash, named as
+displaced.
 
 Settling twice ends as settling once.
 

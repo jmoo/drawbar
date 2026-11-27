@@ -1,6 +1,7 @@
 //! File effects without atomic replace. A commit runs [`resolve`], [`prepare`],
-//! [`apply`], the writer's append, then [`finish`]; recovery resumes [`apply`]
-//! where an interrupted run stopped.
+//! [`apply`], the writer's append, then [`finish`], or [`withdraw`] where [`apply`]
+//! stopped at the first step; recovery resumes [`apply`] where an interrupted run
+//! stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -9,11 +10,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use crate::binding::Bindings;
-use crate::env::{Env, Identify};
+use crate::env::{Digest, Env, Identify};
 use crate::error::{Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
-use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
+use crate::io::{self, Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact, Ref};
 use crate::path::RelPath;
@@ -1142,25 +1143,144 @@ fn mismatch<'a>(
     })
 }
 
+/// A file a step moved to the trash held other than the record's `held` says, as
+/// where another program wrote it after the check, and was moved back. The steps
+/// before `step` are done, and none after it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Changed {
+    pub step: usize,
+    pub refusal: Refusal,
+}
+
 /// Carries out `record`'s steps from `start`, each destination durable before its
-/// source is gone, then reports what the folder shows. A step that fails stops the
-/// run with its error, and the record stays open to settle. The pending record
-/// `name` stays until [`finish`].
+/// source is gone, then reports what the folder shows. A file a step moves to the
+/// trash for good is checked against the record's `held` once it is there, as is,
+/// where moves rename, the one the step before `start` moved, which a crash may
+/// have left unchecked; one that holds anything else stops the run with
+/// [`Changed`]. A step that fails stops the run with its error. Either way the
+/// record stays open to settle. The pending record `name` stays until [`finish`].
 pub fn apply(
     layout: &Layout,
     name: Nonce,
     record: Rc<PendingRecord>,
     start: usize,
     identify: Rc<dyn Identify>,
-) -> Task<'static, Result<Applied>> {
+) -> Task<'static, Result<std::result::Result<Applied, Changed>>> {
     let layout = layout.clone();
     let runs = runs(&record.steps, start, record.moves);
-    let running = (layout.clone(), Rc::clone(&record));
-    each(runs.into_iter(), move |run| {
-        run_steps(&running.0, name, &running.1, run)
-    })
-    .and_then(move |()| account(layout, record, identify))
-    .task()
+    // ⚠️ Where moves copy, a step found done may hold a copy cut short whose
+    // source has gone since, which must not go back in its place.
+    let last = start.checked_sub(1).filter(|_| record.moves.renames());
+    let checked = match last {
+        Some(last) => trashed(&layout, Rc::clone(&record), last, &identify),
+        None => ok(Ok(())),
+    };
+    let running = (layout.clone(), Rc::clone(&record), Rc::clone(&identify));
+    checked
+        .and_then(move |checked| {
+            fold(runs.into_iter(), checked, move |checked, run| {
+                if checked.is_err() {
+                    return ok(checked);
+                }
+                let (layout, record, identify) = (
+                    running.0.clone(),
+                    Rc::clone(&running.1),
+                    Rc::clone(&running.2),
+                );
+                run_steps(&layout, name, &record, run.clone())
+                    .and_then(move |()| trashed(&layout, record, run.start, &identify))
+            })
+        })
+        .and_then(move |checked| match checked {
+            Ok(()) => account(layout, record, identify).map_ok(Ok),
+            Err(changed) => ok(Err(changed)),
+        })
+        .task()
+}
+
+/// Checks the file step `index` moved to the trash, where no later step takes it
+/// back out, against the record's `held`, and moves it back where it holds
+/// anything else.
+fn trashed<'a>(
+    layout: &Layout,
+    record: Rc<PendingRecord>,
+    index: usize,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, std::result::Result<(), Changed>> {
+    let EffectStep::ToTrash { path, item } = &record.steps[index] else {
+        return ok(Ok(()));
+    };
+    let held = record.held.iter().find(|(held, _)| held == path);
+    let Some(&(_, expected)) = held.filter(|_| !restored(&record).contains(item)) else {
+        return ok(Ok(()));
+    };
+    let path = path.clone();
+    let trash = layout.trash(record.writer, *item);
+    let identify: Rc<dyn Identify> = Rc::new(As {
+        identify: Rc::clone(identify),
+        path: path.clone(),
+    });
+    flow::stat(Root::Folder, &trash)
+        .and_then({
+            let trash = trash.clone();
+            move |meta| {
+                let len = match (meta, expected) {
+                    (None, _) => return ok(None),
+                    (Some(meta), Expect::Holds(_)) => meta.len,
+                    (Some(meta), _) => return ok(Some((meta.len, None))),
+                };
+                flow::identities(Root::Folder, vec![(trash, len)], &identify)
+                    .map_ok(move |found| Some((len, found.into_iter().next().flatten())))
+            }
+        })
+        .and_then(move |found| {
+            let holds = match (expected, found) {
+                (_, None) => true,
+                (Expect::Holds(identity), Some((_, found))) => found == Some(identity),
+                (Expect::Listed { len, .. }, Some((found, _))) => found == len,
+                (_, Some(_)) => true,
+            };
+            if holds {
+                return ok(Ok(()));
+            }
+            let refusal = Refusal::Changed(Box::new(Mismatch {
+                path: path.clone(),
+                expected,
+                found: found.and_then(|(_, identity)| identity),
+            }));
+            relocate(record.moves, &trash, &path).map_ok(move |()| {
+                Err(Changed {
+                    step: index,
+                    refusal,
+                })
+            })
+        })
+}
+
+/// The identity of a file as though it were at `path`, where the app may tell
+/// files apart by name.
+struct As {
+    identify: Rc<dyn Identify>,
+    path: RelPath,
+}
+
+impl Identify for As {
+    fn ranges(&self, _: &RelPath, len: u64) -> Vec<io::Range> {
+        self.identify.ranges(&self.path, len)
+    }
+
+    fn digest(&self, _: &RelPath, len: u64) -> Box<dyn Digest> {
+        self.identify.digest(&self.path, len)
+    }
+}
+
+/// The trash items a `from_trash` step of `record` takes out.
+fn restored(record: &PendingRecord) -> BTreeSet<Nonce> {
+    let items = record.steps.iter().filter_map(|step| match step {
+        EffectStep::FromTrash { item, .. } => Some(*item),
+        _ => None,
+    });
+    items.collect()
 }
 
 /// The steps from `start` in runs carried out together: consecutive `place`
@@ -1398,6 +1518,28 @@ fn account<'a>(
 /// Removes the pending record `name` once the intent's entry is durable, after its
 /// markers. A record already gone is success.
 pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'static, Result<()>> {
+    removed(layout, name, record).task()
+}
+
+/// Removes the record `name` of a run that [`Changed`] stopped at its first step,
+/// after its markers, then the files it staged, leaving every library path as it
+/// was before the record was written.
+pub fn withdraw(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'static, Result<()>> {
+    let writer = record.writer;
+    let staged: Vec<RelPath> = record
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::Place { staged, path } => Some(layout.staged(writer, *staged, path)),
+            _ => None,
+        })
+        .collect();
+    removed(layout, name, record)
+        .and_then(move |()| each(staged.into_iter(), |path| flow::remove(Root::Folder, &path)))
+        .task()
+}
+
+fn removed<'a>(layout: &Layout, name: Nonce, record: &PendingRecord) -> Fallible<'a, ()> {
     let path = layout.pending(record.writer, name);
     let dir = layout.pending_dir(record.writer);
     let unmarked = match record.moves {
@@ -1420,9 +1562,7 @@ pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'sta
             }
         }),
     };
-    unmarked
-        .and_then(move |()| flow::remove(Root::Folder, &path))
-        .task()
+    unmarked.and_then(move |()| flow::remove(Root::Folder, &path))
 }
 
 /// Which of a record's paths the folder holds, the length of each that is a file,

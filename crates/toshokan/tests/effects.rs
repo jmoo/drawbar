@@ -388,7 +388,7 @@ fn run_effects(
     let sources: Vec<Box<dyn blocking::Source<Refusing>>> = vec![Box::new(saved.to_vec())];
     blocking::run_with(backend, sources, prepare)?.unwrap();
     let apply = effects::apply(&layout(), plan.record, Rc::clone(&record), 0, identify());
-    let applied = blocking::run(backend, apply)?;
+    let applied = blocking::run(backend, apply)?.expect("nothing changes the folder");
     Ok((record, applied))
 }
 
@@ -488,7 +488,7 @@ fn where_moves_copy_a_long_file_moves_a_chunk_at_a_time() {
     let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
     blocking::run(&mut backend, prepare).unwrap().unwrap();
     let apply = effects::apply(&layout(), plan.record, record, 0, identify());
-    blocking::run(&mut backend, apply).unwrap();
+    blocking::run(&mut backend, apply).unwrap().unwrap();
     assert_eq!(backend.largest as u64, CHUNK);
     let d = &mut common::BlockingMem(disk);
     assert_eq!(sorted(d).user, user(&[("b", &long)]));
@@ -1170,4 +1170,299 @@ fn where_renames_may_replace_a_file_made_at_a_destination_after_the_checks_is_ke
     let d = &mut common::BlockingMem(disk);
     assert_eq!(sorted(d).user, user(&[("d/n", b"theirs")]));
     assert_eq!(sorted(d).staged, [b"mine".to_vec()]);
+}
+
+/// A folder another program writes in: just before the first request `picks`
+/// picks, it writes `bytes` to the file at `at`.
+struct Writes {
+    disk: MemDisk,
+    picks: fn(&Io) -> bool,
+    at: RelPath,
+    bytes: Option<Vec<u8>>,
+}
+
+impl Writes {
+    fn new(disk: &MemDisk, picks: fn(&Io) -> bool, at: &str, bytes: &[u8]) -> Self {
+        Self {
+            disk: disk.clone(),
+            picks,
+            at: path(at),
+            bytes: Some(bytes.to_vec()),
+        }
+    }
+}
+
+impl Backend for Writes {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        if let Some(bytes) = self.bytes.take_if(|_| (self.picks)(&io)) {
+            let removed = self.disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: self.at.clone(),
+            });
+            assert!(removed.is_ok(), "{removed:?}");
+            put(
+                &mut common::BlockingMem(self.disk.clone()),
+                &[(self.at.as_str(), &bytes)],
+            );
+        }
+        self.disk.perform(io)
+    }
+}
+
+/// Picks the request that puts a pending record in place, once its checks passed.
+fn journals(io: &Io) -> bool {
+    let record = |path: &RelPath| {
+        path.parent() == Some(layout().pending_dir(WRITER)) && path.as_str().ends_with(".json")
+    };
+    matches!(io, Io::Rename { to: path, .. } | Io::Create { path, .. } if record(path))
+}
+
+/// Picks the rename that moves `a` away.
+fn takes_a(io: &Io) -> bool {
+    matches!(io, Io::Rename { from, .. } if from.as_str() == "a")
+}
+
+/// An intent's record, journaled with its staged files filled from `saved`.
+struct Journaled {
+    name: Nonce,
+    record: Rc<PendingRecord>,
+}
+
+fn journal(backend: &mut Writes, changes: &[FileChange], saved: &[&[u8]]) -> Journaled {
+    let caps = backend.capabilities(Root::Folder);
+    let plan = effects::resolve(changes, &bound(&[]), &layout(), caps, &mut env(1)).unwrap();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    let sources = saved.iter().map(|bytes| {
+        let source: Box<dyn blocking::Source<Writes>> = Box::new(bytes.to_vec());
+        source
+    });
+    blocking::run_with(backend, sources.collect(), prepare)
+        .unwrap()
+        .unwrap();
+    Journaled {
+        name: plan.record,
+        record,
+    }
+}
+
+fn apply_on(
+    backend: &mut Writes,
+    journaled: &Journaled,
+) -> Result<effects::Applied, effects::Changed> {
+    let record = Rc::clone(&journaled.record);
+    let apply = effects::apply(&layout(), journaled.name, record, 0, identify());
+    blocking::run(backend, apply).unwrap()
+}
+
+fn changed(at: &str, held: &[u8], found: &[u8]) -> Refusal {
+    Refusal::Changed(Box::new(Mismatch {
+        path: path(at),
+        expected: Expect::Holds(identity(held)),
+        found: Some(identity(found)),
+    }))
+}
+
+#[test]
+fn a_file_written_after_a_saves_checks_is_put_back_and_the_save_withdrawn() {
+    for caps in [Capabilities::ALL, common::COPYING] {
+        let disk = MemDisk::with_capabilities(caps, Capabilities::ALL);
+        let d = &mut common::BlockingMem(disk.clone());
+        put(d, &[("a", b"old bytes")]);
+        let mut writes = Writes::new(&disk, journals, "a", b"theirs");
+        let journaled = journal(&mut writes, &[save_over("a", b"old bytes")], &[b"mine"]);
+        let applied = apply_on(&mut writes, &journaled);
+        let refusal = changed("a", b"old bytes", b"theirs");
+        assert_eq!(
+            applied,
+            Err(effects::Changed { step: 0, refusal }),
+            "{caps:?}"
+        );
+        let folder = sorted(d);
+        assert_eq!(
+            (folder.user, folder.trash, folder.staged),
+            (user(&[("a", b"theirs")]), vec![], vec![b"mine".to_vec()]),
+            "{caps:?}: their write stands, and nothing of the save is placed"
+        );
+        let withdraw = effects::withdraw(&layout(), journaled.name, &journaled.record);
+        blocking::run(&mut writes, withdraw).unwrap();
+        assert_eq!(
+            sorted(d),
+            Folder {
+                user: user(&[("a", b"theirs")]),
+                ..Folder::default()
+            },
+            "{caps:?}: withdrawn, the save leaves nothing behind"
+        );
+    }
+}
+
+#[test]
+fn a_file_written_after_the_checks_stops_the_steps_at_its_own_and_is_put_back() {
+    for caps in [Capabilities::ALL, common::COPYING] {
+        let disk = MemDisk::with_capabilities(caps, Capabilities::ALL);
+        let d = &mut common::BlockingMem(disk.clone());
+        put(d, &[("a", b"old a"), ("b", b"old b")]);
+        let saves = [
+            save_over("a", b"old a"),
+            FileChange::Save {
+                entity: EntityId::from_u128(0xf),
+                path: path("b"),
+                content: Content(1),
+                expect: Expect::Holds(identity(b"old b")),
+            },
+        ];
+        let mut writes = Writes::new(&disk, journals, "b", b"theirs");
+        let journaled = journal(&mut writes, &saves, &[b"new a", b"new b"]);
+        let applied = apply_on(&mut writes, &journaled);
+        let refusal = changed("b", b"old b", b"theirs");
+        assert_eq!(
+            applied,
+            Err(effects::Changed { step: 2, refusal }),
+            "{caps:?}"
+        );
+        let folder = sorted(d);
+        assert_eq!(
+            (folder.user, folder.trash, folder.pending > 0),
+            (
+                user(&[("a", b"new a"), ("b", b"theirs")]),
+                vec![b"old a".to_vec()],
+                true
+            ),
+            "{caps:?}: the steps before stay done, their write stands, and the record stays open"
+        );
+    }
+}
+
+#[test]
+fn settling_a_record_while_another_program_writes_its_file_gives_up_and_keeps_their_write() {
+    let disk = MemDisk::new();
+    let d = &mut common::BlockingMem(disk.clone());
+    put(d, &[("a", b"old bytes")]);
+    let mut writes = Writes::new(&disk, takes_a, "a", b"theirs");
+    let journaled = journal(&mut writes, &[save_over("a", b"old bytes")], &[b"mine"]);
+    let settled = blocking::run(
+        &mut writes,
+        recovery::settle(
+            &layout(),
+            journaled.name,
+            Rc::clone(&journaled.record),
+            identify(),
+            Capabilities::ALL,
+        ),
+    );
+    assert!(
+        matches!(settled, Ok(recovery::Resumed::GivenUp)),
+        "settling did not give up"
+    );
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.trash, folder.pending),
+        (user(&[("a", b"theirs")]), vec![], 1),
+        "their write stands, and the record is left to settle with consent"
+    );
+}
+
+/// An identity that tells files apart by name as well as by bytes, as an app's
+/// identity of a format with its own checksum does.
+struct ByName;
+
+impl toshokan::Identify for ByName {
+    fn ranges(&self, _: &RelPath, len: u64) -> Vec<Range> {
+        vec![Range { offset: 0, len }]
+    }
+
+    fn digest(&self, path: &RelPath, len: u64) -> Box<dyn toshokan::env::Digest> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(path.name().unwrap_or_default().as_bytes());
+        hasher.update(&len.to_be_bytes());
+        Box::new(toshokan::env::Blake3(hasher))
+    }
+}
+
+#[test]
+fn a_save_over_a_file_whose_identity_depends_on_its_name_goes_through() {
+    let disk = MemDisk::new();
+    let d = &mut common::BlockingMem(disk.clone());
+    put(d, &[("a.syx", b"old bytes")]);
+    let identify: Rc<dyn toshokan::Identify> = Rc::new(ByName);
+    let save = FileChange::Save {
+        entity: E,
+        path: path("a.syx"),
+        content: Content(0),
+        expect: Expect::Holds(identify.of_bytes(&path("a.syx"), b"old bytes")),
+    };
+    let caps = Capabilities::ALL;
+    let plan = effects::resolve(&[save], &bound(&[]), &layout(), caps, &mut env(1)).unwrap();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let prepare = effects::prepare(
+        &layout(),
+        Rc::clone(&plan),
+        Rc::clone(&record),
+        Rc::clone(&identify),
+    );
+    let mut backend = Refusing::new(disk.clone(), None);
+    let sources: Vec<Box<dyn blocking::Source<Refusing>>> = vec![Box::new(b"mine".to_vec())];
+    blocking::run_with(&mut backend, sources, prepare)
+        .unwrap()
+        .unwrap();
+    let apply = effects::apply(&layout(), plan.record, record, 0, identify);
+    let applied = blocking::run(&mut backend, apply).unwrap();
+    assert!(applied.is_ok(), "{applied:?}");
+    assert_eq!(sorted(d).user, user(&[("a.syx", b"mine")]));
+}
+
+#[test]
+fn settling_a_record_stopped_between_a_move_to_the_trash_and_its_check_puts_their_write_back() {
+    let disk = MemDisk::new();
+    let d = &mut common::BlockingMem(disk.clone());
+    put(d, &[("a", b"old bytes")]);
+    let mut writes = Writes::new(&disk, |_| false, "a", b"unused");
+    let journaled = journal(&mut writes, &[save_over("a", b"old bytes")], &[b"mine"]);
+    let EffectStep::ToTrash { item, .. } = journaled.record.steps[0] else {
+        panic!("{:?}", journaled.record.steps);
+    };
+    let removed = disk.perform(Io::Remove {
+        root: Root::Folder,
+        path: path("a"),
+    });
+    assert!(removed.is_ok(), "{removed:?}");
+    put(d, &[("a", b"theirs")]);
+    let made = disk.perform(Io::MakeDir {
+        root: Root::Folder,
+        path: layout().trash_dir(WRITER),
+    });
+    assert!(made.is_ok(), "{made:?}");
+    let moved = disk.perform(Io::Rename {
+        root: Root::Folder,
+        from: path("a"),
+        to: layout().trash(WRITER, item),
+    });
+    assert!(moved.is_ok(), "{moved:?}");
+    let settled = blocking::run(
+        &mut writes,
+        recovery::settle(
+            &layout(),
+            journaled.name,
+            Rc::clone(&journaled.record),
+            identify(),
+            Capabilities::ALL,
+        ),
+    );
+    assert!(
+        matches!(settled, Ok(recovery::Resumed::GivenUp)),
+        "settling did not give up"
+    );
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.trash, folder.pending),
+        (user(&[("a", b"theirs")]), vec![], 1),
+        "their write is back, and the record is left to settle with consent"
+    );
 }

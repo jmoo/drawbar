@@ -277,6 +277,8 @@ Other differences:
 - Where a browser cannot rename files in a picked folder, every move copies the
   file and removes the old one
   ([What is supported](../getting-started/support.md#the-library-in-the-browser)).
+  A write another program makes between toshokan's last look at the old file
+  and its removal is lost.
 - A folder handle can be kept only in IndexedDB, and it comes back without its
   permission. The browser asks again when the folder is chosen in **File ▸ Open
   recent**.

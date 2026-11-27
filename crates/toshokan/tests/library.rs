@@ -742,6 +742,8 @@ through_both!(
     one_intent_creates_entities_that_name_each_other,
     effects_that_stop_partway_fail_the_commit_and_keep_both_versions,
     an_undo_that_stops_partway_fails_and_the_next_write_finishes_it,
+    a_save_over_a_file_another_program_writes_after_its_checks_is_refused_and_keeps_their_bytes,
+    an_undo_over_a_file_another_program_writes_after_its_checks_is_refused_and_keeps_their_bytes,
     an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reopened,
     an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent,
     a_resumed_save_leaves_a_newer_save_made_meanwhile,
@@ -6974,6 +6976,100 @@ fn an_undo_that_stops_partway_fails_and_the_next_write_finishes_it<F: Facade>() 
     assert_eq!(
         read(&folder, "song.npno").as_deref(),
         Some(b"one".as_slice())
+    );
+}
+
+/// Picks the request that puts a pending record in place.
+fn journals(io: &Io) -> bool {
+    let record = |path: &RelPath| {
+        path.components().any(|c| c == "pending") && path.as_str().ends_with(".json")
+    };
+    matches!(io, Io::Rename { to: path, .. } | Io::Create { path, .. } if record(path))
+}
+
+fn a_save_over_a_file_another_program_writes_after_its_checks_is_refused_and_keeps_their_bytes<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, probe) = open_probed::<F>(&folder, &clock);
+    let song = create(&mut a, "song.npno", b"song");
+    let (other, wrote) = (folder.clone(), Rc::new(Cell::new(false)));
+    let writes = Rc::clone(&wrote);
+    probe.seen.borrow_mut().failing = Some(Box::new(move |io: &Io| {
+        if journals(io) && !writes.replace(true) {
+            put(&other, "song.npno", b"theirs");
+        }
+        false
+    }));
+    let saved = a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"saved".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+    });
+    probe.seen.borrow_mut().failing = None;
+    assert!(wrote.get(), "the other program wrote");
+    assert!(
+        matches!(&saved, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("song.npno")),
+        "{saved:?}"
+    );
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"theirs".as_slice())
+    );
+    assert_eq!(pending_files(&folder), [], "nothing is left to settle");
+    assert_eq!(a.trash().unwrap(), [], "nothing went to the trash");
+    assert_ne!(a.history().last().unwrap().label, "Save");
+    create(&mut a, "next.npno", b"next");
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"theirs".as_slice()),
+        "the next write leaves their bytes"
+    );
+}
+
+fn an_undo_over_a_file_another_program_writes_after_its_checks_is_refused_and_keeps_their_bytes<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, probe) = open_probed::<F>(&folder, &clock);
+    let song = create(&mut a, "song.npno", b"song");
+    a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"saved".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+    })
+    .unwrap();
+    let (other, wrote) = (folder.clone(), Rc::new(Cell::new(false)));
+    let writes = Rc::clone(&wrote);
+    probe.seen.borrow_mut().failing = Some(Box::new(move |io: &Io| {
+        if journals(io) && !writes.replace(true) {
+            put(&other, "song.npno", b"theirs");
+        }
+        false
+    }));
+    let undone = a.undo();
+    probe.seen.borrow_mut().failing = None;
+    assert!(wrote.get(), "the other program wrote");
+    assert!(
+        matches!(&undone, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("song.npno")),
+        "{undone:?}"
+    );
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"theirs".as_slice())
+    );
+    assert_eq!(pending_files(&folder), [], "nothing is left to settle");
+    assert!(
+        !a.history().last().unwrap().undone,
+        "the save is not undone"
     );
 }
 

@@ -198,7 +198,8 @@ fn standing(
 /// that can do what `capabilities` says, after clearing what the last done step
 /// and a copy cut short left behind. The caller then appends the record's entry
 /// with what [`Applied`] says, after which [`effects::finish`] may remove the
-/// record. Where a remaining step cannot run, it does nothing and returns
+/// record. Where a remaining step cannot run, or a file one moves to the trash is
+/// not what the intent checked, it stops before that step and returns
 /// [`Resumed::GivenUp`].
 pub fn settle(
     layout: &Layout,
@@ -258,7 +259,10 @@ pub fn settle(
                 .and_then(move |()| {
                     flow::run(effects::apply(&layout, name, record, done, identify))
                 })
-                .map_ok(Resumed::Applied)
+                .map_ok(|applied| match applied {
+                    Ok(applied) => Resumed::Applied(applied),
+                    Err(_) => Resumed::GivenUp,
+                })
         })
         .task()
 }
@@ -268,7 +272,7 @@ pub enum Resumed {
     /// Its remaining steps were carried out, as this says.
     Applied(Applied),
     /// What a remaining step moves is gone, or is not what the intent checked, so
-    /// none was taken.
+    /// neither it nor any after it was taken.
     GivenUp,
 }
 
