@@ -147,6 +147,16 @@ impl Held {
         }
     }
 
+    /// This link still knowing `crc`, as the oldest checksum it keeps, where it had
+    /// forgotten it.
+    pub fn remembering(mut self, crc: u32) -> Held {
+        if !self.knew(crc) {
+            self.past.truncate(PAST - 1);
+            self.past.push(crc);
+        }
+        self
+    }
+
     /// This link at another slot of its class, under `name` where drawbar renamed the
     /// slot. Otherwise the name it had travels with it.
     pub fn moved(&self, spot: Spot, name: Option<&str>) -> Held {

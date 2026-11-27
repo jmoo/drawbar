@@ -1215,11 +1215,18 @@ fn bring(
     if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
-    // A version the link never knew counts, once replaced, as an earlier one: put back,
-    // it reads as older.
-    let replaced = entity.saved_print().filter(|it| !before.knew(it.crc));
-    let known = replaced.map_or_else(|| before.clone(), |it| before.agreed(it, name.trim()));
+    // The version replaced stays known, as an earlier one, where the link never knew it
+    // and where its history is full: put back, it reads as older.
+    let replaced = entity.saved_print();
+    let known = match replaced.filter(|it| !before.knew(it.crc)) {
+        Some(unknown) => before.agreed(unknown, name.trim()),
+        None => before.clone(),
+    };
     let after = known.agreed(print_of(&bytes)?, name.trim());
+    let after = match replaced {
+        Some(replaced) => after.remembering(replaced.crc),
+        None => after,
+    };
     let restored = Restored {
         id,
         bytes: entity.bytes.to_vec(),
@@ -2018,6 +2025,29 @@ mod tests {
 
         let log = &mut bench.log;
         bench.workspace.save_over(id, mine, None, log);
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+    }
+
+    #[test]
+    fn a_file_put_back_to_the_oldest_version_its_link_kept_still_reads_as_older() {
+        let mut bench = Bench::new();
+        let versions: Vec<Vec<u8>> = (40..50).map(|gain| gained(&gain.to_string())).collect();
+        let (oldest, newest) = (versions[0].clone(), versions[9].clone());
+        walked(&mut bench, &[Some(crc(&newest))]);
+        let id = linked(&mut bench, "A.ne5p", oldest.clone(), 1, &oldest);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let held = Held::new(PROGRAM, at(1), "A", print(&oldest)).unwrap();
+        let agreed = versions[1..9].iter();
+        let held = agreed.fold(held, |held, version| held.agreed(print(version), "A"));
+        assert_eq!(held.past.len(), crate::link::PAST);
+        bench.workspace.link(id, &keyboard, held);
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+        bench.sync();
+        got(&mut bench, 1, newest, Purpose::Pull);
+        assert_eq!(standing(&bench, id), Some(Standing::Same));
+
+        let log = &mut bench.log;
+        bench.workspace.save_over(id, oldest, None, log);
         assert_eq!(standing(&bench, id), Some(Standing::Theirs));
     }
 
