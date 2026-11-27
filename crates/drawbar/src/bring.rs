@@ -1056,6 +1056,9 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     follow_moves(&device.state, workspace, log, &keyboard, &moves);
     unlink(workspace, log, &keyboard, &unlinks);
     for (class, items) in batches {
+        for item in &items {
+            workspace.queue_write(item.id);
+        }
         device.send(DeviceCmd::SendAll { class, items }, log);
     }
     let Some(first) = stale.first() else {
@@ -2396,6 +2399,37 @@ mod tests {
             now.map(|held| held.base),
             Some(print(&body())),
             "a landed write agrees"
+        );
+    }
+
+    #[test]
+    fn a_file_saved_again_after_sync_was_pressed_keeps_that_save_when_its_write_lands() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body()))]);
+        let (sent, saved) = (gained("40"), gained("96"));
+        let id = linked(&mut bench, "A.ne5p", sent.clone(), 1, &body());
+        open_read(&mut bench);
+        bench.press();
+        assert_eq!(written(&bench).len(), 1);
+        bench.device.pump();
+        let log = &mut bench.log;
+        bench.workspace.save_over(id, saved.clone(), None, log);
+
+        bench.device.pretend(DeviceEvent::Sent {
+            id,
+            class: PROGRAM,
+            at: at(1),
+            name: "A.ne5p".into(),
+            sent: crate::device::Payload::Bytes(sent),
+        });
+        heard(&mut bench);
+
+        let entity = bench.workspace.get(id).unwrap();
+        assert!(!entity.is_unsaved(), "it is still saved");
+        assert_eq!(
+            entity.saved_print(),
+            Some(print(&saved)),
+            "as the newer save"
         );
     }
 

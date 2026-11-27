@@ -1872,6 +1872,7 @@ fn save_doc(
         },
         log,
     );
+    workspace.queue_write(id);
 }
 
 /// Queue a local asset for a slot.

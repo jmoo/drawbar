@@ -1035,11 +1035,12 @@ impl LocalEntity {
         }
     }
 
-    /// Whether a write of `sent` that landed leaves it nothing to save: it has moved on
-    /// from `sent`, and its file holds `sent` already or a save made since.
-    fn saved_past(&self, sent: &[u8]) -> bool {
-        let saved_since = self.kept && self.path.is_some() && !self.is_unsaved();
-        !self.holds(sent) && (self.saved.holds(sent) || saved_since)
+    /// Whether a write of `sent` that landed leaves it nothing to save: what it is saved
+    /// as has moved since the write was queued over the baseline stamped `over`, as a
+    /// save moves it, or it holds `sent` already under bytes that have moved on.
+    fn settled(&self, sent: &[u8], over: Option<u64>) -> bool {
+        let moved = over.is_some_and(|over| self.saved.stamp != over);
+        moved || (self.saved.holds(sent) && !self.holds(sent))
     }
 
     /// The extension its bytes call for. See `format_tag`. One not read yet takes the
@@ -1734,6 +1735,9 @@ pub struct Workspace {
     /// overwrites, with the stamp of the save that writes them. It goes only once that
     /// save has landed.
     saving_over: std::collections::BTreeMap<u64, (Leaving, u64)>,
+    /// The stamp each asset was saved under when a write of its bytes was queued, until
+    /// that write lands.
+    writing: std::collections::BTreeMap<u64, u64>,
     /// The files File ▸ Import… picked, not yet taken.
     picked: Vec<Outside>,
     unbundled: Vec<Unbundled>,
@@ -1853,6 +1857,7 @@ impl Workspace {
             bundling: None,
             moving_over: Default::default(),
             saving_over: Default::default(),
+            writing: Default::default(),
             picked: Vec::new(),
             unbundled: Vec::new(),
             undecoded: VecDeque::new(),
@@ -3808,14 +3813,24 @@ impl Workspace {
         true
     }
 
+    /// Note what the asset `id` is saved as, as a write of the bytes it holds is queued.
+    /// One resting in its file sends the file.
+    pub fn queue_write(&mut self, id: u64) {
+        let held = self.get(id).filter(|it| it.rests().is_none());
+        if let Some(stamp) = held.map(|it| it.saved.stamp) {
+            self.writing.insert(id, stamp);
+        }
+    }
+
     /// Record a write that reached a slot: the bytes it carried become the saved
     /// baseline.
     ///
     /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. An edit
     /// made while the write was in flight exists only on this computer, and calling it
-    /// saved would let it be discarded with its tab. One saved to its file since keeps
-    /// that save.
+    /// saved would let it be discarded with its tab. One saved since the write was
+    /// queued ([`Workspace::queue_write`]) keeps that save.
     pub fn landed(&mut self, id: u64, sent: Vec<u8>) {
+        let over = self.writing.remove(&id);
         let resting = self
             .get(id)
             .filter(|entity| entity.rests().is_some())
@@ -3830,7 +3845,7 @@ impl Workspace {
             Some(false) => {
                 self.respell(id, sent.clone().into());
             }
-            None if self.get(id).is_some_and(|it| it.saved_past(&sent)) => {
+            None if self.get(id).is_some_and(|it| it.settled(&sent, over)) => {
                 self.revision += 1;
                 return;
             }
@@ -3986,6 +4001,7 @@ impl Workspace {
         self.arriving.remove(&id);
         self.moving_over.remove(&id);
         self.saving_over.remove(&id);
+        self.writing.remove(&id);
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
@@ -4018,6 +4034,7 @@ impl Workspace {
         self.edits.retain(|id, _| held(*id));
         self.moving_over.retain(|id, _| held(*id));
         self.saving_over.retain(|id, _| held(*id));
+        self.writing.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id, _| held(*id));

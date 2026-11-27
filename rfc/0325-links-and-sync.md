@@ -198,8 +198,9 @@ nothing else.
 - A step runs only while the link is still as shown. A bring-in also needs the file
   untouched, and a write the same body. A file shown with unsaved edits is the
   exception: it goes up as it is when its step runs, and is saved once the write
-  lands. A piano or sample resting in its file is saved first. Sync saves no file it
-  does not write. A move runs only while every move of its swap or rotation does.
+  lands, unless it was saved again meanwhile. A piano or sample resting in its file
+  is saved first. Sync saves no file it does not write. A move runs only while every
+  move of its swap or rotation does.
 - A plan whose Sync cannot start, because a save failed or the library could not be
   checked, is let go: the sheet lists its rows again and nothing runs later.
 - A write carries what its slot is expected to hold. The worker reads the slot's info

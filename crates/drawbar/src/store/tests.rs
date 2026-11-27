@@ -495,13 +495,38 @@ fn a_send_landing_what_the_file_already_holds_saves_nothing() {
     assert!(workspace.get(id).unwrap().is_unsaved());
 }
 
-#[test]
-fn a_send_landing_after_a_newer_save_leaves_the_file_as_saved() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
+/// A program saved in the library, edited with `gain` and not saved, with a write of it
+/// queued: the session, the program, and the bytes the write carries.
+fn queued_edit(root: &Temp, gain: &str) -> (Session, u64, Vec<u8>) {
+    let mut session = Session::open(root);
     let id = session.create();
     session.sync();
-    let sent = with_gain(&session.bytes(id), "40");
+    let sent = with_gain(&session.bytes(id), gain);
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, sent.clone(), log);
+    workspace.queue_write(id);
+    (session, id, sent)
+}
+
+#[test]
+fn a_write_of_unsaved_edits_that_lands_saves_them() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+
+    session.bench.workspace.landed(id, sent.clone());
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == sent,
+        "the file holds the edits"
+    );
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_landing_after_a_newer_save_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
     let saved = with_gain(&sent, "96");
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.replace_bytes(id, saved.clone(), log);
@@ -516,6 +541,46 @@ fn a_send_landing_after_a_newer_save_leaves_the_file_as_saved() {
         "the file keeps the newer save"
     );
     assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_landing_after_a_newer_save_and_another_edit_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+    let (saved, edited) = (with_gain(&sent, "96"), with_gain(&sent, "12"));
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, edited.clone(), log);
+    session.sync();
+
+    session.bench.workspace.landed(id, sent);
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == saved,
+        "the file keeps the newer save"
+    );
+    assert!(session.bytes(id) == edited, "the later edit is still held");
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_of_edits_reverted_since_it_was_queued_still_saves_what_it_sent() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.revert(id, log);
+    assert!(!workspace.get(id).unwrap().is_unsaved());
+
+    session.bench.workspace.landed(id, sent.clone());
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == sent,
+        "the file holds what was sent"
+    );
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
 /// A browser cannot wait for its library's answers, so it lets a library go only once it
