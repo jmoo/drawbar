@@ -713,7 +713,10 @@ list of whole states.
   body, and stops at it to reach anything else. The label says which, but a
   user meets the rule without being told.
 - A sample instrument or piano library edited in its file loses its edit steps
-  at each save until it meets rule 2.
+  at each save until it meets rule 2. It also follows its file when a save is
+  undone or redone, and an edit that changes nothing over the file is not held.
+  So values typed back to what an undone save restores are let go, and redoing
+  that save shows the saved values, not the ones typed back.
 - Writing one sound over another ends the edit steps of the sound written over.
 - A sample instrument or piano library held whole, such as one just made, takes
   its file when a save of it is undone, because its file is read back in place
