@@ -1502,7 +1502,6 @@ impl Store {
     }
 
     /// Whether a send is held for a rescan or check still in flight.
-    #[cfg(test)]
     pub fn holds_send(&self) -> bool {
         self.send_waits
     }

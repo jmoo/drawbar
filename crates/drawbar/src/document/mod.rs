@@ -733,7 +733,7 @@ impl Document {
         ctx: &egui::Context,
         acts: Vec<crate::browser::Act>,
         workspace: &mut Workspace,
-        sync: &crate::bring::Rows,
+        sync: &[u64],
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
         let mut ids = self.samples.ids();
@@ -804,6 +804,12 @@ impl Document {
         }
         self.saving.push(Saving { files, act });
         None
+    }
+
+    /// Whether a Sync waits here for a save.
+    pub fn holds_sync(&self) -> bool {
+        let syncs = |held: &Saving| matches!(held.act, crate::browser::Act::SyncAll);
+        self.saving.iter().any(syncs)
     }
 
     /// The acts whose saves have all answered: each runs where every save landed, and
@@ -1824,7 +1830,7 @@ mod tests {
         #[cfg(not(target_arch = "wasm32"))]
         fn act(&mut self, acts: Vec<crate::browser::Act>) {
             let ctx = self.ctx.clone();
-            let sync = Rows::of(&self.device.state, &self.workspace, &self.queue);
+            let sync = crate::bring::writes(&self.device);
             let acts = self
                 .document
                 .settle(&ctx, acts, &mut self.workspace, &sync, &mut self.log);
@@ -2038,13 +2044,7 @@ mod tests {
             log,
             ..
         } = &mut open;
-        let ran = document.settle(
-            &ctx,
-            vec![Act::SaveDoc(id)],
-            workspace,
-            &Rows::default(),
-            log,
-        );
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, &[], log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(workspace.saving_edit(id));
 
@@ -2054,7 +2054,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, &Rows::default(), log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &[], log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let whole = sample::apply(&bytes, &sets).unwrap();
@@ -2128,6 +2128,45 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&sent, &saved));
         assert!(dir.read("Saved.nsmp") == sample::apply(&bytes, &sets).unwrap());
         assert_eq!(saved.take_reads(), [], "nothing read it to send it");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sync_saves_no_edit_of_a_sample_left_out_of_it() {
+        use crate::browser::Act;
+
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        let (class, at) = (ObjectClass::Sample, Location::from_user(1, 1));
+        open.device.pretend_scanned(class, 1, &[""]);
+        open.act(vec![Act::Send { id, class, at }]);
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets, workspace, log).unwrap();
+        open.twice();
+        open.act(vec![Act::Sync(None)]);
+        while let Some(class) = open.device.state.scan.take() {
+            open.device.state.scan.finished(class);
+        }
+
+        let sync = Rows::of(&open.device.state, &open.workspace, &open.queue);
+        let row = sync.list.iter().find(|row| row.id == id).expect("a row");
+        let sheet = open.device.asks.sheet.as_mut().expect("open");
+        sheet.turn(row, crate::bring::Way::Up, &sync.list, &open.workspace);
+        crate::bring::accept(&mut open.device, &sync, &open.workspace);
+        open.act(vec![Act::SyncAll]);
+        assert!(!open.workspace.saving_edit(id), "no save was asked for");
+        assert!(open.entity().is_unsaved(), "the edit is still only here");
     }
 
     /// An edit of a sample resting in its file is not sent as the file without it.
@@ -4424,7 +4463,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
-            &Rows::default(),
+            &[],
             &mut open.log,
         );
         assert!(
@@ -4487,13 +4526,7 @@ mod tests {
             log,
             ..
         } = &mut open;
-        let ran = document.settle(
-            &ctx,
-            vec![Act::SaveDoc(id)],
-            workspace,
-            &Rows::default(),
-            log,
-        );
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, &[], log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
@@ -4503,7 +4536,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, &Rows::default(), log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &[], log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let renamed = piano::snapshot(
@@ -4575,7 +4608,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Revert(open.id)],
             &mut open.workspace,
-            &Rows::default(),
+            &[],
             &mut open.log,
         );
         assert!(

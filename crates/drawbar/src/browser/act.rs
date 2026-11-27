@@ -295,8 +295,9 @@ pub enum Rescuing {
 
 impl Act {
     /// The assets whose bytes the act carries out of the app: saved into their files,
-    /// exported, queued, or written to the instrument. Sync may write any file with a row.
-    pub fn carries(&self, sync: &crate::bring::Rows) -> Vec<u64> {
+    /// exported, queued, or written to the instrument. Sync carries `sync`, the files
+    /// its plan writes.
+    pub fn carries(&self, sync: &[u64]) -> Vec<u64> {
         match self {
             Act::SaveDoc(id)
             | Act::WriteBack(id)
@@ -307,7 +308,7 @@ impl Act {
             | Act::Replace { id, .. } => vec![*id],
             Act::SendChecked(ids) => ids.clone(),
             Act::ExportBundle { ids, .. } => ids.clone(),
-            Act::SyncAll => sync.list.iter().map(|row| row.id).collect(),
+            Act::SyncAll => sync.to_vec(),
             _ => Vec::new(),
         }
     }

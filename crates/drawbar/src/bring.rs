@@ -726,6 +726,25 @@ impl Sheet {
     }
 }
 
+/// The files the plan Sync was pressed on writes to the keyboard.
+pub fn writes(device: &Device) -> Vec<u64> {
+    let sheet = device.asks.sheet.as_ref();
+    let steps = sheet.and_then(|sheet| sheet.accepted.as_ref());
+    let up = steps
+        .into_iter()
+        .flatten()
+        .filter(|step| step.way == Way::Up);
+    up.map(|step| step.row.id).collect()
+}
+
+/// Let go of the plan Sync was pressed on unless something still `holds` its Sync to run
+/// later: one that was refused runs nothing, and the sheet takes choices again.
+pub fn let_go(device: &mut Device, holds: bool) {
+    if let Some(sheet) = device.asks.sheet.as_mut().filter(|_| !holds) {
+        sheet.accepted = None;
+    }
+}
+
 /// The sheet and what Sync is bringing in, while one keyboard is attached. A new attach
 /// starts it over.
 #[derive(Default)]
@@ -2537,6 +2556,25 @@ mod tests {
         bench.act(vec![Act::SyncAll]);
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
+    }
+
+    #[test]
+    fn a_pressed_plan_is_let_go_only_once_nothing_holds_its_sync() {
+        let mut bench = Bench::new();
+        walked(&mut bench, &[Some(crc(&body())), Some(crc(&gained("40")))]);
+        let ahead = linked(&mut bench, "A.ne5p", gained("41"), 1, &body());
+        linked(&mut bench, "B.ne5p", body(), 2, &body());
+        open_read(&mut bench);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        accept(&mut bench.device, &sync, &bench.workspace);
+        assert_eq!(writes(&bench.device), [ahead], "only what goes up");
+        let pressed = |bench: &Bench| bench.device.asks.sheet.as_ref().unwrap().pressed();
+
+        let_go(&mut bench.device, true);
+        assert_eq!(pressed(&bench), Some(2));
+        let_go(&mut bench.device, false);
+        assert_eq!(pressed(&bench), None, "it takes choices again");
+        assert!(writes(&bench.device).is_empty());
     }
 
     #[test]

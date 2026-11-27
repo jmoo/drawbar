@@ -1244,9 +1244,7 @@ impl eframe::App for DrawbarApp {
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
         // it is.
-        let sync = self
-            .library
-            .synced(&self.workspace, &self.device, &self.queue);
+        let sync = crate::bring::writes(&self.device);
         let acts = self
             .document
             .settle(ctx, acts, &mut self.workspace, &sync, &mut self.log);
@@ -1267,6 +1265,8 @@ impl eframe::App for DrawbarApp {
             &mut self.builds,
             &mut self.log,
         );
+        let held = self.store.as_ref().is_some_and(Store::holds_send);
+        crate::bring::let_go(&mut self.device, held || self.document.holds_sync());
         self.builds.poll(
             &mut self.workspace,
             &self.browser.folders,

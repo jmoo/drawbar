@@ -2848,6 +2848,37 @@ mod tests {
         );
     }
 
+    /// A Sync that was pressed and then refused, as when the library could not be read
+    /// again, runs nothing later.
+    #[test]
+    fn a_pressed_sync_that_nothing_holds_takes_choices_again() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let (class, at) = (ObjectClass::Program, nord_usb::Location::from_user(1, 1));
+        let waiting = (
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        crate::queue::enqueue(waiting.0, waiting.1, waiting.2, waiting.3, id, class, at);
+        crate::bring::open(&mut app.device, None);
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let sync = crate::bring::Rows::of(&app.device.state, &app.workspace, &app.queue);
+        crate::bring::accept(&mut app.device, &sync, &app.workspace);
+        let pressed = |app: &DrawbarApp| app.device.asks.sheet.as_ref().map(|it| it.pressed());
+        assert_eq!(pressed(&app), Some(Some(1)));
+
+        let painted = settled(&ctx, &mut app, SCREEN);
+        assert_eq!(pressed(&app), Some(None), "the sheet stays up");
+        assert!(painted.words.iter().any(|word| word.text == "Sync 1"));
+    }
+
     /// A key acts on nothing a modal covers: ⌘S behind the Sync sheet leaves the
     /// open document's revert point where it was, and saves again once the sheet closes.
     #[test]

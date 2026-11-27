@@ -196,7 +196,11 @@ nothing else.
 
 - A step runs only while the link is still as shown. A bring-in also needs the file
   untouched, and a write the same body. A file shown with unsaved edits is the
-  exception: Sync saves them first, so it goes up as it is when its step runs.
+  exception: Sync saves them first, so it goes up as it is when its step runs. Sync
+  saves no file it does not write. A move runs only while every move of its swap or
+  rotation does.
+- A plan whose Sync cannot start, because a save failed or the library could not be
+  checked, is let go: the sheet lists its rows again and nothing runs later.
 - A write carries what its slot is expected to hold. The worker reads the slot's info
   just before the backup, delete and write, and refuses the write when the slot holds
   anything else. The check sits at the instrument boundary because a panel Store made
