@@ -268,6 +268,9 @@ pub struct Store {
     /// The change answered next is the one that turned the library read-only, which
     /// the log has said already.
     turned_read_only: bool,
+    /// The assets whose edits a save was asked of and refused, since nothing is
+    /// written here, which the next poll names.
+    refused: Vec<u64>,
     /// The assets a projection passed over while a save or a rename of their files was
     /// in flight, which the next one looks at again.
     deferred: BTreeSet<u64>,
@@ -401,6 +404,7 @@ impl Store {
             keeping: VecDeque::new(),
             told_unkept: false,
             turned_read_only: false,
+            refused: Vec::new(),
             deferred: BTreeSet::new(),
             focused: true,
             scan: Scan::Idle,
@@ -1063,6 +1067,15 @@ impl Store {
         let mut released = false;
         while let Some(event) = self.backend.try_recv() {
             released |= self.react(event, workspace, browser, queue, timeline, log);
+        }
+        for id in std::mem::take(&mut self.refused) {
+            let Some(entity) = workspace.get(id) else {
+                continue;
+            };
+            log.trouble(format!(
+                "“{}” was not saved. The library is read-only, so its file is unchanged.",
+                entity.name
+            ));
         }
         self.tell_unfinished(workspace.ctx(), browser, log);
         self.watch(browser);
@@ -3984,6 +3997,7 @@ impl Store {
             // what waits on it is told.
             for id in workspace.edits_to_save() {
                 workspace.edit_not_saved(id);
+                self.refused.push(id);
             }
             return true;
         }

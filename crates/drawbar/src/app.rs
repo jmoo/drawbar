@@ -3766,4 +3766,26 @@ mod tests {
         let attribute = attribute.replace(' ', "");
         attribute == "cfg(test)" || attribute.starts_with("cfg(all(test,")
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_save_refused_in_a_read_only_library_is_said_once_for_save_and_for_export() {
+        let refused =
+            "“Marimba.nsmp” was not saved. The library is read-only, so its file is unchanged.";
+        for (press, carry) in [
+            ("Save", browser::Act::SaveDoc as fn(u64) -> browser::Act),
+            ("Export", browser::Act::Export),
+        ] {
+            let (root, _) = crate::store::tests::newer_drawbar_wrote();
+            let (ctx, mut app, id) = edited_sample(&root);
+            act(&ctx, &mut app, vec![carry(id)]);
+            until(&ctx, &mut app, "the save is answered", |app| {
+                !app.document.awaits_save(id, &app.workspace)
+            });
+            input(&ctx, &mut app, Vec::new());
+
+            let said = app.log.iter().filter(|entry| entry.text == refused).count();
+            assert_eq!(said, 1, "{press} is answered once");
+        }
+    }
 }
