@@ -730,6 +730,17 @@ impl Walk {
             moved_on || answer == Answer::Taken,
             "{whence}: the library takes {label}, whose files changed nowhere else"
         );
+        if let (Answer::Taken, Some(Step::Library { files, .. })) = (answer, step) {
+            for filed in files {
+                let left = if again { &filed.before } else { &filed.after };
+                assert!(
+                    *left == self.model.placed(filed.doc),
+                    "{whence}: the library takes {label} though document {} is not as the \
+                     step left it",
+                    filed.doc
+                );
+            }
+        }
         self.refusal = answer != Answer::Taken;
         answer
     }
@@ -796,7 +807,7 @@ impl Walk {
                 text.contains("was not saved, because") || text.ends_with(": refused by the test")
             }
             Action::Outside(_) => text.contains("changed on disk") || self.refusal,
-            Action::Undo | Action::Redo => self.refusal,
+            Action::Undo | Action::Redo => self.refusal && text.contains(" cannot be "),
             _ => false,
         }
     }
