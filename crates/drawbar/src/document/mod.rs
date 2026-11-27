@@ -799,7 +799,7 @@ impl Document {
         }
         let files: Vec<(u64, u64)> = carried
             .iter()
-            .filter(|id| workspace.edit_of(**id).is_some())
+            .filter(|id| workspace.edit(**id).is_some())
             .filter_map(|id| Some((*id, workspace.get(*id)?.rests()?.serial)))
             .collect();
         if files.is_empty() {
@@ -4771,5 +4771,64 @@ mod tests {
             open.entity().is_unsaved(),
             "as an edit of the file the save wrote"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_send_asked_while_a_resting_sample_is_edited_back_during_its_save_waits_and_does_not_run() {
+        use crate::browser::Act;
+        use crate::device::DeviceCmd;
+
+        let bytes = sample_bytes();
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file.clone());
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        let (class, at) = (ObjectClass::Sample, Location::from_user(1, 1));
+        open.device.pretend_scanned(class, 1, &[""]);
+        open.act(vec![Act::Send { id, class, at }]);
+
+        let rename = |open: &mut Open, name: &str| {
+            let sets = vec![("name".to_string(), name.to_string())];
+            let Open {
+                document,
+                workspace,
+                log,
+                ..
+            } = open;
+            document.apply(id, sets, workspace, log).unwrap();
+            open.twice();
+        };
+        rename(&mut open, "Vibes");
+        open.act(vec![Act::SaveDoc(id)]);
+        let (from, edit) = open.workspace.send_edit(id).expect("the store sends it");
+        rename(&mut open, "Marimba");
+
+        let sent = |open: &Open| {
+            let mut queued = open.device.queued().iter();
+            queued.any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+        };
+        open.act(vec![Act::SendAll]);
+        let (_, status) = open.log.status();
+        assert!(
+            !sent(&open) && !status.starts_with("Nothing was sent"),
+            "the send waits for the save in flight: {status}"
+        );
+
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved);
+        open.act(Vec::new());
+
+        assert!(
+            !sent(&open),
+            "the edit back is not saved, so the send does not run"
+        );
+        let (_, status) = open.log.status();
+        assert!(status.contains("was not saved"), "{status}");
     }
 }
