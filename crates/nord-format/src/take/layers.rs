@@ -331,6 +331,19 @@ pub fn place(
     layers: Option<usize>,
     min_gap_db: f64,
 ) -> Vec<Option<Placed>> {
+    place_series(struck, layers, min_gap_db, |_, _| false)
+}
+
+/// As [`place`], but a file within `min_gap_db` of a louder one is kept as a layer of its
+/// own where `series(file, louder)`, by their places in `struck`, says the two are one
+/// series of takes: near-equal levels can still differ in tone, so only a level that
+/// stands alone is a duplicate.
+pub fn place_series(
+    struck: &[Option<Hit>],
+    layers: Option<usize>,
+    min_gap_db: f64,
+    series: impl Fn(usize, usize) -> bool,
+) -> Vec<Option<Placed>> {
     let mut placed: Vec<Option<Placed>> = vec![None; struck.len()];
     let mut sorted: Vec<Hit> = Vec::new();
     for (i, hit) in struck.iter().enumerate() {
@@ -358,7 +371,29 @@ pub fn place(
         if group.is_empty() {
             continue;
         }
-        let choices = pick(&group, layers, Order::Loudness, min_gap_db);
+        let mut choices = pick(&group, layers, Order::Loudness, min_gap_db);
+        // A duplicate of its series is kept: the rest are left out, and what remains is
+        // picked again with no gap, so each of them is a layer.
+        let kept = |hit: &Hit, choice: &Choice| match choice {
+            Choice::Duplicate { of } => series(hit.number - 1, of - 1),
+            _ => true,
+        };
+        if (group.iter().zip(&choices))
+            .any(|(hit, c)| matches!(c, Choice::Duplicate { .. }) && kept(hit, c))
+        {
+            let (keep, left): (Vec<_>, Vec<_>) =
+                (group.iter().copied().zip(choices)).partition(|(hit, choice)| kept(hit, choice));
+            let again: Vec<&Hit> = keep.iter().map(|(hit, _)| *hit).collect();
+            let picked = pick(&again, layers, Order::Loudness, 0.0);
+            let mut by_number: std::collections::BTreeMap<usize, Choice> =
+                (again.iter().map(|hit| hit.number))
+                    .zip(picked)
+                    .chain(left.into_iter().map(|(hit, choice)| (hit.number, choice)))
+                    .collect();
+            choices = (group.iter())
+                .map(|hit| by_number.remove(&hit.number).expect("every hit chose"))
+                .collect();
+        }
         let of = choices
             .iter()
             .filter(|c| matches!(c, Choice::Layer(_)))
@@ -685,6 +720,41 @@ mod tests {
                 Some(Placed::Duplicate { note: 60, of: 1 }),
                 Some(Placed::NoPitch),
             ]
+        );
+    }
+
+    /// ⚠️ A file near the level of a louder one of its note is kept as a layer where
+    /// the two are one series; a near-equal file of no series is still a duplicate.
+    #[test]
+    fn a_near_equal_file_of_one_series_is_kept_as_a_layer() {
+        let struck = [
+            Some(hit(0, -10.0, 60.1)),
+            Some(hit(0, -10.5, 60.0)),
+            Some(hit(0, -10.8, 59.9)),
+        ];
+        // Files 0 and 1 are one series; file 2 is no series of either.
+        let series = |a: usize, b: usize| a.max(b) == 1 && a.min(b) == 0;
+        let placed = place_series(&struck, None, 2.0, series);
+        assert_eq!(
+            placed,
+            [
+                Some(Placed::Layer {
+                    note: 60,
+                    layer: 0,
+                    of: 2
+                }),
+                Some(Placed::Layer {
+                    note: 60,
+                    layer: 1,
+                    of: 2
+                }),
+                Some(Placed::Duplicate { note: 60, of: 0 }),
+            ]
+        );
+        assert_eq!(
+            place(&struck, None, 2.0)[1],
+            Some(Placed::Duplicate { note: 60, of: 0 }),
+            "no series: a duplicate, as before"
         );
     }
 
