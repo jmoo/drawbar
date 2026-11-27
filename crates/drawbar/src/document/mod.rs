@@ -745,7 +745,8 @@ impl Document {
     }
 
     /// Whether the document `id` holds exactly `working`, which takes the document's body
-    /// where it holds an equal one in another allocation.
+    /// where it holds an equal one in another allocation, and the stamp of its edit where
+    /// it holds an equal edit made again.
     pub fn holds(&self, workspace: &Workspace, id: u64, working: &mut Working) -> bool {
         let Some(entity) = workspace
             .get(id)
@@ -755,10 +756,16 @@ impl Document {
         };
         match (entity.rests(), working) {
             (None, Working::Body(held)) => shares(held, &entity.bytes),
-            (Some(_), Working::Edit { over, edit }) => {
-                *over == entity.saved.stamp() && edit.as_ref() == workspace.edit(id)
+            (Some(_), Working::Edit { over, edit, stamp }) if *over == entity.saved.stamp() => {
+                let (held, now) = workspace.kept_edit(id).unzip();
+                let now = now.unwrap_or(0);
+                let same = *stamp == now || edit.as_ref() == held;
+                if same {
+                    *stamp = now;
+                }
+                same
             }
-            (None, Working::Edit { .. }) | (Some(_), Working::Body(_)) => false,
+            (_, Working::Edit { .. }) | (Some(_), Working::Body(_)) => false,
         }
     }
 
@@ -1644,7 +1651,7 @@ fn holdable(workspace: &Workspace, id: u64, working: &Working) -> bool {
         Working::Body(bytes) => {
             !piano::is_piano(entity) && entity.rests().is_none_or(|file| !file.holds(bytes))
         }
-        Working::Edit { over, edit } => {
+        Working::Edit { over, edit, .. } => {
             let file = (entity.saved.file()).filter(|_| *over == entity.saved.stamp());
             let changes = |file: &crate::ondisk::OnDisk| {
                 edit.as_ref()
@@ -4940,7 +4947,7 @@ mod tests {
     fn told(working: &Working) -> String {
         match working {
             Working::Body(bytes) => format!("a body of {} bytes", bytes.len()),
-            Working::Edit { over, edit } => format!("an edit over {over}: {edit:?}"),
+            Working::Edit { over, edit, .. } => format!("an edit over {over}: {edit:?}"),
         }
     }
 
@@ -5435,6 +5442,30 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_edit_held_again_is_still_held_and_another_edit_is_not() {
+        let dir = testing::Temp::new();
+        let mut open = resting_sample(&dir, &[("name", "Vibes")]);
+        let mut vibes = open.working();
+        let bells = Edit::Sample(vec![("name".into(), "Bells".into())]);
+        let over = open.entity().saved.stamp();
+        let holds = |open: &Open, working: &mut Working| {
+            open.document.holds(&open.workspace, open.id, working)
+        };
+        assert!(holds(&open, &mut vibes));
+
+        let again = vibes.clone();
+        assert!(open.hold(&Working::Edit {
+            over,
+            edit: Some(bells),
+            stamp: 0,
+        }));
+        assert!(!holds(&open, &mut vibes), "another edit is held");
+        assert!(open.hold(&again));
+        assert!(holds(&open, &mut vibes), "an equal edit is held again");
+    }
+
     /// A hold is all or nothing: a working copy the document cannot hold exactly changes
     /// nothing.
     #[cfg(not(target_arch = "wasm32"))]
@@ -5443,7 +5474,11 @@ mod tests {
         let dir = testing::Temp::new();
         let mut open = drafted_piano(&dir);
         let over = open.entity().saved.stamp();
-        let edit = Working::Edit { over, edit: None };
+        let edit = Working::Edit {
+            over,
+            edit: None,
+            stamp: 0,
+        };
         open.refuses(edit, "an edit of a piano held whole");
         let body = Working::Body(open.entity().saved.bytes().clone());
         open.refuses(body, "a body of a piano held whole");
@@ -5460,12 +5495,14 @@ mod tests {
         let moved = Working::Edit {
             over: over + 1,
             edit: None,
+            stamp: 0,
         };
         open.refuses(moved, "an edit over another baseline");
         let nothing = Edit::Sample(vec![("name".into(), "Marimba".into())]);
         let nothing = Working::Edit {
             over,
             edit: Some(nothing),
+            stamp: 0,
         };
         open.refuses(nothing, "an edit that changes nothing over the file");
 
@@ -5486,7 +5523,11 @@ mod tests {
         let mut open = Open::fresh(Fresh::Program);
         open.frame(Vec::new());
         let over = open.entity().saved.stamp();
-        let edit = Working::Edit { over, edit: None };
+        let edit = Working::Edit {
+            over,
+            edit: None,
+            stamp: 0,
+        };
         open.refuses(edit, "an edit of a document with no file");
     }
 

@@ -646,10 +646,8 @@ impl Store {
             else {
                 continue;
             };
-            let (draft, stamp) = match workspace.kept_edit(entity.id) {
-                Some((edit, stamp)) => (Draft::Edit(edit.clone()), stamp),
-                None => (Draft::Bytes(entity.bytes.to_vec()), entity.stamp),
-            };
+            let edit = workspace.kept_edit(entity.id);
+            let stamp = edit.map_or(entity.stamp, |(_, stamp)| stamp);
             let sent = self.drafting.iter().rev().find(|sent| sent.0 == entity.id);
             let latest = sent.map(|(_, key, stamp, base)| (key, *stamp, *base));
             let latest = latest.or_else(|| {
@@ -659,7 +657,11 @@ impl Store {
             if latest == Some((&key, stamp, base)) {
                 continue;
             }
-            let Ok(bytes) = draft.encode() else {
+            let encoded = match edit {
+                Some((edit, _)) => Draft::encode_edit(edit),
+                None => Ok(Draft::encode_bytes(&entity.bytes)),
+            };
+            let Ok(bytes) = encoded else {
                 continue;
             };
             let mut replaces = self.superseded.remove(&entity.id).unwrap_or_default();

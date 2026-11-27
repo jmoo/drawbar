@@ -16,14 +16,15 @@ const BYTES: &[u8] = b"bytes\n";
 const EDIT: &[u8] = b"edit\n";
 
 impl Draft {
-    /// The draft's bytes as they are kept: the line that says its kind, then what it
-    /// holds, an edit as its working copy.
-    pub fn encode(&self) -> Result<Vec<u8>, String> {
-        let (kind, held) = match self {
-            Draft::Bytes(bytes) => (BYTES, bytes.clone()),
-            Draft::Edit(edit) => (EDIT, edit.working()?),
-        };
-        Ok([kind, &held].concat())
+    /// A draft of `bytes` as it is kept: the line that says its kind, then the bytes.
+    pub fn encode_bytes(bytes: &[u8]) -> Vec<u8> {
+        [BYTES, bytes].concat()
+    }
+
+    /// A draft of `edit` as it is kept: the line that says its kind, then the edit as
+    /// its working copy.
+    pub fn encode_edit(edit: &Edit) -> Result<Vec<u8>, String> {
+        Ok([EDIT, &edit.working()?].concat())
     }
 
     /// The draft `bytes` keep, or why they do not read as one.
@@ -44,11 +45,12 @@ mod tests {
 
     #[test]
     fn a_draft_reads_back_as_it_was_kept() {
+        let bytes = b"CBIN\nbytes\n".to_vec();
+        let kept = Draft::encode_bytes(&bytes);
+        assert_eq!(Draft::decode(&kept), Ok(Draft::Bytes(bytes)));
         let edit = Edit::Sample(vec![("name".into(), "Vibes".into())]);
-        for draft in [Draft::Bytes(b"CBIN\nbytes\n".to_vec()), Draft::Edit(edit)] {
-            let kept = draft.encode().unwrap();
-            assert_eq!(Draft::decode(&kept), Ok(draft));
-        }
+        let kept = Draft::encode_edit(&edit).unwrap();
+        assert_eq!(Draft::decode(&kept), Ok(Draft::Edit(edit)));
         assert!(Draft::decode(b"CBIN").is_err());
     }
 }
