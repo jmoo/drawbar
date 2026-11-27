@@ -3926,6 +3926,20 @@ fn planned_piano(root: &Temp) -> (Session, u64, crate::document::piano::Plan) {
     (session, id, plan)
 }
 
+#[test]
+fn a_save_asked_of_an_edit_in_a_read_only_library_is_answered_as_not_landed() {
+    let (root, _later) = newer_drawbar_wrote();
+    let (mut session, id, _) = planned_piano(&root);
+    assert!(session.store.read_only().is_some(), "opened read-only");
+    assert!(session.bench.workspace.save_edit(id));
+
+    session.sync();
+
+    let workspace = &session.bench.workspace;
+    assert!(!workspace.saving_edit(id), "the save is answered");
+    assert!(workspace.edit_of(id).is_some(), "and the edit is kept");
+}
+
 /// A piano library whose file is saved over outside drawbar under an unsaved plan keeps
 /// the plan, made again over the file as it is now, and drawbar asks whose to keep.
 /// Keeping mine saves the plan over their file.

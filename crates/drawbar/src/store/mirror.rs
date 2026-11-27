@@ -3773,6 +3773,17 @@ impl Store {
         ));
     }
 
+    /// Answer each save asked of an edit as not landed, where the library is opened and
+    /// nothing may be written.
+    fn refuse_edits(&self, workspace: &mut Workspace) {
+        if !self.opened() {
+            return;
+        }
+        for id in workspace.edits_to_save() {
+            workspace.edit_not_saved(id);
+        }
+    }
+
     /// Send the saves asked for of edits of files resting in the library, each once the
     /// save or move before it has answered.
     ///
@@ -3921,6 +3932,7 @@ impl Store {
         }
         self.keep_slot_edits(workspace, pass != Pass::Files);
         if !self.open() {
+            self.refuse_edits(workspace);
             return true;
         }
         if self.scan != Scan::Idle && pass != Pass::Last {
