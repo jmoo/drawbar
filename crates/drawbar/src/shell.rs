@@ -2848,8 +2848,6 @@ mod tests {
         );
     }
 
-    /// A Sync that was pressed and then refused, as when the library could not be read
-    /// again, runs nothing later.
     #[test]
     fn a_pressed_sync_that_nothing_holds_takes_choices_again() {
         let ctx = egui::Context::default();

@@ -2112,6 +2112,7 @@ mod tests {
         };
         assert!(sent(&open).is_none(), "nothing is sent before the save");
         assert!(open.workspace.saving_edit(id));
+        assert!(open.document.holds_sync(), "the Sync waits for it");
 
         let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
         let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
@@ -2125,6 +2126,7 @@ mod tests {
         let Some(Payload::File { file: sent, .. }) = sent(&open) else {
             panic!("the file the save wrote is sent: {:?}", open.log.status())
         };
+        assert!(!open.document.holds_sync());
         assert!(std::sync::Arc::ptr_eq(&sent, &saved));
         assert!(dir.read("Saved.nsmp") == sample::apply(&bytes, &sets).unwrap());
         assert_eq!(saved.take_reads(), [], "nothing read it to send it");

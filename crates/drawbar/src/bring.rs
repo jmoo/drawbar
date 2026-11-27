@@ -628,10 +628,12 @@ impl Sheet {
         }
     }
 
-    /// Whether `row` waits for the user: it goes no way, and the user did not leave it
-    /// out.
+    /// Whether `row` waits for the user: it goes no way, and the user left out neither it
+    /// nor a move it goes only with.
     pub fn waits(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> bool {
-        self.way(row, rows, workspace).is_none() && self.picks.get(&key(row)) != Some(&None)
+        let left_out = |row: &Row| self.picks.get(&key(row)) == Some(&None);
+        let left_out = Sheet::with(row, rows).is_some_and(|with| with.into_iter().any(left_out));
+        self.way(row, rows, workspace).is_none() && !left_out
     }
 
     /// Whether `row` can be turned to `way`: it may go that way, and every move it goes
@@ -683,26 +685,17 @@ impl Sheet {
     }
 
     /// Turn `row` to `way`, with every move it goes only with, or out of this Sync where
-    /// it went that way already, with every move that goes only with it.
+    /// it went that way already.
     pub fn turn(&mut self, row: &Row, way: Way, rows: &[Row], workspace: &Workspace) {
         let Some(with) = Sheet::with(row, rows).filter(|_| self.takes(row, way, rows, workspace))
         else {
             return;
         };
-        if self.way(row, rows, workspace) != Some(way) {
-            for row in with {
-                self.pick(row, Some(way), workspace);
-            }
-            return;
+        if self.way(row, rows, workspace) == Some(way) {
+            return self.pick(row, None, workspace);
         }
-        let went = self.moving(rows);
-        self.pick(row, None, workspace);
-        let goes = self.moving(rows);
-        let moves = rows
-            .iter()
-            .filter(|it| matches!(it.change, Change::Moved { .. }));
-        for stuck in moves.filter(|it| went.contains(&it.id) && !goes.contains(&it.id)) {
-            self.pick(stuck, None, workspace);
+        for row in with {
+            self.pick(row, Some(way), workspace);
         }
     }
 
@@ -989,10 +982,10 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
         device.asks.sheet = Some(sheet);
         return;
     };
-    let (going, mut stale): (Vec<Step>, Vec<Step>) = steps
+    let (going, stale): (Vec<Step>, Vec<Step>) = steps
         .into_iter()
         .partition(|step| step.holds(&device.state, workspace));
-    let going = whole(going, &mut stale);
+    let going = whole(going);
     let writes: Vec<&Step> = going.iter().filter(|step| step.way == Way::Up).collect();
     let batches = match crate::browser::batches(&writes, workspace) {
         Ok(batches) => batches,
@@ -1059,9 +1052,8 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     open(device, Some(first.row.id));
 }
 
-/// `going` without each move whose swap or rotation no longer goes whole, which joins
-/// `stale`.
-fn whole(mut going: Vec<Step>, stale: &mut Vec<Step>) -> Vec<Step> {
+/// `going` without each move whose swap or rotation no longer goes whole.
+fn whole(mut going: Vec<Step>) -> Vec<Step> {
     loop {
         let goes = |id: u64| going.iter().any(|step| step.row.id == id);
         let stuck = going.iter().position(|step| match step.row.change {
@@ -1071,9 +1063,9 @@ fn whole(mut going: Vec<Step>, stale: &mut Vec<Step>) -> Vec<Step> {
             _ => false,
         });
         match stuck {
-            Some(at) => stale.push(going.remove(at)),
+            Some(at) => going.remove(at),
             None => return going,
-        }
+        };
     }
 }
 
@@ -2557,6 +2549,8 @@ mod tests {
         pick(&mut bench, first, Way::Down);
         turn_off(&mut bench, second);
         assert_eq!(shown(&bench), [out, out], "A cannot move without B");
+        pick(&mut bench, second, Way::Down);
+        assert_eq!(shown(&bench), [goes, goes], "and goes again once B does");
     }
 
     /// A file that changes after Sync is pressed is not synced, and neither is the move
@@ -2576,6 +2570,9 @@ mod tests {
         bench.act(vec![Act::SyncAll]);
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
+        let changed = |name: &str| format!("“{name}” was not synced: it changed");
+        let said = |text: String| bench.log.iter().any(|entry| entry.text.starts_with(&text));
+        assert_eq!((said(changed("A")), said(changed("B"))), (false, true));
     }
 
     #[test]
