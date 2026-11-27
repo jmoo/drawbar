@@ -1620,6 +1620,11 @@ impl Store {
                 if let (true, Some(asked)) = (landed, &asked) {
                     self.refiled(asked, workspace);
                 }
+                if let (false, Waiting::This, Some(asked)) = (landed, waiting, &asked) {
+                    for (id, _) in asked.leaves() {
+                        self.file_unknown(id, workspace);
+                    }
+                }
                 let answer = timeline::Answer {
                     made,
                     undoable,
@@ -2931,14 +2936,20 @@ impl Store {
         std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
     }
 
-    /// The file of an asset a change went unheard over is read again. Until then one
-    /// holding its body counts as unsaved, and one that no longer does forgets what it
-    /// remembered of the file.
-    fn unheard(&mut self, id: u64, workspace: &mut Workspace) {
+    /// What the file of an asset holds is not known: an undo or redo of its save stopped
+    /// partway, or went unheard. One holding its body counts as unsaved, and one that no
+    /// longer does forgets what it remembered of the file.
+    fn file_unknown(&mut self, id: u64, workspace: &mut Workspace) {
         match workspace.get(id).is_some_and(LocalEntity::holds_body) {
             true => workspace.unfile(id),
             false => workspace.stale(id),
         }
+    }
+
+    /// The file of an asset a change went unheard over is read again, and until then is
+    /// not known.
+    fn unheard(&mut self, id: u64, workspace: &mut Workspace) {
+        self.file_unknown(id, workspace);
         if let Some(path) = self.records.get(&id).and_then(|record| record.path.clone()) {
             self.read_unheard(id, path, workspace);
         }

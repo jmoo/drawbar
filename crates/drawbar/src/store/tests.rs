@@ -10218,6 +10218,7 @@ fn an_undo_of_a_save_the_next_change_finishes_moves_only_the_baseline() {
         .store
         .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     session.undo();
+    assert!(session.unsaved(id), "its file is not known to hold it");
     session.make_tag("Sunday");
     session.settle();
 
@@ -10227,6 +10228,33 @@ fn an_undo_of_a_save_the_next_change_finishes_moves_only_the_baseline() {
     assert_eq!(session.bench.workspace.working(id), held);
     assert_eq!(session.bench.browser.asking(), None);
     assert_eq!(session.said("changed on disk"), 0);
+}
+
+/// Another program puts a file where the undo of a save was putting one back. The library
+/// turns read-only until it is opened again, and the document keeps what it held.
+#[test]
+fn a_file_put_in_the_way_of_the_undo_of_a_save_leaves_the_document_what_it_held() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, made, edited) = session.saved_once("96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.undo();
+    fs::write(root.at("untitled.ne5p"), b"theirs").unwrap();
+    session.make_tag("Sunday");
+    assert!(
+        session.store.read_only().is_some(),
+        "the undo cannot finish"
+    );
+    session.close();
+
+    fs::rename(root.at("untitled.ne5p"), root.local().join("theirs")).unwrap();
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    let id = again.only();
+    assert_eq!(again.bytes(id), edited, "the document holds its edit");
+    assert!(again.unsaved(id));
 }
 
 #[test]
