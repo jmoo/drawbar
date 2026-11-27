@@ -330,6 +330,10 @@ pub struct Store {
     /// How many times room has been looked for by going through every asset.
     #[cfg(test)]
     pub(crate) looked_for_room: usize,
+    /// How many times the files waiting to be finished have been looked for by going
+    /// through every asset.
+    #[cfg(test)]
+    pub(crate) looked_for_finishing: usize,
     /// How many writing commands have been sent.
     sent: u64,
     /// Where drawbar keeps a slot's former occupant no library could take, whose files
@@ -423,6 +427,8 @@ impl Store {
             roomless: BTreeMap::new(),
             #[cfg(test)]
             looked_for_room: 0,
+            #[cfg(test)]
+            looked_for_finishing: 0,
             sent: 0,
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
@@ -2313,8 +2319,8 @@ impl Store {
         if finishing != self.finishing {
             self.finishing = finishing;
             self.finish_asked = false;
+            self.defer_finishing();
         }
-        self.defer_finishing();
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2407,6 +2413,10 @@ impl Store {
     fn defer_finishing(&mut self) {
         if self.finishing.is_empty() {
             return;
+        }
+        #[cfg(test)]
+        {
+            self.looked_for_finishing += 1;
         }
         let waiting = self.records.iter().filter(|(_, record)| {
             let path = record.path.as_ref();

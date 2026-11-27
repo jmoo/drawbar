@@ -6804,6 +6804,32 @@ fn a_folder_rename_that_failed_partway_takes_its_files_once_finished() {
     assert_eq!(root.read("Gig/a.ne5p"), edited);
 }
 
+#[test]
+fn views_while_a_change_waits_to_be_finished_look_for_its_files_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Refuse(|io| puts(io, "b.ne5p")));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename waits"
+    );
+
+    session.store.looked_for_finishing = 0;
+    for _ in 0..3 {
+        session.refresh();
+        session.refocus();
+    }
+    assert_eq!(session.store.looked_for_finishing, 0);
+}
+
 static FOUND_MOVED: Moved = Moved::new(false);
 
 /// ⚠️ A file known by its path is not followed to where finishing a change moves it:
