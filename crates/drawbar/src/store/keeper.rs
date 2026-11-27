@@ -671,8 +671,8 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            // toshokan refuses over what the folder and the library's history hold,
-            // which waiting does not change. A read or write that failed may pass.
+            // Most refusals cannot pass, and one that could, as over a file a sync tool
+            // is replacing, costs its step. A read or write that failed may pass.
             Err(e @ Error::Refused(_)) => {
                 match again {
                     true => library.forget_redo(),

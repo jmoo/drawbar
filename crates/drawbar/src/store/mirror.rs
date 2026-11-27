@@ -1617,13 +1617,14 @@ impl Store {
                 if let (Some(_), Some(earlier)) = (finished, timeline.waiting()) {
                     self.refiled(earlier, workspace);
                 }
-                if let (true, Some(asked)) = (landed, &asked) {
-                    self.refiled(asked, workspace);
-                }
-                if let (false, Waiting::This, Some(asked)) = (landed, waiting, &asked) {
-                    for (id, _) in asked.leaves() {
-                        self.file_unknown(id, workspace);
+                match (&asked, landed, waiting) {
+                    (Some(asked), true, _) => self.refiled(asked, workspace),
+                    (Some(asked), false, Waiting::This) => {
+                        for (id, _) in asked.leaves() {
+                            self.file_unknown(id, workspace);
+                        }
                     }
+                    _ => {}
                 }
                 let answer = timeline::Answer {
                     made,

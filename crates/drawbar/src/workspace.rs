@@ -2305,8 +2305,8 @@ impl Workspace {
         };
         let asked = self.edits_to_save().contains(&id);
         self.rest(id, file, stamp);
-        if let Some(held) = self.edits.get_mut(&id).filter(|_| asked) {
-            held.save = Save::Asked;
+        if asked {
+            self.save_edit(id);
         }
     }
 

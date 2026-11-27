@@ -356,8 +356,8 @@ three ways:
   own history holds. The file a save wrote holds other bytes or is gone,
   something is where the step would put a file, another drawbar changed the
   same thing since, or the trash no longer holds what the step needs. Waiting
-  changes none of these, so the step is let go with a word that says why, and
-  Undo names the step before it.
+  changes most of these not at all, so the step is let go with a word that says
+  why, and Undo names the step before it.
 - The step fails, because the folder could not be read or written or the
   library is read-only. That may pass, so the step goes back to the list it
   left, and the log says what is in the way.
@@ -369,8 +369,9 @@ is refused at every press. In one timeline that would shut off every step
 behind it, edits included.
 
 A library step is checked when it is asked, since only the library can look at
-the folder. A step whose file is put back as the step left it before Undo is
-pressed is taken as any other.
+the folder. A step whose file is put back as the step left it, and seen there
+by drawbar's next look at the folder, before Undo is pressed is taken as any
+other.
 
 An edit step is one comparison and one call:
 
@@ -706,7 +707,8 @@ list of whole states.
   offered again if its file is later put back as the step left it. What the
   step displaced stays in the trash, where no Undo reaches it. Some refusals
   are judged from the folder as drawbar last looked at it, so a file that was
-  missing at that look and has come back since still costs its step.
+  missing at that look and has come back since still costs its step. So does a
+  file a sync tool has removed for a moment when Undo is pressed.
 - Undo treats a save two ways. It leaves the save alone to reach an edit of a
   body, and stops at it to reach anything else. The label says which, but a
   user meets the rule without being told.
