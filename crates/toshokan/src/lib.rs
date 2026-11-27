@@ -109,10 +109,10 @@
 //! it until the next commit, refresh or close.
 //!
 //! Undo reaches the intents of this session, and ends at close. An intent that
-//! only dismisses runs, only joins entities or settles another writer's record is
-//! no step of it, and [`Committed::undoable`] says which a commit is. An undo is
-//! refused with [`Refusal::ChangedSince`] where another writer changed the same
-//! thing since.
+//! only dismisses runs, only joins entities or settles another writer's record, or
+//! one committed as final, is no step of it, and [`Committed::undoable`] says which
+//! a commit is. An undo is refused with [`Refusal::ChangedSince`] where another
+//! writer changed the same thing since.
 //!
 //! ## What needs the user
 //!

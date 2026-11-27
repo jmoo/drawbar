@@ -244,7 +244,7 @@ pub struct Committed {
     pub left: Vec<RelPath>,
     /// Whether it is a step of this instance's undo history, as every intent is
     /// but one that only dismisses runs, only joins entities or settles another
-    /// writer's record.
+    /// writer's record, or one committed as final.
     pub undoable: bool,
     /// Whether this instance's own state caught up with the commit.
     pub local: Local,
