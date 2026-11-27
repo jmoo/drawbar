@@ -1380,16 +1380,20 @@ impl State {
 
     /// What this document's plan edits: the file the library rests in, or the body in
     /// memory the plan was begun on. That body stays the plan's while the working bytes
-    /// are it or the plan's lay-out of it, until that lay-out is saved.
+    /// are it or the plan's lay-out of it, until that lay-out is saved with the plan
+    /// unchanged since.
     fn baseline(&self, entity: &LocalEntity) -> Mark {
         if let Some(file) = entity.rests() {
             return Mark::Resting(file.serial);
         }
-        let Some(Mark::Held(begun)) = self.plans.get(&entity.id).map(|plan| plan.against) else {
+        let Some(plan) = self.plans.get(&entity.id) else {
+            return Mark::Held(entity.stamp);
+        };
+        let Mark::Held(begun) = plan.against else {
             return Mark::Held(entity.stamp);
         };
         let holds = match self.laid(entity) {
-            Some(_) => entity.stamp != entity.saved.stamp(),
+            Some(laid) => entity.stamp != entity.saved.stamp() || *plan != laid.plan,
             None => begun == entity.stamp,
         };
         Mark::Held(if holds { begun } else { entity.stamp })

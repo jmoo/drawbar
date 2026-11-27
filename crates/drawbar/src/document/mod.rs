@@ -4801,6 +4801,45 @@ mod tests {
             .collect()
     }
 
+    /// Record the piano library's working bytes as written to a slot.
+    fn sent(open: &mut Open, bytes: Vec<u8>) {
+        let at = nord_usb::Location { bank: 0, slot: 0 };
+        let class = nord_usb::ObjectClass::Piano;
+        open.workspace.landed(open.id, class, at, bytes);
+        open.twice();
+    }
+
+    #[test]
+    fn a_piano_lay_out_that_lands_in_a_slot_ends_its_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+        let bytes = open.entity().bytes.to_vec();
+        sent(&mut open, bytes);
+
+        assert_eq!(open.document.piano.renaming(open.entity()).0, None);
+        assert!(!open.pends());
+        assert!(!open.entity().is_unsaved());
+    }
+
+    #[test]
+    fn a_piano_edit_made_while_a_send_is_in_flight_outlives_the_send() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+        let bytes = open.entity().bytes.to_vec();
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("XTest Piano")]);
+        open.frame(vec![egui::Event::Text("Y".to_string())]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+        sent(&mut open, bytes);
+
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed.as_deref(), Some("YXTest Piano"));
+        assert!(open.pends() && open.entity().is_unsaved());
+        assert_eq!(lay_out(&mut open), "YXTest Piano", "a save writes it");
+    }
+
     /// The library folder a piano library held in memory is saved into, as the store
     /// writes it and finds it changed.
     #[cfg(not(target_arch = "wasm32"))]
