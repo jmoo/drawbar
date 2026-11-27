@@ -4115,6 +4115,27 @@ fn an_overwrite_removes_the_file_it_came_from_once_it_lands() {
     assert!(!session.bench.workspace.get(kept).unwrap().is_unsaved());
 }
 
+#[test]
+fn a_save_asked_of_a_resting_edit_runs_after_its_file_is_read_again_unchanged() {
+    let root = Temp::new();
+    let (mut session, id, bytes) = resting_sample(&root);
+    touch(&root, "Zoned.nsmp");
+    session.store.focus(false);
+    session.store.focus(true);
+    assert!(session.store.scanning(), "a rescan is in flight");
+
+    session.rename_resting(id, "Vibes");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+    session.sync();
+
+    assert!(session.bench.browser.asking().is_none(), "nothing to ask");
+    let edited = crate::document::sample::apply(&bytes, &[("name".into(), "Vibes".into())]);
+    assert!(root.read("Zoned.nsmp") == edited.unwrap(), "the save ran");
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
 /// A sample instrument holding an unsaved edit over its file, whose file is saved over
 /// outside drawbar, is not read whole to keep the edit apart: it rests in the new file,
 /// which its edit follows where it still applies, and drawbar asks what to do.

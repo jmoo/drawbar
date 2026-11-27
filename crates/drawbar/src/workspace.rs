@@ -2295,11 +2295,18 @@ impl Workspace {
     }
 
     /// The file an asset rests in was read again and holds what it held: the asset rests
-    /// in it under the stamp it had, and an edit held of it is made again over it.
+    /// in it under the stamp it had, and an edit held of it is made again over it. A save
+    /// asked of that edit and not sent stays asked, since the file is the one it was
+    /// asked of.
     pub fn rest_again(&mut self, id: u64, file: Arc<OnDisk>) {
         let entity = self.get(id).filter(|entity| entity.rests().is_some());
-        if let Some(stamp) = entity.map(|entity| entity.saved.stamp) {
-            self.rest(id, file, stamp);
+        let Some(stamp) = entity.map(|entity| entity.saved.stamp) else {
+            return;
+        };
+        let asked = self.edits_to_save().contains(&id);
+        self.rest(id, file, stamp);
+        if let Some(held) = self.edits.get_mut(&id).filter(|_| asked) {
+            held.save = Save::Asked;
         }
     }
 
