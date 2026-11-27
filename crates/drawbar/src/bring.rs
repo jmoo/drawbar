@@ -683,17 +683,26 @@ impl Sheet {
     }
 
     /// Turn `row` to `way`, with every move it goes only with, or out of this Sync where
-    /// it went that way already.
+    /// it went that way already, with every move that goes only with it.
     pub fn turn(&mut self, row: &Row, way: Way, rows: &[Row], workspace: &Workspace) {
         let Some(with) = Sheet::with(row, rows).filter(|_| self.takes(row, way, rows, workspace))
         else {
             return;
         };
-        if self.way(row, rows, workspace) == Some(way) {
-            return self.pick(row, None, workspace);
+        if self.way(row, rows, workspace) != Some(way) {
+            for row in with {
+                self.pick(row, Some(way), workspace);
+            }
+            return;
         }
-        for row in with {
-            self.pick(row, Some(way), workspace);
+        let went = self.moving(rows);
+        self.pick(row, None, workspace);
+        let goes = self.moving(rows);
+        let moves = rows
+            .iter()
+            .filter(|it| matches!(it.change, Change::Moved { .. }));
+        for stuck in moves.filter(|it| went.contains(&it.id) && !goes.contains(&it.id)) {
+            self.pick(stuck, None, workspace);
         }
     }
 
@@ -961,9 +970,10 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
         device.asks.sheet = Some(sheet);
         return;
     };
-    let (going, stale): (Vec<Step>, Vec<Step>) = steps
+    let (going, mut stale): (Vec<Step>, Vec<Step>) = steps
         .into_iter()
         .partition(|step| step.holds(&device.state, workspace));
+    let going = whole(going, &mut stale);
     let writes: Vec<&Step> = going.iter().filter(|step| step.way == Way::Up).collect();
     let batches = match crate::browser::batches(&writes, workspace) {
         Ok(batches) => batches,
@@ -1028,6 +1038,24 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
         ));
     }
     open(device, Some(first.row.id));
+}
+
+/// `going` without each move whose swap or rotation no longer goes whole, which joins
+/// `stale`.
+fn whole(mut going: Vec<Step>, stale: &mut Vec<Step>) -> Vec<Step> {
+    loop {
+        let goes = |id: u64| going.iter().any(|step| step.row.id == id);
+        let stuck = going.iter().position(|step| match step.row.change {
+            Change::Moved {
+                with: Some(with), ..
+            } => !goes(with),
+            _ => false,
+        });
+        match stuck {
+            Some(at) => stale.push(going.remove(at)),
+            None => return going,
+        }
+    }
 }
 
 /// Read a slot to bring it in.
@@ -2448,11 +2476,65 @@ mod tests {
         let sheet = bench.device.asks.sheet.as_ref().unwrap();
         let mine = row(&bench, first);
         assert_eq!(sheet.way(&mine, &sync.list, &bench.workspace), None);
+        assert!(
+            !sheet.waits(&mine, &sync.list, &bench.workspace),
+            "left out with the other, not waiting for the user"
+        );
         assert_eq!(
             plan(sheet, &sync.list, &bench.device.state, &bench.workspace),
             []
         );
         bench.press();
+        assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
+        assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
+    }
+
+    /// A is in B's slot and B in a free one: B's move needs nothing of A's, and A's needs
+    /// B's.
+    #[test]
+    fn a_move_left_out_takes_out_only_the_moves_that_go_with_it() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(
+            &mut bench,
+            &[None, Some(("A", crc(&a))), Some(("B", crc(&b)))],
+        );
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        open_read(&mut bench);
+        let shown = |bench: &Bench| {
+            let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+            let sheet = bench.device.asks.sheet.as_ref().unwrap();
+            [first, second].map(|id| {
+                let row = row(bench, id);
+                let way = sheet.way(&row, &sync.list, &bench.workspace);
+                (way, sheet.waits(&row, &sync.list, &bench.workspace))
+            })
+        };
+        let (goes, out) = ((Some(Way::Down), false), (None, false));
+        assert_eq!(shown(&bench), [goes, goes]);
+        turn_off(&mut bench, first);
+        assert_eq!(shown(&bench), [out, goes], "B moves without A");
+        pick(&mut bench, first, Way::Down);
+        turn_off(&mut bench, second);
+        assert_eq!(shown(&bench), [out, out], "A cannot move without B");
+    }
+
+    /// A file that changes after Sync is pressed is not synced, and neither is the move
+    /// that goes only with its own.
+    #[test]
+    fn a_swap_whose_one_file_changed_since_sync_was_pressed_moves_neither_link() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(&mut bench, &[Some(("B", crc(&b))), Some(("A", crc(&a)))]);
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        open_read(&mut bench);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        accept(&mut bench.device, &sync, &bench.workspace);
+        let log = &mut bench.log;
+        bench.workspace.replace_bytes(second, gained("60"), log);
+        bench.act(vec![Act::SyncAll]);
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }
