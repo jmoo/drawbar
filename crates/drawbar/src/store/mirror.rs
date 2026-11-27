@@ -260,7 +260,7 @@ pub struct Store {
     /// the log has said already.
     turned_read_only: bool,
     /// The assets a projection passed over while a save or a rename of their files was
-    /// in flight, which the next one looks at again.
+    /// in flight or waited to be finished, which the next one looks at again.
     deferred: BTreeSet<u64>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
@@ -2298,6 +2298,11 @@ impl Store {
             joined,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
+        let waiting = self.records.iter().filter(|(_, record)| {
+            let path = record.path.as_ref();
+            path.is_some_and(|path| self.finishing.contains(path))
+        });
+        self.deferred.extend(waiting.map(|(id, _)| *id));
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2447,18 +2452,12 @@ impl Store {
                 self.awaiting.insert(id);
                 continue;
             }
-            if let (true, Some(path)) = (self.awaiting.remove(&id), record.path.clone()) {
-                if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
-                    log.say(format!("Finished saving “{}”.", entity.name));
-                }
-                self.read_unheard(id, path, workspace);
-                continue;
-            }
             if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
                 self.deferred.insert(id);
                 continue;
             }
             let Some((path, stat)) = listed.files.get(&key) else {
+                self.awaiting.remove(&id);
                 touched.insert(id);
                 match self.vanished(id, workspace, browser, queue, log) {
                     Vanished::Deleted => {
@@ -2480,17 +2479,28 @@ impl Store {
             if std::mem::take(&mut record.missing) {
                 browser.folders.missing.remove(&id);
             }
-            if record.path.as_ref() != Some(path) {
+            let own = self.awaiting.remove(&id);
+            let stayed = record.path.as_ref() == Some(path);
+            if !stayed {
                 touched.insert(id);
-                moved += 1;
+                moved += usize::from(!own);
                 record.path = Some(path.clone());
                 let before = workspace.get(id).map(|entity| entity.name.clone());
                 workspace.follow(id, browser.folders.ahead(path));
-                if let Some(before) = before.filter(|_| !self.quiet) {
+                if let Some(before) = before.filter(|_| !own && !self.quiet) {
                     log.say(format!(
                         "“{before}” was moved to {path} outside drawbar; its tags went with it."
                     ));
                 }
+            }
+            if own {
+                // A finished change that left the file where it was saved it.
+                let unsaved = workspace.get(id).filter(|entity| entity.is_unsaved());
+                if let Some(entity) = unsaved.filter(|_| stayed) {
+                    log.say(format!("Finished saving “{}”.", entity.name));
+                }
+                self.read_unheard(id, path.clone(), workspace);
+                continue;
             }
             let Some(record) = self.records.get_mut(&id) else {
                 continue;

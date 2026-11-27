@@ -6583,6 +6583,74 @@ fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
     assert_eq!(title, "drawbar could not finish “Save”");
 }
 
+static MOVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `io` is the first request after the one that takes the file from
+/// `untitled.ne5p`.
+fn after_the_move(io: &toshokan::Io) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let leaves = match io {
+        toshokan::Io::Rename { from: path, .. } | toshokan::Io::Remove { path, .. } => {
+            path.as_str() == "untitled.ne5p"
+        }
+        _ => false,
+    };
+    MOVED.load(SeqCst) || (leaves && MOVED.swap(true, SeqCst))
+}
+
+#[test]
+fn a_rename_that_failed_after_the_move_and_is_finished_later_is_followed_and_saved_there() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Refuse(after_the_move));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "b.ne5p"], "the file moved");
+    assert_eq!(session.said("did not change as asked"), 1, "and it failed");
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(session.said("Finished saving"), 0, "nothing was saved");
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
+    assert_eq!(root.read("b.ne5p"), edited);
+}
+
+#[test]
+fn a_rename_that_failed_before_the_move_and_is_finished_later_is_not_said_to_be_made_outside() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Refuse(|io| puts(io, "b.ne5p")));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "b.ne5p"],
+        "the rename is finished"
+    );
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    assert_eq!(session.said("outside drawbar"), 0);
+}
+
 /// A folder's rename another drawbar left unfinished, finished or rolled back, moves its
 /// files as drawbar's own change: the log says nothing of files changed outside drawbar.
 #[test]
