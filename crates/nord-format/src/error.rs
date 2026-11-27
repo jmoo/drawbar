@@ -15,6 +15,9 @@ pub enum ParseError {
     #[error("value {value} is outside {bound}")]
     OutOfBounds { value: String, bound: String },
 
+    #[error("the file is empty")]
+    Empty,
+
     #[error("unknown format: {0}")]
     UnknownFormat(String),
 

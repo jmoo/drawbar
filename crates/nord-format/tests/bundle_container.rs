@@ -41,6 +41,11 @@ fn refusal(bytes: &[u8]) -> ArchiveError {
 }
 
 #[test]
+fn an_empty_file_is_refused_as_empty() {
+    assert_eq!(read(&[]).unwrap_err(), "the file is empty");
+}
+
+#[test]
 fn a_dos_time_packs_as_the_words_an_nsm_member_recorded() {
     // A member NSM wrote at 2026-07-25 16:48:26 carries time 0x860d, date 0x5cf9.
     assert_eq!(DosTime::new(2026, 7, 25, 16, 48, 26), Some(MODIFIED));
@@ -214,7 +219,6 @@ fn only_nsm_shaped_archives_are_read() {
         refusal(&bytes[..bytes.len() - 1]),
         ArchiveError::NoEndRecord
     );
-    assert_eq!(refusal(&[]), ArchiveError::NoEndRecord);
 }
 
 #[test]
