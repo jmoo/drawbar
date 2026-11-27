@@ -166,8 +166,8 @@ writing over a sound, removing a folder with what is in it, or making a tag and
 naming it, is one undo. An action on more files than the library can keep as one
 step is refused whole and changes nothing; do it in smaller parts. That is tens of
 thousands of files with short names, and about ten thousand with names hundreds
-of characters long. If another drawbar has changed what an undo would take
-back, that undo is refused, and Undo goes on to the change before it. An edit
+of characters long. If what an undo would take back has changed since, that
+undo is refused, and Undo goes on to the change before it. An edit
 you have not saved is taken back with **Revert** instead.
 
 Undo and Redo are off while a change is being written. A change that takes more

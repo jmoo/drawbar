@@ -431,8 +431,8 @@ impl<F: Fs> Library<F> {
 
     /// Undoes this session's latest intent not undone. Refused with
     /// [`Refusal::Nothing`](crate::Refusal::Nothing) when there is none,
-    /// [`Refusal::ChangedSince`](crate::Refusal::ChangedSince) where another writer
-    /// changed the same thing since, and [`Refusal::Emptied`](crate::Refusal::Emptied)
+    /// [`Refusal::ChangedSince`](crate::Refusal::ChangedSince) where a write made
+    /// since changed the same thing, and [`Refusal::Emptied`](crate::Refusal::Emptied)
     /// when the bytes it would bring back have left the trash.
     pub async fn undo(&mut self) -> Result<Committed> {
         run(&self.fs, self.core.undo()).await
