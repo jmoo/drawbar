@@ -133,7 +133,7 @@ impl<F: Fs> Keeper<F> {
         }
         let changes = matches!(
             cmd,
-            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. }
+            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Finish | Cmd::Settle { .. }
         );
         let finished = match changes {
             true => self.finish_earlier().await,
@@ -175,6 +175,11 @@ impl<F: Fs> Keeper<F> {
             Cmd::Redo => {
                 let (redone, forgot) = self.undone(true).await;
                 self.made("Redo".to_string(), finished, redone, forgot, answer)
+                    .await;
+            }
+            Cmd::Finish => {
+                let viewed = self.standing().await;
+                self.made("Finish".to_string(), finished, viewed, false, answer)
                     .await;
             }
             Cmd::Settle { orphan, how } => {
@@ -693,6 +698,16 @@ impl<F: Fs> Keeper<F> {
             Ok((Some((committed.intent, committed.undoable)), viewed)),
             false,
         )
+    }
+
+    /// The view as it stands, with its folders.
+    async fn standing(&mut self) -> Result<(Option<Made>, Viewed), String> {
+        let library = self.library.as_mut().ok_or("the library is not open")?;
+        let viewed = Viewed {
+            dirs: folders(library.fs()).await,
+            ..committed_view(library, &mut self.shown, Vec::new())
+        };
+        Ok((None, viewed))
     }
 
     /// Settle another writer's unfinished change, and the view after it.
