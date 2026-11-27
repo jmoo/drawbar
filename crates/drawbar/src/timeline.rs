@@ -363,12 +363,16 @@ impl Timeline {
         Aim::Redo(self.undone.last().map(Step::number))
     }
 
-    /// Whether the step `aim` named is still in the list its command takes from, so that
-    /// command takes that step or one recorded above it since. An aim that named none
-    /// holds.
+    /// Whether the command `aim` names takes the step it named or one recorded since: the
+    /// named step is still in its list, and no older step was put back above it. An aim
+    /// that named none holds.
     pub fn holds(&self, aim: Aim) -> bool {
         match aim {
-            Aim::Undo(Some(number)) => self.done.iter().any(|step| step.number() == number),
+            Aim::Undo(Some(number)) => {
+                let named = self.done.iter().any(|step| step.number() == number);
+                let takes = self.undoes().map(|at| self.done[at].number());
+                named && takes.is_some_and(|takes| takes >= number)
+            }
             Aim::Redo(Some(number)) => self.undone.iter().any(|step| step.number() == number),
             Aim::Undo(None) | Aim::Redo(None) => true,
         }
@@ -1098,6 +1102,25 @@ mod tests {
 
         session.undo();
         assert_eq!(session.holds(1), body(3), "the later drag is its own step");
+    }
+
+    #[test]
+    fn an_undo_aimed_at_an_edit_does_not_hold_once_an_older_step_is_put_back_above_it() {
+        let mut session = Session::default();
+        session.log(change("Rename “1”"));
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the rename is undone by the library");
+        };
+        session.edit(1, 3, Gesture::Dragging);
+        let aim = session.timeline.aim_undo();
+        assert!(session.timeline.holds(aim));
+
+        session
+            .timeline
+            .answered(Some(Asked::Undo(taken)), not_made());
+
+        assert_eq!(session.undo_reads(), Some("Rename “1”"));
+        assert!(!session.timeline.holds(aim), "Undo would take the rename");
     }
 
     #[test]
