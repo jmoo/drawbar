@@ -3644,7 +3644,7 @@ impl Store {
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
             Err(Failure::Unheard) => {
-                workspace.edit_not_saved(id);
+                workspace.edit_unheard(id);
                 return self.read_unheard(id, path, workspace);
             }
         };

@@ -1967,6 +1967,17 @@ mod tests {
             self.frame(Vec::new())
         }
 
+        /// Rename the open sample instrument as its name box does, and draw it twice.
+        #[cfg(not(target_arch = "wasm32"))]
+        fn rename_sample(&mut self, name: &str) {
+            let sets = vec![("name".to_string(), name.to_string())];
+            let (document, workspace) = (&mut self.document, &mut self.workspace);
+            document
+                .apply(self.id, sets, workspace, &mut self.log)
+                .unwrap();
+            self.twice();
+        }
+
         /// Every word one frame of the document puts on screen.
         fn words(&mut self) -> Vec<String> {
             self.painted(Vec::new())
@@ -4731,18 +4742,7 @@ mod tests {
         open.id = id;
         open.twice();
 
-        let rename = |open: &mut Open, name: &str| {
-            let sets = vec![("name".to_string(), name.to_string())];
-            let Open {
-                document,
-                workspace,
-                log,
-                ..
-            } = open;
-            document.apply(id, sets, workspace, log).unwrap();
-            open.twice();
-        };
-        rename(&mut open, "Vibes");
+        open.rename_sample("Vibes");
         let ctx = open.ctx.clone();
         let Open {
             document,
@@ -4755,7 +4755,7 @@ mod tests {
         assert_eq!(ran, [], "the save waits for the file");
         let (from, edit) = workspace.send_edit(id).expect("the store sends it");
 
-        rename(&mut open, "Marimba");
+        open.rename_sample("Marimba");
         let during = open.document.instrument_name(id, &open.workspace);
         assert_eq!(during, "Marimba", "the box keeps the name typed");
 
@@ -4775,7 +4775,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_send_asked_while_a_resting_sample_is_edited_back_during_its_save_waits_and_does_not_run() {
+    fn a_send_asked_during_the_save_of_an_edit_back_runs_once_that_edit_is_saved() {
         use crate::browser::Act;
         use crate::device::DeviceCmd;
 
@@ -4791,21 +4791,10 @@ mod tests {
         open.device.pretend_scanned(class, 1, &[""]);
         open.act(vec![Act::Send { id, class, at }]);
 
-        let rename = |open: &mut Open, name: &str| {
-            let sets = vec![("name".to_string(), name.to_string())];
-            let Open {
-                document,
-                workspace,
-                log,
-                ..
-            } = open;
-            document.apply(id, sets, workspace, log).unwrap();
-            open.twice();
-        };
-        rename(&mut open, "Vibes");
+        open.rename_sample("Vibes");
         open.act(vec![Act::SaveDoc(id)]);
         let (from, edit) = open.workspace.send_edit(id).expect("the store sends it");
-        rename(&mut open, "Marimba");
+        open.rename_sample("Marimba");
 
         let sent = |open: &Open| {
             let mut queued = open.device.queued().iter();
@@ -4823,12 +4812,90 @@ mod tests {
         let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
         open.workspace.edit_saved(id, saved);
         open.act(Vec::new());
+        assert!(!sent(&open), "the edit back is not saved yet");
 
-        assert!(
-            !sent(&open),
-            "the edit back is not saved, so the send does not run"
-        );
-        let (_, status) = open.log.status();
-        assert!(status.contains("was not saved"), "{status}");
+        let (from, edit) = open.workspace.send_edit(id).expect("the edit back is sent");
+        let vibes = dir.read("Saved.nsmp");
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &vibes);
+        std::fs::write(dir.at("Again.nsmp"), out.unwrap()).unwrap();
+        let again = testing::on_disk(&dir, "Again.nsmp", &dir.read("Again.nsmp"));
+        open.workspace.edit_saved(id, again);
+        open.workspace.settle_files(&mut open.log);
+        open.act(Vec::new());
+
+        assert!(sent(&open), "the send runs once the edit back is saved");
+        assert!(dir.read("Again.nsmp") == bytes, "and the file is as it was");
+    }
+
+    /// A resting `Marimba` renamed `Vibes` and saved, `during` typed while the save is
+    /// out, Save pressed then where `save`, and the save landing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn renamed_during_a_save(during: &[&str], save: bool) -> (testing::Temp, Open) {
+        use crate::browser::Act;
+
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.twice();
+        open.rename_sample("Vibes");
+        open.act(vec![Act::SaveDoc(id)]);
+        let (from, edit) = open.workspace.send_edit(id).expect("the store sends it");
+        for name in during {
+            open.rename_sample(name);
+        }
+        open.act(save.then_some(Act::SaveDoc(id)).into_iter().collect());
+        let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &sample_bytes());
+        std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
+        let saved = testing::on_disk(&dir, "Saved.nsmp", &dir.read("Saved.nsmp"));
+        open.workspace.edit_saved(id, saved);
+        open.act(Vec::new());
+        open.twice();
+        (dir, open)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_last_name_typed_during_a_save_stands_once_it_lands() {
+        let cases: [(&[&str], &str, bool); 4] = [
+            (&["Marimba", "Vibes", "Marimba"], "Marimba", true),
+            (&["Marimba", "Bells"], "Bells", true),
+            (&["Marimba", "Vibes"], "Vibes", false),
+            (&["Bells", "Marimba"], "Marimba", true),
+        ];
+        for (during, name, unsaved) in cases {
+            let (_dir, open) = renamed_during_a_save(during, false);
+            let shown = open.document.instrument_name(open.id, &open.workspace);
+            let now = open.entity().is_unsaved();
+            assert_eq!(
+                (shown.as_str(), now),
+                (name, unsaved),
+                "typed {during:?} during the save: shows {shown:?}, unsaved {now}"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_save_asked_during_a_save_saves_the_edit_made_since_once_the_first_lands() {
+        for back in ["Marimba", "Bells"] {
+            let (dir, mut open) = renamed_during_a_save(&[back], true);
+            let id = open.id;
+            let vibes = dir.read("Saved.nsmp");
+            let asked = open.workspace.edits_to_save();
+            assert_eq!(asked, [id], "the save asked of {back:?} goes to the store");
+            let (from, edit) = open.workspace.send_edit(id).unwrap();
+            let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &vibes);
+            std::fs::write(dir.at("Again.nsmp"), out.unwrap()).unwrap();
+            let again = testing::on_disk(&dir, "Again.nsmp", &dir.read("Again.nsmp"));
+            open.workspace.edit_saved(id, again);
+            open.act(Vec::new());
+            open.twice();
+
+            let shown = open.document.instrument_name(id, &open.workspace);
+            assert_eq!(shown, back);
+            assert!(!open.entity().is_unsaved(), "{back:?} is saved");
+        }
     }
 }
