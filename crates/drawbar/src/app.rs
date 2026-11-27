@@ -1812,17 +1812,28 @@ mod tests {
         (ctx, app)
     }
 
-    /// Run frames until `done`.
+    /// How long a test waits on the library's thread: far longer than a stalled CI runner
+    /// has kept one waiting, since only a failure waits it out.
     #[cfg(not(target_arch = "wasm32"))]
-    fn until(ctx: &egui::Context, app: &mut DrawbarApp, done: impl Fn(&DrawbarApp) -> bool) {
-        for _ in 0..500 {
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Run frames until `done`, which `what` names.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn until(
+        ctx: &egui::Context,
+        app: &mut DrawbarApp,
+        what: &str,
+        done: impl Fn(&DrawbarApp) -> bool,
+    ) {
+        let began = std::time::Instant::now();
+        while began.elapsed() < PATIENCE {
             frame(ctx, app);
             if done(app) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("it never happened");
+        panic!("{what}: not after {PATIENCE:?}");
     }
 
     /// The list is let go of only once the library holds it, its keys left as they were,
@@ -1850,7 +1861,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|store| store.has_taken_in(&hash))
         };
-        until(&ctx, &mut app, taken);
+        until(&ctx, &mut app, "the library takes the list in", taken);
         app.let_older_go(&mut storage);
         assert_eq!(crate::store::older::found(&storage), Found::Nothing);
         assert_eq!(
@@ -1873,7 +1884,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| !store.listing() && !store.deciding())
         };
-        until(&ctx, &mut app, idle);
+        until(&ctx, &mut app, "the library is idle", idle);
         app.let_older_go(&mut again);
         assert_eq!(crate::store::older::found(&again), Found::Nothing);
         assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"], "taken in once");
@@ -1907,7 +1918,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| store.has_taken_in(&hash))
         };
-        until(&ctx, &mut app, taken);
+        until(&ctx, &mut app, "the library takes the list in", taken);
         app.let_older_go(&mut storage);
         assert_eq!(
             held(&storage, "drawbar.this_computer"),
@@ -1920,7 +1931,7 @@ mod tests {
             let store = app.store.as_ref();
             store.is_some_and(|store| store.handed_over(&hash, &app.workspace))
         };
-        until(&ctx, &mut app, kept);
+        until(&ctx, &mut app, "the save keeps the edit", kept);
         app.let_older_go(&mut storage);
         assert_eq!(crate::store::older::found(&storage), Found::Nothing);
     }
@@ -1941,7 +1952,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.text.contains("could not bring"))
         };
-        until(&ctx, &mut app, failed);
+        until(&ctx, &mut app, "the take-in is refused", failed);
         app.let_older_go(&mut storage);
         assert_eq!(held(&storage, "drawbar.this_computer"), assets);
         assert_eq!(root.names(""), [".drawbar"]);
@@ -1987,20 +1998,8 @@ mod tests {
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let backend = crate::testing::backend(&ctx, root);
         let mut app = DrawbarApp::with_library(&cc, Some(Store::start(backend)));
-        for _ in 0..500 {
-            frame(&ctx, &mut app);
-            if app
-                .browser
-                .folders
-                .place
-                .as_ref()
-                .is_some_and(|at| !at.opening)
-            {
-                return (ctx, app);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the library did not open");
+        until_open(&ctx, &mut app);
+        (ctx, app)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2078,22 +2077,16 @@ mod tests {
         let (ctx, mut app) = opened_over(&root);
         app.platform = crate::platform::Platform::Web;
         app.browser.tags.make("Live").expect("a new tag");
-        let until = |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&Store) -> bool| {
+        type Done = fn(&Store) -> bool;
+        let press = |app: &mut DrawbarApp, keys: Vec<egui::Event>, what: &str, done: Done| {
             let mut window = eframe::Frame::_new_kittest();
             let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
             crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
-            for _ in 0..500 {
-                if app.store.as_ref().is_some_and(done) {
-                    return true;
-                }
-                frame(&ctx, app);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            false
+            until(&ctx, app, what, |app| app.store.as_ref().is_some_and(done));
         };
         let undoable = |store: &Store| store.undo_label().is_some();
         let redoable = |store: &Store| store.redo_label().is_some();
-        assert!(until(&mut app, Vec::new(), undoable), "the tag is made");
+        press(&mut app, Vec::new(), "the tag is made", undoable);
         let key = |modifiers| egui::Event::Key {
             key: egui::Key::Z,
             physical_key: None,
@@ -2102,14 +2095,10 @@ mod tests {
             modifiers,
         };
         let command = egui::Modifiers::COMMAND;
-        assert!(until(&mut app, vec![key(command)], redoable), "⌘Z undid it");
+        press(&mut app, vec![key(command)], "⌘Z undid it", redoable);
         let shift = command.plus(egui::Modifiers::SHIFT);
-        assert!(
-            until(&mut app, vec![key(shift)], |store| store
-                .redo_label()
-                .is_none()),
-            "⇧⌘Z redid it"
-        );
+        let redone = |store: &Store| store.redo_label().is_none();
+        press(&mut app, vec![key(shift)], "⇧⌘Z redid it", redone);
     }
 
     /// End to end through the app's own frames: New makes a file, and the next run finds
@@ -2144,15 +2133,11 @@ mod tests {
     /// Run frames until the library just asked for has opened.
     #[cfg(not(target_arch = "wasm32"))]
     fn until_open(ctx: &egui::Context, app: &mut DrawbarApp) {
-        for _ in 0..500 {
-            frame(ctx, app);
+        let open = |app: &DrawbarApp| {
             let place = app.browser.folders.place.as_ref();
-            if place.is_some_and(|at| !at.opening) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the library did not open");
+            place.is_some_and(|at| !at.opening)
+        };
+        until(ctx, app, "the library opens", open);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

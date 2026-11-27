@@ -76,7 +76,7 @@ them. drawbar treats a file it cannot decode as a note when its bytes are UTF-8
 text of up to 256 KiB. A file that begins with the magic of a format `nord-format` decodes, or
 whose extension names one, is never a note, so one that fails to decode keeps
 its error. An empty file is a note only when it is a `.txt`. What a user sees is
-under [Notes](../drawbar/editing.md#notes).
+under [Notes](../drawbar/setlists.md#notes).
 
 To build the API documentation locally:
 

@@ -92,6 +92,7 @@ in
       toshokan-spec-deep = callPackage ./crates/toshokan/spec { suite = "toshokan-spec-deep"; };
 
       docs = callPackage ./nix/docs.nix { };
+      mkDownloads = callPackage ./nix/downloads.nix { };
       site = callPackage ./nix/site.nix { web = self.drawbar-web; };
 
       # The corpus package supplies its library-filtered committed tier; `full` adds

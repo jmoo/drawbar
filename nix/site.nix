@@ -1,14 +1,18 @@
-# The GitHub Pages tree: the browser build at the root, the guide under /docs.
+# The GitHub Pages tree: the browser build at the root, the guide under /docs,
+# and the download redirects under /download.
 # Copies, not links: the tree leaves the store as a tarball.
-# `web` is a parameter so the deployed tree can pair a released bundle with this
-# checkout's guide; scripts/site.bash overrides it, and passes the release before it
-# as `previous`.
+# `web` and `nordCliVersion` are parameters so the deployed tree can pair released
+# builds with this checkout's guide; scripts/site.bash overrides them, and passes
+# the release before `web` as `previous`.
 {
   docs,
   lib,
+  mkDownloads,
+  nordCliVersion ? workspace.manifests.nord-cli.version,
   previous ? null,
   runCommand,
   web,
+  workspace,
 }:
 runCommand "drawbar-site-${web.version}"
   {
@@ -18,6 +22,12 @@ runCommand "drawbar-site-${web.version}"
     mkdir -p "$out/docs"
     cp -rL ${web}/. "$out/"
     cp -rL ${docs}/. "$out/docs/"
+    cp -rL ${
+      mkDownloads {
+        drawbar = web.version;
+        nord-cli = nordCliVersion;
+      }
+    }/. "$out/"
 
     # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
     touch "$out/.nojekyll"
