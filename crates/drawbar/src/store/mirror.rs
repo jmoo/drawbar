@@ -233,6 +233,10 @@ pub struct Store {
     /// A change of this session's own failed partway and waits for the next change to
     /// finish it. An undo or a redo would reverse that change, not the step it names.
     waits: bool,
+    /// The assets whose files such a change, an undo or redo of a save, names. Each is
+    /// kept as a draft while it waits, whatever it reads, since the change may never
+    /// finish.
+    unsettled: BTreeSet<u64>,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
@@ -392,6 +396,7 @@ impl Store {
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
             waits: false,
+            unsettled: BTreeSet::new(),
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
@@ -972,10 +977,12 @@ impl Store {
         })
     }
 
-    /// Whether an asset holds an edit its file does not: one unsaved, or one saved where
-    /// nothing may be written, which only memory holds.
+    /// Whether an asset holds an edit its file may not: one unsaved, one saved where
+    /// nothing may be written, which only memory holds, or one whose file a change that
+    /// waits to finish names.
     fn unsaved(&self, entity: &LocalEntity, workspace: &Workspace) -> bool {
-        entity.is_unsaved() || (!self.open() && workspace.unfiled(entity.id))
+        let unfiled = !self.open() && workspace.unfiled(entity.id);
+        entity.is_unsaved() || unfiled || self.unsettled.contains(&entity.id)
     }
 
     /// Where the library is, as the user would look for it.
@@ -1636,10 +1643,15 @@ impl Store {
                     }
                     _ => {}
                 }
-                // A step that stopped partway is finished by the next write or open.
+                if waiting != Waiting::Earlier {
+                    self.unsettled.clear();
+                }
+                // A step that stopped partway is taken to finish at the next write or open.
                 match (&asked, landed, waiting) {
-                    (Some(asked), true, _) | (Some(asked), false, Waiting::This) => {
+                    (Some(asked), true, _) => self.refiled(asked.leaves(), workspace),
+                    (Some(asked), false, Waiting::This) => {
                         self.refiled(asked.leaves(), workspace);
+                        self.unsettled = asked.leaves().into_iter().map(|(id, _)| id).collect();
                     }
                     _ => {}
                 }
@@ -1719,6 +1731,7 @@ impl Store {
                     .flat_map(timeline::Asked::leaves)
                     .map(|(id, _)| id)
                     .collect();
+                self.unsettled.clear();
                 for id in left {
                     self.unheard(id, workspace);
                 }

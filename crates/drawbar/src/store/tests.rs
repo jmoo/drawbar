@@ -10420,31 +10420,99 @@ fn a_quit_while_an_undo_of_a_save_waits_to_finish_keeps_the_edit_and_asks_nothin
     assert_eq!(again.bench.browser.asking(), None);
 }
 
+impl Session {
+    /// A program saved once, its save undone, and its redo stopped partway where `stop`
+    /// refuses a request: its id, and the file's bytes before and after the save.
+    fn redo_stopped(
+        &mut self,
+        root: &Temp,
+        stop: fn(&toshokan::Io) -> bool,
+    ) -> (u64, Vec<u8>, Vec<u8>) {
+        let (id, made, edited) = self.saved_once("96");
+        self.undo();
+        assert_eq!(root.read("untitled.ne5p"), made, "the save is undone");
+        self.store.fault(Fault::Refuse(stop));
+        self.redo();
+        (id, made, edited)
+    }
+}
+
+/// Whether `io` is the first move of a change over `untitled.ne5p`: the file, out to the
+/// trash.
+fn moves_out(io: &toshokan::Io) -> bool {
+    match io {
+        toshokan::Io::Rename { from, .. } => from.as_str() == "untitled.ne5p",
+        toshokan::Io::Create { path, .. } => path.as_str().contains("/trash/"),
+        _ => false,
+    }
+}
+
+/// Remove the records of the changes each writer of the library at `root` left
+/// waiting, which leaves what a record that never landed leaves.
+fn drop_pending(root: &Temp) {
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    for writer in writers {
+        let pending = writer.unwrap().path().join("pending");
+        if pending.exists() {
+            fs::remove_dir_all(pending).unwrap();
+        }
+    }
+}
+
+/// up a change that waits to put back what it holds.
+fn drop_trash(root: &Temp) {
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    for writer in writers {
+        fs::remove_dir_all(writer.unwrap().path().join("trash")).unwrap();
+    }
+}
+
 #[test]
 fn an_undo_of_a_save_that_stopped_partway_and_never_landed_leaves_the_document_saved() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let (id, _, edited) = session.saved_once("96");
-    session.store.fault(Fault::Refuse(|io| match io {
-        toshokan::Io::Rename { from, .. } => from.as_str() == "untitled.ne5p",
-        toshokan::Io::Create { path, .. } => path.as_str().contains("/trash/"),
-        _ => false,
-    }));
+    session.store.fault(Fault::Refuse(moves_out));
     session.undo();
     assert!(session.unsaved(id), "the undo stopped partway");
-    // With its record gone, the change is one whose record never landed.
-    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
-    for writer in writers {
-        let pending = writer.unwrap().path().join("pending");
-        fs::remove_dir_all(pending).unwrap();
-    }
+    drop_pending(&root);
     session.make_tag("Sunday");
+    session.settle();
 
     assert_eq!(root.read("untitled.ne5p"), edited, "nothing was undone");
     assert!(!session.unsaved(id));
     session.bench.workspace.mark_saved(id);
     session.sync();
     assert_eq!(session.said("was not saved"), 0);
+}
+
+#[test]
+fn a_quit_while_a_redo_of_a_save_waits_to_finish_finishes_it_at_the_next_open() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, _, edited) = session.redo_stopped(&root, |io| puts(io, "untitled.ne5p"));
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), edited, "the redo is finished");
+    assert_eq!(again.bytes(again.only()), edited);
+    assert_eq!(again.bench.browser.asking(), None);
+}
+
+#[test]
+fn a_quit_while_a_redo_of_a_save_that_never_lands_waits_keeps_the_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, made, edited) = session.redo_stopped(&root, moves_out);
+    session.close();
+    drop_pending(&root);
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the redo never landed");
+    let id = again.only();
+    assert_eq!(again.bytes(id), edited, "the edit is kept");
+    assert!(again.unsaved(id));
+    assert!(again.bench.browser.asking().is_some(), "the user is asked");
 }
 
 /// Another program puts a file where the undo of a save was putting one back. The library
