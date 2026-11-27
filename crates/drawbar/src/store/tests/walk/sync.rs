@@ -12,10 +12,8 @@ use toshokan::simulator::{self, Files, SyncEvent, Versions};
 use toshokan::RelPath;
 
 use super::{name, Times};
-use crate::testing::Temp;
-
-/// Where each writer of the library keeps its log, in the folder.
-const WRITERS: &str = ".drawbar/library/writers.2/";
+use crate::store::keys;
+use crate::testing::{date, patiently, Temp};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Entry {
@@ -33,15 +31,10 @@ pub(super) struct Item {
 /// Everything in a folder, by `/`-separated path.
 pub(super) type Tree = BTreeMap<String, Item>;
 
+/// Everything in the folder at `root`, which nothing may change while it is read.
 pub(super) fn tree(root: &Path) -> Tree {
-    // ⚠️ A change the user went on from may still be moving files: what goes while the
-    // walk reads is left out.
     fn walk(dir: &Path, at: &str, into: &mut Tree) {
-        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
-        let entries = match fs::read_dir(dir) {
-            Err(e) if gone(&e) => return,
-            listed => listed.unwrap_or_else(|e| panic!("{at}: {e}")),
-        };
+        let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{at}: {e}"));
         for entry in entries {
             let entry = entry.unwrap();
             let name = entry.file_name().into_string().unwrap();
@@ -64,13 +57,8 @@ pub(super) fn tree(root: &Path) -> Tree {
                     },
                 })
             };
-            match read(&entry) {
-                Ok(item) => {
-                    into.insert(path, item);
-                }
-                Err(e) if gone(&e) => {}
-                Err(e) => panic!("{path}: {e}"),
-            }
+            let item = read(&entry).unwrap_or_else(|e| panic!("{path}: {e}"));
+            into.insert(path, item);
         }
     }
     let mut found = Tree::new();
@@ -263,7 +251,11 @@ impl Sync {
         item: Option<Item>,
         notes: &mut Vec<String>,
     ) -> Result<(), String> {
-        if let Some(writer) = path.strip_prefix(WRITERS).and_then(|r| r.split('/').next()) {
+        let writers = format!("{}/", keys::layout().writers());
+        if let Some(writer) = path
+            .strip_prefix(&writers)
+            .and_then(|r| r.split('/').next())
+        {
             let writes = *self.writers.entry(writer.to_string()).or_insert(copy);
             if writes != copy {
                 return Err(format!(
@@ -491,7 +483,7 @@ impl Sync {
                 }
                 match held.get(path) {
                     Some(bytes) => {
-                        let time = self.times.stamp(&root.join(path.as_str()), None);
+                        let time = self.times.stamp(&root.join(path.as_str()), None, None);
                         put(&root, path.as_str(), bytes, time)
                     }
                     None => remove(&root, path.as_str()),
@@ -565,10 +557,8 @@ fn put(root: &Path, path: &str, bytes: &[u8], modified: SystemTime) -> Result<()
     remove(root, path)?;
     let staged: PathBuf = parent.join(format!(".syncthing.{}.tmp", leaf(path)));
     fs::write(&staged, bytes).map_err(|e| e.to_string())?;
-    let file = fs::File::options().write(true).open(&staged);
-    file.and_then(|file| file.set_modified(modified))
-        .map_err(|e| e.to_string())?;
-    fs::rename(&staged, &target).map_err(|e| e.to_string())
+    date(&staged, modified).map_err(|e| e.to_string())?;
+    patiently(|| fs::rename(&staged, &target)).map_err(|e| e.to_string())
 }
 
 /// Remove the file or the empty folder at `path`, if anything is there.

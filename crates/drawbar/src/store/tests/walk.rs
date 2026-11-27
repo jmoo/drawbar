@@ -105,13 +105,19 @@ const CONTESTED: [&str; 5] = [
 /// says sync does not settle.
 const ROUNDS: usize = 4;
 
+/// How many times a drawbar sends what waits before the walk says a change still waits.
+const SYNCS: usize = 4;
+
+/// How long a library's thread may take to run what it was sent.
+const PATIENCE: Duration = Duration::from_secs(60);
+
 #[test]
-fn two_drawbars_on_one_folder_show_what_is_on_disk_after_every_step_of_a_seeded_walk() {
+fn two_drawbars_on_one_folder_keep_edits_and_offer_each_undo_by_name_through_a_seeded_walk() {
     walks(&[World::Shared], &[2], &[1, 2, 3, 4]);
 }
 
 #[test]
-fn drawbars_on_synced_copies_show_their_own_copy_and_agree_once_sync_settles() {
+fn drawbars_on_synced_copies_keep_edits_and_offer_each_undo_by_name_while_sync_settles() {
     walks(&SYNCED, &[2, 3], &[1]);
 }
 
@@ -157,16 +163,21 @@ impl World {
 
 /// Walk each of `worlds` with each of `counts` drawbars, from each seed of
 /// `DRAWBAR_WALK_SEEDS`, a range such as `1..=500`, or of `seeds` where it is unset; say
-/// every walk that failed, and return the first failure of each [`UNHELD`] check.
+/// every walk that failed, and return the first failure of each [`UNHELD`] check, which
+/// it prints.
 fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> Unheld {
     let seeds = match std::env::var("DRAWBAR_WALK_SEEDS") {
         Ok(range) => seed_range(&range).collect(),
-        Err(_) => seeds.to_vec(),
+        Err(std::env::VarError::NotPresent) => seeds.to_vec(),
+        Err(std::env::VarError::NotUnicode(range)) => panic!("{SEEDS}, not {range:?}"),
     };
+    let test = std::thread::current();
+    let test = test.name().expect("a test names its thread");
     let mut failed = Vec::new();
     let mut unheld = Unheld::new();
     let mut walked = 0;
     for seed in seeds {
+        let again = format!("\nto walk it again: DRAWBAR_WALK_SEEDS={seed}..={seed} cargo test -p drawbar --lib {test}");
         for world in worlds {
             for count in counts {
                 walked += 1;
@@ -174,36 +185,44 @@ fn walks(worlds: &[World], counts: &[usize], seeds: &[u64]) -> Unheld {
                 match panic::catch_unwind(AssertUnwindSafe(walk)) {
                     Ok(found) => {
                         for (check, said) in found {
-                            unheld.entry(check).or_insert(said);
+                            unheld.entry(check).or_insert(said + &again);
                         }
                     }
                     Err(panic) => {
                         let said = panicked(panic);
                         let walk = format!("{world:?} with {count} drawbars, seed {seed}");
                         match said.starts_with(&walk) {
-                            true => failed.push(said),
-                            false => failed.push(format!("{walk}: {said}")),
+                            true => failed.push(said + &again),
+                            false => failed.push(format!("{walk}: {said}{again}")),
                         }
                     }
                 }
             }
         }
     }
+    assert!(walked > 0, "no walk was walked");
     assert!(
         failed.is_empty(),
         "{} of {walked} walks failed:\n\n{}",
         failed.len(),
         failed.join("\n\n")
     );
+    for (check, said) in &unheld {
+        println!("{check:?}, which UNHELD lists, fails first in {said}\n");
+    }
     unheld
 }
+
+/// What `DRAWBAR_WALK_SEEDS` must be.
+const SEEDS: &str = "DRAWBAR_WALK_SEEDS is a range of at least one seed, such as 1..=500";
 
 fn seed_range(range: &str) -> RangeInclusive<u64> {
     let seed = |text: &str| text.trim().parse::<u64>().ok();
     let parsed = range
         .split_once("..=")
         .and_then(|(from, to)| Some(seed(from)?..=seed(to)?));
-    parsed.unwrap_or_else(|| panic!("DRAWBAR_WALK_SEEDS is a range such as 1..=500, not {range:?}"))
+    let walked = parsed.filter(|seeds| !seeds.is_empty());
+    walked.unwrap_or_else(|| panic!("{SEEDS}, not {range:?}"))
 }
 
 fn panicked(panic: Box<dyn std::any::Any + Send>) -> String {
@@ -259,7 +278,8 @@ const COARSE: u64 = 2_000_000_000;
 
 /// The walk's time, which every drawbar's clock reads and which dates every file written,
 /// and the seeds of the ids each drawbar draws: all from the walk's seed, with dice of
-/// their own so that they leave the walk's choices as they were.
+/// their own so that they leave the walk's choices as they were. Each library's thread
+/// rolls dice of its own for the times of the files it writes.
 #[derive(Clone)]
 struct Times(Arc<Mutex<Ticks>>);
 
@@ -296,9 +316,16 @@ impl Times {
 
     /// The time of the file just written at `at`, or, where it was staged with the time
     /// `staged` and put in place there, that time or now and then the time the file put
-    /// there just before it was given.
-    fn stamp(&self, at: &std::path::Path, staged: Option<SystemTime>) -> SystemTime {
+    /// there just before it was given: as `own` rolls, or the walk's time's own dice.
+    fn stamp(
+        &self,
+        at: &std::path::Path,
+        staged: Option<SystemTime>,
+        own: Option<&mut Dice>,
+    ) -> SystemTime {
         let mut ticks = self.ticks();
+        let ticks = &mut *ticks;
+        let dice = own.unwrap_or(&mut ticks.dice);
         let now = ticks.ms * 1_000_000;
         let recent = |time: &SystemTime| {
             let ns = time
@@ -307,10 +334,10 @@ impl Times {
             ns.is_ok_and(|ns| ns + u128::from(COARSE) >= u128::from(now))
         };
         let before = ticks.given.get(at).copied().filter(recent);
-        let tied = before.filter(|_| staged.is_some() && ticks.dice.one_in(TIES));
+        let tied = before.filter(|_| staged.is_some() && dice.one_in(TIES));
         let time = tied.or(staged).unwrap_or_else(|| {
             let after = ticks.ns.max(ticks.ms * 1_000_000);
-            ticks.ns = after + 1_000 * (1 + ticks.dice.below(1_000) as u64);
+            ticks.ns = after + 1_000 * (1 + dice.below(1_000) as u64);
             SystemTime::UNIX_EPOCH + Duration::from_nanos(ticks.ns)
         });
         ticks.given.insert(at.to_path_buf(), time);
@@ -319,19 +346,24 @@ impl Times {
 
     /// Give the file at `path` the time of a file written now.
     fn date(&self, path: &std::path::Path) {
-        let file = fs::File::options().write(true).open(path);
-        file.and_then(|file| file.set_modified(self.stamp(path, None)))
+        crate::testing::date(path, self.stamp(path, None, None))
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
 
-    /// What a drawbar opened next takes from outside: this time, and ids of its own.
+    /// What a drawbar opened next takes from outside: this time, and ids and file times of
+    /// its own.
     fn ambient(&self) -> Ambient {
-        let random = SeededRandom::new(self.ticks().dice.roll());
+        let (random, mut own) = {
+            let dice = &mut self.ticks().dice;
+            (SeededRandom::new(dice.roll()), Dice(dice.roll()))
+        };
         let stamping = self.clone();
         Ambient {
             clock: Box::new(self.clone()),
             random: Box::new(random),
-            stamp: Some(Box::new(move |at, staged| stamping.stamp(at, staged))),
+            stamp: Some(Box::new(move |at, staged| {
+                stamping.stamp(at, staged, Some(&mut own))
+            })),
         }
     }
 }
@@ -447,8 +479,6 @@ const UNHELD: &[Check] = &[
     Check::NoUnexplainedWarning,
     // An undo is let go as changed by another drawbar where the walk sees no such change.
     Check::UndoLetGoForAnother,
-    // No Undo is offered right after a change.
-    Check::OffersUndoAndRedo,
     // Undo of New leaves the file in the folder.
     Check::UndoRestoresTheFolder,
     // Undo leaves the view other than before the change.
@@ -457,6 +487,8 @@ const UNHELD: &[Check] = &[
     Check::KeptUndoGoes,
     // Synced drawbars show a lost row at different paths once sync settles.
     Check::Converges,
+    // A save writes over a file sync replaced with one of the same length and time.
+    Check::NoSaveOverUnshownBytes,
 ];
 
 /// What a walk found of [`UNHELD`] checks: the first failure of each.
@@ -481,8 +513,9 @@ struct Done {
     /// The user went on without waiting for the library's answers.
     hurried: bool,
     shows: Vec<Shows>,
-    /// The asset whose bytes it edited, with the gain it set.
-    edited: Option<(u64, usize)>,
+    /// The asset whose bytes it edited, with the edit it left, or none where it edited
+    /// the asset back to what it was saved as.
+    edited: Option<(u64, Option<Edit>)>,
     /// The asset whose file it made or saved.
     wrote: Option<u64>,
     /// What the Edit menu calls each change it made, where the walk knows.
@@ -545,7 +578,7 @@ fn logged(root: &Temp) -> BTreeSet<toshokan::EntryHash> {
 
 /// Every entry of every writer's log in `root`'s copy.
 fn logged_entries(root: &Temp) -> Vec<toshokan::log::Entry> {
-    let writers = fs::read_dir(root.at(".drawbar/library/writers.2"));
+    let writers = fs::read_dir(root.at(crate::store::keys::layout().writers().as_str()));
     let dirs = writers.into_iter().flatten().flatten();
     let files = dirs.flat_map(|dir| fs::read_dir(dir.path()).into_iter().flatten().flatten());
     let logs = files.filter(|file| file.path().extension().is_some_and(|ext| ext == "txt"));
@@ -933,7 +966,7 @@ struct Kept {
     why: String,
 }
 
-/// An edit the walk made and has not saved: its gain and the bytes it left.
+/// An edit the walk made, until its asset is saved as it: its gain and the bytes it left.
 struct Edit {
     gain: usize,
     bytes: Vec<u8>,
@@ -1037,7 +1070,12 @@ struct Walk {
     /// Whether a chaos event or a conflict touched each drawbar's copy since it last came
     /// back.
     odd: Vec<bool>,
-    steps: Vec<String>,
+    /// What happened at each step, by the step's number.
+    steps: Vec<(usize, String)>,
+    /// The number of the step under way.
+    step: usize,
+    /// The drawbar whose action the step under way is.
+    acting: Option<usize>,
     named: usize,
     /// What the Edit menu calls the change made at each clock, where the walk knows.
     menu: BTreeMap<usize, String>,
@@ -1113,6 +1151,8 @@ impl Walk {
             contested: Contested::default(),
             at: vec![BTreeMap::new(); count],
             steps: Vec::new(),
+            step: 0,
+            acting: None,
             named: 0,
             menu: BTreeMap::new(),
             unheld: Default::default(),
@@ -1123,6 +1163,8 @@ impl Walk {
         for _ in 0..self.world.steps() {
             self.step();
         }
+        self.step += 1;
+        self.acting = None;
         match self.folders {
             Folders::Shared(_) => {
                 for who in 0..self.drawbars.len() {
@@ -1144,19 +1186,23 @@ impl Walk {
     /// Fail the walk where `check` broke, or, where it is [`UNHELD`], note its first
     /// failure and go on.
     fn fail(&self, check: Check, what: &str, details: String) {
+        let acting = match self.acting {
+            Some(who) => format!("{}'s action", name(who)),
+            None => "no drawbar's action".to_string(),
+        };
         let failure = format!(
-            "{:?} with {} drawbars, seed {}, step {}: {check:?}: {what}\n  {details}",
+            "{:?} with {} drawbars, seed {}, step {}, {acting}: {check:?}: {what}\n  {details}",
             self.world,
             self.drawbars.len(),
             self.seed,
-            self.steps.len(),
+            self.step,
         );
         if UNHELD.contains(&check) {
             self.unheld.borrow_mut().entry(check).or_insert(failure);
             return;
         }
-        let steps: Vec<String> = (self.steps.iter().enumerate())
-            .map(|(n, step)| format!("  {}. {step}", n + 1))
+        let steps: Vec<String> = (self.steps.iter())
+            .map(|(n, step)| format!("  {n}. {step}"))
             .collect();
         let logs: Vec<String> = (self.drawbars.iter().enumerate())
             .map(|(who, session)| {
@@ -1166,15 +1212,29 @@ impl Walk {
                 format!("  {} last logged:\n{}", name(who), last.join("\n"))
             })
             .collect();
-        panic!(
+        let failure = format!(
             "{failure}\nlogs:\n{}\nsteps:\n{}",
             logs.join("\n"),
             steps.join("\n")
         );
+        panic::resume_unwind(Box::new(failure));
+    }
+
+    /// The folder drawbar `who` opened, once every library's thread has run what it was
+    /// sent, so that nothing changes it while the walk reads it.
+    fn root(&self, who: usize) -> &Temp {
+        self.quiet();
+        self.folders.root(who)
+    }
+
+    /// Wait until every library's thread has run what it was sent.
+    fn quiet(&self) {
+        let fresh = self.fresh.values().map(|opened| &opened.session);
+        self.drawbars.iter().chain(fresh).for_each(Session::quiet);
     }
 
     fn said(&mut self, step: String) {
-        self.steps.push(step);
+        self.steps.push((self.step, step));
     }
 
     fn fresh_name(&mut self, stem: &str) -> String {
@@ -1187,17 +1247,21 @@ impl Walk {
     }
 
     fn step(&mut self) {
+        self.quiet();
+        self.step += 1;
+        self.acting = None;
         self.times.pass();
         let syncs = matches!(self.folders, Folders::Synced { .. });
         if syncs && self.dice.one_in(2) && self.sync_step() {
             return;
         }
         let who = self.dice.below(self.drawbars.len());
+        self.acting = Some(who);
         if !self.current[who] {
             let refocus = self.dice.one_in(2);
             self.come_back(who, refocus);
         }
-        let root = self.folders.root(who);
+        let root = self.root(who);
         let before = (disk(root), seen(&self.drawbars[who]));
         let (shown_before, logged) = (shown(&self.drawbars[who]), logged(root));
         let held = holdings(&self.drawbars[who]);
@@ -1243,8 +1307,11 @@ impl Walk {
                 self.current[who] = self.looked(who);
             }
         }
-        if let Some((id, gain)) = edited {
-            self.track_edit(who, id, gain);
+        if let Some((id, edit)) = edited {
+            match edit {
+                Some(edit) => self.unsaved[who].insert(id, edit),
+                None => self.unsaved[who].remove(&id),
+            };
         }
         if made == Made::One && hurried {
             self.hurried[who].push((self.clock, log));
@@ -1283,8 +1350,7 @@ impl Walk {
         self.trashes(who, &before.0);
         match shared {
             true => {
-                let [touched, rewritten, removed] =
-                    compare(&before.0, &disk(self.folders.root(who)));
+                let [touched, rewritten, removed] = compare(&before.0, &disk(self.root(who)));
                 for other in self.others(who).collect::<Vec<_>>() {
                     self.theirs[other].extend(touched.iter().cloned());
                     self.rewritten[other].extend(rewritten.iter().cloned());
@@ -1299,6 +1365,7 @@ impl Walk {
     /// chaos event where the walk has chaos, or now and then every delivery at once.
     /// Whether there was anything to do.
     fn sync_step(&mut self) -> bool {
+        self.quiet();
         let Folders::Synced { sync, chaos } = &self.folders else {
             return false;
         };
@@ -1432,7 +1499,7 @@ impl Walk {
     /// Note each file drawbar `who` deleted from its own folder, which held `before`: a
     /// path gone whose bytes fewer files hold now, as a move leaves them somewhere.
     fn trashes(&mut self, who: usize, before: &Disk) {
-        let after = disk(self.folders.root(who));
+        let after = disk(self.root(who));
         let count = |disk: &Disk, bytes: &Vec<u8>| {
             let files = disk
                 .values()
@@ -1454,7 +1521,7 @@ impl Walk {
     /// Note the files whose bytes sync changed in drawbar `copy`'s copy, which held
     /// `before`, and those it took away.
     fn brought(&mut self, copy: usize, before: &Tree) {
-        let now = tree(&self.folders.root(copy).0);
+        let now = tree(&self.root(copy).0);
         let [_, rewritten, removed] = compare(&library(before), &library(&now));
         self.rewritten[copy].extend(rewritten);
         self.removed[copy].extend(removed);
@@ -1518,7 +1585,7 @@ impl Walk {
         shown: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
         said: usize,
     ) {
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         for (path, bytes, before) in shown {
             let Some(Entry::File(held)) = on_disk.get(&path) else {
                 continue;
@@ -1640,6 +1707,7 @@ impl Walk {
 
     /// Take in what each drawbar wrote to its copy, as sync's next scan does.
     fn record(&mut self) {
+        self.quiet();
         let Folders::Synced { sync, .. } = &mut self.folders else {
             return;
         };
@@ -1647,7 +1715,10 @@ impl Walk {
         let recorded: Result<Vec<Vec<String>>, String> =
             (0..copies).map(|copy| sync.record(copy)).collect();
         match recorded {
-            Ok(notes) => self.steps.extend(notes.into_iter().flatten()),
+            Ok(notes) => {
+                let step = self.step;
+                (self.steps).extend(notes.into_iter().flatten().map(|note| (step, note)));
+            }
             Err(broken) => self.fail(
                 Check::OnlyItsWriterChangesALog,
                 "a copy changed another's log",
@@ -1677,6 +1748,7 @@ impl Walk {
                 self.fail(Check::SyncSettles, "sync does not settle", details);
                 break;
             }
+            self.quiet();
             let Folders::Synced { sync, .. } = &mut self.folders else {
                 return;
             };
@@ -1724,7 +1796,7 @@ impl Walk {
             self.nothing_missing(who);
         }
         let first = &self.drawbars[0];
-        let on_disk = disk(self.folders.root(0));
+        let on_disk = disk(self.root(0));
         for who in 1..self.drawbars.len() {
             let session = &self.drawbars[who];
             let what = format!("A and {} show different libraries", name(who));
@@ -1738,7 +1810,7 @@ impl Walk {
                 let d = format!("(A's view first)\n  {}", differ.join("\n  "));
                 self.fail(Check::Converges, &what, d);
             }
-            if let Some(d) = apart(&on_disk, &disk(self.folders.root(who))) {
+            if let Some(d) = apart(&on_disk, &disk(self.root(who))) {
                 let what = format!("A's and {}'s copies differ", name(who));
                 self.fail(Check::Converges, &what, format!("(A's first)\n  {d}"));
             }
@@ -1748,7 +1820,7 @@ impl Walk {
     /// The drawbar `who` comes back to its window, or asks for a refresh, and shows the
     /// library as a fresh open does once that answers.
     fn come_back(&mut self, who: usize, refocus: bool) {
-        let held = disk(self.folders.root(who));
+        let held = disk(self.root(who));
         let late = self.late_shown(who);
         let bases = self.bases(who);
         let log = self.drawbars[who].bench.log.len();
@@ -1758,7 +1830,7 @@ impl Walk {
             false => session.refresh(),
         }
         self.looking(who, refocus);
-        self.read_facts[who] = logged_facts(self.folders.root(who));
+        self.read_facts[who] = logged_facts(self.root(who));
         let how = ["refreshes", "comes back to its window"][usize::from(refocus)];
         self.said(format!("{} {how}", name(who)));
         self.vet(who);
@@ -1876,7 +1948,7 @@ impl Walk {
         let (Some(from), to) = (names.first(), names.get(1)) else {
             return false;
         };
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let file = |path: &str| matches!(on_disk.get(path), Some(Entry::File(_)));
         let there = match to {
             Some(to) => file(to) || file(&format!("{to}/{from}")),
@@ -1896,7 +1968,7 @@ impl Walk {
         let Some(count) = text.split(' ').next().and_then(|n| n.parse::<usize>().ok()) else {
             return false;
         };
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let lost = seen(&self.drawbars[who]).lost;
         let paths: BTreeSet<&String> = self.tagged[who].iter().chain(&lost).collect();
         let gone = paths
@@ -1909,7 +1981,7 @@ impl Walk {
     /// what a chaos event wrote elsewhere too: binding, which knows a file by its contents,
     /// may take either for the other.
     fn holds_what_chaos_wrote(&self, who: usize, sync: &Sync, name: &str) -> bool {
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let mut named = on_disk
             .iter()
             .filter(|(path, _)| *path == name || leaf(path) == name);
@@ -1957,7 +2029,7 @@ impl Walk {
             && (self.wrote.values())
                 .any(|other| other.entity == wrote.entity && other.path != wrote.path);
         (0..self.drawbars.len()).any(|who| {
-            let on_disk = disk(self.folders.root(who));
+            let on_disk = disk(self.root(who));
             let holds = |path: &str| {
                 many && matches!(on_disk.get(path), Some(Entry::File(b)) if *b == wrote.bytes)
             };
@@ -1995,7 +2067,7 @@ impl Walk {
     /// here, the entity was found in this file by its contents, which cannot tell its
     /// file from another saved with the same bytes.
     fn found_in_like_bytes(&self, who: usize, name: &str) -> bool {
-        let file = |who: usize, path: &str| match disk(self.folders.root(who)).remove(path) {
+        let file = |who: usize, path: &str| match disk(self.root(who)).remove(path) {
             Some(Entry::File(bytes)) => Some(bytes),
             _ => None,
         };
@@ -2031,7 +2103,7 @@ impl Walk {
         let Some(made_at) = chosen.or(self.kept[who].as_ref().map(|kept| kept.made_at)) else {
             return false;
         };
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         if why == NO_FILE {
             let Folders::Synced { sync, .. } = &self.folders else {
                 return false;
@@ -2100,11 +2172,11 @@ impl Walk {
         let Some(path) = LibPath::parse(&at) else {
             return;
         };
-        let Ok(meta) = fs::symlink_metadata(self.folders.root(who).at(&at)) else {
+        let Ok(meta) = fs::symlink_metadata(self.root(who).at(&at)) else {
             return;
         };
         let stem = self.fresh_name("Aside");
-        let root = self.folders.root(who);
+        let root = self.root(who);
         let leaf = match (meta.is_dir(), path.leaf().rsplit_once('.')) {
             (false, Some((_, extension))) => format!("{stem}.{extension}"),
             _ => stem,
@@ -2145,16 +2217,13 @@ impl Walk {
         let Some(label) = label else {
             return;
         };
+        self.said(format!("{} chooses {label} again", name(who)));
         self.names_the_step(&label, redo, made_at);
         let session = &mut self.drawbars[who];
         let held = holdings(session);
         let log = session.bench.log.len();
-        match redo {
-            false => session.undo(),
-            true => session.redo(),
-        }
+        session.take_back(redo);
         session.sync_all();
-        self.said(format!("{} chooses {label} again", name(who)));
         self.expose(who, made_at);
         self.changed(who, &held);
         self.chosen[who] = Some(Chosen { redo, made_at, log });
@@ -2245,7 +2314,7 @@ impl Walk {
         let known: BTreeSet<String> = names.iter().flat_map(|n| self.known_as(who, n)).collect();
         let named = (session.bench.workspace.listed()).filter(|e| known.contains(&e.name));
         let paths: Vec<String> = named.filter_map(|e| session.path(e.id)).collect();
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let theirs = |path: &String| match on_disk.get(path) {
             Some(Entry::File(bytes)) => self.retagged_bytes[who].contains(bytes),
             _ => false,
@@ -2317,7 +2386,7 @@ impl Walk {
             .iter()
             .filter_map(|(path, ..)| Some(leaf(path.as_deref()?).to_string()));
         let retagged: BTreeSet<String> = paths.collect();
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let files = held
             .iter()
             .filter_map(|(path, ..)| on_disk.get(path.as_deref()?));
@@ -2341,7 +2410,7 @@ impl Walk {
         shown_before: &Shown,
         logged: &BTreeSet<toshokan::EntryHash>,
     ) {
-        let after = (disk(self.folders.root(who)), seen(&self.drawbars[who]));
+        let after = (disk(self.root(who)), seen(&self.drawbars[who]));
         let name = name(who);
         for (redo, (disk_was, seen_was)) in [(false, before), (true, after)] {
             let (offered, when) = [("Undo", "before"), ("Redo", "after")][usize::from(redo)];
@@ -2355,30 +2424,39 @@ impl Walk {
                 self.fail(Check::OffersUndoAndRedo, &what, "after the change".into());
                 return;
             };
+            self.said(format!("{name} chooses {label} at once"));
             if let Some(made_at) = self.history[who].done.last().copied() {
                 self.names_the_step(&label, redo, made_at);
             }
             let session = &mut self.drawbars[who];
             let held = holdings(session);
             let log = session.bench.log.len();
-            match redo {
-                false => session.undo(),
-                true => session.redo(),
-            }
+            session.take_back(redo);
             session.sync_all();
             if let Some(made_at) = self.history[who].done.last().copied() {
                 self.expose(who, made_at);
             }
-            self.said(format!("{name} chooses {label} at once"));
             self.changed(who, &held);
             self.check();
-            let since = self.drawbars[who].bench.log.iter().skip(log);
-            if since.into_iter().any(|entry| let_go(&entry.text)) {
+            let since: Vec<&str> = (self.drawbars[who].bench.log.iter().skip(log))
+                .map(|entry| entry.text.as_str())
+                .collect();
+            if since.iter().any(|text| let_go(text)) {
                 self.history[who].done.pop();
                 return;
             }
+            if let Some(why) = since.iter().find_map(|text| kept_for(text)) {
+                let why = why.to_string();
+                let History { done, undone } = &mut self.history[who];
+                let made_at = match redo {
+                    false => done.last().copied(),
+                    true => done.pop().inspect(|step| undone.push(*step)),
+                };
+                self.kept[who] = made_at.map(|made_at| Kept { redo, made_at, why });
+                return;
+            }
             let what = format!("{label} leaves the folder other than it was {when}");
-            if let Some(d) = apart(&disk(self.folders.root(who)), &disk_was) {
+            if let Some(d) = apart(&disk(self.root(who)), &disk_was) {
                 self.fail(
                     Check::UndoRestoresTheFolder,
                     &what,
@@ -2421,7 +2499,7 @@ impl Walk {
     fn tagged_apart(&self, who: usize, before: &Seen) -> BTreeSet<String> {
         type Latest = ((toshokan::Hlc, toshokan::EntryHash), toshokan::Identity);
         let mut latest: BTreeMap<(toshokan::EntityId, String), Latest> = BTreeMap::new();
-        for entry in logged_entries(self.folders.root(who)) {
+        for entry in logged_entries(self.root(who)) {
             let ops = match entry.kind() {
                 EntryKind::Intent(logged) => logged.ops.clone(),
                 EntryKind::Bind(bound) => bound.ops.clone(),
@@ -2480,7 +2558,7 @@ impl Walk {
         logged: &BTreeSet<toshokan::EntryHash>,
         before: &Shown,
     ) -> BTreeSet<String> {
-        let all = self::logged_entries(self.folders.root(who));
+        let all = self::logged_entries(self.root(who));
         let ops = |kind: &EntryKind| match kind {
             EntryKind::Intent(logged) => logged.ops.clone(),
             EntryKind::Bind(bound) => bound.ops.clone(),
@@ -2542,6 +2620,7 @@ impl Walk {
     /// outside drawbar; Undo is not stuck; every unsaved edit is kept; and, on one shared
     /// folder, no file is missing. While sync lags, a file in transit may show missing.
     fn check(&mut self) {
+        self.quiet();
         let lags = matches!(self.folders, Folders::Synced { .. });
         for who in 0..self.drawbars.len() {
             self.vet(who);
@@ -2553,6 +2632,11 @@ impl Walk {
         let current: Vec<usize> = (0..self.drawbars.len())
             .filter(|who| self.current[*who])
             .collect();
+        for who in &current {
+            if let Some(what) = self.drawbars[*who].waiting() {
+                panic!("{} reads as settled while {what} waits", name(*who));
+            }
+        }
         let mut by_folder: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for who in &current {
             by_folder
@@ -2611,7 +2695,7 @@ impl Walk {
         self.follow(who);
         let log = &self.drawbars[who].bench.log;
         assert!(
-            log.len() < 500,
+            log.len() < crate::log::CAPACITY,
             "{} logged more than its log keeps",
             name(who)
         );
@@ -2681,6 +2765,7 @@ impl Walk {
 
     /// Each drawbar in `drawbars`, all on `folder`, shows what a fresh open of it shows.
     fn show_a_fresh_open(&mut self, folder: usize, drawbars: &[usize], when: &str) {
+        self.quiet();
         let root = self.folders.root(drawbars[0]);
         let now = tree(&root.0);
         if self
@@ -2721,7 +2806,7 @@ impl Walk {
 
     fn shows_the_disk(&self, who: usize) {
         let session = &self.drawbars[who];
-        let on_disk = disk(self.folders.root(who));
+        let on_disk = disk(self.root(who));
         let mut wrong = Vec::new();
         let listed = session.bench.workspace.listed();
         for entity in listed.filter(|entity| !missing(session, entity.id)) {
@@ -2767,20 +2852,6 @@ impl Walk {
         if !wrong.is_empty() {
             let what = format!("what {} shows is not on disk", name(who));
             self.fail(Check::ShowsTheDisk, &what, format!("{wrong:#?}"));
-        }
-    }
-
-    /// Follow the unsaved edit an action left on `id`, or forget the one it saved.
-    fn track_edit(&mut self, who: usize, id: u64, gain: usize) {
-        let entity = self.drawbars[who].bench.workspace.get(id);
-        match entity.filter(|entity| entity.is_unsaved()) {
-            Some(entity) => {
-                let bytes = entity.bytes.to_vec();
-                self.unsaved[who].insert(id, Edit { gain, bytes });
-            }
-            None => {
-                self.unsaved[who].remove(&id);
-            }
         }
     }
 
@@ -2939,10 +3010,14 @@ impl Walk {
                 let goes = writes && !saves && edited == saved;
                 let verb = ["Save", "New"][usize::from(writes)];
                 let names = vec![format!("{verb} “{}”", leaf(&at))];
+                let edit = (edited != saved).then(|| Edit {
+                    gain,
+                    bytes: edited.clone(),
+                });
                 Done {
                     made: [Made::Nothing, Made::One]
                         [usize::from(saves && (writes || edited != saved))],
-                    edited: Some((id, gain)),
+                    edited: Some((id, edit)),
                     wrote: saves.then_some(id),
                     ..Done::one(match goes {
                         true => Vec::new(),
@@ -3003,8 +3078,16 @@ impl Walk {
                     return None;
                 }
                 let hurried = self.dice.one_in(2);
-                let made = !self.drawbars[who].tag_names().iter().any(|t| t == tag);
-                self.drawbars[who].tag(&[id], tag);
+                let session = &mut self.drawbars[who];
+                let tags = &mut session.bench.browser.tags;
+                let known = tags.all().iter().find(|t| t.name == tag).map(|t| t.id);
+                let made = known.is_none();
+                let tag_id = known.unwrap_or_else(|| tags.make(tag).expect("a new tag"));
+                session.bench.act(vec![Act::Tag {
+                    ids: vec![id],
+                    tag: tag_id,
+                }]);
+                session.committed();
                 let at = path(self, id);
                 self.said(format!("{name} tags {at} “{tag}”{}", hurry(hurried)));
                 let shows = vec![Shows::Wearing(at, tag.to_string())];
@@ -3030,7 +3113,7 @@ impl Walk {
                         tag: tag_id,
                     }],
                 );
-                session.decided();
+                session.committed();
                 let at = path(self, id);
                 self.said(format!("{name} takes “{tag}” off {at}{}", hurry(hurried)));
                 let names = vec![format!("Untag “{tag}”")];
@@ -3059,12 +3142,15 @@ impl Walk {
                     .find(|id| !before.contains(id))
                     .expect("a new folder is shown");
                 let at = session.bench.browser.folders.path_of(made)?.clone();
+                let answered = between && self.dice.one_in(2);
                 if between {
                     let Bench {
                         workspace, browser, ..
                     } = &mut session.bench;
                     session.store.sync(workspace, browser, Pass::Files);
-                    session.poll();
+                }
+                if answered {
+                    session.caught_up();
                 }
                 let naming = Act::RenameFolder {
                     id: made,
@@ -3072,7 +3158,11 @@ impl Walk {
                 };
                 perform(session, vec![naming]);
                 self.passed.insert(at.to_string());
-                let pause = ["", ", a frame passes,"][usize::from(between)];
+                let pause = match (between, answered) {
+                    (false, _) => "",
+                    (true, false) => ", a frame passes,",
+                    (true, true) => ", a frame passes once the library answers,",
+                };
                 self.said(format!("{name} makes {at}{pause} and names it “{to}”"));
                 let named = at.parent().join(&to).to_string();
                 let shows = vec![Shows::Folder(named)];
@@ -3204,18 +3294,15 @@ impl Walk {
             true => session.store.redo_label()?,
         };
         from.pop();
+        let hurried = self.dice.one_in(2);
+        self.said(format!("{} chooses {offered}{}", name(who), hurry(hurried)));
         self.names_the_step(&offered, redo, made_at);
         let session = &mut self.drawbars[who];
         let log = session.bench.log.len();
         self.chosen[who] = Some(Chosen { redo, made_at, log });
-        let hurried = self.dice.one_in(2);
-        match redo {
-            false => session.undo(),
-            true => session.redo(),
-        }
+        session.take_back(redo);
         self.clock += 1;
         self.changed[who] = self.clock;
-        self.said(format!("{} chooses {offered}{}", name(who), hurry(hurried)));
         Some(Done {
             made: Made::Step,
             hurried,
@@ -3323,19 +3410,88 @@ impl Walk {
 
 impl Session {
     /// Write everything, sending again each change that waited for the answer to one
-    /// before it, and wait until the disk has it.
+    /// before it, and wait until the disk has it and every answer is folded in.
     fn sync_all(&mut self) {
-        for _ in 0..ROUNDS {
+        let mut waits = None;
+        for _ in 0..SYNCS {
             let Bench {
                 workspace, browser, ..
             } = &mut self.bench;
             let went = self.store.sync(workspace, browser, Pass::Last);
             self.settle();
-            if went {
+            self.caught_up();
+            waits = self.waiting();
+            if went && waits.is_none() {
                 return;
             }
         }
-        panic!("a change still waits after {ROUNDS} syncs");
+        panic!(
+            "{} still waits after {SYNCS} syncs",
+            waits.unwrap_or("a change")
+        );
+    }
+
+    /// Wait until the library's thread has run every command sent, folding in no answer.
+    fn quiet(&self) {
+        let since = std::time::Instant::now();
+        while !self.store.idle() {
+            assert!(
+                since.elapsed() < PATIENCE,
+                "the library's thread runs what it is sent"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Fold in every answer, as a frame does once the library's thread has run every
+    /// command sent, until the answers send no more.
+    fn caught_up(&mut self) {
+        loop {
+            self.quiet();
+            self.poll();
+            if self.store.idle() {
+                return;
+            }
+        }
+    }
+
+    /// Send the files the workspace needs written and the changes to the facts asked for,
+    /// and fold in every answer, until no change waits.
+    fn committed(&mut self) {
+        for _ in 0..SYNCS {
+            let Bench {
+                workspace, browser, ..
+            } = &mut self.bench;
+            self.store.sync(workspace, browser, Pass::Files);
+            self.caught_up();
+            if !self.store.deciding() {
+                return;
+            }
+        }
+        panic!("a change to the facts still waits after {SYNCS} sends");
+    }
+
+    /// Undo, or redo, and wait until it is committed.
+    fn take_back(&mut self, redo: bool) {
+        match redo {
+            false => self.store.undo(),
+            true => self.store.redo(),
+        }
+        self.committed();
+    }
+
+    /// What waits for an answer or to be sent, if anything does.
+    fn waiting(&self) -> Option<&'static str> {
+        let store = &self.store;
+        let waits = [
+            ("a change to the facts", store.deciding()),
+            ("a rescan", store.scanning()),
+            ("a write", store.writing()),
+        ];
+        waits
+            .into_iter()
+            .find(|(_, waits)| *waits)
+            .map(|(what, _)| what)
     }
 }
 
