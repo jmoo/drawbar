@@ -1,77 +1,78 @@
-# Your instrument
+# Your keyboard
 
-Back up your instrument before you sync. Nord Sound Manager makes a full
-backup. [What is supported](../getting-started/support.md) says which instruments
-have been tested.
+Connect a Nord keyboard over USB to see its sounds beside the files on your
+computer. From here you copy sounds off the keyboard, send sounds to it and
+rearrange its slots.
+
+Before you change anything on the instrument, make a full backup with Nord
+Sound Manager. [Check support for your keyboard](../getting-started/support.md#usb).
 
 ## Connecting
 
-Close Nord Sound Manager first, since it keeps the USB connection to itself. Then
-click **Connect instrument…** in the top bar, or choose **Instrument ▸
-Connect…**. A web browser asks you to pick the device. The desktop app takes the
-first Nord it finds. [What is supported](../getting-started/support.md#usb)
-lists the browsers that can connect.
+1. Close Nord Sound Manager so it releases the USB connection.
+2. Turn the instrument on and connect it to the computer by USB.
+3. Choose **Connect instrument…** at the top of drawbar. In a browser, select
+   your instrument in the device picker. The desktop app opens the first Nord
+   it finds.
+4. Look for your instrument's name on the left, below **This computer**.
 
-Once connected, drawbar reads the instrument's folders, and its slots appear,
-labeled the way the panel shows them: `7:4 Africa Split`. Empty slots are listed
-too, as places to drop things. **Instrument ▸ Read everything** (⌘R) reads them
-again. A folder drawbar cannot name keeps the instrument's name for it and is read
-only.
+If your instrument doesn't appear, check [browser USB support](../getting-started/support.md#usb)
+or [USB permissions on Linux](../getting-started/install.md#connecting-on-linux).
 
-## Slots
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](../assets/screenshot.png)
 
-Right-click a slot to **Open**, **Copy to this computer**, **Load on instrument**,
-**Rename**, **Duplicate** or **Delete…**. Load on instrument makes the panel play
-that slot, and a document from a slot has the same button in its
-[header](editing.md#the-document-header). The name is typed in the browser, which
-opens at the slot when you rename from the Keyboard tab or the Library.
+## Folders and slots
 
-Samples and pianos keep the name they were sent with, so they cannot be renamed
-or duplicated on the instrument. The instrument also keeps one of each name: a
-sample or piano named like one already there goes on Sync to replace it, and
-cannot go to any other slot until you rename it.
+The instrument has a folder for each kind of sound it holds, such as
+**Programs**. Expand a folder and a bank to see its slots. An address like
+**7:4** means bank 7, slot 4, as on the panel. The **Keyboard** tab shows the
+same slots bank by bank, empty ones included.
 
-With several slots checked, **Copy to this computer** reads each folder's slots
-in one go. **Export as bundle…**
-writes them, with what they play, as one bundle; see
-[Bundles](this-computer.md#bundles).
+To refresh the listing after changes on the keyboard, choose **Instrument ▸
+Read everything**. A folder drawbar doesn't recognize is listed but read-only.
 
-Drag to move things:
+## Work with a slot
 
-- a slot onto **This computer** copies it;
-- a sound onto a slot places it there for Sync;
-- a slot onto another slot in the same folder swaps the two.
+Right-click a slot for its actions. Some change the instrument as soon as you
+choose them.
 
-## Sync
+| Action | What it does | Changes the instrument |
+|---|---|---|
+| **Open**, or double-click | Opens the slot's own copy for editing | At once, when you save |
+| **Copy to this computer** | [Copies the sound](sending.md#copy-a-sound-to-this-computer) into your library | No |
+| **Load on instrument** | Selects the slot on the panel | No |
+| **Rename**, **Duplicate** | Renames the slot, or copies it to the first empty slot | At once |
+| **Delete…** | Removes the sound after you confirm. There is no undo. | At once |
+| Drag onto another slot in the same folder | Swaps the two slots | At once |
 
-Nothing is written until you sync. **Sync** in the top bar, or **Instrument ▸
-Sync…** (⇧⌘S), reads the instrument and lists what differs. `↑` writes a sound to
-the keyboard, `↓` brings one to this computer. The lit arrow is the way a row goes:
-click the other to turn it, or the lit one to leave that sound out. A `!` row has
-none lit until you pick. When an instrument attaches with changes of its own, the
-list opens by itself.
+Everything else waits until you [sync](sending.md#sync). That includes a sound
+dragged from **This computer** onto a slot, and a saved change to a file linked
+to a slot.
 
-A sound's name goes with it, minus the extension: `Africa-Split.ne5p` becomes
-`Africa-Split` on the panel.
+<details>
+<summary>Names of samples and pianos</summary>
 
-Library undo puts back a file Sync brought in. **Undo** in the activity log does
-too, and puts back a link Sync moved or removed.
+A file's name, without its extension, becomes the slot name. The instrument
+keeps one sample or piano of each name in a folder, so if the name is already
+in use, the file goes on Sync to replace that slot. Rename your file first
+to keep both.
+
+Samples and pianos cannot be renamed or duplicated on the instrument. Copy one
+to this computer, rename the copy and send it.
+
+</details>
 
 ## Safety
 
-- A move is a swap. Nothing is lost.
-- Before writing over a sound, drawbar copies the old one. If the write fails,
-  it puts the old one back. If that fails too, the old sound is kept on this
-  computer, and the activity log says where.
-- In the browser, a page left open while drawbar.app is updated cannot copy the
-  old sound, so it writes over none until you reload it. Writing to an empty
-  slot still works.
-- An interrupted transfer cannot leave the instrument stuck on its progress
-  screen.
-- Writing Settings, or the slot the panel is playing, reloads the panel, so
-  unsaved panel changes are lost. drawbar warns you before writing Settings.
+Before replacing an occupied program, song, piano or sample, drawbar keeps a
+copy of the old sound. If the transfer fails, it tries to put that sound back.
+If it can't, the activity log tells you where to find the copy. [Recover a sound after an interrupted write](recovery.md#a-change-was-interrupted).
 
-## Disconnecting
+If a browser tab was open during a drawbar update, reload it before replacing
+a sound. Until it can keep a recovery copy, drawbar writes only to empty slots.
 
-Unplug, and the instrument's slots disappear. Sounds you placed on a slot stay
-listed, so plug back in and sync.
+A damaged piano or sample fails verification and cannot be sent. If a piano is
+too large for the free memory, [trim it to fit](pianos.md#trim-to-fit).
+
+For the hardware on which transfers and recovery have been tested, see
+[What is supported](../getting-started/support.md#usb).

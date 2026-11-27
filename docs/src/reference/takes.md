@@ -1,8 +1,9 @@
 # Takes
 
 How `nord piano prep` reads a recorded take, and how `nord piano build` turns a
-take's regions into strokes. [Samples and pianos](../nord-cli/libraries.md#building-from-a-recorded-take)
-says how to use them.
+take's regions into strokes. [Make a piano from a recording](../drawbar/recording.md)
+and [Work with samples and pianos](../nord-cli/libraries.md#building-from-a-recorded-take)
+say how to use them.
 
 ## Finding the strokes
 
@@ -106,3 +107,22 @@ root's loudest attack.
 
 A format 5 library, or one built against a template, plays each stroke's audio at
 its own level, so nothing is raised.
+
+## Layers, trims and loops
+
+In format 6, layers named `l00`, `l01`, … step 20 apart, spanning at least 0 to 50
+and at most 0 to 100, and format 5 uses a fifth of each value.
+
+A format 6 library trims in tenths of a decibel and can also boost a stroke, by up
+to about 10.8 dB together with the instrument gain. A format 5 library trims in
+whole decibels and cannot boost. Without a template, format 6 plays softer layers a
+little louder as the kind's own pianos have them, up to 6 dB for a Wurlitzer. When
+a soft layer or release needs more boost than the instrument gives at its gain, the
+whole library is turned down to fit, but a release from a take just plays quieter.
+A format 5 library, like one built on a template, trims each attack and resonance
+stroke 3 dB more than its layer's value states, and each release stroke 12 dB.
+
+Audio after a loop's end is not used, and the loop's last four samples are replaced
+by the four just before its start, which a seamless loop already has. A loop is
+exact in a WAV at 35,002 Hz. At any other rate its ends move to the nearest frame of
+the resampled audio.

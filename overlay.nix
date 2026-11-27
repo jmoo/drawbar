@@ -14,6 +14,7 @@ let
     concatStringsSep
     crane
     elem
+    elemAt
     escapeShellArgs
     filter
     filterAttrs
@@ -34,6 +35,10 @@ let
     optionalAttrs
     optionals
     optionalString
+    readFile
+    replaceStrings
+    splitString
+    tail
     toUpper
     ;
 
@@ -725,13 +730,49 @@ let
     meta.description = "the drawbar user guide";
   };
 
-  # The GitHub Pages tree: the browser build at the root, the guide under /docs.
+  # The stable name under drawbar.app/download/ of each release file scripts/assets.tsv lists.
+  downloadNames = {
+    drawbar-app = "macos";
+    drawbar-appimage = "linux";
+    drawbar-windows = "windows";
+    nord-cli-linux-aarch64-tarball = "nord-linux-aarch64";
+    nord-cli-linux-x86_64-tarball = "nord-linux-x86_64";
+    nord-cli-windows = "nord-windows";
+  };
+
+  # A page per release file that redirects to it at the given crate versions.
+  downloads =
+    versions:
+    final.symlinkJoin {
+      name = "drawbar-downloads";
+      paths = map (
+        line:
+        let
+          row = splitString "\t" line;
+          crate = elemAt row 0;
+          tag = "${crate}-v${versions.${crate}}";
+          asset = replaceStrings [ "@version@" ] [ versions.${crate} ] (elemAt row 5);
+          url = "https://github.com/jmoo/drawbar/releases/download/${tag}/${asset}";
+        in
+        final.writeTextDir "download/${downloadNames.${elemAt row 2}}/index.html" ''
+          <!doctype html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=${url}">
+          <title>${asset}</title>
+          <p><a href="${url}">Download ${asset}</a></p>
+        ''
+      ) (tail (filter (line: line != "") (splitString "\n" (readFile ./scripts/assets.tsv))));
+    };
+
+  # The GitHub Pages tree: the browser build at the root, the guide under /docs,
+  # and the download redirects under /download.
   # Copies, not links: the tree leaves the store as a tarball.
-  # `web` is a parameter so the deployed tree can pair a released bundle with
-  # this checkout's guide; scripts/site.bash overrides it, and passes the release
-  # before it as `previous`.
+  # `web` and `nordCliVersion` are parameters so the deployed tree can pair released
+  # builds with this checkout's guide; scripts/site.bash overrides them, and passes
+  # the release before `web` as `previous`.
   site = makeOverridable (
     {
+      nordCliVersion ? manifests.nord-cli.version,
       previous ? null,
       web,
     }:
@@ -743,6 +784,12 @@ let
         mkdir -p "$out/docs"
         cp -rL ${web}/. "$out/"
         cp -rL ${docs}/. "$out/docs/"
+        cp -rL ${
+          downloads {
+            drawbar = web.version;
+            nord-cli = nordCliVersion;
+          }
+        }/. "$out/"
 
         # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
         touch "$out/.nojekyll"
