@@ -3358,6 +3358,31 @@ fn an_edit_made_during_a_save_whose_answer_is_lost_stays_over_the_file_found() {
     }
 }
 
+/// A save that fails while the edit held changes nothing over the file says only that
+/// it was not saved.
+#[test]
+fn a_failed_save_of_an_instrument_edited_back_does_not_say_an_edit_is_kept() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    session.rename_resting(id, "Alpha");
+    session.sync();
+    let path = root.at("Zoned.nsmp");
+    let time = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut theirs = fs::read(&path).unwrap();
+    let last = theirs.len() - 3;
+    theirs[last] ^= 0x40;
+    fs::write(&path, &theirs).unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(time).unwrap();
+
+    session.rename_during_save(id, "Beta", "Alpha");
+    session.settle();
+
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(session.said("The edit is kept"), 0);
+}
+
 /// A plan over a piano library resting in its file is saved by laying the library out
 /// again from its file, each kept stroke read by its range: the file then holds what a
 /// whole read and a whole layout write make, and the asset rests in it.
