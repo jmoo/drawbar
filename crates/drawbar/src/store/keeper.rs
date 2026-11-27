@@ -12,7 +12,7 @@ use std::sync::Arc;
 use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging};
 use toshokan::error::{Refusal, Why};
 use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
-use toshokan::log::Settlement;
+use toshokan::log::{FileFact, Settlement};
 use toshokan::plan::FactChange;
 use toshokan::report::{
     Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, ScanReport, Start, TrashItem, What,
@@ -1150,8 +1150,9 @@ impl Answering {
         })
     }
 
-    /// The event that says the part landed; none for one answered only on failure.
-    async fn landed<F: Fs>(self, fs: &F) -> Option<Event> {
+    /// The event that says the part landed, where the commit logged `files` as it left
+    /// them; none for one answered only on failure.
+    async fn landed<F: Fs>(self, fs: &F, files: &[FileFact]) -> Option<Event> {
         Some(match self {
             Answering::Saved {
                 id,
@@ -1160,13 +1161,19 @@ impl Answering {
                 crc,
                 identity,
             } => {
-                // The commit landed: a stat that fails now leaves what it wrote, with no
-                // time, which the next scan reads the identity again for.
-                let stat = stat_at(fs, &path).await;
-                let stat = stat.unwrap_or(Stat {
-                    len,
-                    modified: None,
-                });
+                let logged = relative(&path).and_then(|at| files.iter().find(|f| f.path == at));
+                // A save logged with other contents, or not logged, is known by no time,
+                // so the next look reads the file again.
+                let stat = match logged.filter(|file| Some(file.identity) == identity) {
+                    Some(file) => Stat {
+                        len: file.len,
+                        modified: file.modified,
+                    },
+                    None => Stat {
+                        len,
+                        modified: None,
+                    },
+                };
                 let result = Ok(Fingerprint {
                     crc: Some(crc),
                     identity,
@@ -1346,9 +1353,9 @@ impl Tried {
             ..
         } in owed
         {
-            let event = match changes.is_some() {
-                true => answering.landed(fs).await,
-                false => {
+            let event = match &changes {
+                Some(committed) => answering.landed(fs, &committed.files).await,
+                None => {
                     let filled = failed.and_then(|failed| failed.take()).map(fill_failure);
                     let failure = filled.or_else(|| why.clone());
                     answering.refused(failure.unwrap_or(Failure::Io("not made".to_string())))
@@ -3342,35 +3349,38 @@ mod tests {
     }
 
     #[test]
-    fn a_landed_save_that_cannot_be_looked_at_after_is_saved_with_what_it_wrote() {
-        struct Unstated(toshokan::MemDisk);
-        impl Fs for Unstated {
-            fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
-                self.0.capabilities(root)
-            }
-
-            async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
-                match io {
-                    toshokan::Io::Stat { .. } => Err(IoError::Denied),
-                    io => Fs::perform(&self.0, io).await,
-                }
-            }
-        }
-        let answering = Answering::Saved {
-            id: 1,
-            path: path("c3.ne5p"),
+    fn a_landed_save_takes_its_time_from_the_commit_only_where_it_logged_what_was_written() {
+        let at = path("c3.ne5p");
+        let (mine, theirs) = (keys::identity_of_bytes(&at, b"abc"), b"xyz");
+        let logged = |bytes: &[u8]| FileFact {
+            path: relative(&at).unwrap(),
+            identity: keys::identity_of_bytes(&at, bytes).unwrap(),
             len: 3,
-            crc: 7,
-            identity: None,
+            modified: Some(9),
         };
-        let landed = nord_usb::block_on(answering.landed(&Unstated(toshokan::MemDisk::new())));
-        let Some(Event::Saved {
-            result: Ok(print), ..
-        }) = landed
-        else {
-            panic!("{landed:?}")
-        };
-        assert_eq!((print.len, print.modified, print.crc), (3, None, Some(7)));
+        let cases = [
+            ("logged as written", vec![logged(b"abc")], Some(9)),
+            ("logged with other contents", vec![logged(theirs)], None),
+            ("not logged", vec![], None),
+        ];
+        for (case, files, modified) in cases {
+            let answering = Answering::Saved {
+                id: 1,
+                path: at.clone(),
+                len: 3,
+                crc: 7,
+                identity: mine,
+            };
+            let landed = nord_usb::block_on(answering.landed(&toshokan::MemDisk::new(), &files));
+            let Some(Event::Saved {
+                result: Ok(print), ..
+            }) = landed
+            else {
+                panic!("{case}: {landed:?}")
+            };
+            let found = (print.len, print.modified, print.crc, print.identity);
+            assert_eq!(found, (3, modified, Some(7), mine), "{case}");
+        }
     }
 
     /// Storage that runs `meddle` once, right after the first read of `at` in the folder

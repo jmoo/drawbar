@@ -9160,3 +9160,47 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
 }
+/// Another program's write, made once the library has put a saved file in place and
+/// before the save is answered: the file, and the bytes written to it.
+static WRITTEN_AFTER_THE_PUT: std::sync::Mutex<Option<(std::path::PathBuf, Vec<u8>)>> =
+    std::sync::Mutex::new(None);
+
+fn writes_after_the_put(io: &toshokan::Io) -> bool {
+    let logs = matches!(io, toshokan::Io::Append { .. });
+    let mut written = WRITTEN_AFTER_THE_PUT.lock().unwrap();
+    if let Some((path, bytes)) = written.take_if(|_| logs) {
+        fs::write(&path, bytes).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(later).unwrap();
+    }
+    false
+}
+
+#[test]
+fn a_file_another_program_writes_as_its_save_is_answered_is_seen_to_have_changed() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = root.read("untitled.ne5p");
+    let (mine, theirs) = (with_gain(&made, "96"), with_gain(&made, "40"));
+    *WRITTEN_AFTER_THE_PUT.lock().unwrap() = Some((root.at("untitled.ne5p"), theirs.clone()));
+    session.store.fault(Fault::Refuse(writes_after_the_put));
+
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine, log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == theirs,
+        "their write is on disk"
+    );
+
+    session.refocus();
+
+    assert!(
+        session.bytes(id) == theirs,
+        "the document shows what its file holds"
+    );
+}
