@@ -762,27 +762,35 @@ impl Document {
         }
         let mut out = Vec::new();
         for act in acts {
-            // Whatever the gesture's source, the saved bytes are about to be restored or
-            // removed, and an edit over them would edit nothing.
-            if let crate::browser::Act::Revert(id) | crate::browser::Act::Remove(id) = &act {
-                self.piano.forget(*id);
-                self.parked.remove(id);
-                self.samples.forget(*id);
-            }
-            // Reopened on the next frame, because every box holds a reverted edit.
-            if let crate::browser::Act::Revert(id) = &act {
-                if self.open.as_ref().is_some_and(|open| open.id == *id) {
-                    self.open = None;
-                }
-            }
             let carried = act.carries(queue);
-            if let Some(act) = self.save_first(act, &carried, workspace, log) {
-                out.extend(self.piano.hold(ctx, act, workspace));
-            }
+            let held = self
+                .save_first(act, &carried, workspace, log)
+                .and_then(|act| self.piano.hold(ctx, act, workspace));
+            out.extend(held.inspect(|act| self.let_go(act)));
         }
         out.extend(self.saved(workspace, log));
-        out.extend(self.released(ctx, workspace, log));
+        for act in self.released(ctx, workspace, log) {
+            self.let_go(&act);
+            out.push(act);
+        }
         out
+    }
+
+    /// Drop the edits an act about to run lets go of: whatever the gesture's source, the
+    /// bytes they edit are about to be restored, replaced or removed.
+    fn let_go(&mut self, act: &crate::browser::Act) {
+        use crate::browser::Act;
+        let (Act::Revert(id) | Act::Remove(id) | Act::KeepBoth(id) | Act::Restore { id, .. }) = act
+        else {
+            return;
+        };
+        self.piano.forget(*id);
+        self.parked.remove(id);
+        self.samples.forget(*id);
+        // Reopened on the next frame, because every box holds an edit let go.
+        if self.open.as_ref().is_some_and(|open| open.id == *id) {
+            self.open = None;
+        }
     }
 
     /// Hold an act that carries assets out of the app while any of them holds an edit
@@ -4714,6 +4722,83 @@ mod tests {
         let (renamed, _) = open.document.piano.renaming(open.entity());
         assert_eq!(renamed, None, "a save writes the restored name");
         assert!(!open.pends());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn restoring_a_pianos_saved_body_over_a_lay_out_drops_the_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+        let id = open.id;
+        open.act(vec![crate::browser::Act::Restore {
+            id,
+            bytes: piano_bytes(),
+        }]);
+        open.twice();
+
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed, None, "a save writes the restored name");
+        assert!(!open.pends());
+        assert!(!open.entity().is_unsaved());
+    }
+
+    /// Keep both over a piano library whose saved body is in memory, as a slot that
+    /// changed since its edit was kept asks: the copy takes the edit, and the original
+    /// is left as it was saved.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn keep_both_over_a_saved_body(laid: bool) {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        open.place();
+        rename_with_an_x(&mut open);
+        if laid {
+            assert_eq!(lay_out(&mut open), "XTest Piano");
+        }
+        let id = open.id;
+        open.act(vec![crate::browser::Act::KeepBoth(id)]);
+        let ctx = open.ctx.clone();
+        if let Some(applied) = open
+            .document
+            .piano
+            .awaited(&ctx, &mut open.workspace, &mut open.log)
+        {
+            let acts = open
+                .document
+                .put_back(applied, &mut open.workspace, &mut open.log);
+            open.act(acts);
+        }
+        open.twice();
+
+        assert_eq!(copies(&open), ["XTest Piano"], "the copy holds the rename");
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed, None, "the original keeps its saved name");
+        assert!(!open.pends());
+        assert!(!open.entity().is_unsaved());
+        assert_eq!(stored_name(&open), "Test Piano");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_both_lets_go_of_a_pending_piano_plan_on_the_original() {
+        keep_both_over_a_saved_body(false);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_both_lets_go_of_a_laid_out_piano_plan_on_the_original() {
+        keep_both_over_a_saved_body(true);
+    }
+
+    /// The names of the piano libraries the workspace holds besides the open one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn copies(open: &Open) -> Vec<String> {
+        open.workspace
+            .entities()
+            .iter()
+            .filter(|entity| entity.id != open.id)
+            .filter_map(|entity| piano::snapshot(entity.entity.as_deref()?)?.ok())
+            .map(|snapshot| snapshot.name)
+            .collect()
     }
 
     /// The library folder a piano library held in memory is saved into, as the store
