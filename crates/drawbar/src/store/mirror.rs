@@ -1477,6 +1477,12 @@ impl Store {
         self.ids.key(id).cloned()
     }
 
+    /// Whether the library's thread has run through every command sent, answered or not.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub fn idle(&self) -> bool {
+        self.backend.idle()
+    }
+
     /// Whether a change to the facts waits to be sent or answered.
     #[cfg(test)]
     pub fn deciding(&self) -> bool {

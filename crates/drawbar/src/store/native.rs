@@ -146,6 +146,9 @@ pub struct Backend {
     seen: std::cell::Cell<(usize, std::time::Instant)>,
     #[cfg(test)]
     fault: Arc<std::sync::Mutex<Option<super::Fault>>>,
+    /// Commands sent and not yet run through.
+    #[cfg(test)]
+    queued: Arc<AtomicUsize>,
 }
 
 /// Whether the library's thread is running a command, and since when.
@@ -215,6 +218,10 @@ impl Backend {
         let faults = fault.clone();
         #[cfg(test)]
         let refusing = signs.clone();
+        #[cfg(test)]
+        let queued = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let left = queued.clone();
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it. A look at the folder
             // that hangs is a command that shows no life.
@@ -272,6 +279,8 @@ impl Backend {
                         ctx.request_repaint();
                     }
                     ran.fetch_sub(usize::from(wrote), Ordering::Release);
+                    #[cfg(test)]
+                    left.fetch_sub(1, Ordering::Release);
                     living.run(false);
                 }
                 if !let_go.load(Ordering::Acquire) {
@@ -294,6 +303,8 @@ impl Backend {
             seen: std::cell::Cell::new((0, std::time::Instant::now())),
             #[cfg(test)]
             fault,
+            #[cfg(test)]
+            queued,
         }
     }
 
@@ -364,8 +375,12 @@ impl Backend {
         if let Some(tx) = &self.tx {
             let writes = usize::from(cmd.writes());
             self.unrun.fetch_add(writes, Ordering::AcqRel);
+            #[cfg(test)]
+            self.queued.fetch_add(1, Ordering::AcqRel);
             if tx.send(cmd).is_err() {
                 self.unrun.fetch_sub(writes, Ordering::AcqRel);
+                #[cfg(test)]
+                self.queued.fetch_sub(1, Ordering::AcqRel);
             }
         }
     }
@@ -378,6 +393,12 @@ impl Backend {
     /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
         self.unrun.load(Ordering::Acquire) != 0
+    }
+
+    /// Whether the library's thread has run through every command sent.
+    #[cfg(test)]
+    pub fn idle(&self) -> bool {
+        self.queued.load(Ordering::Acquire) == 0
     }
 
     pub fn try_recv(&mut self) -> Option<Event> {
@@ -488,10 +509,19 @@ impl Stamps {
         let at = top.join(path.as_str());
         let had = staged.then(|| fs::metadata(&at).and_then(|meta| meta.modified()).ok());
         let modified = (self.stamp.borrow_mut())(&at, had.flatten());
-        let file = File::options().write(true).open(&at);
-        file.and_then(|file| file.set_modified(modified))
-            .unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+        crate::testing::date(&at, modified).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
     }
+}
+
+/// Whether `from` is a file toshokan staged in the folder, in a writer's directory for
+/// staged files.
+#[cfg(test)]
+fn staged(root: Root, from: &toshokan::RelPath) -> bool {
+    let tmp = from
+        .parent()
+        .filter(|dir| dir.name() == Some(toshokan::layout::TMP));
+    let writers = tmp.and_then(|tmp| tmp.parent()?.parent());
+    root == Root::Folder && writers == Some(keys::layout().writers())
 }
 
 impl toshokan::asynch::Fs for Blocking {
@@ -508,9 +538,7 @@ impl toshokan::asynch::Fs for Blocking {
             Io::Create { root, path, .. }
             | Io::Append { root, path, .. }
             | Io::Write { root, path, .. } => Some((*root, path.clone(), false)),
-            Io::Rename { root, from, to } if from.as_str().contains("/tmp/") => {
-                Some((*root, to.clone(), true))
-            }
+            Io::Rename { root, from, to } if staged(*root, from) => Some((*root, to.clone(), true)),
             _ => None,
         };
         let done = self.native.borrow_mut().perform(io);

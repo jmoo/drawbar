@@ -59,6 +59,48 @@ impl Temp {
     }
 }
 
+/// Give the file at `path` the modification time `time`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn date(path: &std::path::Path, time: std::time::SystemTime) -> std::io::Result<()> {
+    patiently(|| {
+        fs::File::options()
+            .write(true)
+            .open(path)?
+            .set_modified(time)
+    })
+}
+
+/// Run `op` again, for about half a second, while another program holds the file it
+/// names, as antivirus and indexing do on Windows for a moment after a file is written.
+#[cfg(windows)]
+pub(crate) fn patiently<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
+    const HELD: [u32; 3] = [
+        ERROR_SHARING_VIOLATION,
+        ERROR_LOCK_VIOLATION,
+        ERROR_ACCESS_DENIED,
+    ];
+    for wait in [10, 40, 150, 400] {
+        match op() {
+            Err(e)
+                if e.raw_os_error()
+                    .is_some_and(|code| HELD.contains(&(code as u32))) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+            done => return done,
+        }
+    }
+    op()
+}
+
+#[cfg(all(not(windows), not(target_arch = "wasm32")))]
+pub(crate) fn patiently<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    op()
+}
+
 /// The backend over the library in `root`, with this install's own state for it beside
 /// the library, as drawbar's own data is.
 #[cfg(not(target_arch = "wasm32"))]
