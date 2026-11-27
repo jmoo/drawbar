@@ -640,6 +640,57 @@ fn a_file_copied_to_a_new_path_and_deleted_is_matched_by_its_contents() {
     assert_eq!(session.bench.workspace.listed().count(), 1);
 }
 
+/// Another program's write, made once the library has checked the file for a save and
+/// before it moves the file away: the file, and the bytes written to it.
+static WRITTEN_AFTER_THE_CHECK: std::sync::Mutex<Option<(std::path::PathBuf, Vec<u8>)>> =
+    std::sync::Mutex::new(None);
+
+fn writes_after_the_check(io: &toshokan::Io) -> bool {
+    let journals = match io {
+        toshokan::Io::Rename { to: path, .. } | toshokan::Io::Create { path, .. } => {
+            path.as_str().contains("/pending/") && path.as_str().ends_with(".json")
+        }
+        _ => false,
+    };
+    let mut written = WRITTEN_AFTER_THE_CHECK.lock().unwrap();
+    if let Some((path, bytes)) = written.take_if(|_| journals) {
+        let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::write(&path, bytes).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(then))
+            .unwrap();
+    }
+    false
+}
+
+#[test]
+fn a_save_does_not_replace_a_file_another_program_wrote_after_the_save_looked_at_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = root.read("untitled.ne5p");
+    let (mine, theirs) = (with_gain(&made, "96"), with_gain(&made, "40"));
+    *WRITTEN_AFTER_THE_CHECK.lock().unwrap() = Some((root.at("untitled.ne5p"), theirs.clone()));
+    session.store.fault(Fault::Refuse(writes_after_the_check));
+
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+
+    let wrote = WRITTEN_AFTER_THE_CHECK.lock().unwrap().is_none();
+    assert!(wrote, "the other program wrote");
+    assert!(root.read("untitled.ne5p") == theirs, "their write stands");
+    assert_eq!(session.said("was not saved, because it changed on disk"), 1);
+    assert!(
+        session.bench.workspace.get(id).unwrap().is_unsaved(),
+        "the edit is still unsaved"
+    );
+}
+
 /// A file drawbar listed but never wrote is fingerprinted by its length and time until
 /// its contents are read, and then by its CRC as well. A save over it after it changed
 /// on disk, its length the same, is refused; one after it was only written again with
