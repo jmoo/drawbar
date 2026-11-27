@@ -150,7 +150,7 @@ changed the same thing since
 and where a file no longer holds what the intent left there. drawbar lets go of
 a step the library refuses, so the next undo reaches the one before. A step
 that fails because the folder could not be read or written, or the library is
-read-only, stays.
+read-only, stays, except a redo that a change made since has ended.
 An intent too large for one log entry is refused before it writes anything.
 
 The trash holds what a delete or a save displaced, for this session's undo and

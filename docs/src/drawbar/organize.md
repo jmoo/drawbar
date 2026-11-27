@@ -87,7 +87,8 @@ before you decide.
 and **Edit ▸ Redo** repeats it. A move, save, deletion or tag change across
 several files is one step. Undo lasts while this window has the library open. If
 another drawbar, or a change made outside drawbar, has changed what an undo would
-take back, that undo is refused, and Undo goes on to the change before it.
+take back, that undo is refused and let go, and the next Undo takes the change
+before it.
 
 Deleted and overwritten files are kept for Undo up to 1 GiB, oldest first out.
 Quitting empties that trash.

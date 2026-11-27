@@ -360,7 +360,8 @@ three ways:
   why, and Undo names the step before it.
 - The step fails, because the folder could not be read or written or the
   library is read-only. That may pass, so the step goes back to the list it
-  left, and the log says what is in the way.
+  left, and the log says what is in the way. A redo does not go back where a
+  step was recorded while it was asked, since a new step ends Redo.
 
 toshokan draws the same line: a refusal is its own kind of error, apart from a
 failed read or write. Today drawbar lets a step go only for the last two
@@ -522,7 +523,7 @@ and they are why these documents lose their edit steps at a save.
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
 | The library refuses an undo or redo over what the folder or its history holds | The step is let go, and the log says why. Nothing is written, and Undo names the step before it. |
-| An undo or redo fails because the folder could not be read or written, or the library is read-only | The step stays, and the log says what is in the way. |
+| An undo or redo fails because the folder could not be read or written, or the library is read-only | The step stays, and the log says what is in the way. A redo that a step recorded since has ended is let go. |
 | The library's history ends while an undo or redo waits for its answer | The step is let go with the rest of that history, whatever the answer. |
 | The answer to a save is lost, or a save fails partway and a later write finishes it | The baseline goes back, and the file is read again once what it holds can be known. That read moves only the baseline, so an edit made or undone since stays, unsaved where the file holds something else. |
 | A document takes a file changed from outside | Its working copy is the file's. Its edit steps no longer match. |

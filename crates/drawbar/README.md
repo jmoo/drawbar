@@ -22,6 +22,8 @@ says what each needs.
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
   table.
+- Undo an edit to a sound or a change to your files and tags, in the order you
+  made them.
 - Trim a piano library until it fits, build a sample instrument from WAVs or a
   Sample Editor project, and listen to either from the screen or a MIDI
   controller before you send it.
