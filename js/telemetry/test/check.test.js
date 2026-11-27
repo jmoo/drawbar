@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 import { MOST_ROWS, admitted, agent, allowed, report, rows } from "../src/check.js";
 import { message } from "../src/mail.js";
@@ -100,6 +101,72 @@ test("a report is refused without text, with a bad id, or with an extra field", 
   assert.equal(report(JSON.stringify({ ...sent, id: "abcdefghi1" })), null);
   assert.equal(report(JSON.stringify({ ...sent, ip: "1.2.3.4" })), null);
   assert.equal(report(JSON.stringify({ ...sent, text: "x".repeat(5_001) }), edge), null);
+});
+
+// The guide's feedback page with `text` and `contact` typed in and its form submitted.
+// A report number is drawn from ten bytes counting up from `random`.
+async function feedback(text, contact, random = 0) {
+  const posts = [];
+  const said = { textContent: "" };
+  const send = { disabled: false };
+  let submit = null;
+  const form = {
+    hidden: true,
+    elements: { text: { value: text }, contact: { value: contact } },
+    querySelector: (selector) => (selector === "button" ? send : said),
+    addEventListener: (_, listener) => {
+      submit = listener;
+    },
+    reset() {},
+  };
+  vm.runInNewContext(read("../../../docs/feedback.js"), {
+    document: { getElementById: () => form },
+    crypto: { getRandomValues: (bytes) => bytes.map((_, at) => random + at) },
+    fetch: async (url, init) => {
+      posts.push({ url, ...init });
+      return { ok: true, status: 204 };
+    },
+  });
+  await submit?.({ preventDefault() {} });
+  return { posts, said: said.textContent };
+}
+
+test("the guide's feedback form sends a report the collector accepts", async () => {
+  for (const random of [0, 10, 21]) {
+    const { posts, said } = await feedback(
+      "  The Wurli is too quiet.\n",
+      " me@example.com ",
+      random,
+    );
+    assert.equal(posts.length, 1);
+    const [{ url, method, headers, body }] = posts;
+    assert.equal(url, "https://t.drawbar.app/report");
+    assert.equal(method, "POST");
+    assert.equal(headers["content-type"], "text/plain");
+    const kept = report(body);
+    assert.ok(kept, `the collector refuses ${body}`);
+    assert.deepEqual(
+      { ...kept, id: "" },
+      {
+        id: "",
+        kind: "feedback",
+        text: "The Wurli is too quiet.",
+        contact: "me@example.com",
+        version: "guide",
+        model: "",
+        firmware: "",
+        faults: "",
+        build: "",
+        log: "",
+      },
+    );
+    assert.ok(said.includes(kept.id), `the page does not show the report's number: ${said}`);
+  }
+});
+
+test("the guide's feedback form sends nothing with nothing written", async () => {
+  const { posts } = await feedback("  \n", "");
+  assert.deepEqual(posts, []);
 });
 
 test("a report's email is headed by its kind and number alone", () => {

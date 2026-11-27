@@ -1,96 +1,73 @@
-# Editing
+# Edit a program
 
-There is no Apply button. A control you move is set on the document at once,
-and the name shows a `*` until you save. Nothing on the instrument changes until
-you queue the document and send it.
+Programs, live slots, presets and settings open with controls laid out like the
+keyboard's panel. A *program* remembers a playable setup, such as a piano and
+organ split with effects.
+
+Audio files have their own editors. See [sample instruments](samples.md),
+[piano libraries](pianos.md) and [WAV recordings](recording.md).
+
+## Open a program
+
+1. Import a program file, or [copy one from your keyboard](sending.md#copy-a-sound-to-this-computer).
+2. Double-click it under **This computer**.
+3. In **Basic**, choose a section at the top to jump to its controls. Drag a
+   knob up to raise its value, or double-click it to type one. A `*` beside the
+   document name means you have unsaved edits.
+4. Keep or discard your edits:
+
+   | To | Choose |
+   |---|---|
+   | Change the library file | **File ▸ Save** |
+   | Keep the new version as a separate file | **Export…** in the document header |
+   | Go back to the last save | **Revert** |
+
+5. To hear the program on the keyboard, [send it to a slot](sending.md#sending),
+   then load that slot.
+
+Saving a copy that came from a slot also queues it for that slot. Saving a
+document you opened from an instrument slot writes the slot at once.
+
+## Work with the panel controls
+
+Click a lamp to flip a switch, open a selector to choose a setting, or pull a
+drawbar down. Inactive sections may be folded. An **unrecognized value** is
+the value that was in the file. You can leave it as it is.
+
+To edit from the computer keyboard, press Tab to reach a control.
+
+| Key | Does |
+|---|---|
+| Arrow keys | Step a knob |
+| Page Up, Page Down | Take larger steps |
+| Home, End | Reach the limits |
+| Space | Flip a switch |
+
+**Choose a piano.** With the instrument connected, choose the piano **Type**,
+then choose a **Model** from the pianos it holds. The program uses that piano
+when you send it. Without the instrument, a program may identify a piano or
+sample only by number.
+
+**Change a morph.** A morph lets a playing control, such as a wheel, move a
+setting toward a second value. Three dots mark a control with a morph. Pick the
+source in the inspector's **Morph** card and set its target value. Choose
+**Panel** or **Back to the panel** to edit the starting value again.
 
 ## The document header
 
-Every document has the same strip across the top: its kind and name, a format
-badge, where it lives (a slot, a folder, or this computer), its size, and its
-state: `edited`, `matches keyboard`, `differs from keyboard`, `waiting to send`
-or `on the keyboard`. Hover any of them for the detail.
+The strip above the controls names the sound, where it is and whether it has
+unsaved edits. Hover over an icon or status for details. **Basic** shows the
+playing controls, and **Advanced** shows the file's fields.
 
-To the right are the two faces, **Revert**, **Export…**, and the document's
-main action, usually **Queue send**. That action is grayed out when there is
-nowhere to send to, and becomes a warning such as `Won't fit · 70 MB over` when
-the send cannot happen yet.
+<details>
+<summary>Every field and raw values</summary>
 
-A document that belongs to a slot on the connected instrument also has **Load on
-instrument**, which makes the panel play that slot. The panel plays what the
-instrument holds there, so edits you have not sent are not heard.
+In **Advanced**, **Every field** lists settings the panel view leaves out.
+**Raw** shows the value as last saved. Type a new one under **Writes** to
+change it. A pencil marks each changed field.
 
-## The faces
+</details>
 
-- **Basic** is the sound's controls, in the instrument's own words.
-- **Advanced** is the record of the bytes, top to bottom:
-  - **About this file**: what the file says about itself. Songs, files
-    with nothing to edit and bytes drawbar could not read have none.
-  - **Container**: what the file's header states, and whether its checksum
-    matches.
-  - **On the instrument**, for a document read from a slot: what the
-    instrument reports about that slot.
-  - The body. For a program, live slot, settings file or preset this is
-    **Every field**, a table that includes values the Basic face does not draw.
-    **Raw** is the value as last saved. Type into the **Writes** column to set a
-    field. A value the field cannot hold is refused, with the reason. A field
-    changed since the last save is highlighted and marked with a pencil, and the
-    count above the table says how many there are. Samples and pianos list what
-    drawbar can edit in them and where each edit lands in the file. A song
-    shows its four stored slots, and a file with nothing to edit shows its
-    **Body bytes**. Bytes drawbar could not read have no body to show.
-
-A WAV has only Basic, and bytes drawbar could not read have only Advanced, so
-neither shows the switch.
-
-## Programs, live slots, settings and presets
-
-These open on a panel divided into sections the way the instrument's is, with a
-strip of chips at the top to jump between them. Each field is drawn as the
-control the panel uses: a lamp for a switch, a menu for a selector, a knob with
-the panel's own reading, drawbars you pull down, a grid for a pattern. A value
-drawbar has no name for reads `unrecognized value (6)` with a warning mark, and
-stays in its menu so you can change back to it.
-
-Every control answers the keyboard. Tab reaches it, the arrow keys step a knob,
-Page Up and Page Down jump it, Home and End take it to its stops, and Space flips
-a lamp. Double-click a knob to type a value.
-
-Where a program refers to a piano or sample by id, drawbar asks the connected
-instrument for its name and shows it. With an instrument connected, the piano
-**Model** lists its pianos of the chosen **Type**. Changing either one points the
-program at the piano now chosen, which is what the instrument plays. Sections the
-program stores but is not using are folded away.
-
-A control with a morph shows three dots. Pick a morph source in the inspector's
-**Morph** card and every morphed control shows that source's target instead.
-Editing then writes the morph. **Panel**, or **Back to the panel** above
-the sections, shows the panel's own values again.
-
-## Set lists
-
-A song from a set list opens as the programs it plays, one row each, with its bank and slot,
-the program's name where drawbar knows it, and whether the entry resolves. Drag
-rows to reorder them.
-
-## Notes
-
-A text file opens as a box you type in: the set list, the cues, what the desk
-needs. A `.txt`, a `.md` or any other plain text file of up to 256 KiB opens
-this way, and **New ▸ Text note** starts an empty one. Tab types a tab, and
-pasted control characters other than tabs and line breaks are dropped.
-
-A note is saved, reverted, renamed, filed, tagged and exported like anything
-else on the list. The header counts its lines where another document's header
-gives its size. Notes stay on this computer; see
-[What is supported](../getting-started/support.md).
-
-## Files with nothing to edit
-
-A file drawbar recognizes but cannot yet edit opens with what the container
-says, and its bytes are under **Body bytes** on the Advanced face. It can still
-be sent, copied and tagged, and goes back to the instrument byte for byte as it
-came off.
-
-Sample instruments and piano libraries have editors of their own. See
-[Samples](samples.md) and [Pianos](pianos.md).
+If drawbar recognizes a file but has no editor for it, **Advanced** lets you
+inspect its contents. It can still be sent, copied and tagged, and goes back to
+the instrument byte for byte.

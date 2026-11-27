@@ -1,73 +1,67 @@
-# The instrument
+# Work with an instrument
 
-Back up first. Nord Sound Manager makes a full backup, and it must be closed
-before `nord` can connect, since it keeps the USB connection to itself.
-[What is supported](../getting-started/support.md) says which instruments have
-been tested.
+Make a full backup with Nord Sound Manager before writing to the keyboard.
+Close Sound Manager to release the USB connection. On Linux, check the
+[USB permission rule](../getting-started/install.md#connecting-on-linux).
+[See which instruments have been tested](../getting-started/support.md#usb).
+
+## Read a program onto your computer
 
 ```sh
-nord device status                      # what the instrument holds; --json for scripts
-nord device info                        # what is attached
-nord device geometry                    # its partitions, banks and slots
-nord device recover                     # release a session an interrupted run left open
-
-nord program list                       # every occupied slot
-nord program focus                      # what the panel has loaded
-nord program get 7:4                    # print the summary
-nord program get 7:4 -o patch.ne5p      # or save the file
-nord program put patch.ne5p 7:4 --yes   # send a file to a slot
-nord program move 8:13 7:16 --yes
-nord program duplicate 7:2 7:3 --yes
-nord program rename 6:13 "Warm Pad" --yes
-nord program delete 7:50 7:49 --yes
-nord program select 2:12                # load it on the panel
-nord program info 7:4                   # size, format, name, checksum
-nord program deps 7:4                   # the piano and sample it uses, by name
+nord device status
+nord program list
+nord program get 7:4 -o patch.ne5p
 ```
 
-The same verbs work on `setlist`, `sample` and `piano`. `live` takes `get`,
-`info`, `deps` and `edit`, and `settings` takes `get`, `info` and `edit`.
+`status` shows what the instrument holds. Use `--json` for scripts.
+Choose an occupied address from `list` in place of `7:4`. Without `-o`,
+`get` prints a summary. With it, you have a file you can [inspect](files.md)
+or [edit](editing.md) independently of the keyboard.
+
+Use `nord device info` to identify the attached instrument, or `nord device
+geometry` for its banks and slot counts. To see what's currently selected on
+the panel, run `nord program focus`.
 
 ## Before anything changes
 
-A command that changes the instrument reads the slot first, says what it is
-about to do, and asks:
+For example, to send an edited file back to bank 7, slot 4:
 
-```
-$ nord program duplicate 7:2 7:3
-duplicating "Africa Split" from bank 7 slot 2 to bank 7 slot 3 — OVERWRITING "Squabble B"
-proceed? [y/N]
+```sh
+nord program put louder.ne5p 7:4
 ```
 
-`move` reports a swap rather than an overwrite, because the instrument exchanges
-the two slots and nothing is lost. It also lists the songs that point at the
-program, since the instrument updates them to follow it. `put` names the slot
-after the file.
+Read the destination and the name of the current occupant when prompted. Press
+Enter to cancel or type `y` to continue. The slot takes its new name from the
+file. Use `--yes` to answer in advance when scripting a write.
 
-`--yes` skips the question. Without a terminal to ask on, the command stops
-with `refusing to proceed without --yes`. There is no `--force`, and nothing
-skips the read.
+## Organize slots
+
+| Task | Example | Effect |
+|---|---|---|
+| Load a program | `nord program select 2:12` | Selects it on the panel. |
+| Move a program | `nord program move 8:13 7:16` | Swaps the two slots. The command lists songs that follow the move. |
+| Copy to a second slot | `nord program duplicate 7:2 7:3` | Replaces the destination if occupied. |
+| Rename a program | `nord program rename 6:13 "Warm Pad"` | Changes the name shown on the keyboard. |
+| Delete programs | `nord program delete 7:50 7:49` | Removes the sounds from those slots. |
+
+Use `get` and `put` with `sample`, `piano` or `setlist` to transfer those
+sounds. For a song and all its dependencies, [read a bundle](files.md#bundles).
+`live` provides `get`, `info`, `deps` and `edit`. For `settings`, use `get`,
+`info` or `edit`.
 
 ## What a write does
 
-The instrument does not overwrite an occupied slot in place, so a `put` into one
-deletes the old sound first. `nord` first saves the old sound in the working
-directory as a file such as `nord-rescued-7-50.ne5p`, and puts it back if the
-write fails. The file is deleted once the slot holds what it should. If the
-write and the put-back both fail, or `nord` is stopped partway, the file stays,
-and `put` takes it straight back. Live slots and settings are the exception: the
-instrument overwrites those in place.
+Before replacing an occupied program, song, sample or piano, `nord` checks the
+input and saves the old sound to the working directory. To choose a different
+recovery folder, use `--rescue-dir DIR` or set `NORD_RESCUE_DIR`. If it can't
+save the recovery copy, it leaves the slot alone.
 
-While the old sound is read, its file is named `nord-rescued-7-50.ne5p.partial`.
-It takes its own name only once it is complete, and the slot is not touched
-before then. A `.partial` file left by a stopped `nord` can be deleted.
+If the write fails, `nord` tries to restore the old sound. After a successful
+write or restore, it removes the recovery file. If both fail, or the command
+was interrupted, look for a file such as `nord-rescued-7-50.ne5p`. Use it
+with `nord program put` to restore the sound to the intended slot. A
+`.partial` file means the recovery copy was unfinished and the slot hadn't
+yet been changed. Live slots and settings are written in place.
 
-`--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
-folder. Without a folder it can write to, `nord` leaves the slot alone.
-
-`put` checks that the file is intact before it touches the instrument.
-
-Every command closes its session even when it fails, so an error cannot leave the
-instrument stuck on its progress screen. If a run is interrupted, the next
-command may say the instrument answered out of step. `nord device recover`
-releases the session it still holds.
+If the next command says the instrument answered out of step after an interrupted
+session, run `nord device recover` and try again.
