@@ -1461,11 +1461,18 @@ impl State {
         (*held != self.draft).then(|| self.draft.clone())
     }
 
-    /// Keep a plan the library accepted.
-    pub fn commit(&mut self, plan: Plan) {
-        if let Some(open) = &self.open {
-            self.plans.insert(open.id, plan);
-        }
+    /// Keep a plan the library accepted. An empty plan needs no lay-out: where one has
+    /// reached the working bytes, this returns the body the plan edits for them to hold
+    /// again.
+    #[must_use]
+    pub fn commit(&mut self, plan: Plan) -> Option<Bytes> {
+        let id = self.open.as_ref()?.id;
+        let over = match plan.is_empty() {
+            true => self.laid.remove(&id).map(|(_, over)| over),
+            false => None,
+        };
+        self.plans.insert(id, plan);
+        over
     }
 
     /// Put back the plan in hand, because the library refused the drafted one.
@@ -4725,7 +4732,14 @@ mod tests {
                 .take(&vec![(path.to_string(), value.to_string())])
                 .expect("the piano knows the field");
             if let Some(plan) = self.state.drafted() {
-                self.state.commit(plan);
+                self.commit(plan);
+            }
+        }
+
+        /// What [`super::super::Document::replan`] does with a plan the library takes.
+        fn commit(&mut self, plan: Plan) {
+            if let Some(body) = self.state.commit(plan) {
+                self.workspace.replace_bytes(self.id, body, &mut self.log);
             }
         }
 
@@ -4780,7 +4794,7 @@ mod tests {
                     .state
                     .check(self.workspace.get(self.id).unwrap(), &plan)
                 {
-                    Ok(()) => self.state.commit(plan),
+                    Ok(()) => self.commit(plan),
                     Err(_) => self.state.discard(),
                 }
             }

@@ -660,7 +660,9 @@ impl Document {
         };
         match checked {
             Ok(resting) => {
-                self.piano.commit(plan.clone());
+                if let Some(body) = self.piano.commit(plan.clone()) {
+                    workspace.replace_bytes(id, body, log);
+                }
                 self.refused(None);
                 // A library resting in its file is saved by writing the plan through it.
                 if resting {
@@ -4628,6 +4630,25 @@ mod tests {
             .filter(|word| word.ends_with(" roots"))
             .collect();
         assert_eq!(roots, ["2 roots"], "the file holds 3 and the body 2");
+    }
+
+    #[test]
+    fn a_piano_plan_typed_back_after_a_lay_out_leaves_nothing_unsaved() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+
+        open.frame(Vec::new());
+        open.frame(vec![open.on_name_box("XTest Piano")]);
+        open.frame(vec![testing::key(egui::Key::Delete)]);
+        open.frame(vec![testing::key(egui::Key::Enter)]);
+        open.twice();
+        assert!(
+            !open.entity().is_unsaved(),
+            "pends {}",
+            open.document.pends(open.id)
+        );
+        assert!(open.entity().bytes == *open.entity().saved.bytes());
     }
 
     #[test]
