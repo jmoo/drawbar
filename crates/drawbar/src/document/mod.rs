@@ -4739,6 +4739,42 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn keeping_both_copies_a_piano_with_its_pending_plan() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        let _theirs = saved_over_outside(&mut open, &three_root_piano());
+        open.twice();
+
+        let id = open.id;
+        open.act(vec![crate::browser::Act::KeepBoth(id)]);
+        let ctx = open.ctx.clone();
+        if let Some(applied) = open
+            .document
+            .piano
+            .awaited(&ctx, &mut open.workspace, &mut open.log)
+        {
+            let acts = open
+                .document
+                .put_back(applied, &mut open.workspace, &mut open.log);
+            open.act(acts);
+        }
+        let copies: Vec<String> = open
+            .workspace
+            .entities()
+            .iter()
+            .filter(|entity| entity.id != id)
+            .filter_map(|entity| piano::snapshot(entity.entity.as_deref()?)?.ok())
+            .map(|snapshot| snapshot.name)
+            .collect();
+        assert_eq!(copies, ["XTest Piano"], "the copy holds the rename");
+        assert!(
+            open.entity().rests().is_some(),
+            "the file is taken as it is"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn a_piano_body_restored_over_a_lay_out_shows_what_it_holds() {
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         rename_with_an_x(&mut open);
