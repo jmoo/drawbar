@@ -929,19 +929,22 @@ impl Step {
         })
     }
 
-    /// Whether the file, its link, and what the keyboard reports for the slots it
-    /// touches are all still as the sheet showed them.
+    /// Whether the file, its link, what the keyboard reports for the slots it touches,
+    /// and the file linked where a move goes are all still as the sheet showed them.
     fn holds(&self, state: &DeviceState, workspace: &Workspace) -> bool {
         let (Some(keyboard), Some(entity)) = (state.keyboard(), workspace.get(self.row.id)) else {
             return false;
         };
         let file = Seen::of(entity, keyboard);
         let read = |at: Option<Location>| Some(Expect::of(state.slot(self.row.class, at?)?));
-        let to = match self.row.change {
-            Change::Moved { to, .. } => read(Some(to)),
-            _ => None,
+        let (to, with) = match self.row.change {
+            Change::Moved { to, with, .. } => {
+                let linked = workspace.linked_at(keyboard, self.row.class, &Spot::at(to));
+                (read(Some(to)), linked == with)
+            }
+            _ => (None, true),
         };
-        self.file.still(&file, self.way) && read(self.row.at) == self.slot && to == self.to
+        self.file.still(&file, self.way) && read(self.row.at) == self.slot && to == self.to && with
     }
 }
 
@@ -1052,14 +1055,19 @@ pub fn apply(device: &mut Device, workspace: &mut Workspace, log: &mut Log) {
     open(device, Some(first.row.id));
 }
 
-/// `going` without each move whose swap or rotation no longer goes whole.
+/// `going` without each step that goes only with others that no longer do: a move whose
+/// swap or rotation is not whole, and a piano or sample no program going up plays.
 fn whole(mut going: Vec<Step>) -> Vec<Step> {
     loop {
-        let goes = |id: u64| going.iter().any(|step| step.row.id == id);
-        let stuck = going.iter().position(|step| match step.row.change {
+        let goes = |id: u64| going.iter().find(|step| step.row.id == id);
+        let stuck = going.iter().position(|step| match &step.row.change {
             Change::Moved {
                 with: Some(with), ..
-            } => !goes(with),
+            } => goes(*with).is_none(),
+            Change::Plays { by } => {
+                let up = |id: &u64| goes(*id).is_some_and(|step| step.way == Way::Up);
+                !by.iter().any(up)
+            }
             _ => false,
         });
         match stuck {
@@ -1191,9 +1199,11 @@ fn bring(
     if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
-    // The version replaced counts as an earlier one: put back, it reads as older.
-    let replaced = before.agreed(entity.saved_print()?, name.trim());
-    let after = replaced.agreed(print_of(&bytes)?, name.trim());
+    // A version the link never knew counts, once replaced, as an earlier one: put back,
+    // it reads as older.
+    let replaced = entity.saved_print().filter(|it| !before.knew(it.crc));
+    let known = replaced.map_or_else(|| before.clone(), |it| before.agreed(it, name.trim()));
+    let after = known.agreed(print_of(&bytes)?, name.trim());
     let restored = Restored {
         id,
         bytes: entity.bytes.to_vec(),
@@ -1950,6 +1960,81 @@ mod tests {
         let log = &mut bench.log;
         bench.workspace.save_over(id, mine, None, log);
         assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+    }
+
+    #[test]
+    fn bringing_in_over_a_version_the_link_knows_keeps_the_order_of_its_history() {
+        let mut bench = Bench::new();
+        let (v1, v2, v3) = (body(), gained("40"), gained("41"));
+        walked(&mut bench, &[Some(crc(&v3))]);
+        let id = linked(&mut bench, "A.ne5p", v1.clone(), 1, &v1);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let held = Held::new(PROGRAM, at(1), "A", print(&v1)).unwrap();
+        let held = held.agreed(print(&v2), "A").agreed(print(&v3), "A");
+        bench.workspace.link(id, &keyboard, held);
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+        bench.sync();
+        got(&mut bench, 1, v3, Purpose::Pull);
+
+        let log = &mut bench.log;
+        bench.workspace.save_over(id, v1, None, log);
+        let slots = vec![Some(program_info(1, "A", crc(&v2)))];
+        bench.device.pretend(DeviceEvent::BankScanned {
+            class: PROGRAM,
+            bank: 1,
+            slots,
+        });
+        heard(&mut bench);
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+    }
+
+    #[test]
+    fn a_move_onto_a_slot_another_file_was_linked_to_since_sync_was_pressed_is_not_run() {
+        let mut bench = Bench::new();
+        let a = body();
+        walked_named(&mut bench, &[None, Some(("A", crc(&a)))]);
+        let moved = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        open_read(&mut bench);
+        let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+        accept(&mut bench.device, &sync, &bench.workspace);
+        let since = linked(&mut bench, "C.ne5p", gained("41"), 2, &gained("41"));
+        bench.act(vec![Act::SyncAll]);
+        assert_eq!(slot_of(&bench, moved), Some(Spot::at(at(1))));
+        assert_eq!(slot_of(&bench, since), Some(Spot::at(at(2))));
+    }
+
+    #[test]
+    fn a_piano_goes_up_only_while_a_program_that_plays_it_still_does() {
+        for changed in [false, true] {
+            let mut bench = Bench::new();
+            walked(&mut bench, &[Some(crc(&body()))]);
+            let class = ObjectClass::Piano;
+            bench.device.pretend_geometry(class, &[("Grand", 2)]);
+            let held = [Some(("Grand", 1000)), None];
+            bench.device.pretend_lengths(class, 1, &held);
+            let log = &mut bench.log;
+            let tine = crate::testing::piano(1);
+            let piano = bench
+                .workspace
+                .ingest("Tine.npno".into(), Origin::Fresh, tine, log);
+            bench.workspace.settle_files(log);
+            let id = crate::plays::slot_key(class, "Tine").1.to_string();
+            let plays = crate::fields::apply(&body(), &[("piano_panel.id".into(), id)]);
+            let program = linked(&mut bench, "A.ne5p", plays.unwrap().1, 1, &body());
+            open_read(&mut bench);
+            let sync = Rows::of(&bench.device.state, &bench.workspace, &bench.queue);
+            accept(&mut bench.device, &sync, &bench.workspace);
+            if changed {
+                let log = &mut bench.log;
+                bench.workspace.replace_bytes(program, gained("60"), log);
+            }
+            bench.act(vec![Act::SyncAll]);
+            let ids: Vec<u64> = written(&bench).iter().map(|(id, _)| *id).collect();
+            match changed {
+                false => assert_eq!(ids, [piano, program]),
+                true => assert!(ids.is_empty(), "{ids:?}"),
+            }
+        }
     }
 
     #[test]
