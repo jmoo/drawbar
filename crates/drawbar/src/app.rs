@@ -3195,9 +3195,9 @@ mod tests {
     #[test]
     fn a_drag_back_to_where_it_began_and_an_undo_in_one_frame_take_back_nothing() {
         let (ctx, mut app) = keyed();
-        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
-        let on_dial = dial(&said, "PROGRAM LEVEL");
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
         let turned = turn_gain(&ctx, &mut app, id, "40");
+        let on_dial = dial(&input(&ctx, &mut app, Vec::new()), "PROGRAM LEVEL");
         input(&ctx, &mut app, vec![egui::Event::PointerMoved(on_dial)]);
         input(&ctx, &mut app, vec![crate::testing::button(on_dial, true)]);
         let away = on_dial - egui::vec2(0.0, 40.0);
