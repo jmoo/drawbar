@@ -2127,6 +2127,7 @@ fn commit<'a>(
                 library,
                 Committed {
                     left: ended.left,
+                    files: ended.files,
                     undoable: committed.undoable && entering != Entering::Final,
                     ..committed
                 },
@@ -2165,6 +2166,7 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         trees: trees.collect(),
         local,
         left: Vec::new(),
+        files: Vec::new(),
     }
 }
 
@@ -2644,9 +2646,12 @@ fn close(mut logged: Logged, closing: Option<Closing>) -> (Logged, Option<Settle
     (logged, Some(settle))
 }
 
-/// The directories the folder still holds that a commit's effects were to remove.
+/// How a commit's effects ended: the directories the folder still holds that they
+/// were to remove, and the facts logged of the files they left.
+#[derive(Default)]
 struct Ended {
     left: Vec<RelPath>,
+    files: Vec<FileFact>,
 }
 
 /// Logs `logged`, which enters the history as `entering` says, carrying out
@@ -2672,8 +2677,7 @@ fn transact<'a>(
             })
             .map_ok(|(library, entries)| {
                 library.show();
-                let ended = Ended { left: Vec::new() };
-                (library, entries, ended)
+                (library, entries, Ended::default())
             });
     }
     let mut logged = logged;
@@ -2822,6 +2826,9 @@ fn log_effects<'a>(
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     let file_ops = file_ops(&applied, &record.files);
+    let files = applied.files.iter().map(|(_, file)| file);
+    let files = files.chain(applied.unbound.iter().map(|(_, file)| file));
+    let files: Vec<FileFact> = files.flatten().cloned().collect();
     let (mut logged, settle) = close(logged, closing);
     logged.ops.extend(file_ops);
     logged.displaced = applied.displaced;
@@ -2849,7 +2856,10 @@ fn log_effects<'a>(
             library.wrote(&touched);
             rescan_paths(library, touched).map_ok(move |library| {
                 library.show();
-                let ended = Ended { left: applied.left };
+                let ended = Ended {
+                    left: applied.left,
+                    files,
+                };
                 (library, entries, ended)
             })
         })
@@ -2883,7 +2893,8 @@ fn settle_orphan(
         .and_then(tidy_staging)
         .and_then(
             move |library| match effects.is_empty() && facts.is_empty() {
-                true => append(library, vec![EntryKind::Settle(settle)]),
+                true => append(library, vec![EntryKind::Settle(settle)])
+                    .map_ok(|(library, entries)| (library, entries, Vec::new())),
                 false => {
                     let logged = Logged {
                         label: theirs.label,
@@ -2901,14 +2912,15 @@ fn settle_orphan(
                         Some(closing),
                         Vec::new(),
                     )
-                    .map_ok(|(library, entries, _)| (library, entries))
+                    .map_ok(|(library, entries, ended)| (library, entries, ended.files))
                 }
             },
         )
-        .and_then(move |(library, entries)| {
+        .and_then(move |(library, entries, files)| {
             library.show();
             let committed = Committed {
                 undoable: false,
+                files,
                 ..committed(&entries, Vec::new(), library.local())
             };
             library

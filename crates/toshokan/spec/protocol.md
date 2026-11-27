@@ -404,9 +404,11 @@ fails before its own intent is tried.
 Otherwise a commit whose entries are durable succeeds, whatever fails after
 them, and says which parts of the instance's own state lag it: `head.json` not
 written, which the next commit, refresh or close writes again; or the scan after
-it failed, which the next refresh repeats. Settling one
-of this writer's own effects and settling another writer's effect commit in the
-same way.
+it failed, which the next refresh repeats. It reports the fact its `file` and
+`path` ops logged of each file the effects left, read at step 5 before the
+append, so an app knows a file it wrote by the length and time it had then.
+Settling one of this writer's own effects and settling another writer's effect
+commit in the same way.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.

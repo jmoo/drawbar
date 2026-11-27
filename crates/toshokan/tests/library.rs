@@ -693,6 +693,7 @@ through_both!(
     orphans_are_held_back_while_a_pending_record_cannot_be_read,
     a_writer_whose_own_pending_record_cannot_be_read_does_not_open,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
+    a_commit_reports_the_fact_it_logged_of_each_file_it_placed,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_folder_holding_no_file_is_renamed_and_named_back_by_undo,
@@ -4739,6 +4740,48 @@ fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F
     assert_eq!(a.view().listed(&path("moved.npno")), None);
     a.rescan().unwrap();
     assert_eq!(a.view().listed(&path("same.npno")).map(|l| l.len), Some(4));
+}
+
+fn a_commit_reports_the_fact_it_logged_of_each_file_it_placed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let placed = |at: &str, bytes: &[u8]| {
+        let modified = match folder.perform(Io::Stat {
+            root: Root::Folder,
+            path: path(at),
+        }) {
+            Ok(Reply::Stat(Some(meta))) => meta.modified,
+            other => panic!("{other:?}"),
+        };
+        FileFact {
+            path: path(at),
+            identity: identity(bytes),
+            len: bytes.len() as u64,
+            modified,
+        }
+    };
+
+    let saved = a
+        .commit("Save", |i| {
+            let (i, _) = i.create(|e| {
+                e.save(&path("song.npno"), b"song".to_vec(), Expect::Absent);
+            });
+            i.save_file(&path("a.wav"), b"wave".to_vec(), Expect::Absent)
+        })
+        .unwrap();
+    let tagged = a
+        .commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
+                e.add(TAGS, tag("new"));
+            });
+            i
+        })
+        .unwrap();
+
+    let expected = [placed("song.npno", b"song"), placed("a.wav", b"wave")];
+    assert_eq!(saved.files, expected, "the files the save placed");
+    assert_eq!(tagged.files, [], "a commit that places no file");
 }
 
 fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: Facade>() {

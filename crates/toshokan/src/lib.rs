@@ -98,7 +98,8 @@
 //! files went, an undo's included. A save takes bytes or a source the driver
 //! streams into staging a chunk at a time, such as a [`Splice`](plan::Splice) of
 //! the file being rewritten, so a file of hundreds of megabytes is never held
-//! whole.
+//! whole. [`Committed::files`] gives each file the effects left as the commit
+//! logged it, read once the effects were done and before the intent was logged.
 //!
 //! A commit whose file effects fail logs nothing and fails. The next write, or the
 //! next open, finishes them first, and where it cannot, the library is read-only
