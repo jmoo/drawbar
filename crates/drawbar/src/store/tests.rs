@@ -9160,6 +9160,7 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
 }
+
 /// Another program's write, made once the library has put a saved file in place and
 /// before the save is answered: the file, and the bytes written to it.
 static WRITTEN_AFTER_THE_PUT: std::sync::Mutex<Option<(std::path::PathBuf, Vec<u8>)>> =

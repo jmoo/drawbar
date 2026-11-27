@@ -3383,6 +3383,46 @@ mod tests {
         }
     }
 
+    /// Otherwise the next look reads each saved file again.
+    #[test]
+    fn ordinary_saves_are_answered_with_the_length_and_time_a_listing_finds() {
+        let root = Temp::new();
+        fs::write(root.at("old.ne5p"), b"old").unwrap();
+        let mut keeper = keeper(&root);
+        let save = |id, at: &str, bytes: &[u8], expect| Intent::Save {
+            id,
+            path: path(at),
+            bytes: bytes.to_vec(),
+            expect,
+            came: None,
+        };
+        let decomposed = "Cafe\u{301}.ne5p";
+        let old = keeper.listed("old.ne5p");
+        let answers = keeper.run_one(Cmd::Intent(Intent::Batch(vec![
+            save(1, "new.ne5p", b"new", Expect::Absent),
+            save(2, "old.ne5p", b"over", old),
+            save(3, decomposed, b"cafe", Expect::Absent),
+            save(4, "Sub/deep.wav", b"wave", Expect::Absent),
+        ])));
+        keeper.run_one(Cmd::Rescan);
+
+        let saved = answers.iter().filter_map(|event| match event {
+            Event::Saved {
+                path,
+                result: Ok(print),
+                ..
+            } => Some((path.as_str(), print.stat())),
+            _ => None,
+        });
+        let saved: Vec<(&str, Stat)> = saved.collect();
+        let listed: Vec<(&str, Stat)> = ["new.ne5p", "old.ne5p", decomposed, "Sub/deep.wav"]
+            .into_iter()
+            .map(|at| (at, keeper.stat(at)))
+            .collect();
+        assert_eq!(saved, listed, "{answers:?}");
+        assert!(listed.iter().all(|(_, stat)| stat.modified.is_some()));
+    }
+
     /// Storage that runs `meddle` once, right after the first read of `at` in the folder
     /// once armed, as another program changing that file mid-copy would.
     struct Meddled {
