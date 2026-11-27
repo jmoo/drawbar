@@ -86,7 +86,7 @@ file's exact bytes without a link is a hint in the Selection card and nothing mo
 
 A file sent to a slot that is not its own is placed there by hand and listed in the
 same sheet. A program going up lists the piano or sample it plays as a row of its
-own when the keyboard lacks it.
+own when the keyboard lacks it. That row goes up while any program that plays it does.
 
 Undo in the activity log takes back a link made, moved or removed, and a file Sync
 brought in, each only while it is still as that change left it. Library undo takes

@@ -1861,7 +1861,7 @@ mod tests {
             id: piano,
             class: ObjectClass::Piano,
             at: Some(Location::from_user(1, 2)),
-            change: Change::Plays { by: program },
+            change: Change::Plays { by: vec![program] },
         };
         let mut device = pianos_read(&workspace, 2, "Grand");
         assert_eq!(rows(&mut device), [placed.clone(), played.clone()]);
@@ -1939,6 +1939,56 @@ mod tests {
             &[Some(("Rhodes", 9)), Some(("Wurly", 9))],
         );
         assert_eq!(counted(&mut full, false), (1, vec![false, true]), "no room");
+    }
+
+    #[test]
+    fn a_piano_two_programs_play_goes_up_while_either_does() {
+        use crate::bring::{plan, Change, Rows};
+        let (mut workspace, mut log, fresh) = bench();
+        let piano = workspace.ingest(
+            "Tine.npno".into(),
+            Origin::Fresh,
+            testing::piano(1),
+            &mut log,
+        );
+        let tine = plays::slot_key(ObjectClass::Piano, "Tine").1;
+        let (_, bytes) =
+            crate::fields::apply(&fresh, &[("piano_panel.id".into(), tine.to_string())]).unwrap();
+        let programs = ["Keys.ne5p", "Pad.ne5p"]
+            .map(|name| workspace.ingest(name.into(), Origin::Fresh, bytes.clone(), &mut log));
+        let mut device = pianos_read(&workspace, 2, "Grand");
+        let mut queue = Queue::default();
+        for (slot, program) in (0..).zip(programs) {
+            let class = ObjectClass::Program;
+            enqueue(
+                &workspace,
+                &mut device,
+                &mut queue,
+                &mut log,
+                program,
+                class,
+                at(slot),
+            );
+        }
+        crate::bring::open(&mut device, None);
+        while let Some(class) = device.state.scan.take() {
+            device.state.scan.finished(class);
+        }
+        let sync = Rows::of(&device.state, &workspace, &queue);
+        let played = sync.list.iter().find(|row| row.id == piano).expect("a row");
+        let by = programs.to_vec();
+        assert_eq!(played.change, Change::Plays { by });
+        assert_eq!(played.said(&workspace, &queue), "new · 2 programs play it");
+
+        let sheet = device.asks.sheet.as_mut().expect("open");
+        let mut left_out = |program: u64| {
+            let row = sync.list.iter().find(|row| row.id == program).unwrap();
+            sheet.turn(row, Way::Up, &sync.list, &workspace);
+            let steps = plan(sheet, &sync.list, &device.state, &workspace);
+            steps.iter().any(|step| step.row.id == piano)
+        };
+        assert!(left_out(programs[0]), "the other program still plays it");
+        assert!(!left_out(programs[1]), "nothing going up plays it");
     }
 
     #[test]

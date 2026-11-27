@@ -22,9 +22,9 @@ use crate::workspace::{print_of, LocalEntity, VerifyState, Workspace};
 pub enum Change {
     /// Sent by hand to a slot, unless `waits` says why it goes nowhere yet.
     Placed { waits: Option<Waits> },
-    /// A piano or sample only this computer has, which the program `by` plays and which
-    /// goes up with it, to a free slot.
-    Plays { by: u64 },
+    /// A piano or sample only this computer has, which the programs `by` play and which
+    /// goes up with any of them, to a free slot.
+    Plays { by: Vec<u64> },
     /// The slot holds an earlier version of the file.
     Ahead,
     /// The slot holds a version the file never had, and the file has not changed.
@@ -160,10 +160,13 @@ impl Row {
                 format!("to {to} · {}", crate::queue::placed_words(self.id, queue))
             }
             Change::Plays { .. } if self.at.is_none() => "no room on the keyboard".into(),
-            Change::Plays { by } => {
-                let name = workspace.get(*by).map_or("", |it| display_name(&it.name));
-                format!("new · “{name}” plays it")
-            }
+            Change::Plays { by } => match by[..] {
+                [program] => {
+                    let name = workspace.get(program).map_or("", |it| it.name.as_str());
+                    format!("new · “{}” plays it", display_name(name))
+                }
+                _ => format!("new · {} programs play it", by.len()),
+            },
             Change::Ahead => "newer here".into(),
             Change::Theirs => "newer on the keyboard".into(),
             Change::Both => "both changed".into(),
@@ -214,12 +217,9 @@ impl Rows {
     /// as it stands.
     pub fn of(state: &DeviceState, workspace: &Workspace, queue: &Queue) -> Rows {
         let list = rows(state, workspace, queue);
-        let up = |id: u64| {
-            let program = list.iter().find(|row| row.id == id);
-            program.is_some_and(|row| row.ways(workspace).taken == Some(Way::Up))
-        };
-        let marked = list.iter().filter(|row| match row.change {
-            Change::Plays { by } => up(by),
+        let up = |row: &Row| row.ways(workspace).taken == Some(Way::Up);
+        let marked = list.iter().filter(|row| match &row.change {
+            Change::Plays { by } => list.iter().any(|it| by.contains(&it.id) && up(it)),
             _ => true,
         });
         let marks = marked.map(|row| {
@@ -364,11 +364,15 @@ fn played(state: &DeviceState, workspace: &Workspace, queue: &Queue, rows: &[Row
             let file = workspace
                 .listed()
                 .find(|file| crate::plays::key_of(file) == Some(key));
-            let Some(file) =
-                file.filter(|file| !rows.iter().chain(&found).any(|row| row.id == file.id))
-            else {
+            let Some(file) = file.filter(|file| !rows.iter().any(|row| row.id == file.id)) else {
                 continue;
             };
+            if let Some(row) = found.iter_mut().find(|row| row.id == file.id) {
+                if let Change::Plays { by } = &mut row.change {
+                    by.extend((!by.contains(&program.id)).then_some(program.id));
+                }
+                continue;
+            }
             let mut taken = queue.waiting_in(class);
             taken.extend(
                 found
@@ -380,7 +384,9 @@ fn played(state: &DeviceState, workspace: &Workspace, queue: &Queue, rows: &[Row
                 id: file.id,
                 class,
                 at: state.first_free(class, &taken),
-                change: Change::Plays { by: program.id },
+                change: Change::Plays {
+                    by: vec![program.id],
+                },
             });
         }
     }
@@ -598,16 +604,14 @@ impl Sheet {
         }
     }
 
-    /// Whether the sheet lists `row`: a piano or sample a program plays only while that
-    /// program goes up.
+    /// Whether the sheet lists `row`: a piano or sample programs play only while one of
+    /// them goes up.
     pub fn shows(&self, row: &Row, rows: &[Row], workspace: &Workspace) -> bool {
-        let Change::Plays { by } = row.change else {
+        let Change::Plays { by } = &row.change else {
             return true;
         };
-        let program = rows
-            .iter()
-            .find(|it| it.id == by && it.change != row.change);
-        program.is_some_and(|it| self.way(it, rows, workspace) == Some(Way::Up))
+        let mut programs = rows.iter().filter(|it| by.contains(&it.id));
+        programs.any(|it| self.way(it, rows, workspace) == Some(Way::Up))
     }
 
     /// The way Sync takes `row`: the one the user picked, or else its own. A move goes

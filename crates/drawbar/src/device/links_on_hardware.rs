@@ -989,7 +989,7 @@ fn l10_a_program_placed_on_a_slot_lists_the_sample_it_plays_and_sync_writes_it_f
     );
     let played = changes(&rig);
     assert!(
-        played.contains(&(probe, Change::Plays { by: id })),
+        played.contains(&(probe, Change::Plays { by: vec![id] })),
         "the sample is a row of its own: {played:?}\n{}",
         rig.bench.log.tail(20)
     );
