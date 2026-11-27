@@ -477,6 +477,24 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
     assert_eq!(root.read("untitled.ne5p"), edited);
 }
 
+#[test]
+fn a_send_landing_what_the_file_already_holds_saves_nothing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let sent = session.bytes(id);
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, with_gain(&sent, "96"), log);
+    assert!(workspace.take_file_asks().is_empty());
+
+    workspace.landed(id, sent);
+
+    let asks = workspace.take_file_asks();
+    assert!(asks.is_empty(), "the file holds what was sent: {asks:?}");
+    assert!(workspace.get(id).unwrap().is_unsaved());
+}
+
 /// A browser cannot wait for its library's answers, so it lets a library go only once it
 /// is settled, after one last pass whose answers nothing reads. That pass sends no save,
 /// so the index it writes holds what each save answered.

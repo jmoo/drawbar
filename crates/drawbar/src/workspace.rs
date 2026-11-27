@@ -3823,6 +3823,10 @@ impl Workspace {
             Some(false) => {
                 self.respell(id, sent.clone().into());
             }
+            None if self.get(id).is_some_and(|it| it.saved.holds(&sent)) => {
+                self.revision += 1;
+                return;
+            }
             None => {}
         }
         let stamp = self.stamp_for(id, &sent);
