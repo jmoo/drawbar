@@ -18,7 +18,7 @@ use crate::shell::{pressed_inside, Dock, Shell};
 use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
-use crate::timeline::{Gesture, LetGo, Timeline};
+use crate::timeline::{Gesture, Timeline};
 use crate::workspace::{Working, Workspace};
 use crate::zoom::{Room, Zoom};
 
@@ -193,7 +193,7 @@ pub struct DrawbarApp {
     pub(crate) timeline: Timeline,
     /// The Undo and Redo asked for this frame, in order, which run once its edits are
     /// recorded.
-    pub(crate) undoing: Vec<crate::menu::Command>,
+    pub(crate) undoing: Vec<crate::timeline::Aim>,
     /// The libraries opened lately.
     #[cfg(not(target_arch = "wasm32"))]
     recent: crate::libraries::Recent,
@@ -400,12 +400,17 @@ impl DrawbarApp {
         if !picked.is_empty() {
             ctx.request_repaint();
         }
-        for command in picked {
-            if admit(command) && self.may_run(ctx, command) {
-                self.run(ctx, frame, command, acts);
+        for (command, aim) in picked.into_iter().filter(|(command, _)| admit(*command)) {
+            match aim {
+                Some(aim) => self.undoing.push(aim),
+                None if self.may_run(ctx, command) => self.run(ctx, frame, command, acts),
+                None => {}
             }
         }
-        bar.refresh(|command| self.offer_now(ctx, command));
+        bar.refresh(
+            |command| self.offer_now(ctx, command),
+            |command| self.aim(command),
+        );
         self.menubar = Some(bar);
     }
 
@@ -568,7 +573,7 @@ impl DrawbarApp {
     /// Record what this frame's edits made of each document they changed, as steps Undo
     /// takes back, and let go of the steps Undo and Redo would take whose documents moved
     /// on.
-    fn record(&mut self, ctx: &egui::Context, began: Option<egui::Id>) -> LetGo {
+    fn record(&mut self, ctx: &egui::Context, began: Option<egui::Id>) {
         let shown = self.timeline.shown();
         let documents = Editors {
             document: &mut self.document,
@@ -593,11 +598,10 @@ impl DrawbarApp {
             })
         });
         let changes: Vec<_> = changes.collect();
-        let let_go = follow(&mut self.timeline, ctx, began, changes, &documents);
+        follow(&mut self.timeline, ctx, began, changes, &documents);
         if self.timeline.shown() != shown {
             ctx.request_repaint();
         }
-        let_go
     }
 
     /// Hold a send to the instrument until the library's files have been checked for
@@ -1338,8 +1342,8 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.log,
         );
-        let let_go = self.record(ctx, began);
-        self.undo_asked(ctx, let_go);
+        self.record(ctx, began);
+        self.undo_asked(ctx);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1517,7 +1521,7 @@ fn follow(
     began: Option<egui::Id>,
     changes: Vec<Change>,
     documents: &impl crate::timeline::Documents,
-) -> LetGo {
+) {
     let gesture = gesture(ctx);
     let pressed = ctx.input(|i| i.pointer.any_pressed());
     let left = |began: &egui::Id| pressed || gesture != Gesture::Focused(*began);
@@ -1535,7 +1539,7 @@ fn follow(
     if committed.is_some() {
         timeline.close();
     }
-    timeline.settle(gesture, documents)
+    timeline.settle(gesture, documents);
 }
 
 /// The gesture going on as a frame ends.
@@ -3016,15 +3020,7 @@ mod tests {
             idle(app) && root.read("untitled.ne5p") == changed
         });
         assert_eq!(undo_line(&app).0, "Undo Edit “untitled.ne5p”");
-        let outside = crate::fields::apply(&changed, &[("center_panel.gain".into(), "12".into())])
-            .unwrap()
-            .1;
-        app.workspace.replace_bytes(
-            id,
-            outside.clone(),
-            crate::workspace::Cause::Follow,
-            &mut app.log,
-        );
+        let outside = replaced_outside(&mut app, id);
 
         input(&ctx, &mut app, vec![undo_key(false)]);
         until(&ctx, &mut app, "the library is idle", idle);
@@ -3125,6 +3121,115 @@ mod tests {
 
         assert_eq!(bytes(&app, id), last);
         assert_eq!(steps(&app), (2, 0));
+    }
+
+    /// Replace what `id` holds as a change from outside drawbar does, which is no step.
+    fn replaced_outside(app: &mut DrawbarApp, id: u64) -> Vec<u8> {
+        let sets = [("center_panel.gain".into(), "12".into())];
+        let outside = crate::fields::apply(&bytes(app, id), &sets).unwrap().1;
+        let cause = crate::workspace::Cause::Follow;
+        app.workspace
+            .replace_bytes(id, outside.clone(), cause, &mut app.log);
+        outside
+    }
+
+    /// Two programs with their gains turned, the second's turn undone, and the first
+    /// replaced from outside since the last frame. Returns the second and what it holds.
+    fn redo_over_a_replaced_undo(ctx: &egui::Context, app: &mut DrawbarApp) -> (u64, Vec<u8>) {
+        let (first, _) = in_front(ctx, app, crate::workspace::Fresh::Program);
+        turn_gain(ctx, app, first, "40");
+        let (second, _) = in_front(ctx, app, crate::workspace::Fresh::Program);
+        let before = bytes(app, second);
+        turn_gain(ctx, app, second, "40");
+        input(ctx, app, vec![undo_key(false)]);
+        replaced_outside(app, first);
+        (second, before)
+    }
+
+    #[test]
+    fn an_undo_and_a_redo_pressed_as_the_redos_step_goes_redo_what_the_undo_took() {
+        let (ctx, mut app) = keyed();
+        let (first, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let turned = turn_gain(&ctx, &mut app, first, "40");
+        let (second, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, second, "40");
+        input(&ctx, &mut app, vec![undo_key(false)]);
+        replaced_outside(&mut app, second);
+
+        input(&ctx, &mut app, vec![undo_key(false), undo_key(true)]);
+
+        assert_eq!(
+            bytes(&app, first),
+            turned,
+            "the first turn is undone and made again"
+        );
+        assert_eq!(steps(&app), (1, 0));
+    }
+
+    #[test]
+    fn a_redo_and_an_undo_pressed_as_the_undos_step_goes_undo_what_the_redo_made() {
+        let (ctx, mut app) = keyed();
+        let (second, before) = redo_over_a_replaced_undo(&ctx, &mut app);
+
+        input(&ctx, &mut app, vec![undo_key(true), undo_key(false)]);
+
+        assert_eq!(
+            bytes(&app, second),
+            before,
+            "the second turn is made and undone again"
+        );
+        assert_eq!(steps(&app), (0, 1));
+    }
+
+    #[test]
+    fn a_redo_pressed_after_an_undo_whose_step_went_does_nothing() {
+        let (ctx, mut app) = keyed();
+        let (second, before) = redo_over_a_replaced_undo(&ctx, &mut app);
+
+        input(&ctx, &mut app, vec![undo_key(false), undo_key(true)]);
+
+        assert_eq!(bytes(&app, second), before, "the second turn stays undone");
+        assert_eq!(steps(&app), (0, 1));
+    }
+
+    #[test]
+    fn a_drag_back_to_where_it_began_and_an_undo_in_one_frame_take_back_nothing() {
+        let (ctx, mut app) = keyed();
+        let (id, said) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let on_dial = dial(&said, "PROGRAM LEVEL");
+        let turned = turn_gain(&ctx, &mut app, id, "40");
+        input(&ctx, &mut app, vec![egui::Event::PointerMoved(on_dial)]);
+        input(&ctx, &mut app, vec![crate::testing::button(on_dial, true)]);
+        let away = on_dial - egui::vec2(0.0, 40.0);
+        input(&ctx, &mut app, vec![egui::Event::PointerMoved(away)]);
+        assert_ne!(bytes(&app, id), turned, "the drag moved the level");
+
+        let back = egui::Event::PointerMoved(on_dial);
+        input(&ctx, &mut app, vec![back, undo_key(false)]);
+        input(&ctx, &mut app, vec![crate::testing::button(on_dial, false)]);
+        input(&ctx, &mut app, Vec::new());
+
+        assert_eq!(bytes(&app, id), turned, "the turn of the gain stands");
+        assert_eq!(steps(&app), (1, 0), "and the drag is no step");
+    }
+
+    #[test]
+    fn an_undo_picked_under_a_label_whose_step_has_since_gone_takes_back_nothing() {
+        let (ctx, mut app) = keyed();
+        let (first, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let turned = turn_gain(&ctx, &mut app, first, "40");
+        let (second, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, second, "40");
+        let labeled = app.aim(crate::menu::Command::Undo).expect("Undo aims");
+        let outside = replaced_outside(&mut app, second);
+        input(&ctx, &mut app, Vec::new());
+
+        app.undoing.push(labeled);
+        input(&ctx, &mut app, Vec::new());
+
+        assert_eq!(bytes(&app, first), turned, "the first turn stands");
+        assert_eq!(bytes(&app, second), outside);
+        assert_eq!(steps(&app), (1, 0));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

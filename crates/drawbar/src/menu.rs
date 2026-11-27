@@ -20,7 +20,7 @@ use crate::shell::Dock;
 use crate::store::Store;
 use crate::strings::folder;
 use crate::tabs::Spot;
-use crate::timeline::{Asked, LetGo, Next, Went};
+use crate::timeline::{Aim, Asked, Next, Went};
 use crate::workspace::Fresh;
 use crate::zoom::Step;
 
@@ -688,29 +688,46 @@ impl DrawbarApp {
                 .is_some_and(|offer| offer.enabled)
     }
 
-    /// Run the Undo and Redo asked for this frame, in order, once its edits are recorded,
-    /// so each takes the step its menu named after them. One no longer offered, or whose
-    /// named step `let_go` says this frame let go of, does nothing.
-    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context, let_go: LetGo) {
-        for command in std::mem::take(&mut self.undoing) {
-            let gone = match command {
-                Command::Redo => let_go.redo,
-                _ => let_go.undo,
+    /// What `command` would take now, where it is Undo or Redo.
+    pub(crate) fn aim(&self, command: Command) -> Option<Aim> {
+        match command {
+            Command::Undo => Some(self.timeline.aim_undo()),
+            Command::Redo => Some(self.timeline.aim_redo()),
+            _ => None,
+        }
+    }
+
+    /// Run the Undo and Redo asked for this frame, in order, once its edits are recorded.
+    /// The first runs only while the step it named is still there to take, and each after
+    /// it is aimed at what the one before did, so all after one that did nothing are
+    /// dropped.
+    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context) {
+        let asked = std::mem::take(&mut self.undoing);
+        if !asked.first().is_some_and(|aim| self.timeline.holds(*aim)) {
+            return;
+        }
+        for aim in asked {
+            let (command, again) = match aim {
+                Aim::Undo(_) => (Command::Undo, false),
+                Aim::Redo(_) => (Command::Redo, true),
             };
-            if !gone
-                && self
-                    .offer_now(ctx, command)
-                    .is_some_and(|offer| offer.enabled)
+            if !self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
             {
-                self.undo(command == Command::Redo);
-                ctx.request_repaint();
+                return;
+            }
+            ctx.request_repaint();
+            if !self.undo(again) {
+                return;
             }
         }
     }
 
     /// Undo the step the timeline names next, or redo it `again`: a library step is asked
-    /// of the library, and an edit step brings its document to the front.
-    fn undo(&mut self, again: bool) {
+    /// of the library, and an edit step brings its document to the front. Returns whether
+    /// a step moved.
+    fn undo(&mut self, again: bool) -> bool {
         let mut documents = Editors {
             document: &mut self.document,
             workspace: &mut self.workspace,
@@ -721,8 +738,11 @@ impl DrawbarApp {
             true => self.timeline.redo(&mut documents),
         };
         let taken = match went {
-            Went::Nowhere => return,
-            Went::Edit(id) => return self.tabs.open(id),
+            Went::Nowhere => return false,
+            Went::Edit(id) => {
+                self.tabs.open(id);
+                return true;
+            }
             Went::Library(taken) => taken,
         };
         let asked = match self.store.as_mut() {
@@ -730,12 +750,14 @@ impl DrawbarApp {
             Some(store) => store.undo(taken),
             None => Err(taken),
         };
-        if let Err(taken) = asked {
-            self.timeline.put_back(match again {
-                true => Asked::Redo(taken),
-                false => Asked::Undo(taken),
-            });
-        }
+        let Err(taken) = asked else {
+            return true;
+        };
+        self.timeline.put_back(match again {
+            true => Asked::Redo(taken),
+            false => Asked::Undo(taken),
+        });
+        false
     }
 
     /// Do what `command` names, now, except Undo and Redo, which wait for the frame's
@@ -753,7 +775,7 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Import => acts.push(Act::OpenFiles),
-            Command::Undo | Command::Redo => self.undoing.push(command),
+            Command::Undo | Command::Redo => self.undoing.extend(self.aim(command)),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }

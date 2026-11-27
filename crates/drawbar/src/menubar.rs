@@ -12,6 +12,7 @@ use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem
 
 use crate::menu::{label, menus, shortcut, undoes, Command, Entry, Offer, RECENT};
 use crate::platform::Platform;
+use crate::timeline::Aim;
 
 /// One native item and what it last showed, so it is only touched when that changes.
 struct Line {
@@ -20,6 +21,8 @@ struct Line {
     shown: Option<(String, bool, Option<bool>)>,
     /// The label while the command is not offered, when its offered label varies.
     resting: String,
+    /// The step Undo or Redo named when the label was last brought up to date.
+    aim: Option<Aim>,
 }
 
 enum Item {
@@ -105,23 +108,30 @@ impl MenuBar {
         })
     }
 
-    /// The commands picked from the menu bar since the last frame.
-    pub fn picked(&self) -> Vec<Command> {
+    /// The commands picked from the menu bar since the last frame, each with the step it
+    /// named as it was picked, where it is Undo or Redo.
+    pub fn picked(&self) -> Vec<(Command, Option<Aim>)> {
         self.picked
             .try_iter()
             .filter_map(|id| {
                 let line = self.lines.iter().find(|line| line.item.id() == &id);
                 let recent = self.recent.lines.iter().find(|(item, _)| item.id() == &id);
-                line.map(|line| line.command)
-                    .or(recent.map(|(_, command)| *command))
+                line.map(|line| (line.command, line.aim))
+                    .or(recent.map(|(_, command)| (*command, None)))
             })
             .collect()
     }
 
-    /// Bring each item's label, enablement, and check up to date with `offer`.
-    pub fn refresh(&mut self, offer: impl Fn(Command) -> Option<Offer>) {
+    /// Bring each item's label, enablement, and check up to date with `offer`, and what
+    /// Undo and Redo name with `aim`.
+    pub fn refresh(
+        &mut self,
+        offer: impl Fn(Command) -> Option<Offer>,
+        aim: impl Fn(Command) -> Option<Aim>,
+    ) {
         self.recent.refresh(&offer);
         for line in &mut self.lines {
+            line.aim = aim(line.command);
             let now = match offer(line.command) {
                 Some(offer) => (offer.label, offer.enabled, offer.checked),
                 None => (line.resting.clone(), false, Some(false)),
@@ -225,6 +235,7 @@ fn fill(submenu: &Submenu, entries: &[Entry], lines: &mut Vec<Line>, recent: &mu
                             item: Item::Check(item),
                             shown: None,
                             resting,
+                            aim: None,
                         });
                     }
                     false => append(submenu, &plain(lines, *command, &resting)),
@@ -243,6 +254,7 @@ fn plain(lines: &mut Vec<Line>, command: Command, label: &str) -> MenuItem {
         item: Item::Plain(item.clone()),
         shown: None,
         resting: label.to_string(),
+        aim: None,
     });
     item
 }

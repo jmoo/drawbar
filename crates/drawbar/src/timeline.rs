@@ -40,11 +40,12 @@ pub enum Gesture {
     Focused(egui::Id),
 }
 
-/// Whether a frame's end let go of the step Undo, or Redo, would have taken.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct LetGo {
-    pub undo: bool,
-    pub redo: bool,
+/// An Undo or a Redo, and the number of the step it named when it was offered, where it
+/// named one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Aim {
+    Undo(Option<u64>),
+    Redo(Option<u64>),
 }
 
 /// What a file holds: the baseline the workspace knows it by, and the identity the library
@@ -89,6 +90,7 @@ impl Saved {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Logged {
     label: String,
+    number: u64,
     /// The entry its undo or redo reverses.
     entry: EntryHash,
     /// Empty unless the change did nothing but save documents from their bodies.
@@ -99,6 +101,7 @@ pub struct Logged {
 #[derive(Clone, PartialEq, Debug)]
 struct Edited {
     label: String,
+    number: u64,
     id: u64,
     before: Working,
     after: Working,
@@ -122,6 +125,14 @@ impl Step {
         match self {
             Step::Library(step) => &step.label,
             Step::Edit(step) => &step.label,
+        }
+    }
+
+    /// The count of steps recorded once this one was, which no other step shares.
+    fn number(&self) -> u64 {
+        match self {
+            Step::Library(step) => step.number,
+            Step::Edit(step) => step.number,
         }
     }
 
@@ -262,6 +273,7 @@ impl Timeline {
         self.end_redo();
         let step = Edited {
             label,
+            number: self.recorded,
             id,
             before,
             after,
@@ -290,12 +302,11 @@ impl Timeline {
 
     /// The frame ended with `gesture` going on. A step another gesture opened closes,
     /// and the steps Undo and Redo would take next are let go where their documents no
-    /// longer hold what they recorded. Returns which of the two it let go of.
-    pub fn settle(&mut self, gesture: Gesture, documents: &impl Documents) -> LetGo {
+    /// longer hold what they recorded.
+    pub fn settle(&mut self, gesture: Gesture, documents: &impl Documents) {
         if self.open.is_some_and(|open| open != gesture) {
             self.close();
         }
-        let mut let_go = LetGo::default();
         while let Some(at) = self.undoes() {
             let Step::Edit(step) = &mut self.done[at] else {
                 break;
@@ -304,16 +315,13 @@ impl Timeline {
                 break;
             }
             self.let_go(at);
-            let_go.undo = true;
         }
         while let Some(Step::Edit(step)) = self.undone.last_mut() {
             if documents.holds(step.id, &mut step.before) {
                 break;
             }
             self.bytes -= self.undone.pop().map_or(0, |step| step.size());
-            let_go.redo = true;
         }
-        let_go
     }
 
     /// The step Undo takes: the last, or an edit beneath the saves that end the list,
@@ -349,6 +357,25 @@ impl Timeline {
 
     pub fn next_redo(&self) -> Option<Next<'_>> {
         self.undone.last().map(next)
+    }
+
+    pub fn aim_undo(&self) -> Aim {
+        Aim::Undo(self.undoes().map(|at| self.done[at].number()))
+    }
+
+    pub fn aim_redo(&self) -> Aim {
+        Aim::Redo(self.undone.last().map(Step::number))
+    }
+
+    /// Whether the step `aim` named is still in the list its command takes from, so that
+    /// command takes that step or one recorded above it since. An aim that named none
+    /// holds.
+    pub fn holds(&self, aim: Aim) -> bool {
+        match aim {
+            Aim::Undo(Some(number)) => self.done.iter().any(|step| step.number() == number),
+            Aim::Redo(Some(number)) => self.undone.iter().any(|step| step.number() == number),
+            Aim::Undo(None) | Aim::Redo(None) => true,
+        }
     }
 
     /// Take back the step [`Timeline::next_undo`] names, and no other: an edit step
@@ -479,6 +506,7 @@ impl Timeline {
                 }
                 self.keep(Step::Library(Logged {
                     label,
+                    number: self.recorded,
                     entry,
                     saved,
                 }));
