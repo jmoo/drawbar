@@ -6765,6 +6765,45 @@ fn a_rename_after_a_save_that_failed_partway_moves_the_saved_file() {
     assert!(!held.is_unsaved(), "the edit is what the file holds");
 }
 
+static FOLDER_MOVED: Moved = Moved::new(false);
+
+#[test]
+fn a_folder_rename_that_failed_partway_takes_its_files_once_finished() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    session.tag(&[id], "Sunday");
+    session.read(&[id]);
+    let edited = session.edit(id, "96");
+    let live = LibPath::parse("Live").unwrap();
+    let folder = session.bench.browser.folders.id_of(&live).expect("listed");
+    session
+        .store
+        .fault(Fault::Refuse(|io| after_leaving(io, "Live", &FOLDER_MOVED)));
+    session.rename_folder(folder, "Gig");
+    session.decided();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename failed"
+    );
+
+    session.make_tag("Monday");
+    session.settle();
+
+    assert_eq!(session.said("is missing"), 0);
+    assert_eq!(session.said("outside drawbar"), 0);
+    assert_eq!(session.said("appeared"), 0);
+    assert_eq!(session.path(id).as_deref(), Some("Gig/a.ne5p"));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.read("Gig/a.ne5p"), edited);
+}
+
 static FOUND_MOVED: Moved = Moved::new(false);
 
 /// ⚠️ A file known by its path is not followed to where finishing a change moves it:

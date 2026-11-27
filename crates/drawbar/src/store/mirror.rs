@@ -1640,7 +1640,7 @@ impl Store {
                     // next write finishes the delete.
                     let finishing = |key: &Key| {
                         let path = shown.files.get(key).map(|(path, _)| path);
-                        path.is_some_and(|path| self.finishing.contains(path))
+                        path.is_some_and(|path| waits_to_finish(&self.finishing, path))
                     };
                     deleted.retain(|key| !finishing(key));
                     let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
@@ -2410,7 +2410,7 @@ impl Store {
         }
         let waiting = self.records.iter().filter(|(_, record)| {
             let path = record.path.as_ref();
-            path.is_some_and(|path| self.finishing.contains(path))
+            path.is_some_and(|path| waits_to_finish(&self.finishing, path))
         });
         self.deferred.extend(waiting.map(|(id, _)| *id));
     }
@@ -2471,7 +2471,7 @@ impl Store {
             if record
                 .path
                 .as_ref()
-                .is_some_and(|path| self.finishing.contains(path))
+                .is_some_and(|path| waits_to_finish(&self.finishing, path))
             {
                 self.deferred.insert(id);
                 self.awaiting.insert(id);
@@ -4618,6 +4618,11 @@ fn held(workspace: &Workspace) -> u64 {
     workspace
         .held_whole()
         .saturating_add(workspace.asked_whole())
+}
+
+/// Whether `path` is or is in one of the paths a change of drawbar's own waits to finish.
+fn waits_to_finish(finishing: &BTreeSet<LibPath>, path: &LibPath) -> bool {
+    finishing.iter().any(|at| path.is_in(at))
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.
