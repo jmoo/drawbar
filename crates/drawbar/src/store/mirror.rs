@@ -1614,6 +1614,13 @@ impl Store {
                 let landed = made.is_some();
                 self.waits = waiting != Waiting::Nothing;
                 let asked = self.answering.pop_front().map(Sent::asked);
+                // A step that waited and is not finished first never landed.
+                match (finished, timeline.waiting()) {
+                    (None, Some(earlier)) if waiting != Waiting::Earlier => {
+                        self.refiled(unlanded(earlier), workspace);
+                    }
+                    _ => {}
+                }
                 // A step that stopped partway is finished by the next write or open.
                 match (&asked, landed, waiting) {
                     (Some(asked), true, _) | (Some(asked), false, Waiting::This) => {
@@ -4592,6 +4599,20 @@ impl Sent {
             }
             step => step,
         }
+    }
+}
+
+/// What the file of each document an undo or redo of a save names holds where the step
+/// never landed: what it held before the step was asked.
+fn unlanded(asked: &timeline::Asked) -> Vec<(u64, &timeline::Filed)> {
+    match asked {
+        timeline::Asked::Undo(taken) => (taken.saved().iter())
+            .map(|saved| (saved.id, &saved.after))
+            .collect(),
+        timeline::Asked::Redo(taken) => (taken.saved().iter())
+            .map(|saved| (saved.id, &saved.before))
+            .collect(),
+        timeline::Asked::Change { .. } | timeline::Asked::Lasting => Vec::new(),
     }
 }
 

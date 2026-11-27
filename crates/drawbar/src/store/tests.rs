@@ -10384,6 +10384,26 @@ fn an_edit_made_back_while_an_undo_of_a_save_waits_to_finish_stays_unsaved() {
 }
 
 #[test]
+fn an_undo_of_a_save_whose_record_is_refused_leaves_the_document_saved_in_its_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session.store.fault(Fault::Refuse(|io| match io {
+        toshokan::Io::Create { path, .. } => path.as_str().contains("pending/"),
+        toshokan::Io::Rename { to, .. } => to.as_str().contains("pending/"),
+        _ => false,
+    }));
+    session.undo();
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(session.said("The library did not change as asked"), 1);
+    assert_eq!(root.read("untitled.ne5p"), edited, "nothing was undone");
+    assert_eq!(session.bytes(id), edited);
+    assert!(!session.unsaved(id));
+}
+
+#[test]
 fn a_quit_while_an_undo_of_a_save_waits_to_finish_keeps_the_edit_and_asks_nothing() {
     let root = Temp::new();
     let mut session = Session::open(&root);
@@ -10402,6 +10422,33 @@ fn a_quit_while_an_undo_of_a_save_waits_to_finish_keeps_the_edit_and_asks_nothin
     assert_eq!(again.bytes(id), edited, "the document holds its edit");
     assert!(again.unsaved(id));
     assert_eq!(again.bench.browser.asking(), None);
+}
+
+#[test]
+fn an_undo_of_a_save_that_stopped_partway_and_never_landed_leaves_the_document_saved() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session.store.fault(Fault::Refuse(|io| match io {
+        toshokan::Io::Rename { from, .. } => from.as_str() == "untitled.ne5p",
+        toshokan::Io::Create { path, .. } => path.as_str().contains("/trash/"),
+        _ => false,
+    }));
+    session.undo();
+    assert!(session.unsaved(id), "the undo stopped partway");
+    // With its record gone, the change is one whose record never landed.
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    for writer in writers {
+        let pending = writer.unwrap().path().join("pending");
+        fs::remove_dir_all(pending).unwrap();
+    }
+    session.make_tag("Sunday");
+
+    assert_eq!(root.read("untitled.ne5p"), edited, "nothing was undone");
+    assert!(!session.unsaved(id));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
 }
 
 /// Another program puts a file where the undo of a save was putting one back. The library
