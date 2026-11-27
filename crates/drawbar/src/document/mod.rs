@@ -660,7 +660,10 @@ impl Document {
         };
         match checked {
             Ok(resting) => {
-                if let Some(body) = self.piano.commit(plan.clone()) {
+                let body = workspace
+                    .get(id)
+                    .and_then(|entity| self.piano.commit(entity, plan.clone()));
+                if let Some(body) = body {
                     workspace.replace_bytes(id, body, log);
                 }
                 self.refused(None);
@@ -679,8 +682,11 @@ impl Document {
     }
 
     /// Whether this document holds an edit its bytes do not.
-    fn pends(&self, id: u64) -> bool {
-        self.piano.pending(id) || self.samples.pending(id)
+    fn pends(&self, id: u64, workspace: &Workspace) -> bool {
+        workspace
+            .get(id)
+            .is_some_and(|entity| self.piano.pending(entity))
+            || self.samples.pending(id)
     }
 
     /// The names a save writes, where the document's edit renames the file's.
@@ -718,7 +724,7 @@ impl Document {
     /// The plan lives here, but the unsaved state is read from the asset; see
     /// [`LocalEntity::is_unsaved`]. Call this wherever a plan is committed or laid out.
     fn note_pending(&self, id: u64, workspace: &mut Workspace) -> bool {
-        workspace.mark_pending(id, self.pends(id))
+        workspace.mark_pending(id, self.pends(id, workspace))
     }
 
     /// Let go of what is kept about an asset that has left the workspace.
@@ -843,15 +849,15 @@ impl Document {
         out
     }
 
-    /// Release the acts a finished apply was holding, and put the bytes it made into
-    /// the document.
+    /// Release the acts a finished apply was holding, once the bytes it made are in the
+    /// document.
     pub fn released(
         &mut self,
         ctx: &egui::Context,
         workspace: &mut Workspace,
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
-        match self.piano.answered(ctx, workspace) {
+        match self.piano.answered(ctx, workspace, log) {
             Some(applied) => self.put_back(applied, workspace, log),
             None => Vec::new(),
         }
@@ -864,9 +870,8 @@ impl Document {
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
         match applied.made {
-            Some(Ok(bytes)) => {
+            Some(Ok(())) => {
                 self.refused(None);
-                workspace.replace_bytes(applied.id, bytes, log);
                 self.note_pending(applied.id, workspace);
             }
             Some(Err(why)) => {
@@ -1865,6 +1870,11 @@ mod tests {
                 &mut self.builds,
                 &mut self.log,
             );
+        }
+
+        /// Whether the document holds an edit its bytes do not.
+        fn pends(&self) -> bool {
+            self.document.pends(self.id, &self.workspace)
         }
 
         /// The open document's state.
@@ -4530,7 +4540,7 @@ mod tests {
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![testing::key(egui::Key::Enter)]);
 
-        assert!(open.document.pends(open.id), "the rename is a plan");
+        assert!(open.pends(), "the rename is a plan");
         assert_eq!(
             open.entity().bytes,
             *open.entity().saved.bytes(),
@@ -4547,14 +4557,14 @@ mod tests {
             &mut open.log,
         );
         assert!(
-            acts.is_empty() || !open.document.pends(open.id),
+            acts.is_empty() || !open.pends(),
             "the save waits for the apply",
         );
         if acts.is_empty() {
             let applied = open
                 .document
                 .piano
-                .awaited(&ctx, &open.workspace)
+                .awaited(&ctx, &mut open.workspace, &mut open.log)
                 .expect("the apply the save waits on is in flight");
             acts = open
                 .document
@@ -4566,7 +4576,7 @@ mod tests {
         );
         assert!(named(&open).contains('X'), "{}", named(&open));
         assert!(open.entity().is_unsaved(), "only the save clears unsaved");
-        assert!(!open.document.pends(open.id));
+        assert!(!open.pends());
 
         open.workspace.mark_saved(open.id);
         assert!(
@@ -4581,7 +4591,7 @@ mod tests {
         open.frame(vec![open.on_name_box("Test Piano")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![testing::key(egui::Key::Enter)]);
-        assert!(open.document.pends(open.id), "the rename is a plan");
+        assert!(open.pends(), "the rename is a plan");
     }
 
     /// Lay the piano library's plan out as a save does, without saving, and return the
@@ -4599,37 +4609,66 @@ mod tests {
             let applied = open
                 .document
                 .piano
-                .awaited(&ctx, &open.workspace)
+                .awaited(&ctx, &mut open.workspace, &mut open.log)
                 .expect("the lay-out the save waits on is in flight");
             open.document
                 .put_back(applied, &mut open.workspace, &mut open.log);
         }
-        assert!(!open.document.pends(open.id), "the plan is laid out");
+        assert!(!open.pends(), "the plan is laid out");
+        stored_name(open)
+    }
+
+    /// The name the piano library's body stores.
+    fn stored_name(open: &Open) -> String {
         piano::snapshot(open.entity().entity.as_deref().unwrap())
             .unwrap()
             .unwrap()
             .name
     }
 
-    #[test]
-    fn a_piano_body_unlike_its_file_shows_the_roots_the_body_holds() {
+    /// [`piano_bytes`] with a third root.
+    fn three_root_piano() -> Vec<u8> {
         use nord_format::formats::npno::synthetic::{take, Build};
         use nord_format::formats::npno::Bank;
 
-        let mut saved = Build::new();
-        saved.takes.push(take(84, Bank::Attack, 0, 3));
-        saved.map.push((84, 84));
-        let draft = Build::new().bytes().unwrap();
+        let mut library = Build::new();
+        library.takes.push(take(84, Bank::Attack, 0, 3));
+        library.map.push((84, 84));
+        library.bytes().unwrap()
+    }
 
-        let mut open = Open::file("Test Piano.npno", saved.bytes().unwrap());
-        open.twice();
-        open.workspace.replace_bytes(open.id, draft, &mut open.log);
-        let words = open.twice();
-        let roots: Vec<&String> = words
+    /// The counts of roots among the words a frame painted.
+    fn roots(words: &[String]) -> Vec<&str> {
+        words
             .iter()
             .filter(|word| word.ends_with(" roots"))
-            .collect();
-        assert_eq!(roots, ["2 roots"], "the file holds 3 and the body 2");
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Save `theirs` over the piano library's file outside drawbar, as the store finds
+    /// it: a file it indexes and leaves on disk. The file lives as long as the folder
+    /// returned.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn saved_over_outside(open: &mut Open, theirs: &[u8]) -> crate::testing::Temp {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Test Piano.npno", theirs);
+        open.workspace.rebase_file(open.id, file);
+        dir
+    }
+
+    #[test]
+    fn a_piano_body_unlike_its_file_shows_the_roots_the_body_holds() {
+        let mut open = Open::file("Test Piano.npno", three_root_piano());
+        open.twice();
+        open.workspace
+            .replace_bytes(open.id, piano_bytes(), &mut open.log);
+        let words = open.twice();
+        assert_eq!(
+            roots(&words),
+            ["2 roots"],
+            "the file holds 3 and the body 2"
+        );
     }
 
     #[test]
@@ -4643,27 +4682,16 @@ mod tests {
         open.frame(vec![testing::key(egui::Key::Delete)]);
         open.frame(vec![testing::key(egui::Key::Enter)]);
         open.twice();
-        assert!(
-            !open.entity().is_unsaved(),
-            "pends {}",
-            open.document.pends(open.id)
-        );
+        assert!(!open.entity().is_unsaved(), "pends {}", open.pends());
         assert!(open.entity().bytes == *open.entity().saved.bytes());
     }
 
     #[test]
     fn a_piano_plan_outlives_a_change_to_its_file_from_outside() {
-        use nord_format::formats::npno::synthetic::{take, Build};
-        use nord_format::formats::npno::Bank;
-
         let mut open = Open::file("Test Piano.npno", piano_bytes());
         rename_with_an_x(&mut open);
-
-        let mut theirs = Build::new();
-        theirs.takes.push(take(84, Bank::Attack, 0, 3));
-        theirs.map.push((84, 84));
         open.workspace
-            .rebase(open.id, theirs.bytes().unwrap(), &mut open.log);
+            .rebase(open.id, three_root_piano(), &mut open.log);
         open.twice();
 
         let (renamed, _) = open.document.piano.renaming(open.entity());
@@ -4673,6 +4701,63 @@ mod tests {
             "XTest Piano",
             "keeping mine keeps the rename"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pending_piano_plan_outlives_a_change_outside_and_keeping_mine_saves_it() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        let _theirs = saved_over_outside(&mut open, &three_root_piano());
+        let words = open.twice();
+
+        assert_eq!(roots(&words), ["2 roots"], "the rows show the body");
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
+        assert_eq!(
+            lay_out(&mut open),
+            "XTest Piano",
+            "a save writes the rename"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_laid_out_piano_plan_outlives_a_change_outside() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+        let _theirs = saved_over_outside(&mut open, &three_root_piano());
+        let words = open.twice();
+
+        assert_eq!(roots(&words), ["2 roots"], "the rows show the body");
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed.as_deref(), Some("XTest Piano"));
+        assert!(!open.pends());
+        assert_eq!(stored_name(&open), "XTest Piano", "a save writes the body");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_piano_body_restored_over_a_lay_out_shows_what_it_holds() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        assert_eq!(lay_out(&mut open), "XTest Piano");
+        let id = open.id;
+        open.act(vec![crate::browser::Act::Restore {
+            id,
+            bytes: three_root_piano(),
+        }]);
+        let words = open.twice();
+
+        assert_eq!(
+            roots(&words),
+            ["3 roots"],
+            "the rows show the restored body"
+        );
+        let (renamed, _) = open.document.piano.renaming(open.entity());
+        assert_eq!(renamed, None, "a save writes the restored name");
+        assert!(!open.pends());
     }
 
     /// A plan over a piano library resting in its file is saved through that file: the
@@ -4694,7 +4779,7 @@ mod tests {
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![testing::key(egui::Key::Enter)]);
 
-        assert!(open.document.pends(id), "the rename is a plan");
+        assert!(open.pends(), "the rename is a plan");
         assert!(open.workspace.edit_of(id).is_some(), "held as a rewrite");
         assert!(open.entity().rests().is_some() && open.entity().held_whole() == 0);
         assert_eq!(file.take_reads(), [], "nothing was read to plan it");
@@ -4725,7 +4810,7 @@ mod tests {
         );
         assert!(renamed.unwrap().unwrap().name.contains('X'));
         open.frame(Vec::new());
-        assert!(!open.document.pends(id), "the plan went with the save");
+        assert!(!open.pends(), "the plan went with the save");
         assert!(!open.entity().is_unsaved());
     }
 
@@ -4755,7 +4840,7 @@ mod tests {
             std::sync::Arc::ptr_eq(over, &theirs),
             "made over their file"
         );
-        assert!(open.document.pends(id) && open.entity().is_unsaved());
+        assert!(open.pends() && open.entity().is_unsaved());
         let (renamed, _) = open.document.piano.renaming(open.entity());
         assert!(
             renamed.is_some_and(|name| name.contains('X')),
@@ -4773,7 +4858,7 @@ mod tests {
         open.frame(vec![open.on_name_box("Test Piano")]);
         open.frame(vec![egui::Event::Text("X".to_string())]);
         open.frame(vec![testing::key(egui::Key::Enter)]);
-        assert!(open.document.pends(open.id));
+        assert!(open.pends());
         assert!(
             open.entity().is_unsaved(),
             "which offers Revert in the menu",
@@ -4796,7 +4881,7 @@ mod tests {
             matches!(acts.as_slice(), [crate::browser::Act::Revert(id)] if *id == open.id),
             "the revert itself still runs",
         );
-        assert!(!open.document.pends(open.id), "the revert drops the plan");
+        assert!(!open.pends(), "the revert drops the plan");
 
         crate::browser::apply(
             &mut crate::browser::Browser::default(),

@@ -30,6 +30,7 @@ use crate::browser::Act;
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
 use crate::led;
+use crate::log::Log;
 use crate::midi;
 use crate::ondisk::{self, OnDisk};
 use crate::panel::cut;
@@ -1225,6 +1226,15 @@ struct Laying {
     job: work::Job<Result<Vec<u8>, String>>,
 }
 
+/// A plan laid out into a document's working bytes.
+struct Laid {
+    plan: Plan,
+    /// The body it was laid out over.
+    over: Bytes,
+    /// The [`LocalEntity::stamp`] of the body the lay-out made.
+    made: u64,
+}
+
 /// Where a document's plan stands between a switch being thrown and the bytes it makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Standing {
@@ -1239,13 +1249,13 @@ enum Standing {
 /// One act waiting on a document's apply.
 type Held = (u64, Act);
 
-/// What a finished apply left: the bytes it made of one document's plan, and the acts
-/// that have nothing left to wait for.
+/// What a finished apply left: whether one document's working bytes now hold its plan,
+/// and the acts that have nothing left to wait for.
 pub struct Applied {
     pub id: u64,
     /// `None` where the plan changed while the apply ran, so the bytes it made are of a
-    /// library nobody wants anymore.
-    pub made: Option<Result<Vec<u8>, String>>,
+    /// library nobody wants anymore, and were dropped.
+    pub made: Option<Result<(), String>>,
     pub acts: Vec<Act>,
 }
 
@@ -1256,10 +1266,9 @@ pub struct State {
     /// ⚠️ Not dropped when the tab changes. The plan is the only record of what the
     /// working bytes were trimmed from, so leaving the tab must not throw it away.
     plans: HashMap<u64, Plan>,
-    /// The plan each document's working bytes were laid out from, and the body it was
-    /// laid out over. A plan they already hold is not pending, and laying it again would
-    /// copy the body for nothing.
-    laid: HashMap<u64, (Plan, Bytes)>,
+    /// The plan each document's working bytes were last laid out from. A plan they still
+    /// hold is not pending, and laying it again would copy the body for nothing.
+    laid: HashMap<u64, Laid>,
     /// The apply in flight, and the acts held until it answers.
     job: Option<Laying>,
     held: Vec<Held>,
@@ -1328,7 +1337,7 @@ impl State {
         self.audio.replan(Source::of(entity), plan);
         self.free = room::free_bytes(ObjectClass::Piano, device);
         self.summarize();
-        let standing = self.standing(id);
+        let standing = self.standing(entity);
 
         let (Some(facts), Some(summary)) = (self.facts(), self.summary.as_ref()) else {
             return Extras::default();
@@ -1359,41 +1368,56 @@ impl State {
     }
 
     /// Where this document's plan stands.
-    fn standing(&self, id: u64) -> Standing {
+    fn standing(&self, entity: &LocalEntity) -> Standing {
         match &self.job {
-            Some(job) if job.id == id => Standing::Applying,
-            _ => match self.pending(id) {
+            Some(job) if job.id == entity.id => Standing::Applying,
+            _ => match self.pending(entity) {
                 true => Standing::Pending,
                 false => Standing::Laid,
             },
         }
     }
 
-    /// What this document's plan edits. A plan of a library held whole edits the body it
-    /// was begun on until that body, or the plan's own lay-out, is saved, or the body is
-    /// replaced by anything else.
+    /// What this document's plan edits: the file the library rests in, or the body in
+    /// memory the plan was begun on. That body stays the plan's while the working bytes
+    /// are it or the plan's lay-out of it, until that lay-out is saved.
     fn baseline(&self, entity: &LocalEntity) -> Mark {
-        if let Some(file) = entity.saved.file() {
+        if let Some(file) = entity.rests() {
             return Mark::Resting(file.serial);
         }
-        let laid = self.laid.contains_key(&entity.id) && entity.stamp != entity.saved.stamp();
-        match self.plans.get(&entity.id).map(|plan| plan.against) {
-            Some(Mark::Held(begun)) if begun == entity.stamp || laid => Mark::Held(begun),
-            _ => Mark::Held(entity.stamp),
-        }
+        let Some(Mark::Held(begun)) = self.plans.get(&entity.id).map(|plan| plan.against) else {
+            return Mark::Held(entity.stamp);
+        };
+        let holds = match self.laid(entity) {
+            Some(_) => entity.stamp != entity.saved.stamp(),
+            None => begun == entity.stamp,
+        };
+        Mark::Held(if holds { begun } else { entity.stamp })
     }
 
-    /// The body this document's plan edits: the working bytes, until a lay-out of the
-    /// plan replaces them.
-    fn body<'a>(&'a self, entity: &'a LocalEntity) -> &'a Bytes {
+    /// This document's plan, while it edits what the document holds.
+    fn plan(&self, entity: &LocalEntity) -> Option<&Plan> {
+        self.plans
+            .get(&entity.id)
+            .filter(|plan| plan.against == self.baseline(entity))
+    }
+
+    /// The lay-out the working bytes hold, while they hold it.
+    fn laid(&self, entity: &LocalEntity) -> Option<&Laid> {
         self.laid
             .get(&entity.id)
-            .map_or(&entity.bytes, |(_, over)| over)
+            .filter(|laid| laid.made == entity.stamp)
+    }
+
+    /// The body this document's plan edits: the working bytes, or what its lay-out was
+    /// laid over while they hold that lay-out.
+    fn body<'a>(&'a self, entity: &'a LocalEntity) -> &'a Bytes {
+        self.laid(entity).map_or(&entity.bytes, |laid| &laid.over)
     }
 
     /// The bytes this document's plan edits.
     fn base<'a>(&'a self, entity: &'a LocalEntity) -> Source<'a> {
-        Source::from(entity.saved.file().map(|file| &**file), self.body(entity))
+        Source::from(entity.rests().map(|file| &**file), self.body(entity))
     }
 
     /// Whether the library this document's plan edits takes `plan`, checked as
@@ -1405,12 +1429,12 @@ impl State {
     }
 
     /// Whether this document's plan has yet to reach its working bytes.
-    pub fn pending(&self, id: u64) -> bool {
-        let Some(plan) = self.plans.get(&id) else {
+    pub fn pending(&self, entity: &LocalEntity) -> bool {
+        let Some(plan) = self.plan(entity) else {
             return false;
         };
-        match self.laid.get(&id) {
-            Some((laid, _)) => plan != laid,
+        match self.laid(entity) {
+            Some(laid) => *plan != laid.plan,
             None => !plan.is_empty(),
         }
     }
@@ -1442,10 +1466,7 @@ impl State {
     /// ⚠️ Nothing for a plan against another baseline: a save discards that plan, and
     /// [`State::begin`] starts a new one.
     pub fn renaming(&self, entity: &LocalEntity) -> (Option<String>, Option<String>) {
-        let plan = self
-            .plans
-            .get(&entity.id)
-            .filter(|plan| plan.against == self.baseline(entity));
+        let plan = self.plan(entity);
         (
             plan.and_then(|plan| plan.name.clone()),
             plan.and_then(|plan| plan.variant.clone()),
@@ -1465,10 +1486,14 @@ impl State {
     /// reached the working bytes, this returns the body the plan edits for them to hold
     /// again.
     #[must_use]
-    pub fn commit(&mut self, plan: Plan) -> Option<Bytes> {
+    pub fn commit(&mut self, entity: &LocalEntity, plan: Plan) -> Option<Bytes> {
         let id = self.open.as_ref()?.id;
         let over = match plan.is_empty() {
-            true => self.laid.remove(&id).map(|(_, over)| over),
+            true => self
+                .laid
+                .remove(&id)
+                .filter(|laid| laid.made == entity.stamp)
+                .map(|laid| laid.over),
             false => None,
         };
         self.plans.insert(id, plan);
@@ -1522,10 +1547,9 @@ impl State {
     /// library asks before it lets one go.
     pub fn hold(&mut self, ctx: &egui::Context, act: Act, workspace: &Workspace) -> Option<Act> {
         let laid = |id: &u64| {
-            self.pending(*id)
-                && workspace
-                    .get(*id)
-                    .is_some_and(|entity| entity.saved.file().is_none())
+            workspace
+                .get(*id)
+                .is_some_and(|entity| entity.rests().is_none() && self.pending(entity))
         };
         let waits = match &act {
             // Every asset on this computer leaves with its library, so each plan over one
@@ -1549,18 +1573,15 @@ impl State {
 
     /// Lay one document's plan out, unless something else is already being laid.
     pub fn start(&mut self, ctx: &egui::Context, id: u64, workspace: &Workspace) {
-        if self.job.is_some() || !self.pending(id) {
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        if self.job.is_some() || entity.rests().is_some() || !self.pending(entity) {
             return;
         }
         let Some(plan) = self.plans.get(&id).cloned() else {
             return;
         };
-        let Some(entity) = workspace.get(id) else {
-            return;
-        };
-        if entity.saved.file().is_some() {
-            return;
-        }
         let over = self.body(entity).clone();
         let (laying, held) = (plan.clone(), over.clone());
         let job = work::run(ctx, move |progress| {
@@ -1576,28 +1597,40 @@ impl State {
         });
     }
 
-    /// The apply that has answered, where one has.
+    /// The apply that has answered, where one has, with the bytes it made put under its
+    /// document.
     ///
     /// ⚠️ An answer over a plan that has since changed, or over a document the workspace
     /// no longer holds, is dropped, not written. Whatever waited on that document then
     /// waits on the apply of the plan in hand, unless nothing is left to wait for.
-    pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+    pub fn answered(
+        &mut self,
+        ctx: &egui::Context,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Option<Applied> {
         let answer = self.job.as_ref()?.job.poll();
-        self.finished(answer, ctx, workspace)
+        self.finished(answer, ctx, workspace, log)
     }
 
     /// [`Self::answered`], waiting for the apply in flight instead of polling it.
     #[cfg(test)]
-    pub fn awaited(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
+    pub fn awaited(
+        &mut self,
+        ctx: &egui::Context,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) -> Option<Applied> {
         let answer = self.job.as_ref()?.job.wait();
-        self.finished(answer, ctx, workspace)
+        self.finished(answer, ctx, workspace, log)
     }
 
     fn finished(
         &mut self,
         answer: work::Answer<Result<Vec<u8>, String>>,
         ctx: &egui::Context,
-        workspace: &Workspace,
+        workspace: &mut Workspace,
+        log: &mut Log,
     ) -> Option<Applied> {
         let made = match answer {
             work::Answer::Running => return None,
@@ -1606,21 +1639,28 @@ impl State {
                 Err("laying out the library stopped without an answer".to_string())
             }
         };
-        let laying = self.job.take()?;
-        let fresh =
-            workspace.get(laying.id).is_some() && self.plans.get(&laying.id) == Some(&laying.plan);
-        match (fresh, made.is_ok()) {
-            (true, true) => {
-                self.laid.insert(laying.id, (laying.plan, laying.over));
+        let Laying { id, plan, over, .. } = self.job.take()?;
+        let fresh = workspace.get(id).is_some() && self.plans.get(&id) == Some(&plan);
+        let made = match (fresh, made) {
+            (true, Ok(bytes)) => {
+                workspace.replace_bytes(id, bytes, log);
+                if let Some(entity) = workspace.get(id) {
+                    let made = entity.stamp;
+                    self.laid.insert(id, Laid { plan, over, made });
+                }
+                Some(Ok(()))
             }
             // A refusal is the end of the wait: nothing can carry bytes the format
             // would not make, and asking again would only produce it a second time.
-            (true, false) => self.held.retain(|(id, _)| *id != laying.id),
-            (false, _) => {}
-        }
+            (true, Err(why)) => {
+                self.held.retain(|(held, _)| *held != id);
+                Some(Err(why))
+            }
+            (false, _) => None,
+        };
         let applied = Applied {
-            id: laying.id,
-            made: fresh.then_some(made),
+            id,
+            made,
             acts: self.freed(workspace),
         };
         self.next(ctx, workspace);
@@ -1632,7 +1672,7 @@ impl State {
     fn freed(&mut self, workspace: &Workspace) -> Vec<Act> {
         let (free, waiting): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
             .into_iter()
-            .partition(|(id, _)| !self.pending(*id) || workspace.get(*id).is_none());
+            .partition(|(id, _)| !workspace.get(*id).is_some_and(|e| self.pending(e)));
         self.held = waiting;
         free.into_iter().map(|(_, act)| act).collect()
     }
@@ -4738,7 +4778,8 @@ mod tests {
 
         /// What [`super::super::Document::replan`] does with a plan the library takes.
         fn commit(&mut self, plan: Plan) {
-            if let Some(body) = self.state.commit(plan) {
+            let entity = self.workspace.get(self.id).expect("it is open");
+            if let Some(body) = self.state.commit(entity, plan) {
                 self.workspace.replace_bytes(self.id, body, &mut self.log);
             }
         }
@@ -4751,7 +4792,7 @@ mod tests {
 
         fn awaited(&mut self) -> Applied {
             self.state
-                .awaited(&self.ctx, &self.workspace)
+                .awaited(&self.ctx, &mut self.workspace, &mut self.log)
                 .expect("an apply is in flight")
         }
 
@@ -4760,14 +4801,11 @@ mod tests {
         fn apply(&mut self) -> Applied {
             self.state.start(&self.ctx, self.id, &self.workspace);
             let applied = self.awaited();
-            let made = applied
+            applied
                 .made
-                .as_ref()
+                .clone()
                 .expect("the plan stood")
-                .as_ref()
-                .expect("the library lays out")
-                .clone();
-            self.workspace.replace_bytes(self.id, made, &mut self.log);
+                .expect("the library lays out");
             applied
         }
 
@@ -5029,7 +5067,9 @@ mod tests {
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, false));
         let held = editor.workspace.get(editor.id).unwrap();
         assert_eq!(held.bytes, saved, "no body was copied for a switch");
-        assert!(editor.state.pending(editor.id));
+        assert!(editor
+            .state
+            .pending(editor.workspace.get(editor.id).unwrap()));
 
         let said = editor
             .state
@@ -5041,7 +5081,9 @@ mod tests {
 
         // And throwing it back is no edit at all.
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, true));
-        assert!(!editor.state.pending(editor.id));
+        assert!(!editor
+            .state
+            .pending(editor.workspace.get(editor.id).unwrap()));
     }
 
     /// The name box holds what a save will write, so typing the stored name back into
@@ -5058,7 +5100,9 @@ mod tests {
             (Some("Wurly 200A".to_string()), None),
             "the box shows what a save would write",
         );
-        assert!(editor.state.pending(editor.id));
+        assert!(editor
+            .state
+            .pending(editor.workspace.get(editor.id).unwrap()));
 
         editor.typed("name", &stored);
         assert_eq!(editor.boxes(), (None, None), "the box is back on the bytes");
@@ -5068,7 +5112,9 @@ mod tests {
             editor.state.plans[&editor.id],
         );
         assert!(
-            !editor.state.pending(editor.id),
+            !editor
+                .state
+                .pending(editor.workspace.get(editor.id).unwrap()),
             "so nothing is left to apply"
         );
     }
@@ -5163,8 +5209,9 @@ mod tests {
 
         let applied = editor.awaited();
         assert_eq!(applied.id, editor.id);
+        assert_eq!(applied.made, Some(Ok(())), "the plan stood and laid out");
         assert_eq!(
-            applied.made.expect("the plan stood").expect("it lays out"),
+            editor.workspace.get(editor.id).unwrap().bytes,
             rebuild(&saved, &editor.state.plans[&editor.id]).unwrap(),
             "what the apply made is what a rebuild from the baseline makes",
         );
@@ -5173,7 +5220,9 @@ mod tests {
             "and the save is let go once the plan is laid out",
         );
         assert!(
-            !editor.state.pending(editor.id),
+            !editor
+                .state
+                .pending(editor.workspace.get(editor.id).unwrap()),
             "the bytes hold the plan now",
         );
     }
@@ -5250,11 +5299,9 @@ mod tests {
         assert!(dropped.acts.is_empty(), "so the save is still waiting");
 
         let applied = editor.awaited();
+        assert_eq!(applied.made, Some(Ok(())), "the second apply lays out");
         assert_eq!(
-            applied
-                .made
-                .expect("the plan stood")
-                .expect("the second apply lays out"),
+            editor.workspace.get(editor.id).unwrap().bytes,
             rebuild(&saved, &wanted).unwrap(),
             "the bytes are of the plan in hand, not the one the job started on",
         );
@@ -5274,7 +5321,12 @@ mod tests {
             .is_none());
 
         editor.driven(Vec::new(), |plan| plan.switch_bank(Bank::Release, true));
-        assert!(!editor.state.pending(editor.id), "the edit is undone");
+        assert!(
+            !editor
+                .state
+                .pending(editor.workspace.get(editor.id).unwrap()),
+            "the edit is undone"
+        );
 
         let applied = editor.awaited();
         assert!(applied.made.is_none(), "the bytes it made are discarded");
@@ -5343,7 +5395,12 @@ mod tests {
 
         editor.state.forget(editor.id);
         assert!(!editor.state.applying(), "nothing is still being laid out");
-        assert!(!editor.state.pending(editor.id), "no plan is left standing");
+        assert!(
+            !editor
+                .state
+                .pending(editor.workspace.get(editor.id).unwrap()),
+            "no plan is left standing"
+        );
         assert!(editor.state.held.is_empty(), "nor anything waiting on one");
     }
 
