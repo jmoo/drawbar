@@ -766,7 +766,7 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
         .bench
         .workspace
         .replace_bytes(id, mine.clone(), Cause::User, &mut session.bench.log);
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
 
     session.refocus();
     let (title, answers) = session.bench.browser.asking().expect("a question");
@@ -838,7 +838,7 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     let id = session.create();
     session.sync();
     let theirs = with_gain(&session.bytes(id), "12");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
 
     session.refocus();
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
@@ -898,7 +898,7 @@ fn a_file_whose_time_alone_changed_is_not_said_to_have_changed() {
     assert_eq!(session.said("changed on disk"), 0);
 
     let theirs = with_gain(&session.bytes(id), "12");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
     session.refocus();
     assert_eq!(session.bytes(id), theirs, "a change after it is still seen");
 }
@@ -1201,7 +1201,7 @@ fn a_save_where_nothing_may_be_written_keeps_what_its_file_holds() {
     session.refocus();
     assert_eq!(session.bytes(grand), mine, "a time alone changes nothing");
     assert_eq!(session.bench.browser.asking(), None);
-    fs::write(root.at("Grand.ne5p"), with_gain(&filed, "40")).unwrap();
+    write_later(&root, "Grand.ne5p", &with_gain(&filed, "40"));
     session.refocus();
     assert_eq!(session.bytes(grand), mine);
     assert!(
@@ -4317,7 +4317,7 @@ fn an_edit_their_file_already_holds_is_let_go_without_asking() {
     let root = Temp::new();
     let (mut session, id, bytes) = resting_sample(&root);
     let theirs = session.edit_resting(id, &bytes);
-    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+    write_later(&root, "Zoned.nsmp", &theirs);
 
     session.settle();
 
@@ -5995,7 +5995,7 @@ fn a_changed_tagged_file_that_cannot_be_read_is_reported_and_the_rest_opens() {
     first.close();
     let mut changed = program.clone();
     changed[program.len() / 2] ^= 1;
-    fs::write(root.at("Song.ne5p"), &changed).unwrap();
+    write_later(&root, "Song.ne5p", &changed);
     fs::write(root.at("Other.ne5p"), &program).unwrap();
     let mode = |mode| {
         let locked = fs::Permissions::from_mode(mode);
@@ -10094,7 +10094,7 @@ fn a_save_refused_while_a_newer_one_waits_keeps_the_newer_and_asks_about_the_fil
     let theirs = with_gain(&root.read("untitled.ne5p"), "40");
     session.edit(id, "96");
     session.bench.workspace.mark_saved(id);
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
     let Bench {
         workspace, browser, ..
     } = &mut session.bench;
@@ -10123,7 +10123,7 @@ fn a_save_asked_while_a_rescan_finds_the_file_changed_keeps_the_save_and_asks() 
     let id = session.create();
     session.sync();
     let theirs = with_gain(&root.read("untitled.ne5p"), "40");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
     session.store.rescan();
     let mine = session.edit(id, "96");
     session.bench.workspace.mark_saved(id);
@@ -10608,7 +10608,7 @@ fn a_document_let_go_of_before_a_lost_undo_of_its_save_still_follows_an_outside_
     assert!(!session.unsaved(id));
 
     let theirs = with_gain(&made, "30");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
     session.refocus();
 
     assert_eq!(session.bytes(id), theirs, "it holds no edit, so it follows");
