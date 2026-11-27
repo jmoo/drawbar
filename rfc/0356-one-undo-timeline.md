@@ -379,8 +379,10 @@ An edit step is one comparison and one call:
 1. If the document holds exactly `after`, call `hold(id, before)`.
 2. Otherwise let the step go, and do nothing more.
 
-Undo takes the step the menu named or none. It never falls through to the step
-behind, which may be a library change the menu did not name.
+Undo takes the step the menu named, or one made since the menu was drawn, or
+none. It never falls through to the step behind, which may be a library change
+the menu did not name. A command asked in the same frame after one that ran
+follows what that one did, and after one that did nothing it is dropped.
 
 Redo is the same with `before` and `after` exchanged and `Cmd::Redo`.
 
