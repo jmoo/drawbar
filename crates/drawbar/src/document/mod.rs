@@ -4840,6 +4840,39 @@ mod tests {
         assert_eq!(lay_out(&mut open), "YXTest Piano", "a save writes it");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_piano_lay_out_over_a_body_since_replaced_leaves_the_newer_body() {
+        let mut open = Open::file("Test Piano.npno", piano_bytes());
+        rename_with_an_x(&mut open);
+        let (ctx, id) = (open.ctx.clone(), open.id);
+        let waiting = open.document.settle(
+            &ctx,
+            vec![crate::browser::Act::Export(id)],
+            &mut open.workspace,
+            &open.queue,
+            &mut open.log,
+        );
+        assert!(waiting.is_empty(), "the export waits for the lay-out");
+        open.workspace
+            .replace_bytes(id, three_root_piano(), &mut open.log);
+        let applied = open
+            .document
+            .piano
+            .awaited(&ctx, &mut open.workspace, &mut open.log)
+            .expect("the lay-out answers");
+        assert!(applied.made.is_none(), "what it made is dropped");
+        let acts = open
+            .document
+            .put_back(applied, &mut open.workspace, &mut open.log);
+
+        assert!(open.entity().bytes[..] == three_root_piano()[..]);
+        assert!(
+            matches!(acts.as_slice(), [crate::browser::Act::Export(at)] if *at == id),
+            "the export carries the body the document holds"
+        );
+    }
+
     /// The library folder a piano library held in memory is saved into, as the store
     /// writes it and finds it changed.
     #[cfg(not(target_arch = "wasm32"))]

@@ -1619,8 +1619,8 @@ impl State {
     /// The apply that has answered, where one has, with the bytes it made put under its
     /// document.
     ///
-    /// ⚠️ An answer over a plan that has since changed, or over a document the workspace
-    /// no longer holds, is dropped, not written. Whatever waited on that document then
+    /// ⚠️ An answer over a plan or a body that has since changed, or over a document the
+    /// workspace no longer holds, is dropped, not written. Whatever waited on that document then
     /// waits on the apply of the plan in hand, unless nothing is left to wait for.
     pub fn answered(
         &mut self,
@@ -1659,7 +1659,9 @@ impl State {
             }
         };
         let Laying { id, plan, over, .. } = self.job.take()?;
-        let fresh = workspace.get(id).is_some() && self.plans.get(&id) == Some(&plan);
+        let fresh = workspace.get(id).is_some_and(|entity| {
+            self.plan(entity) == Some(&plan) && self.body(entity).shares(&over)
+        });
         let made = match (fresh, made) {
             (true, Ok(bytes)) => {
                 workspace.replace_bytes(id, bytes, log);
