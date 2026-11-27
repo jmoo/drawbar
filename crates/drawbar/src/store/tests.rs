@@ -5582,6 +5582,25 @@ fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
 }
 
 #[test]
+fn an_undo_refused_over_this_drawbars_own_delete_names_no_other_drawbar() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for trashed in fs::read_dir(writer.path().join("trash")).unwrap() {
+        fs::remove_file(trashed.unwrap().path()).unwrap();
+    }
+    session.undo();
+    session.undo();
+    let told = "New “untitled.ne5p” cannot be undone: it has changed since.";
+    assert_eq!(session.said(told), 1);
+}
+
+#[test]
 fn a_selection_moved_together_is_one_undo_step() {
     let root = Temp::new();
     fs::create_dir(root.at("Gig")).unwrap();

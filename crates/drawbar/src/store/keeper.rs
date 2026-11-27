@@ -671,15 +671,22 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            // A step another drawbar changed since, or whose trash item went, can
-            // never be taken back; any other refusal may pass once the files are
-            // looked at again.
+            // A step changed since, or whose trash item went, can never be taken
+            // back; any other refusal may pass once the files are looked at again.
             Err(e @ Error::Refused(Refusal::ChangedSince { .. } | Refusal::Emptied)) => {
+                let why = match e {
+                    Error::Refused(Refusal::ChangedSince { by, .. })
+                        if library.writer_id() != Some(by) =>
+                    {
+                        "another drawbar has changed it since".to_string()
+                    }
+                    e => told(&e),
+                };
                 match again {
                     true => library.forget_redo(),
                     false => library.forget_undo(),
                 }
-                return (Err(told(&e)), true);
+                return (Err(why), true);
             }
             Err(e) => return (Err(told(&e)), false),
         };
@@ -2165,7 +2172,7 @@ fn refused(refusal: &Refusal) -> String {
     match refusal {
         Refusal::Changed(mismatch) => format!("“{}” is not as drawbar last saw it", mismatch.path),
         Refusal::Directory(path) => format!("“{path}” is a folder"),
-        Refusal::ChangedSince { .. } => "another drawbar has changed it since".to_string(),
+        Refusal::ChangedSince { .. } => "it has changed since".to_string(),
         Refusal::Nothing => "there is nothing to do".to_string(),
         Refusal::Emptied => "drawbar no longer keeps what undoing it needs".to_string(),
         Refusal::Unsupported(capability) => {
