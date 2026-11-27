@@ -404,11 +404,17 @@ fails before its own intent is tried.
 Otherwise a commit whose entries are durable succeeds, whatever fails after
 them, and says which parts of the instance's own state lag it: `head.json` not
 written, which the next commit, refresh or close writes again; or the scan after
-it failed, which the next refresh repeats. It reports the fact its `file` and
-`path` ops logged of each file the effects left, read at step 5 before the
-append, so an app knows a file it wrote by the length and time it had then.
-Settling one of this writer's own effects and settling another writer's effect
-commit in the same way.
+it failed, which the next refresh repeats. Settling one of this writer's own
+effects and settling another writer's effect commit in the same way.
+
+A commit reports the fact its intent logs, in the `file`, `pin` or `path` op
+its file effects produce, of each file they end with at a path: the path,
+identity, length and modification time, read once the steps are carried out and
+before the entry is appended. A file adopted as it is, which no step moves, is
+among them; a file the effects remove is not. Settling another writer's effect
+reports its file ops the same way. Settling this writer's own unfinished
+effects before a commit reports nothing, and the commit's report covers only
+its own intent.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
