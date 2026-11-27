@@ -3,7 +3,8 @@
 drawbar keeps This computer as a folder of real files, so the folder can be
 synced. This page describes what is stored where, how a change is made, and how
 drawbar stays in step with sync and with other programs. What a user sees of it
-is on [Your files](../drawbar/this-computer.md).
+is on [Back up or move your library](../drawbar/backup.md) and
+[Recover files and edits](../drawbar/recovery.md).
 
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
 `workspace.rs` the assets in memory, and `ondisk.rs` the files read by range.
@@ -27,7 +28,7 @@ the bytes.
 | Recent picked folders | | IndexedDB, as folder handles |
 
 On the desktop the default library is `library` in drawbar's data folder; the
-paths are on [Your files](../drawbar/this-computer.md#where-your-library-lives).
+paths are on [Back up or move your library](../drawbar/backup.md#where-your-library-lives).
 In the browser it is the root of the origin private file system. A preference is
 never kept in a library, and a library is never kept in preferences.
 
@@ -214,7 +215,7 @@ install's own state keeps as unsaved edits.
 A reader keeps nothing between opens: what it shows comes from the files in the
 folder, so a restore from a backup, or a sync still delivering files, changes
 what it shows at the next read
-([If something goes wrong](../drawbar/this-computer.md#if-something-goes-wrong)).
+([Recover files and edits](../drawbar/recovery.md#a-file-is-missing-or-has-lost-its-tags)).
 A file of another writer that cannot be read, as one a sync client keeps only
 online, counts as not delivered yet, and no unfinished change is offered to
 settle until it is read. One of the reader's own writer stops the library
@@ -240,7 +241,7 @@ until the user forgets it.
 
 A file changed on disk under an unsaved edit becomes the new baseline, and the
 edit stays over it. The user then chooses which to keep
-([Changes made outside drawbar](../drawbar/this-computer.md#changes-made-outside-drawbar)).
+([Resolving conflicting edits](../drawbar/recovery.md#an-edit-was-lost-or-two-copies-disagree)).
 An edit held over a resting piano or sample instrument is made again over the
 new file. Where it no longer applies, it stays unsaved and refuses to be saved
 until it is edited again or reverted. A send waits for its rescan, and goes
@@ -254,7 +255,7 @@ on from one copy of drawbar's own data, each as a new writer. The rest is gaps,
 entries whose predecessor has not synced yet, merged once it arrives, and
 unplaced lines of an older copy of a log segment, as a sync client or a backup
 leaves.
-[Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees and
+[Kept apart](../drawbar/recovery.md#kept-apart) says what the user sees and
 does, and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#runs)
 how toshokan finds them.
 

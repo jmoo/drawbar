@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # nix-deps: git nix
-# Assemble the deployed Pages tree: a released app, this checkout's guide.
+# Assemble the deployed Pages tree: a released app and its downloads, this checkout's guide.
 set -euo pipefail
 
 usage() {
@@ -40,6 +40,12 @@ elif ! git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
   exit 1
 fi
 
+nord_cli_tag="$(git -C "$repo" tag --list 'nord-cli-v*' --sort=-v:refname | head -n1)"
+[[ -n $nord_cli_tag ]] || {
+  echo "no nord-cli-v* tag to link; release nord-cli before deploying the site" >&2
+  exit 1
+}
+
 # The release before keeps its modules beside the new ones, for pages cached
 # before this deploy.
 previous="$(git -C "$repo" tag --list 'drawbar-v*' --sort=-v:refname |
@@ -55,11 +61,12 @@ expr="$(printf '
     app = tag: (builtins.getFlake "git+file://%s?ref=refs/tags/${tag}").packages.${system}.drawbar-web;
   in
   here.legacyPackages.${system}.nord.site.override {
+    nordCliVersion = "%s";
     previous = if "%s" == "" then null else app "%s";
     web = app "%s";
-  }' "$repo" "$repo" "$previous" "$previous" "$tag")"
+  }' "$repo" "$repo" "${nord_cli_tag#nord-cli-v}" "$previous" "$previous" "$tag")"
 
-echo "site: app from $tag (keeping ${previous:-no earlier release}), guide from $(git -C "$repo" rev-parse --short HEAD) -> $out"
+echo "site: app from $tag (keeping ${previous:-no earlier release}), downloads from $tag and $nord_cli_tag, guide from $(git -C "$repo" rev-parse --short HEAD) -> $out"
 
 # `builtins.currentSystem` and an unlocked tag ref both need `--impure`; the
 # tag's own flake.lock still pins everything the app is built from.

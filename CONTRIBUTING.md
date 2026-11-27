@@ -215,6 +215,11 @@ need editing; stale text is a bug.
   padded to three, no marketing words. If a page can lose a paragraph without
   losing a fact a reader needs, lose it.
 - Links to the running app point at https://drawbar.app/.
+- A screenshot's alt text is its recipe. It names the file that is open, the view,
+  what is selected and what the picture must show, so that a person or an agent
+  can retake it when the app changes. Each comes as a pair at one size, `<name>-light.png#gh-light-mode-only` and
+  `<name>-dark.png#gh-dark-mode-only`; the guide and GitHub show the one that
+  fits the reader's theme.
 
 ## Tooling and checks
 

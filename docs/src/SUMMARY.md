@@ -1,28 +1,37 @@
 # Summary
 
-[Introduction](introduction.md)
+[drawbar](introduction.md)
 
 # Getting started
 
 - [Install](getting-started/install.md)
 - [What is supported](getting-started/support.md)
+- [The window](drawbar/overview.md)
 
 # drawbar
 
-- [The window](drawbar/overview.md)
-- [Your files](drawbar/this-computer.md)
-- [Your instrument](drawbar/instrument.md)
+- [Library](drawbar/organize.md)
+  - [Folders and sync](drawbar/folders.md)
+  - [Back up](drawbar/backup.md)
+  - [Bundles](drawbar/bundles.md)
+  - [Recover](drawbar/recovery.md)
+- [Instrument](drawbar/instrument.md)
+  - [Copy and send](drawbar/sending.md)
 - [Editing](drawbar/editing.md)
-- [Samples](drawbar/samples.md)
-- [Pianos](drawbar/pianos.md)
-- [Help and About](drawbar/help.md)
+  - [Set lists and notes](drawbar/setlists.md)
+- [Building sounds](drawbar/building.md)
+  - [Samples](drawbar/samples.md)
+  - [Pianos](drawbar/pianos.md)
+  - [From a recording](drawbar/recording.md)
+- [Help](drawbar/help.md)
+  - [Shortcuts](drawbar/shortcuts.md)
 
-# nord-cli
+# nord
 
 - [Overview](nord-cli/overview.md)
 - [Files](nord-cli/files.md)
-- [The instrument](nord-cli/instrument.md)
 - [Editing](nord-cli/editing.md)
+- [Instrument](nord-cli/instrument.md)
 - [Samples and pianos](nord-cli/libraries.md)
 
 # Reference
@@ -38,4 +47,5 @@
 ---
 
 [Community](community.md)
+[Feedback](feedback.md)
 [Privacy](privacy.md)

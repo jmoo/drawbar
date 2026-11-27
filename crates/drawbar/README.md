@@ -4,7 +4,7 @@
 instrument side by side, edit programs, samples and pianos, and send them back.
 Runs in the browser or on the desktop.
 
-![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
+![drawbar's whole window with an instrument attached. On the left, This computer holds the demo sounds, and the instrument's Pianos folder is open below it. In the center, the demo piano drawbar-tine is open on its Key map, Trim to fit, Playback, Velocity layers and Roots. On the right, the inspector shows Selection, Tags and Room.](../../docs/src/assets/screenshot.png)
 
 Open [drawbar.app](https://drawbar.app/), or run the desktop app:
 
@@ -13,14 +13,11 @@ nix run github:jmoo/drawbar#drawbar
 cargo install drawbar
 ```
 
-On Windows, download it from the newest
-[drawbar release](https://github.com/jmoo/drawbar/releases).
-On Linux, download the AppImage from the same release; see
-[Install](../../docs/src/getting-started/install.md#on-the-desktop).
-
-On a Mac with Apple silicon, download the disk image from the same release; see
-[Install](../../docs/src/getting-started/install.md#on-the-desktop) for the first
-open.
+Or download it for [Windows](https://drawbar.app/download/windows),
+[macOS](https://drawbar.app/download/macos) or
+[Linux](https://drawbar.app/download/linux);
+[Open or install drawbar](../../docs/src/getting-started/install.md#on-the-desktop)
+says what each needs.
 
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
@@ -43,7 +40,7 @@ open.
   change something, and you can undo what you change while it is open.
 - Keep the library in Dropbox, OneDrive, iCloud Drive or on a network share, and
   use it from every computer that syncs it; see
-  [Your files](../../docs/src/drawbar/this-computer.md#opening-another-folder).
+  [Open a folder or share it between computers](../../docs/src/drawbar/folders.md#opening-another-folder).
 
 Connecting an instrument from the browser needs Chrome, Edge or Brave.
 
