@@ -2593,7 +2593,7 @@ mod tests {
         bench.workspace.link(first, &keyboard, elsewhere);
 
         let said = undo(&mut bench, "files moved with their sounds");
-        assert_eq!(said, "Linked “B” again; “A” relinked since.");
+        assert_eq!(said, "Linked “B” again; “A” changed since.");
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(3))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }

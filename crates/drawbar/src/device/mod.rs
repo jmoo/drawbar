@@ -1275,18 +1275,17 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
         .collect();
     // Linking one file back unlinks the kept one, so only one file per slot can be.
     let undoable = settled.iter().all(|(_, claims)| claims.len() == 2);
-    let kept: Vec<u64> = settled.iter().map(|(kept, _)| *kept).collect();
-    let unlinked: Vec<(u64, Held)> = settled
+    let unlinked: Vec<(u64, Held, u64)> = settled
         .into_iter()
         .flat_map(|(kept, claims)| {
             let others = claims.iter().filter(move |(entity, _)| entity.id != kept);
-            others.map(|(entity, held)| (entity.id, (*held).clone()))
+            others.map(move |(entity, held)| (entity.id, (*held).clone(), kept))
         })
         .collect();
     if unlinked.is_empty() {
         return;
     }
-    for (id, _) in &unlinked {
+    for (id, ..) in &unlinked {
         workspace.unlink(*id, &keyboard);
     }
     log.say(format!(
@@ -1297,7 +1296,6 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
         log.offer(crate::log::Undo::Reclaim {
             keyboard,
             links: unlinked,
-            kept,
         });
     }
 }
@@ -3948,7 +3946,7 @@ mod tests {
         assert!(bench.log.press("1 file linked to the slot that holds it."));
         bench.log.undo_pressed(&mut bench.workspace);
         assert_eq!(held_at(&bench, id), Some(Spot::at(at(3))));
-        assert_eq!(bench.log.status().1, "Not undone: “Tine” relinked since.");
+        assert_eq!(bench.log.status().1, "Not undone: “Tine” changed since.");
     }
 
     #[test]

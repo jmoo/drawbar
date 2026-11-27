@@ -53,8 +53,8 @@ pub struct Entry {
 /// What drawbar did on its own, as the one change that takes it back.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Undo {
-    /// Files linked on their own, each to its slot: unlink each still linked there, and
-    /// keep it off that keyboard.
+    /// Files linked on their own, each to its slot: keep each off that keyboard, unless it
+    /// is linked to another slot now.
     Unlink {
         keyboard: Keyboard,
         links: Vec<(u64, Held)>,
@@ -67,12 +67,11 @@ pub enum Undo {
         keyboard: Keyboard,
         links: Vec<Relinked>,
     },
-    /// Files unlinked from a slot one of `kept` kept: link back each still unlinked, in
-    /// place of that one and of no other file.
+    /// Files unlinked from a slot another file kept, each with that file: link back
+    /// each still unlinked, in place of that one and of no other file.
     Reclaim {
         keyboard: Keyboard,
-        links: Vec<(u64, Held)>,
-        kept: Vec<u64>,
+        links: Vec<(u64, Held, u64)>,
     },
 }
 
@@ -104,36 +103,47 @@ impl Undo {
         match self {
             Undo::Unlink { keyboard, links } => {
                 let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
-                let (links, relinked): (Vec<_>, Vec<_>) =
-                    links.partition(|(id, held)| stands(workspace, &keyboard, *id, Some(held)));
+                let (links, changed): (Vec<_>, Vec<_>) = links.partition(|(id, held)| {
+                    let stands = |left| stands(workspace, &keyboard, *id, left);
+                    stands(Some(held)) || stands(None)
+                });
                 let unlinked = files(&links);
                 for id in &unlinked {
                     workspace.keep_off(*id, &keyboard);
                 }
                 let done = (!unlinked.is_empty())
                     .then(|| format!("Unlinked {}", named(workspace, &unlinked, "files")));
-                said(done, workspace, &files(&relinked))
+                said(done, workspace, &files(&changed))
             }
             Undo::Restore(kept) => restore(kept, workspace, log),
             Undo::Relink { keyboard, links } => {
                 let links = links.into_iter().filter(|link| here(workspace, link.id));
-                let (links, relinked): (Vec<_>, Vec<_>) = links
+                let (links, changed): (Vec<_>, Vec<_>) = links
                     .partition(|link| stands(workspace, &keyboard, link.id, link.left.as_ref()));
-                let relinked: Vec<u64> = relinked.iter().map(|link| link.id).collect();
+                let changed: Vec<u64> = changed.iter().map(|link| link.id).collect();
                 let links: Vec<(u64, Held)> =
                     links.into_iter().map(|it| (it.id, it.before)).collect();
                 let ours = files(&links);
-                relink(workspace, &keyboard, links, &ours, &relinked)
+                relink(
+                    workspace,
+                    &keyboard,
+                    links,
+                    |_, other| ours.contains(&other),
+                    &changed,
+                )
             }
-            Undo::Reclaim {
-                keyboard,
-                links,
-                kept,
-            } => {
-                let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
-                let (links, relinked): (Vec<_>, Vec<_>) =
-                    links.partition(|(id, _)| stands(workspace, &keyboard, *id, None));
-                relink(workspace, &keyboard, links, &kept, &files(&relinked))
+            Undo::Reclaim { keyboard, links } => {
+                let links = links.into_iter().filter(|(id, ..)| here(workspace, *id));
+                let (links, changed): (Vec<_>, Vec<_>) =
+                    links.partition(|(id, ..)| stands(workspace, &keyboard, *id, None));
+                let changed: Vec<u64> = changed.iter().map(|(id, ..)| *id).collect();
+                let kept: Vec<(Held, u64)> = links
+                    .iter()
+                    .map(|(_, held, kept)| (held.clone(), *kept))
+                    .collect();
+                let over = |held: &Held, other| kept.contains(&(held.clone(), other));
+                let links = links.into_iter().map(|(id, held, _)| (id, held)).collect();
+                relink(workspace, &keyboard, links, over, &changed)
             }
         }
     }
@@ -186,18 +196,18 @@ fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Opt
     }
 }
 
-/// Link each file of `links` to its slot again, unless a file not among `over` is linked
-/// to one of those slots now. `relinked` are the files left alone.
+/// Link each file of `links` to its slot again, unless one of those slots is linked now
+/// to a file the link may not go `over`. `changed` are the files left alone.
 fn relink(
     workspace: &mut Workspace,
     keyboard: &Keyboard,
     links: Vec<(u64, Held)>,
-    over: &[u64],
-    relinked: &[u64],
+    over: impl Fn(&Held, u64) -> bool,
+    changed: &[u64],
 ) -> Option<String> {
     let taken = links.iter().find_map(|(_, held)| {
         let other = workspace.linked_at(keyboard, held.class(), &held.spot)?;
-        (!over.contains(&other)).then_some((other, held))
+        (!over(held, other)).then_some((other, held))
     });
     if let Some((other, held)) = taken {
         let name = named(workspace, &[other], "files");
@@ -212,7 +222,7 @@ fn relink(
     }
     let done = (!linked.is_empty())
         .then(|| format!("Linked {} again", named(workspace, &linked, "files")));
-    said(done, workspace, relinked)
+    said(done, workspace, changed)
 }
 
 /// Whether `id` is linked on `keyboard` as the change being taken back left it: to the
@@ -229,13 +239,13 @@ fn files(links: &[(u64, Held)]) -> Vec<u64> {
 }
 
 /// What an Undo of links says: what it has `done`, and which files it left alone because
-/// they were `relinked` since. `None` where it names no file.
-fn said(done: Option<String>, workspace: &Workspace, relinked: &[u64]) -> Option<String> {
-    let relinked = named(workspace, relinked, "files");
-    match (done, relinked.is_empty()) {
+/// their links `changed` since. `None` where it names no file.
+fn said(done: Option<String>, workspace: &Workspace, changed: &[u64]) -> Option<String> {
+    let changed = named(workspace, changed, "files");
+    match (done, changed.is_empty()) {
         (done, true) => done.map(|done| format!("{done}.")),
-        (None, false) => Some(format!("Not undone: {relinked} relinked since.")),
-        (Some(done), false) => Some(format!("{done}; {relinked} relinked since.")),
+        (None, false) => Some(format!("Not undone: {changed} changed since.")),
+        (Some(done), false) => Some(format!("{done}; {changed} changed since.")),
     }
 }
 
