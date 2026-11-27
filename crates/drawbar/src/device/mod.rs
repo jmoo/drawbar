@@ -1200,21 +1200,20 @@ fn link_found(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) {
     if found.is_empty() {
         return;
     }
-    let linked: Vec<u64> = found.iter().map(|(id, _)| *id).collect();
-    for (id, held) in found {
-        workspace.link(id, keyboard, held);
+    for (id, held) in &found {
+        workspace.link(*id, keyboard, held.clone());
     }
     log.say(format!(
         "{} linked to {}.",
-        counted(linked.len(), "file", "files"),
-        match linked.len() {
+        counted(found.len(), "file", "files"),
+        match found.len() {
             1 => "the slot that holds it",
             _ => "the slots that hold them",
         }
     ));
     log.offer(crate::log::Undo::Unlink {
         keyboard: keyboard.clone(),
-        ids: linked,
+        links: found,
     });
 }
 
@@ -1276,6 +1275,7 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
         .collect();
     // Linking one file back unlinks the kept one, so only one file per slot can be.
     let undoable = settled.iter().all(|(_, claims)| claims.len() == 2);
+    let kept: Vec<u64> = settled.iter().map(|(kept, _)| *kept).collect();
     let unlinked: Vec<(u64, Held)> = settled
         .into_iter()
         .flat_map(|(kept, claims)| {
@@ -1297,6 +1297,7 @@ fn settle_claims(state: &DeviceState, workspace: &mut Workspace, log: &mut Log) 
         log.offer(crate::log::Undo::Reclaim {
             keyboard,
             links: unlinked,
+            kept,
         });
     }
 }
@@ -3925,6 +3926,32 @@ mod tests {
     }
 
     #[test]
+    fn undoing_a_link_made_on_its_own_leaves_a_file_linked_elsewhere_since() {
+        let mut bench = crate::testing::Bench::new();
+        let class = ObjectClass::Program;
+        let crc = print(&body()).crc;
+        bench.device.pretend_geometry(class, &[("A", 3)]);
+        bench
+            .device
+            .pretend_bodies(class, 1, &[None, Some(("Tine", crc)), None]);
+        let origin = Origin::Device { class, at: at(2) };
+        let id = bench
+            .workspace
+            .ingest("Tine.ne5p".into(), origin, body(), &mut bench.log);
+        bench.workspace.settle_files(&mut bench.log);
+        heard(&mut bench);
+        assert_eq!(held_at(&bench, id), Some(Spot::at(at(2))));
+
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let elsewhere = Held::new(class, at(3), "Tine", print(&body())).unwrap();
+        bench.workspace.link(id, &keyboard, elsewhere);
+        assert!(bench.log.press("1 file linked to the slot that holds it."));
+        bench.log.undo_pressed(&mut bench.workspace);
+        assert_eq!(held_at(&bench, id), Some(Spot::at(at(3))));
+        assert_eq!(bench.log.status().1, "Not undone: “Tine” relinked since.");
+    }
+
+    #[test]
     fn a_file_is_linked_on_its_own_to_the_slot_it_names_holding_its_body() {
         let mut bench = crate::testing::Bench::new();
         let class = ObjectClass::Program;
@@ -4216,6 +4243,26 @@ mod tests {
         heard(&mut bench);
         assert_eq!(linked(&bench), [false, true], "the other one, in its place");
         assert_eq!(bench.log.status().1, "Linked “B” again.");
+    }
+
+    #[test]
+    fn undoing_a_settled_claim_takes_the_slot_from_no_file_linked_there_since() {
+        let (mut bench, ids) = claiming(&[("A.ne5p", body()), ("B.ne5p", gained("40"))]);
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let slot = bench.workspace.get(ids[0]).unwrap().held_on(&keyboard);
+        let slot = slot.cloned().expect("A kept it");
+        let since = file(&mut bench, "C.ne5p", gained("41"));
+        bench.workspace.link(since, &keyboard, slot);
+        assert!(bench
+            .log
+            .press("1 file unlinked from a slot another file is linked to."));
+        bench.log.undo_pressed(&mut bench.workspace);
+        let linked = [ids[0], ids[1], since].map(|id| held_at(&bench, id).is_some());
+        assert_eq!(linked, [false, false, true]);
+        assert_eq!(
+            bench.log.status().1,
+            "Not undone: “C” is linked to Programs 2:1 now."
+        );
     }
 
     /// Linking one back unlinks the kept one, so of several only the last would end up

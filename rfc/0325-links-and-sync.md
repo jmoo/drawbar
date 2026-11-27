@@ -89,8 +89,9 @@ same sheet. A program going up lists the piano or sample it plays as a row of it
 own when the keyboard lacks it.
 
 Undo in the activity log takes back a link made, moved or removed, and a file Sync
-brought in. Library undo takes back the file and leaves its link. Either way the file
-then reads as older than its slot. A write to the keyboard has no undo.
+brought in, each only while it is still as that change left it. Library undo takes
+back the file and leaves its link. Either way the file then reads as older than its
+slot. A write to the keyboard has no undo.
 
 ### What a contributor sees
 

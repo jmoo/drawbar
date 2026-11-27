@@ -53,21 +53,36 @@ pub struct Entry {
 /// What drawbar did on its own, as the one change that takes it back.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Undo {
-    /// Files linked on their own: unlink each, and keep it off that keyboard.
-    Unlink { keyboard: Keyboard, ids: Vec<u64> },
-    /// Files brought in from the keyboard, each as it was before.
-    Restore(Vec<Restored>),
-    /// Links drawbar moved or removed: put each back, unless another file is linked to
-    /// one of those slots now.
-    Relink {
+    /// Files linked on their own, each to its slot: unlink each still linked there, and
+    /// keep it off that keyboard.
+    Unlink {
         keyboard: Keyboard,
         links: Vec<(u64, Held)>,
     },
-    /// Files unlinked from a slot another file kept: link each back, in place of that one.
+    /// Files brought in from the keyboard, each as it was before.
+    Restore(Vec<Restored>),
+    /// Links drawbar moved or removed: put back each still as that left it, unless
+    /// another file is linked to one of those slots now.
+    Relink {
+        keyboard: Keyboard,
+        links: Vec<Relinked>,
+    },
+    /// Files unlinked from a slot one of `kept` kept: link back each still unlinked, in
+    /// place of that one and of no other file.
     Reclaim {
         keyboard: Keyboard,
         links: Vec<(u64, Held)>,
+        kept: Vec<u64>,
     },
+}
+
+/// A link drawbar moved or removed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Relinked {
+    pub id: u64,
+    pub before: Held,
+    /// The link the change left the file with, if any.
+    pub left: Option<Held>,
 }
 
 /// A file as it was before it was brought in, and the link bringing it in left.
@@ -83,43 +98,42 @@ pub struct Restored {
 
 impl Undo {
     /// Take the change back, and say what was taken back. A file that is gone is left
-    /// alone; a file brought in is put back only while it is as bringing it in left it.
-    /// `None` when every file it names is gone.
+    /// alone; a file brought in is put back, and a link taken back, only while it is as
+    /// the change left it. `None` when every file it names is gone.
     pub fn perform(self, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
         match self {
-            Undo::Unlink { keyboard, mut ids } => {
-                ids.retain(|id| here(workspace, *id));
-                for id in &ids {
+            Undo::Unlink { keyboard, links } => {
+                let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
+                let (links, relinked): (Vec<_>, Vec<_>) =
+                    links.partition(|(id, held)| stands(workspace, &keyboard, *id, Some(held)));
+                let unlinked = files(&links);
+                for id in &unlinked {
                     workspace.keep_off(*id, &keyboard);
                 }
-                (!ids.is_empty()).then(|| format!("Unlinked {}.", named(workspace, &ids, "files")))
+                let done = (!unlinked.is_empty())
+                    .then(|| format!("Unlinked {}", named(workspace, &unlinked, "files")));
+                said(done, workspace, &files(&relinked))
             }
             Undo::Restore(kept) => restore(kept, workspace, log),
-            Undo::Relink {
-                keyboard,
-                mut links,
-            } => {
-                links.retain(|(id, _)| here(workspace, *id));
-                let ours = |id| links.iter().any(|(it, _)| *it == id);
-                let taken = links.iter().find_map(|(_, held)| {
-                    let other = workspace.linked_at(&keyboard, held.class(), &held.spot)?;
-                    (!ours(other)).then_some((other, held))
-                });
-                if let Some((other, held)) = taken {
-                    let name = named(workspace, &[other], "files");
-                    return Some(format!(
-                        "Not undone: {name} is linked to {} now.",
-                        spot(held)
-                    ));
-                }
-                relink(workspace, &keyboard, links)
+            Undo::Relink { keyboard, links } => {
+                let links = links.into_iter().filter(|link| here(workspace, link.id));
+                let (links, relinked): (Vec<_>, Vec<_>) = links
+                    .partition(|link| stands(workspace, &keyboard, link.id, link.left.as_ref()));
+                let relinked: Vec<u64> = relinked.iter().map(|link| link.id).collect();
+                let links: Vec<(u64, Held)> =
+                    links.into_iter().map(|it| (it.id, it.before)).collect();
+                let ours = files(&links);
+                relink(workspace, &keyboard, links, &ours, &relinked)
             }
             Undo::Reclaim {
                 keyboard,
-                mut links,
+                links,
+                kept,
             } => {
-                links.retain(|(id, _)| here(workspace, *id));
-                relink(workspace, &keyboard, links)
+                let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
+                let (links, relinked): (Vec<_>, Vec<_>) =
+                    links.partition(|(id, _)| stands(workspace, &keyboard, *id, None));
+                relink(workspace, &keyboard, links, &kept, &files(&relinked))
             }
         }
     }
@@ -172,16 +186,57 @@ fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Opt
     }
 }
 
+/// Link each file of `links` to its slot again, unless a file not among `over` is linked
+/// to one of those slots now. `relinked` are the files left alone.
 fn relink(
     workspace: &mut Workspace,
     keyboard: &Keyboard,
     links: Vec<(u64, Held)>,
+    over: &[u64],
+    relinked: &[u64],
 ) -> Option<String> {
-    let ids: Vec<u64> = links.iter().map(|(id, _)| *id).collect();
+    let taken = links.iter().find_map(|(_, held)| {
+        let other = workspace.linked_at(keyboard, held.class(), &held.spot)?;
+        (!over.contains(&other)).then_some((other, held))
+    });
+    if let Some((other, held)) = taken {
+        let name = named(workspace, &[other], "files");
+        return Some(format!(
+            "Not undone: {name} is linked to {} now.",
+            spot(held)
+        ));
+    }
+    let linked = files(&links);
     for (id, held) in links {
         workspace.link(id, keyboard, held);
     }
-    (!ids.is_empty()).then(|| format!("Linked {} again.", named(workspace, &ids, "files")))
+    let done = (!linked.is_empty())
+        .then(|| format!("Linked {} again", named(workspace, &linked, "files")));
+    said(done, workspace, relinked)
+}
+
+/// Whether `id` is linked on `keyboard` as the change being taken back left it: to the
+/// slot `left` names, or to none.
+fn stands(workspace: &Workspace, keyboard: &Keyboard, id: u64, left: Option<&Held>) -> bool {
+    let slot = |held: &Held| (held.class(), held.spot.clone());
+    let now = workspace.get(id).and_then(|it| it.held_on(keyboard));
+    now.map(slot) == left.map(slot)
+}
+
+/// The files `links` name.
+fn files(links: &[(u64, Held)]) -> Vec<u64> {
+    links.iter().map(|(id, _)| *id).collect()
+}
+
+/// What an Undo of links says: what it has `done`, and which files it left alone because
+/// they were `relinked` since. `None` where it names no file.
+fn said(done: Option<String>, workspace: &Workspace, relinked: &[u64]) -> Option<String> {
+    let relinked = named(workspace, relinked, "files");
+    match (done, relinked.is_empty()) {
+        (done, true) => done.map(|done| format!("{done}.")),
+        (None, false) => Some(format!("Not undone: {relinked} relinked since.")),
+        (Some(done), false) => Some(format!("{done}; {relinked} relinked since.")),
+    }
 }
 
 /// Whether a file is still on this computer.

@@ -12,7 +12,7 @@ use crate::device::{
     occupied, slot_label, standing_of, there, Device, DeviceCmd, DeviceState, Purpose,
 };
 use crate::link::{Held, Keyboard, Print, Spot, Standing, There};
-use crate::log::{Log, Restored, Undo};
+use crate::log::{Log, Relinked, Restored, Undo};
 use crate::queue::{compare, Diff, Queue};
 use crate::strings::{counted, display_name, shown};
 use crate::workspace::{print_of, LocalEntity, VerifyState, Workspace};
@@ -1052,7 +1052,15 @@ fn unlink(workspace: &mut Workspace, log: &mut Log, keyboard: &Keyboard, ids: &[
         n => format!("{n} files unlinked from the keyboard."),
     });
     let keyboard = keyboard.clone();
-    log.offer(Undo::Relink { keyboard, links });
+    let links = links.into_iter().map(|(id, before)| Relinked {
+        id,
+        before,
+        left: None,
+    });
+    log.offer(Undo::Relink {
+        keyboard,
+        links: links.collect(),
+    });
 }
 
 /// Move each moved sound's link to the slot it moved to, all of a class at once so a swap
@@ -1105,7 +1113,14 @@ fn follow_moves(
         1 => format!("“{}” is now at {}.", display_name(name), shown(*to)),
         n => format!("{n} files moved with their sounds."),
     });
-    let links = moved.into_iter().map(|(row, _, _, held)| (row.id, held));
+    let links = moved.into_iter().map(|(row, _, _, before)| Relinked {
+        id: row.id,
+        before,
+        left: workspace
+            .get(row.id)
+            .and_then(|it| it.held_on(keyboard))
+            .cloned(),
+    });
     log.offer(Undo::Relink {
         keyboard: keyboard.clone(),
         links: links.collect(),
@@ -2435,6 +2450,27 @@ mod tests {
         );
         bench.press();
         assert_eq!(slot_of(&bench, first), Some(Spot::at(at(1))));
+        assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
+    }
+
+    #[test]
+    fn undoing_a_move_leaves_a_file_linked_elsewhere_since() {
+        let mut bench = Bench::new();
+        let (a, b) = (body(), gained("40"));
+        walked_named(
+            &mut bench,
+            &[Some(("B", crc(&b))), Some(("A", crc(&a))), None],
+        );
+        let first = linked(&mut bench, "A.ne5p", a.clone(), 1, &a);
+        let second = linked(&mut bench, "B.ne5p", b.clone(), 2, &b);
+        bench.sync();
+        let keyboard = bench.device.state.keyboard().cloned().unwrap();
+        let elsewhere = Held::new(PROGRAM, at(3), "A", print(&a)).unwrap();
+        bench.workspace.link(first, &keyboard, elsewhere);
+
+        let said = undo(&mut bench, "files moved with their sounds");
+        assert_eq!(said, "Linked “B” again; “A” relinked since.");
+        assert_eq!(slot_of(&bench, first), Some(Spot::at(at(3))));
         assert_eq!(slot_of(&bench, second), Some(Spot::at(at(2))));
     }
 
