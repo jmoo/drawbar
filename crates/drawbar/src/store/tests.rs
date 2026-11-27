@@ -7030,8 +7030,6 @@ fn undo_and_redo_say_what_they_take_back() {
     );
 }
 
-/// An undo the library refuses is let go when it is asked, with a word, and Undo names
-/// the change before it. Nothing is written.
 #[test]
 fn an_undo_of_a_save_whose_file_changed_outside_is_let_go() {
     let root = Temp::new();
@@ -7123,8 +7121,6 @@ fn a_redo_of_a_save_whose_file_changed_outside_is_let_go() {
     );
 }
 
-/// An undo that fails where the folder could not be read may pass later, so its step
-/// stays.
 #[test]
 fn an_undo_the_folder_could_not_be_read_for_stays_to_be_taken() {
     let root = Temp::new();
