@@ -646,7 +646,12 @@ impl DrawbarApp {
             true => Pass::Full,
             false => Pass::Files,
         };
+        let before = self.workspace.revision();
         let synced = store.sync(&mut self.workspace, &mut self.browser, pass);
+        // What the store changed as it synced, as a save it refused, shows in a frame.
+        if self.workspace.revision() != before {
+            ctx.request_repaint();
+        }
         // A full pass that could not finish, as during a rescan, waits out the cadence too,
         // since each one summarizes every asset.
         if pass == Pass::Full {
@@ -2295,6 +2300,38 @@ mod tests {
         let shift = command.plus(egui::Modifiers::SHIFT);
         let redone: Done = |app| app.timeline.next_redo().is_none() && undoes(app);
         press(&mut app, vec![key(shift)], "⇧⌘Z redid it", redone);
+    }
+
+    /// A save refused where nothing may be written is said without waiting for input.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_save_refused_in_a_read_only_library_asks_for_the_frame_that_says_so() {
+        use eframe::App as _;
+
+        let (root, _) = crate::store::tests::newer_drawbar_wrote();
+        let (ctx, mut app, id) = edited_sample(&root);
+        let run = |app: &mut DrawbarApp, time: f64| {
+            let mut window = eframe::Frame::_new_kittest();
+            let mut input = crate::testing::screen(egui::vec2(1280.0, 720.0), Vec::new());
+            input.time = Some(time);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window))
+        };
+        for n in 0..40 {
+            run(&mut app, 100.0 + f64::from(n) * 0.1);
+        }
+        act(&ctx, &mut app, vec![browser::Act::Export(id)]);
+        assert!(app.document.awaits_save(id, &app.workspace));
+
+        let output = run(&mut app, 104.2);
+
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert_eq!(
+            delay,
+            std::time::Duration::ZERO,
+            "another frame is asked for"
+        );
+        run(&mut app, 104.21);
+        assert!(!app.document.awaits_save(id, &app.workspace));
     }
 
     /// The app over no library, taking its keys as the browser build does.

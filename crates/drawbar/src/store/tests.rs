@@ -1895,7 +1895,7 @@ fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
 
 /// A copy of a library whose hidden folder holds, in this install's own log, a change a
 /// newer drawbar wrote, and the segment of the log that holds it.
-fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {
+pub(crate) fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {
     use toshokan::log::{Entry, EntryKind};
 
     let running = Temp::new();
