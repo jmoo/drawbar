@@ -1199,7 +1199,9 @@ fn bring(
     if entity.is_unsaved() || entity.unread() || entity.rests().is_some() {
         return None;
     }
-    let after = before.agreed(print_of(&bytes)?, name.trim());
+    // The version replaced counts as an earlier one: put back, it reads as older.
+    let replaced = before.agreed(entity.saved_print()?, name.trim());
+    let after = replaced.agreed(print_of(&bytes)?, name.trim());
     let restored = Restored {
         id,
         bytes: entity.bytes.to_vec(),
@@ -1937,6 +1939,24 @@ mod tests {
 
         assert_eq!(undo(&mut bench, "Brought in"), "Put back “A”.");
         assert_eq!(bench.workspace.get(id).unwrap().bytes.to_vec(), body());
+        assert_eq!(standing(&bench, id), Some(Standing::Theirs));
+    }
+
+    #[test]
+    fn a_file_put_back_after_a_bring_in_over_its_own_changes_reads_as_older() {
+        let mut bench = Bench::new();
+        let (mine, theirs) = (gained("41"), gained("40"));
+        walked(&mut bench, &[Some(crc(&theirs))]);
+        let id = linked(&mut bench, "A.ne5p", mine.clone(), 1, &body());
+        assert_eq!(listed(&bench), [(id, Change::Both)]);
+        open_read(&mut bench);
+        pick(&mut bench, id, Way::Down);
+        bench.press();
+        got(&mut bench, 1, theirs, Purpose::Pull);
+        assert_eq!(standing(&bench, id), Some(Standing::Same));
+
+        let log = &mut bench.log;
+        bench.workspace.save_over(id, mine, None, log);
         assert_eq!(standing(&bench, id), Some(Standing::Theirs));
     }
 

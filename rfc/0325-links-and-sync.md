@@ -228,8 +228,9 @@ bundle unpacked into the library exports again with what its programs play.
   that hold different sounds each read as many changes, and their owner needs a
   library for each.
 - History is eight checksums and no bytes. A slot holding a version older than those
-  reads as changed on the keyboard. Turning a `↓` row to `↑`, or picking the file on a
-  both-changed row, discards the keyboard's version.
+  reads as changed on the keyboard, and a file put back to one as changed here.
+  Turning a `↓` row to `↑`, or picking the file on a both-changed row, discards the
+  keyboard's version.
 - A file edited back to bytes it held before reads as older than its slot, and Sync
   offers the slot's version. Turning the row to `↑` sends the file.
 - A change made at the panel while drawbar is attached shows at the next Sync press,
