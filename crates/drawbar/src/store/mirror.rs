@@ -2298,11 +2298,13 @@ impl Store {
             joined,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
-        let waiting = self.records.iter().filter(|(_, record)| {
-            let path = record.path.as_ref();
-            path.is_some_and(|path| self.finishing.contains(path))
-        });
-        self.deferred.extend(waiting.map(|(id, _)| *id));
+        if !self.finishing.is_empty() {
+            let waiting = self.records.iter().filter(|(_, record)| {
+                let path = record.path.as_ref();
+                path.is_some_and(|path| self.finishing.contains(path))
+            });
+            self.deferred.extend(waiting.map(|(id, _)| *id));
+        }
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
