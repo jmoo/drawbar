@@ -382,7 +382,9 @@ An edit step is one comparison and one call:
 Undo takes the step the menu named, or one made since the menu was drawn, or
 none. It never falls through to the step behind, which may be a library change
 the menu did not name. A command asked in the same frame after one that ran
-follows what that one did, and after one that did nothing it is dropped.
+follows what that one did, and after one that did nothing it is dropped. The
+menu names its step as each frame ends, so a press in the frame after an undo
+takes the step before the one that undo took.
 
 Redo is the same with `before` and `after` exchanged and `Cmd::Redo`.
 

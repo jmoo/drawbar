@@ -186,6 +186,10 @@ pub struct DrawbarApp {
     pub(crate) chrome: crate::platform::Frame,
     #[cfg(target_os = "macos")]
     menubar: Option<crate::menubar::MenuBar>,
+    /// What Undo and Redo named when the last frame ended, which a pick from the menu bar
+    /// takes.
+    #[cfg(target_os = "macos")]
+    named: (crate::timeline::Aim, crate::timeline::Aim),
     /// The library open in this window. `None` where the system names no folder for
     /// the default one.
     pub(crate) store: Option<Store>,
@@ -315,6 +319,11 @@ impl DrawbarApp {
             chrome: crate::platform::Frame::of(Platform::current()),
             #[cfg(target_os = "macos")]
             menubar: None,
+            #[cfg(target_os = "macos")]
+            named: (
+                crate::timeline::Aim::Undo(None),
+                crate::timeline::Aim::Redo(None),
+            ),
             store,
             timeline: Timeline::default(),
             undoing: Vec::new(),
@@ -400,17 +409,16 @@ impl DrawbarApp {
         if !picked.is_empty() {
             ctx.request_repaint();
         }
-        for (command, aim) in picked.into_iter().filter(|(command, _)| admit(*command)) {
-            match aim {
-                Some(aim) => self.undoing.push(aim),
-                None if self.may_run(ctx, command) => self.run(ctx, frame, command, acts),
-                None => {}
+        let (undo, redo) = self.named;
+        for command in picked.into_iter().filter(|command| admit(*command)) {
+            match command {
+                crate::menu::Command::Undo => self.undoing.push(undo),
+                crate::menu::Command::Redo => self.undoing.push(redo),
+                _ if self.may_run(ctx, command) => self.run(ctx, frame, command, acts),
+                _ => {}
             }
         }
-        bar.refresh(
-            |command| self.offer_now(ctx, command),
-            |command| self.aim(command),
-        );
+        bar.refresh(|command| self.offer_now(ctx, command));
         self.menubar = Some(bar);
     }
 
@@ -1344,6 +1352,10 @@ impl eframe::App for DrawbarApp {
         );
         self.record(ctx, began);
         self.undo_asked(ctx);
+        #[cfg(target_os = "macos")]
+        {
+            self.named = (self.timeline.aim_undo(), self.timeline.aim_redo());
+        }
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -3230,6 +3242,25 @@ mod tests {
         assert_eq!(bytes(&app, first), turned, "the first turn stands");
         assert_eq!(bytes(&app, second), outside);
         assert_eq!(steps(&app), (1, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_undo_picked_in_the_frame_after_another_takes_the_step_before_it() {
+        let (ctx, mut app) = keyed();
+        let (first, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let made = bytes(&app, first);
+        turn_gain(&ctx, &mut app, first, "40");
+        let (second, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        turn_gain(&ctx, &mut app, second, "40");
+
+        for _ in 0..2 {
+            app.undoing.push(app.named.0);
+            input(&ctx, &mut app, Vec::new());
+        }
+
+        assert_eq!(bytes(&app, first), made, "both turns are taken back");
+        assert_eq!(steps(&app), (0, 2));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
