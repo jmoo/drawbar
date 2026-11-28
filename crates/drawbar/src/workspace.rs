@@ -3790,7 +3790,7 @@ impl Workspace {
     /// Swap in edited bytes, keeping the entity's identity.
     ///
     /// The decode and the verify run again, as they do for a file from disk.
-    pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+    pub fn replace_bytes(&mut self, id: u64, bytes: impl Into<Bytes>, log: &mut Log) {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
