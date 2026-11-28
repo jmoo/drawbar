@@ -12,6 +12,8 @@ use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
+mod walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
@@ -795,11 +797,7 @@ fn puts(io: &toshokan::Io, at: &str) -> bool {
 /// Give the file at `at` another modification time, as a browser's move does.
 fn touch(root: &Temp, at: &str) {
     let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
-    fs::File::options()
-        .write(true)
-        .open(root.at(at))
-        .and_then(|file| file.set_modified(then))
-        .unwrap();
+    crate::testing::date(&root.at(at), then).unwrap();
 }
 
 #[test]

@@ -14,7 +14,7 @@ use crate::icon::{painted, sized, Glyph};
 
 /// Entries kept before the oldest is dropped. A session that opens a hundred files
 /// still fits; a runaway loop cannot grow the app without bound.
-const CAPACITY: usize = 500;
+pub(crate) const CAPACITY: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {

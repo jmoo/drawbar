@@ -142,6 +142,23 @@ with `DRAWBAR_TEST_FOLDER` giving the test folders what a browser's can do:
 storage or a folder picked in Chrome, and `copying` renames nothing, as a folder
 picked in Brave. The default, `desktop`, does what the disk reports.
 
+drawbar's walks put two or three drawbars on one library folder, or on copies that a
+simulated sync keeps in step, and take seeded random steps. After each step they
+check that an edit not yet saved stays with its asset, that another drawbar's save
+under an unsaved edit asks whose to keep, that Take theirs and Keep both do what
+they say, and that questions end and an answered one is not asked again. About one
+change in three is undone and redone at once, to check that Undo and Redo of it are
+offered. When a walk chooses Undo or Redo, it checks that the Edit menu offers and
+names the step its history holds, and that Undo stops once every step is undone. On
+copies, they also check that sync settles and that only a log's writer changes it.
+Each test fails if its own seeds never evaluate one of those checks. `UNHELD` in
+`crates/drawbar/src/store/tests/walk.rs` lists the checks the library does not pass
+yet: a walk notes their failures and goes on, and `--nocapture` prints the first
+failure of each. A failed walk ends with the command that walks it again.
+`DRAWBAR_WALK_SEEDS=1..=500` runs the walks from each seed in the range, and the
+ignored test `every_unheld_check_still_fails_in_some_walk` names a listed check that
+no walk fails.
+
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
 corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
