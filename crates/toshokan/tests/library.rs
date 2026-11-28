@@ -693,6 +693,10 @@ through_both!(
     orphans_are_held_back_while_a_pending_record_cannot_be_read,
     a_writer_whose_own_pending_record_cannot_be_read_does_not_open,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
+    a_commit_reports_the_fact_it_logged_of_each_file_it_placed,
+    a_commit_reports_its_files_as_they_were_before_another_program_wrote_one,
+    each_kind_of_file_effect_reports_the_file_where_it_leaves_it,
+    finishing_another_writers_change_reports_the_file_where_it_leaves_it,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_folder_holding_no_file_is_renamed_and_named_back_by_undo,
@@ -4739,6 +4743,197 @@ fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F
     assert_eq!(a.view().listed(&path("moved.npno")), None);
     a.rescan().unwrap();
     assert_eq!(a.view().listed(&path("same.npno")).map(|l| l.len), Some(4));
+}
+
+/// The fact a commit logs of the file at `at` holding `bytes`, at the time the folder
+/// reports for it now.
+fn fact(folder: &MemDisk, at: &str, bytes: &[u8]) -> FileFact {
+    let modified = match folder.perform(Io::Stat {
+        root: Root::Folder,
+        path: path(at),
+    }) {
+        Ok(Reply::Stat(Some(meta))) => meta.modified,
+        other => panic!("{at}: {other:?}"),
+    };
+    FileFact {
+        path: path(at),
+        identity: identity(bytes),
+        len: bytes.len() as u64,
+        modified,
+    }
+}
+
+fn a_commit_reports_the_fact_it_logged_of_each_file_it_placed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+
+    let saved = a
+        .commit("Save", |i| {
+            let (i, _) = i.create(|e| {
+                e.save(&path("song.npno"), b"song".to_vec(), Expect::Absent);
+            });
+            i.save_file(&path("a.wav"), b"wave".to_vec(), Expect::Absent)
+        })
+        .unwrap();
+    let tagged = a
+        .commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
+                e.add(TAGS, tag("new"));
+            });
+            i
+        })
+        .unwrap();
+
+    let expected = [
+        fact(&folder, "song.npno", b"song"),
+        fact(&folder, "a.wav", b"wave"),
+    ];
+    assert_eq!(saved.files, expected, "the files the save placed");
+    assert_eq!(tagged.files, [], "a commit that places no file");
+}
+
+fn a_commit_reports_its_files_as_they_were_before_another_program_wrote_one<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    let placed: Rc<RefCell<Option<FileFact>>> = Rc::default();
+    let (outside, seen) = (folder.clone(), Rc::clone(&placed));
+    fail(&probe, move |io| {
+        let logging = io.mutates() && io.path().as_str().ends_with(".txt");
+        let put_in_place = read(&outside, "song.npno").as_deref() == Some(b"two");
+        if logging && put_in_place && seen.borrow().is_none() {
+            *seen.borrow_mut() = Some(fact(&outside, "song.npno", b"two"));
+            put(&outside, "song.npno", b"TWO");
+        }
+        false
+    });
+
+    clock.advance(1_000);
+    let saved = a
+        .commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                b"two".to_vec(),
+                Expect::Holds(identity(b"one")),
+            )
+        })
+        .unwrap();
+    heal(&probe);
+
+    let placed = placed
+        .borrow()
+        .clone()
+        .expect("the other program wrote as it was logged");
+    assert_ne!(
+        fact(&folder, "song.npno", b"TWO"),
+        placed,
+        "their write moved the time"
+    );
+    assert_eq!(saved.files, [placed], "the file as the save left it");
+}
+
+fn each_kind_of_file_effect_reports_the_file_where_it_leaves_it<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "copy.npno", b"copy");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+
+    let saved = a.commit("Save", |i| {
+        let two = b"two".to_vec();
+        i.save(
+            song,
+            &path("song.npno"),
+            two,
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert_eq!(
+        saved.unwrap().files,
+        [fact(&folder, "song.npno", b"two")],
+        "save"
+    );
+    clock.advance(1_000);
+    let undone = a.undo().unwrap();
+    assert_eq!(undone.files, [fact(&folder, "song.npno", b"one")], "undo");
+    clock.advance(1_000);
+    let redone = a.redo().unwrap();
+    assert_eq!(redone.files, [fact(&folder, "song.npno", b"two")], "redo");
+    clock.advance(1_000);
+    let moved = a.commit("Save as", |i| {
+        let three = b"three".to_vec();
+        i.save(song, &path("Dir/moved.npno"), three, Expect::Absent)
+    });
+    let moved = moved.unwrap().files;
+    assert_eq!(
+        moved,
+        [fact(&folder, "Dir/moved.npno", b"three")],
+        "save to another path"
+    );
+    clock.advance(1_000);
+    let tree = a.commit("Rename", |i| i.move_tree(&path("Dir"), &path("Other")));
+    let tree = tree.unwrap().files;
+    assert_eq!(
+        tree,
+        [fact(&folder, "Other/moved.npno", b"three")],
+        "folder rename"
+    );
+    clock.advance(1_000);
+    let trashed = a.commit("Delete", |i| {
+        i.trash(song, Expect::Holds(identity(b"three")))
+            .delete(song)
+    });
+    assert_eq!(trashed.unwrap().files, [], "trash");
+    clock.advance(1_000);
+    let restored = a.undo().unwrap().files;
+    assert_eq!(
+        restored,
+        [fact(&folder, "Other/moved.npno", b"three")],
+        "restore from trash"
+    );
+    clock.advance(1_000);
+    let adopted = a.commit("Adopt", |i| {
+        let (i, _) = i.create(|e| {
+            e.adopt(&path("copy.npno"), Expect::Holds(identity(b"copy")));
+        });
+        i
+    });
+    assert_eq!(
+        adopted.unwrap().files,
+        [fact(&folder, "copy.npno", b"copy")],
+        "adopt"
+    );
+}
+
+fn finishing_another_writers_change_reports_the_file_where_it_leaves_it<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut theirs, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut theirs, "song.npno", b"song");
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename(
+            song,
+            &path("renamed.npno"),
+            Expect::Holds(identity(b"song")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+    let (mut ours, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let orphan = ours.refresh().unwrap().orphaned.remove(0);
+
+    let finished = ours.settle(orphan, Settlement::Finished).unwrap();
+
+    assert_eq!(finished.files, [fact(&folder, "renamed.npno", b"song")]);
 }
 
 fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: Facade>() {
