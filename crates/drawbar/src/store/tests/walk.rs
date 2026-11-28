@@ -123,15 +123,16 @@ fn two_drawbars_on_one_folder_offer_each_undo_by_name_through_a_seeded_walk() {
 
 #[test]
 fn drawbars_on_synced_copies_offer_each_undo_by_name_while_sync_settles() {
-    let (_, reached) = walks(&SYNCED, &[2, 3], &[2]);
+    let (_, reached) = walks(&SYNCED, &[2, 3], &[14]);
     reaches(&reached, &HELD_ON_ONE_FOLDER);
     reaches(&reached, &HELD_IN_SYNC);
 }
 
 /// The held checks every world's walks evaluate.
-const HELD_ON_ONE_FOLDER: [Check; 7] = [
+const HELD_ON_ONE_FOLDER: [Check; 8] = [
     Check::MenuNamesTheStep,
     Check::OffersUndoAndRedo,
+    Check::UndoReachesEveryStep,
     Check::UndoEndsWithHistory,
     Check::EditsKept,
     Check::AsksOverAnEdit,
@@ -472,8 +473,11 @@ enum Check {
     UndoLetGoForAnother,
     /// A drawbar whose every step the walk undid offers no Undo.
     UndoEndsWithHistory,
-    /// Undo and Redo of the change just made are offered.
+    /// Right after a change, Undo of it is offered, and once that is chosen, Redo of it.
     OffersUndoAndRedo,
+    /// The Edit menu offers Undo, or Redo, of each step the walk's history holds, while
+    /// nothing the walk knows of let that step go.
+    UndoReachesEveryStep,
     /// The Edit menu names the step Undo or Redo takes back.
     MenuNamesTheStep,
     /// Undo puts the folder back as it was before the change, and Redo as after it.
@@ -497,8 +501,8 @@ enum Check {
     /// A drawbar stops asking questions, and asks none again once it is answered, but
     /// for another asset of the same name.
     QuestionsEnd,
-    /// Take theirs leaves the asset asked about with no unsaved edit, and Keep both
-    /// keeps the edit in a file.
+    /// Take theirs leaves the asset asked about saved as the file on disk holds it, and
+    /// Keep both keeps the edit in the file of another asset.
     AnswersTakeEffect,
     /// Once sync settles and every drawbar rescans, all agree with each other and with
     /// every copy.
@@ -3004,6 +3008,7 @@ impl Walk {
             }
             let answer = self.dice.pick(&answers).expect("a question has answers");
             let session = &mut self.drawbars[who];
+            let offered = session.store.undo_label();
             let held = holdings(session);
             let acts = session.bench.browser.answer(answer);
             perform(session, acts);
@@ -3019,21 +3024,7 @@ impl Walk {
             if title.ends_with("” changed on disk") {
                 self.answered(who, &title, answer, &edits);
             }
-            if answer == "Keep both" || answer == "Take theirs" {
-                let named = names(&title);
-                let session = &self.drawbars[who];
-                let workspace = &session.bench.workspace;
-                // The answer settles the edit of the asset asked about, which another
-                // asset of the same name may not share; Keep both saves it as a file.
-                let about = |id: &u64| {
-                    let entity = workspace.get(*id);
-                    entity.is_some_and(|e| named.contains(&e.name.as_str()) && !e.is_unsaved())
-                };
-                let filed = |edit: &Edit| workspace.listed().any(|e| e.saved.holds(&edit.bytes));
-                let both = answer == "Keep both";
-                (self.unsaved[who]).retain(|id, edit| !about(id) || both && !filed(edit));
-            }
-            if answer == "Keep both" {
+            if answer == "Keep both" && self.drawbars[who].store.undo_label() != offered {
                 self.edits_kept();
                 self.clock += 1;
                 self.history[who].done.push(self.clock);
@@ -3054,15 +3045,26 @@ impl Walk {
     }
 
     /// Drawbar `who` answered `title`, a file changed on disk under an unsaved edit of one
-    /// of `edits`, with `answer`: Take theirs leaves one of them saved as the file holds
-    /// it, and Keep both leaves one edit's bytes in a file.
+    /// of `edits`, with `answer`: Take theirs leaves one of them saved as the file on disk
+    /// holds it, which is not its edit, and Keep both leaves one edit's bytes in the file
+    /// of another asset.
     fn answered(&mut self, who: usize, title: &str, answer: &str, edits: &[(u64, Vec<u8>)]) {
-        let workspace = &self.drawbars[who].bench.workspace;
-        let settled = |(id, _): &&(u64, Vec<u8>)| {
-            let entity = workspace.get(*id);
-            entity.is_some_and(|e| !e.is_unsaved() && e.saved.holds(&e.bytes))
+        let on_disk = disk(self.root(who));
+        let session = &self.drawbars[who];
+        let workspace = &session.bench.workspace;
+        let theirs = |id: u64| match on_disk.get(&session.path(id)?) {
+            Some(Entry::File(bytes)) => Some(bytes.clone()),
+            _ => None,
         };
-        let filed = |(_, bytes): &&(u64, Vec<u8>)| workspace.listed().any(|e| e.saved.holds(bytes));
+        let settled = |(id, edit): &&(u64, Vec<u8>)| {
+            let entity = workspace.get(*id).filter(|e| !e.is_unsaved());
+            let saved = entity.map(|e| e.saved.bytes().to_vec());
+            saved.is_some_and(|saved| Some(&saved) == theirs(*id).as_ref() && saved != *edit)
+        };
+        let filed = |(id, edit): &&(u64, Vec<u8>)| {
+            let mut listed = workspace.listed();
+            listed.any(|e| e.id != *id && e.saved.holds(edit))
+        };
         let took: Vec<u64> = match answer {
             "Take theirs" => edits.iter().filter(settled).map(|(id, _)| *id).collect(),
             "Keep both" => edits.iter().filter(filed).map(|(id, _)| *id).collect(),
@@ -3071,8 +3073,10 @@ impl Walk {
         self.reach(Check::AnswersTakeEffect);
         if took.is_empty() {
             let what = format!("{} answers {title} with {answer}", name(who));
-            let left = ["no edit held in a file", "the edit unsaved"]
-                [usize::from(answer == "Take theirs")];
+            let left = [
+                "no other asset holding the edit",
+                "no asset holding the file's bytes",
+            ][usize::from(answer == "Take theirs")];
             self.fail(
                 Check::AnswersTakeEffect,
                 &what,
@@ -3417,7 +3421,7 @@ impl Walk {
             true => &self.history[who].undone,
         }
         .last()?;
-        let knows = self.knows_its_history(who, made_at);
+        let knows = self.knows_its_history(who);
         self.expose(who, made_at);
         self.kept[who] = None;
         // Its answers may land only once another drawbar looks.
@@ -3432,7 +3436,7 @@ impl Walk {
             true => session.store.redo_label(),
         };
         if knows {
-            self.reach(Check::OffersUndoAndRedo);
+            self.reach(Check::UndoReachesEveryStep);
         }
         let Some(offered) = offered else {
             if knows {
@@ -3443,7 +3447,7 @@ impl Walk {
                 let what = format!("{} offers no {action:?}", name(who));
                 let menu = self.menu.get(&made_at).map_or("a change", String::as_str);
                 let details = format!("where the walk's history holds {menu}");
-                self.fail(Check::OffersUndoAndRedo, &what, details);
+                self.fail(Check::UndoReachesEveryStep, &what, details);
             }
             return None;
         };
@@ -3469,18 +3473,15 @@ impl Walk {
         })
     }
 
-    /// Whether drawbar `who` has nothing the walk knows of that lets it drop the step at
-    /// `made_at` from its Edit menu: it is current, chose no undo or redo still to learn
-    /// of, kept none, hurried on from no change, and no chaos and no other drawbar's change
-    /// came since.
-    fn knows_its_history(&self, who: usize, made_at: usize) -> bool {
-        let theirs = (self.changes.iter()).any(|(clock, by, _)| *clock > made_at && *by != who);
+    /// Whether drawbar `who` has nothing the walk knows of that lets it drop a step from
+    /// its Edit menu: it is current, chose no undo or redo still to learn of, kept none,
+    /// and hurried on from no change. The library drops a step only for an undo or redo
+    /// refused once chosen, or with a log line past which the walk holds no step.
+    fn knows_its_history(&self, who: usize) -> bool {
         self.current[who]
             && self.chosen[who].is_none()
             && self.kept[who].is_none()
             && self.hurried[who].is_empty()
-            && !self.odd[who]
-            && !theirs
     }
 
     /// The clock up to which every drawbar had every other's changes when the change at
