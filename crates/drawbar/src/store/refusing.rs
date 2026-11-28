@@ -11,10 +11,11 @@ pub(super) fn refused(cmd: &Cmd) -> Refusing {
         Cmd::Open => Refusing::Open,
         Cmd::Rescan | Cmd::Refresh => Refusing::Scan,
         Cmd::Intent(intent) => Refusing::Intent(intent.label().to_string(), parts(intent)),
-        Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => Refusing::Intent(
+        Cmd::Undo | Cmd::Redo | Cmd::Finish | Cmd::Settle { .. } => Refusing::Intent(
             match cmd {
                 Cmd::Undo => "Undo",
                 Cmd::Redo => "Redo",
+                Cmd::Finish => "Finish",
                 _ => "Settle",
             }
             .to_string(),

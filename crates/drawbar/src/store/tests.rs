@@ -6692,6 +6692,286 @@ fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
     assert_eq!(title, "drawbar could not finish “Save”");
 }
 
+type Moved = std::sync::atomic::AtomicBool;
+
+/// Whether `io` comes after the first request that takes a file away from `from`, or
+/// from the folder there, which `moved` records.
+fn after_leaving(io: &toshokan::Io, from: &str, moved: &Moved) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let leaves = match io {
+        toshokan::Io::Rename { from: path, .. } | toshokan::Io::Remove { path, .. } => {
+            let path = LibPath::parse(path.as_str());
+            path.is_some_and(|path| path.is_in(&LibPath::parse(from).expect("a path")))
+        }
+        _ => false,
+    };
+    moved.load(SeqCst) || (leaves && moved.swap(true, SeqCst))
+}
+
+static MOVED: Moved = Moved::new(false);
+
+/// Whether `io` is the first request after the one that takes the file from
+/// `untitled.ne5p`.
+fn after_the_move(io: &toshokan::Io) -> bool {
+    after_leaving(io, "untitled.ne5p", &MOVED)
+}
+
+#[test]
+fn a_rename_that_failed_after_the_move_and_is_finished_later_is_followed_and_saved_there() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Refuse(after_the_move));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "b.ne5p"], "the file moved");
+    assert_eq!(session.said("did not change as asked"), 1, "and it failed");
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(session.said("Finished saving"), 0, "nothing was saved");
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
+    assert_eq!(root.read("b.ne5p"), edited);
+}
+
+#[test]
+fn a_rename_that_failed_before_the_move_and_is_finished_later_is_not_said_to_be_made_outside() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Refuse(|io| puts(io, "b.ne5p")));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
+
+    session.make_tag("Sunday");
+    session.settle();
+
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "b.ne5p"],
+        "the rename is finished"
+    );
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    assert_eq!(session.said("outside drawbar"), 0);
+}
+
+static SAVED_MOVED: Moved = Moved::new(false);
+
+#[test]
+fn a_save_after_a_rename_that_failed_after_the_move_saves_where_the_file_is() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Refuse(|io| {
+        after_leaving(io, "untitled.ne5p", &SAVED_MOVED)
+    }));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename failed"
+    );
+
+    session.bench.workspace.mark_saved(id);
+    session.decided();
+
+    assert_eq!(session.said("was not saved"), 0);
+    assert_eq!(
+        session.said("Finished saving"),
+        0,
+        "the rename saved nothing"
+    );
+    let asking = session.bench.browser.asking();
+    assert!(
+        asking.is_none(),
+        "nothing changed outside drawbar: {asking:?}"
+    );
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    assert_eq!(root.names(""), [".drawbar", "b.ne5p"]);
+    assert_eq!(root.read("b.ne5p"), edited);
+}
+
+static RENAMED_MOVED: Moved = Moved::new(false);
+
+#[test]
+fn a_rename_after_a_rename_that_failed_after_the_move_moves_the_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Refuse(|io| {
+        after_leaving(io, "untitled.ne5p", &RENAMED_MOVED)
+    }));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename failed"
+    );
+
+    let name = "c.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.decided();
+
+    assert_eq!(session.said("did not change as asked"), 1);
+    assert_eq!(session.path(id).as_deref(), Some("c.ne5p"));
+    assert_eq!(root.names(""), [".drawbar", "c.ne5p"]);
+}
+
+#[test]
+fn a_rename_after_a_save_that_failed_partway_moves_the_saved_file() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 1, "the save failed");
+
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.decided();
+    session.settle();
+    session.decided();
+
+    assert_eq!(session.said("did not change as asked"), 0);
+    assert_eq!(session.path(id).as_deref(), Some("b.ne5p"));
+    assert_eq!(root.names(""), [".drawbar", "b.ne5p"]);
+    assert_eq!(root.read("b.ne5p"), edited);
+    let held = session.bench.workspace.get(id).expect("the asset");
+    assert!(!held.is_unsaved(), "the edit is what the file holds");
+}
+
+static FOLDER_MOVED: Moved = Moved::new(false);
+
+#[test]
+fn a_folder_rename_that_failed_partway_takes_its_files_once_finished() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    session.tag(&[id], "Sunday");
+    session.read(&[id]);
+    let edited = session.edit(id, "96");
+    let live = LibPath::parse("Live").unwrap();
+    let folder = session.bench.browser.folders.id_of(&live).expect("listed");
+    session
+        .store
+        .fault(Fault::Refuse(|io| after_leaving(io, "Live", &FOLDER_MOVED)));
+    session.rename_folder(folder, "Gig");
+    session.decided();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename failed"
+    );
+
+    session.make_tag("Monday");
+    session.settle();
+
+    assert_eq!(session.said("is missing"), 0);
+    assert_eq!(session.said("outside drawbar"), 0);
+    assert_eq!(session.said("appeared"), 0);
+    assert_eq!(session.path(id).as_deref(), Some("Gig/a.ne5p"));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.read("Gig/a.ne5p"), edited);
+}
+
+#[test]
+fn views_while_a_change_waits_to_be_finished_look_for_its_files_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.store.fault(Fault::Refuse(|io| puts(io, "b.ne5p")));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.sync();
+    assert_eq!(
+        session.said("did not change as asked"),
+        1,
+        "the rename waits"
+    );
+
+    session.store.looked_for_finishing = 0;
+    for _ in 0..3 {
+        session.refresh();
+        session.refocus();
+    }
+    assert_eq!(session.store.looked_for_finishing, 0);
+}
+
+static FOUND_MOVED: Moved = Moved::new(false);
+
+/// ⚠️ A file known by its path is not followed to where finishing a change moves it:
+/// the library reports no move of its own for a change it finishes.
+#[test]
+fn a_save_held_for_an_unfinished_rename_keeps_its_edit() {
+    let root = Temp::new();
+    fs::write(root.at("untitled.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("untitled.ne5p");
+    session.read(&[id]);
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Refuse(|io| {
+        after_leaving(io, "untitled.ne5p", &FOUND_MOVED)
+    }));
+    let name = "b.ne5p".to_string();
+    session
+        .bench
+        .act(vec![crate::browser::Act::RenameLocal { id, name }]);
+    session.decided();
+
+    session.bench.workspace.mark_saved(id);
+    session.decided();
+    session.settle();
+    session.decided();
+
+    assert!(
+        session.bench.workspace.get(id).is_some(),
+        "the asset is kept"
+    );
+    assert_eq!(session.bytes(id), edited, "with its edit");
+}
+
 /// A folder's rename another drawbar left unfinished, finished or rolled back, moves its
 /// files as drawbar's own change: the log says nothing of files changed outside drawbar.
 #[test]

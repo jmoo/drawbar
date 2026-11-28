@@ -220,6 +220,8 @@ pub struct Store {
     quietly: BTreeSet<u64>,
     /// The paths a change of drawbar's own names that its next change finishes.
     finishing: BTreeSet<LibPath>,
+    /// Whether a [`Cmd::Finish`] was sent since `finishing` last changed.
+    finish_asked: bool,
     /// Assets whose file waits for such a change, which take what it leaves.
     awaiting: BTreeSet<u64>,
     /// This session's changes, as the Edit menu names them.
@@ -260,7 +262,7 @@ pub struct Store {
     /// the log has said already.
     turned_read_only: bool,
     /// The assets a projection passed over while a save or a rename of their files was
-    /// in flight, which the next one looks at again.
+    /// in flight or waited to be finished, which the next one looks at again.
     deferred: BTreeSet<u64>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
@@ -328,6 +330,10 @@ pub struct Store {
     /// How many times room has been looked for by going through every asset.
     #[cfg(test)]
     pub(crate) looked_for_room: usize,
+    /// How many times the files waiting to be finished have been looked for by going
+    /// through every asset.
+    #[cfg(test)]
+    pub(crate) looked_for_finishing: usize,
     /// How many writing commands have been sent.
     sent: u64,
     /// Where drawbar keeps a slot's former occupant no library could take, whose files
@@ -377,6 +383,7 @@ impl Store {
             quiet: false,
             quietly: BTreeSet::new(),
             finishing: BTreeSet::new(),
+            finish_asked: false,
             awaiting: BTreeSet::new(),
             history: History::default(),
             answering: VecDeque::new(),
@@ -420,6 +427,8 @@ impl Store {
             roomless: BTreeMap::new(),
             #[cfg(test)]
             looked_for_room: 0,
+            #[cfg(test)]
+            looked_for_finishing: 0,
             sent: 0,
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
@@ -1637,7 +1646,7 @@ impl Store {
                     // next write finishes the delete.
                     let finishing = |key: &Key| {
                         let path = shown.files.get(key).map(|(path, _)| path);
-                        path.is_some_and(|path| self.finishing.contains(path))
+                        path.is_some_and(|path| waits_to_finish(&self.finishing, path))
                     };
                     deleted.retain(|key| !finishing(key));
                     let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
@@ -1824,6 +1833,15 @@ impl Store {
     fn write(&mut self, intent: Intent) {
         self.sent += 1;
         self.commit(intent);
+    }
+
+    /// Finish the change of drawbar's own that waits, so that what touches its paths is
+    /// planned against the view after it.
+    fn finish(&mut self) {
+        self.finish_asked = true;
+        self.sent += 1;
+        self.awaits(Step::Lasting, "Finishing…".to_string());
+        self.send(Cmd::Finish);
     }
 
     /// Send a change to the facts.
@@ -2297,7 +2315,12 @@ impl Store {
             ambiguous,
             joined,
         } = viewed;
-        self.finishing = finishing.into_iter().collect();
+        let finishing: BTreeSet<LibPath> = finishing.into_iter().collect();
+        if finishing != self.finishing {
+            self.finishing = finishing;
+            self.finish_asked = false;
+            self.defer_finishing();
+        }
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2385,6 +2408,23 @@ impl Store {
         touched
     }
 
+    /// Have the next projection look at each asset whose file waits to be finished,
+    /// whether or not the view reaches it.
+    fn defer_finishing(&mut self) {
+        if self.finishing.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.looked_for_finishing += 1;
+        }
+        let waiting = self.records.iter().filter(|(_, record)| {
+            let path = record.path.as_ref();
+            path.is_some_and(|path| waits_to_finish(&self.finishing, path))
+        });
+        self.deferred.extend(waiting.map(|(id, _)| *id));
+    }
+
     /// Follow a tree, or a file no entity is bound to, that this session's undo, redo or
     /// settling moved from `from` to `to`: each asset in it keeps its id, and moves with it.
     fn follow_own(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
@@ -2441,17 +2481,10 @@ impl Store {
             if record
                 .path
                 .as_ref()
-                .is_some_and(|path| self.finishing.contains(path))
+                .is_some_and(|path| waits_to_finish(&self.finishing, path))
             {
                 self.deferred.insert(id);
                 self.awaiting.insert(id);
-                continue;
-            }
-            if let (true, Some(path)) = (self.awaiting.remove(&id), record.path.clone()) {
-                if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
-                    log.say(format!("Finished saving “{}”.", entity.name));
-                }
-                self.read_unheard(id, path, workspace);
                 continue;
             }
             if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
@@ -2459,6 +2492,7 @@ impl Store {
                 continue;
             }
             let Some((path, stat)) = listed.files.get(&key) else {
+                self.awaiting.remove(&id);
                 touched.insert(id);
                 match self.vanished(id, workspace, browser, queue, log) {
                     Vanished::Deleted => {
@@ -2479,6 +2513,12 @@ impl Store {
             };
             if std::mem::take(&mut record.missing) {
                 browser.folders.missing.remove(&id);
+            }
+            if self.awaiting.remove(&id) {
+                if self.take_finished(id, path, workspace, browser, log) {
+                    touched.insert(id);
+                }
+                continue;
             }
             if record.path.as_ref() != Some(path) {
                 touched.insert(id);
@@ -2508,6 +2548,45 @@ impl Store {
         // A file gone missing keeps the status line, which asks for it to be saved.
         let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
         (touched, said)
+    }
+
+    /// Take `path` as where drawbar's own change, finished now, left the file of `id`.
+    /// A moved file holds what it held, and the asset follows it unless it was moved on
+    /// since. A file left in place was saved, and is read again before anything is sent.
+    /// Returns whether the file moved.
+    fn take_finished(
+        &mut self,
+        id: u64,
+        path: &LibPath,
+        workspace: &mut Workspace,
+        browser: &Browser,
+        log: &mut Log,
+    ) -> bool {
+        let Some(record) = self.records.get_mut(&id) else {
+            return false;
+        };
+        let was = record.path.replace(path.clone());
+        let moved = was.as_ref() != Some(path);
+        let Some(entity) = workspace.get(id) else {
+            return moved;
+        };
+        if moved {
+            if entity.path == was.map(|was| browser.folders.ahead(&was)) {
+                workspace.follow(id, browser.folders.ahead(path));
+            }
+            return true;
+        }
+        if entity.is_unsaved() {
+            log.say(format!("Finished saving “{}”.", entity.name));
+        }
+        // ⚠️ A read that answered before a newer save went would take the file over it.
+        if record.saved == entity.saved.stamp() {
+            self.read_unheard(id, path.clone(), workspace);
+        }
+        if self.scan == Scan::Idle && self.rechecking.contains(&id) {
+            self.scan = Scan::Rechecking;
+        }
+        false
     }
 
     /// Show each asset the view reached when its file was last modified, as the view
@@ -3516,6 +3595,7 @@ impl Store {
         };
         let name = entity.name.clone();
         let keep = precious(entity, queue)
+            || record.saved != entity.saved.stamp()
             || !browser.tags.worn(id).is_empty()
             || entity.origin.slot().is_some();
         if keep {
@@ -3661,11 +3741,12 @@ impl Store {
     }
 
     /// Send the saves asked for of edits of files resting in the library, each once the
-    /// save or move before it has answered.
+    /// save or move before it has answered. Returns whether none waits on a held path.
     ///
     /// ⚠️ An asset whose file is missing, or was never written, has nothing to rewrite, and
     /// its save is refused here.
-    fn send_edits(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) {
+    fn send_edits(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) -> bool {
+        let mut sent = true;
         for id in workspace.edits_to_save() {
             let record = self.records.get_mut(&id);
             let file = record.and_then(|record| {
@@ -3676,7 +3757,11 @@ impl Store {
                 workspace.edit_not_saved(id);
                 continue;
             };
-            if record.saving || unsettled(self.moving.iter().chain(held), &path) {
+            if record.saving {
+                continue;
+            }
+            if unsettled(self.moving.iter().chain(held), &path) {
+                sent = false;
                 continue;
             }
             let Some((from, edit)) = workspace.send_edit(id) else {
@@ -3694,6 +3779,7 @@ impl Store {
                 expect: expect.expect(),
             });
         }
+        sent
     }
 
     /// Take in what a copy from outside the library found where it landed. A copy whose
@@ -3822,8 +3908,20 @@ impl Store {
         // ⚠️ A change that touches a rename still to answer, one this pass sends included,
         // waits for it, with every change after it: were the rename refused, the change
         // would act on whatever else has that name on disk.
+        //
+        // ⚠️ So does one that touches a path a change of drawbar's own waits to finish,
+        // which finishing may move, until a finish was tried and answered.
+        let unfinished: Vec<(LibPath, LibPath)> = match self.finish_asked && self.committing == 0 {
+            true => Vec::new(),
+            false => self
+                .finishing
+                .iter()
+                .map(|path| (path.clone(), path.clone()))
+                .collect(),
+        };
         let touches = |moving: &[(LibPath, LibPath)], op: &Op| {
-            ends(op).into_iter().any(|path| unsettled(moving, path))
+            let waiting = || moving.iter().chain(&unfinished);
+            ends(op).into_iter().any(|path| unsettled(waiting(), path))
         };
         let removal_waits = removals.iter().any(|op| touches(&self.moving, op));
         let mut waiting = Vec::new();
@@ -3844,6 +3942,7 @@ impl Store {
                 let [from, to] = ends(op);
                 (from.clone(), to.clone())
             })
+            .chain(unfinished.iter().cloned())
             .collect();
         let holds = !waiting.is_empty();
         browser.folders.hold(waiting);
@@ -3851,11 +3950,14 @@ impl Store {
         self.take_asks(workspace);
         let mut done = self.arrivals(workspace, &held_moves);
         done &= self.carry_out(workspace, &held_moves);
-        self.send_edits(workspace, &held_moves);
+        let edited = self.send_edits(workspace, &held_moves);
         for op in removals {
             self.tree_op(op);
         }
         self.send_batch();
+        if !(done && edited && !holds) && !unfinished.is_empty() && self.committing == 0 {
+            self.finish();
+        }
         self.passes += 1;
         if pass == Pass::Full {
             self.fetch_tracked(workspace, browser);
@@ -4528,6 +4630,11 @@ fn held(workspace: &Workspace) -> u64 {
     workspace
         .held_whole()
         .saturating_add(workspace.asked_whole())
+}
+
+/// Whether `path` is or is in one of the paths a change of drawbar's own waits to finish.
+fn waits_to_finish(finishing: &BTreeSet<LibPath>, path: &LibPath) -> bool {
+    finishing.iter().any(|at| path.is_in(at))
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.

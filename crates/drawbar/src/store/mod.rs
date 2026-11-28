@@ -548,6 +548,9 @@ pub enum Cmd {
     Undo,
     /// Redo the intent undone last. Answered by [`Event::Committed`].
     Redo,
+    /// Finish this session's own change an earlier write left unfinished, as the next
+    /// write would. Answered by [`Event::Committed`], with the view after it.
+    Finish,
     /// Keep an unsaved edit of the file `of` names, made over the file of identity
     /// `base`, in this install's own state, never in the folder, and once it is kept,
     /// let go of the drafts of the files it `replaces`, as the keys they went by. Answered
@@ -607,7 +610,12 @@ impl Cmd {
             | Cmd::DiscardSlot(_)
             | Cmd::ReadSlot(_)
             | Cmd::Read { .. } => false,
-            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } | Cmd::Restore(_) => true,
+            Cmd::Intent(_)
+            | Cmd::Undo
+            | Cmd::Redo
+            | Cmd::Finish
+            | Cmd::Settle { .. }
+            | Cmd::Restore(_) => true,
         }
     }
 }
