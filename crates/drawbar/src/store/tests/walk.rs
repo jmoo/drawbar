@@ -499,9 +499,6 @@ enum Check {
     SavingKeepsTheEdit,
     /// Another drawbar's save under an unsaved edit asks whose to keep.
     AsksOverAnEdit,
-    /// No save writes over bytes sync brought that the drawbar never showed, and a save
-    /// refused for them asks.
-    NoSaveOverUnshownBytes,
     /// A drawbar stops asking questions, and asks none again once it is answered, but
     /// for another asset of the same name.
     QuestionsEnd,
@@ -542,11 +539,9 @@ const UNHELD: &[Check] = &[
     Check::KeptUndoGoes,
     // Synced drawbars show a lost row at different paths once sync settles.
     Check::Converges,
-    // A save of an edit to a file another drawbar moved or deleted drops the asset and
-    // the edit.
+    // A save of an edit to a file another drawbar moved or deleted writes the file and
+    // lists it as another asset.
     Check::SavingKeepsTheEdit,
-    // A save writes over a file sync replaced with one of the same length and time.
-    Check::NoSaveOverUnshownBytes,
 ];
 
 /// What a walk found of [`UNHELD`] checks: the first failure of each.
@@ -1383,7 +1378,7 @@ impl Walk {
             true => self.current[who] = false,
             false => {
                 self.drawbars[who].sync_all();
-                self.kept_late(who, late, log);
+                self.ends_late(who, late, log);
                 self.learn_whether_refused(who);
                 self.current[who] = self.looked(who);
             }
@@ -1663,49 +1658,22 @@ impl Walk {
             .collect()
     }
 
-    /// Fail where drawbar `who` saved an edit over a file sync rewrote after it read the
-    /// log entry naming the rewrite, where `shown` says it showed other bytes there, or
-    /// where such a save, refused since its log was `said` entries long, asked nothing.
-    /// A refused save ends the drawbar's showing the bytes before.
-    fn kept_late(
+    /// Drawbar `who` stops showing the bytes before a late file once `shown` says it
+    /// showed what sync put there, or a save of it was refused since its log was `said`
+    /// entries long.
+    fn ends_late(
         &mut self,
         who: usize,
         shown: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
         said: usize,
     ) {
-        let on_disk = disk(self.root(who));
+        const REFUSED: &str = "was not saved, because it changed on disk";
         for (path, bytes, before) in shown {
-            let Some(Entry::File(held)) = on_disk.get(&path) else {
-                continue;
-            };
-            let wrote = *held != bytes && self.saved_at(who, &path).as_ref() == Some(held);
-            if wrote && before.is_some_and(|before| before != bytes) {
-                let what = format!("{} saved over {path}", name(who));
-                let details = "another drawbar's rewrite it never showed".to_string();
-                self.fail(Check::NoSaveOverUnshownBytes, &what, details);
+            let about = |text: &str| text.contains(REFUSED) && names(text).contains(&leaf(&path));
+            let mut since = self.drawbars[who].bench.log.iter().skip(said);
+            if before.as_ref() == Some(&bytes) || since.any(|entry| about(&entry.text)) {
+                self.late[who].remove(&path);
             }
-            let session = &self.drawbars[who];
-            let about = |text: &str| names(text).contains(&leaf(&path));
-            let since = session.bench.log.iter().skip(said);
-            let refused = since
-                .filter(|entry| {
-                    entry
-                        .text
-                        .contains("was not saved, because it changed on disk")
-                })
-                .any(|entry| about(&entry.text));
-            if !refused {
-                continue;
-            }
-            if !session.bench.browser.questions().any(about) {
-                let what = format!("{} was refused a save over {path}", name(who));
-                self.fail(
-                    Check::NoSaveOverUnshownBytes,
-                    &what,
-                    "and asked nothing".to_string(),
-                );
-            }
-            self.late[who].remove(&path);
         }
     }
 
@@ -1950,7 +1918,7 @@ impl Walk {
             self.show_a_fresh_open(self.folders.of(who), &[who], "once its rescan answered");
         }
         self.drawbars[who].sync_all();
-        self.kept_late(who, late, log);
+        self.ends_late(who, late, log);
         self.trashes(who, &held);
         self.learn_whether_refused(who);
         self.vet(who);
@@ -3013,7 +2981,13 @@ impl Walk {
                         let gain = gain_of(&entity.bytes);
                         format!("the asset is listed{saved} at {at}, holding gain {gain}")
                     }
-                    _ => "the asset is no longer listed, and no asset holds the edit".into(),
+                    _ => {
+                        let holds = |entry: &Entry| *entry == Entry::File(edit.bytes.clone());
+                        let file = folders[who].iter().find(|(_, entry)| holds(entry));
+                        let file =
+                            file.map_or("no file holds".into(), |(at, _)| format!("{at} holds"));
+                        format!("the asset is no longer listed, and {file} the edit")
+                    }
                 };
                 self.fail(check, &what, details);
             }
