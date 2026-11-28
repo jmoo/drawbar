@@ -363,9 +363,9 @@ impl Timeline {
         Aim::Redo(self.undone.last().map(Step::number))
     }
 
-    /// Whether the command `aim` names takes the step it named or one recorded since: the
-    /// named step is still in its list, and no older step was put back above it. An aim
-    /// that named none holds.
+    /// Whether the command `aim` names takes the step it named or, for an Undo, one
+    /// recorded since: the named step is still in its list, and no older step was put
+    /// back above it. An aim that named none holds.
     pub fn holds(&self, aim: Aim) -> bool {
         match aim {
             Aim::Undo(Some(number)) => {
@@ -373,7 +373,7 @@ impl Timeline {
                 let takes = self.undoes().map(|at| self.done[at].number());
                 named && takes.is_some_and(|takes| takes >= number)
             }
-            Aim::Redo(Some(number)) => self.undone.iter().any(|step| step.number() == number),
+            Aim::Redo(Some(number)) => self.aim_redo() == Aim::Redo(Some(number)),
             Aim::Undo(None) | Aim::Redo(None) => true,
         }
     }
@@ -1126,6 +1126,24 @@ mod tests {
 
         assert_eq!(session.undo_reads(), Some("Rename “1”"));
         assert!(!session.timeline.holds(aim), "Undo would take the rename");
+    }
+
+    #[test]
+    fn a_redo_aimed_at_an_edit_does_not_hold_once_an_undone_save_is_put_above_it() {
+        let mut session = Session::default();
+        session.log(save(2));
+        session.click(1, 3);
+        session.undo();
+        let aim = session.timeline.aim_redo();
+        let Went::Library(taken) = session.timeline.undo(&mut session.held) else {
+            panic!("the save is undone by the library");
+        };
+        assert!(session.timeline.holds(aim));
+
+        session.timeline.answered(Some(Asked::Undo(taken)), made(9));
+
+        assert_eq!(session.redo_reads(), Some("Save “2”"));
+        assert!(!session.timeline.holds(aim), "Redo would write the file");
     }
 
     #[test]

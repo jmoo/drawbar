@@ -384,9 +384,13 @@ none. It never falls through to the step behind, which may be a library change
 the menu did not name. A command asked in the same frame after one that ran
 follows what that one did, and after one that did nothing it is dropped. The
 menu names its step as each frame ends, so a press in the frame after an undo
-takes the step before the one that undo took.
+takes the step before the one that undo took. The Mac's menu bar is brought up
+to date at that same point, so its labels and the steps a pick takes are one
+reading of the timeline.
 
-Redo is the same with `before` and `after` exchanged and `Cmd::Redo`.
+Redo is the same with `before` and `after` exchanged and `Cmd::Redo`. It takes
+the step the menu named or none, since a step made since ends redo: an undone
+save that lands above the named step is not written again in its place.
 
 The comparison in step 1 is the safety argument for the editor's half. An undo
 only replaces a working copy the timeline recorded with another the timeline

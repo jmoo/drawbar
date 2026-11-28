@@ -186,8 +186,7 @@ pub struct DrawbarApp {
     pub(crate) chrome: crate::platform::Frame,
     #[cfg(target_os = "macos")]
     menubar: Option<crate::menubar::MenuBar>,
-    /// What Undo and Redo named when the last frame ended, which a pick from the menu bar
-    /// takes.
+    /// What the menu bar's Undo and Redo name, which a pick of either takes.
     #[cfg(target_os = "macos")]
     named: (crate::timeline::Aim, crate::timeline::Aim),
     /// The library open in this window. `None` where the system names no folder for
@@ -390,17 +389,16 @@ impl DrawbarApp {
         self
     }
 
-    /// Run what was picked from the macOS menu bar, of what `admit` lets through, and bring
-    /// its items up to date.
+    /// Run what was picked from the macOS menu bar, of what `admit` lets through.
     #[cfg(target_os = "macos")]
-    fn menu_bar_events(
+    fn menu_bar_picks(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
         admit: fn(crate::menu::Command) -> bool,
         acts: &mut Vec<browser::Act>,
     ) {
-        let Some(mut bar) = self.menubar.take() else {
+        let Some(bar) = &self.menubar else {
             return;
         };
         let picked = bar.picked();
@@ -418,8 +416,17 @@ impl DrawbarApp {
                 _ => {}
             }
         }
-        bar.refresh(|command| self.offer_now(ctx, command));
-        self.menubar = Some(bar);
+    }
+
+    /// Bring the macOS menu bar's items up to date as the frame ends, and with them the
+    /// steps its Undo and Redo name.
+    #[cfg(target_os = "macos")]
+    fn show_menu_bar(&mut self, ctx: &egui::Context) {
+        self.named = (self.timeline.aim_undo(), self.timeline.aim_redo());
+        if let Some(mut bar) = self.menubar.take() {
+            bar.refresh(|command| self.offer_now(ctx, command));
+            self.menubar = Some(bar);
+        }
     }
 
     /// A screen too small for the shell: a browser tab of any size, or a window too small
@@ -436,13 +443,15 @@ impl DrawbarApp {
             |command: crate::menu::Command| matches!(command, crate::menu::Command::Zoom(_));
         let mut acts = Vec::new();
         #[cfg(target_os = "macos")]
-        self.menu_bar_events(ctx, frame, zooms, &mut acts);
+        self.menu_bar_picks(ctx, frame, zooms, &mut acts);
         self.shortcuts(ctx, frame, zooms, &mut acts);
         let smaller = self.zoom.after(crate::zoom::Step::Out, self.room).ok();
         self.frame_alone(ctx);
         if let Some(zoom) = crate::shell::too_small_notice(ctx, smaller) {
             self.pick_zoom(ctx, frame, zoom);
         }
+        #[cfg(target_os = "macos")]
+        self.show_menu_bar(ctx);
     }
 
     /// Copy anything dropped on the window into the library, in the folder it was dropped
@@ -1291,7 +1300,7 @@ impl eframe::App for DrawbarApp {
             acts.extend(self.workspace.take_demos().map(browser::Act::Demos));
         }
         #[cfg(target_os = "macos")]
-        self.menu_bar_events(ctx, frame, |_| true, &mut acts);
+        self.menu_bar_picks(ctx, frame, |_| true, &mut acts);
         self.shortcuts(ctx, frame, |_| true, &mut acts);
         self.browser.dialog(ctx, &mut acts);
         self.changing(ctx);
@@ -1353,9 +1362,7 @@ impl eframe::App for DrawbarApp {
         self.record(ctx, began);
         self.undo_asked(ctx);
         #[cfg(target_os = "macos")]
-        {
-            self.named = (self.timeline.aim_undo(), self.timeline.aim_redo());
-        }
+        self.show_menu_bar(ctx);
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
