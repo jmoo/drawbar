@@ -1,57 +1,61 @@
-# Files
+# Inspect files and unpack bundles
+
+Run these commands in a folder with Nord files. Replace the example filenames
+with yours, or use the [practice program](overview.md#try-it-without-a-keyboard).
+
+## Identify and check a file
 
 ```sh
-nord inspect patch.ne5p              # what is in a file
-nord inspect *.ne5p                  # several at once
-nord inspect --raw song.ne5t         # everything, as decoded
-nord verify *.ne5p                   # check each re-encodes byte for byte
+nord inspect practice.ne5p
+nord inspect *.ne5p
+nord verify practice.ne5p
 ```
 
-`inspect` prints a summary in the instrument's own terms: the parts and their
-settings, the effects, and which piano and sample a program depends on. It exits
-non-zero if any file fails to parse.
+For a program, `inspect` describes the parts, effects and the piano or sample
+it uses. Use `--raw` for the full decoded values. If any input fails to parse,
+`inspect` exits with a nonzero status.
 
-`verify` reads a file, writes it back, and checks that the bytes are identical,
-reporting the offset of the first difference if not. ZIP bundles and backups
-cannot be written back, so they fail. `nord piano verify --deep` also decodes
-every recording inside, and `nord sample verify --deep` walks every encoded
-stroke.
+`verify` checks a round trip in memory and reports the first differing byte
+if the check fails. Use `nord piano verify --deep grand.npno` or
+`nord sample verify --deep pad.nsmp` to check the encoded recordings too.
+The general `verify` command can't round-trip ZIP bundles or backups.
 
-## A file where a slot goes
-
-`get`, `info` and `deps` take a file wherever they take a slot, so you can look
-at a file without an instrument:
+## Find the piano or sample a program needs
 
 ```sh
-nord program get patch.ne5p            # the same summary as for a slot
-nord program info patch.ne5p           # format, version, checksum
-nord program deps patch.ne5p           # the piano and sample ids it refers to
+nord program info practice.ne5p
+nord program deps practice.ne5p
 ```
 
-A file stores ids, not names. `deps` on a slot asks the instrument for the
-names. On a file, it prints the ids. The instrument names no dependencies for live
-slots, so `nord live deps` prints the ids for a slot too.
+`info` shows the file format, version and checksum. `deps` prints the IDs
+stored in the file. For names, connect the keyboard and give the program's
+slot, for example `nord program deps 7:4`. Live slots report IDs even with
+the instrument connected.
 
 ## Bundles
 
-A bundle is the file Nord Sound Manager carries programs or songs in, with
-the pianos and samples they play.
+To take a program to another computer with the sounds it needs, read a bundle
+from the keyboard. Substitute occupied slots on your own instrument. The
+first example collects two programs. The second starts with a song and also
+collects the programs it calls.
 
 ```sh
-nord bundle get program 7:4 7:5 -o gig.ne5pbundle   # programs and what they play
-nord bundle get setlist 1:2 -o b3.ne5tbundle        # a song, its programs, and what they play
-nord bundle unpack gig.ne5pbundle -o gig            # every file at its path, and meta.xml
-nord bundle pack gig -o gig.ne5pbundle              # and back
+nord bundle get program 7:4 7:5 -o gig.ne5pbundle
+nord bundle get setlist 1:2 -o set.ne5tbundle
 ```
 
-`get` reads only. It finds each piano and sample by the name the instrument gives
-it, and warns about one it cannot find in exactly one slot. `pack` keeps a
-`meta.xml` it finds at the top of the folder; without one, it lists which songs
-play which programs. [What is supported](../getting-started/support.md)
-says which instruments' bundles these commands handle.
+`get` leaves the instrument unchanged. Read its warnings if a needed piano
+or sample couldn't be matched to exactly one slot.
 
-`inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
-Manager writes. They refuse one with a compressed, damaged or repeated file, or a
-path that leads outside the folder, and `unpack` then writes nothing.
+To work on a bundle you already have, choose a new folder name for `unpack`. An existing output folder is refused. Keep the
+`meta.xml` file with the contents to preserve the manifest when repacking.
 
-Changing what is inside a file is [Editing](editing.md).
+```sh
+nord bundle unpack gig.ne5pbundle -o gig
+nord bundle pack gig -o revised.ne5pbundle
+```
+
+Without a manifest, `pack` makes one listing which songs use which programs.
+`inspect` and `unpack` read the uncompressed bundles Nord Sound Manager writes.
+A compressed or damaged entry, repeated name or path outside the folder is
+refused. [Supported bundle formats](../getting-started/support.md#files).

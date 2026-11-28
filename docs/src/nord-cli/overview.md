@@ -1,47 +1,51 @@
-# Overview
+# Start with the nord command
 
-`nord` works on Nord files and on a connected instrument from the terminal. It
-prints data to stdout and everything else to stderr, so its output pipes
-cleanly. Every command that changes the instrument says what it is about to
-replace and asks before it goes ahead.
+Use `nord` to inspect a file, make the same edit across several patches, or
+copy sounds to and from a connected keyboard. [Install nord-cli](../getting-started/install.md#the-nord-command)
+to get the command.
 
-[Install](../getting-started/install.md#the-nord-command) it, then:
+## Try it without a keyboard
+
+Run these commands in an empty folder. The first makes a new program file with
+its gain set to 64. The next two read the file you just made.
 
 ```sh
-nord --help
+nord program edit --set center_panel.gain=64 -o practice.ne5p
+nord inspect practice.ne5p
+nord verify practice.ne5p
 ```
 
-## Commands
+`inspect` describes the program. `verify` checks that decoding and writing it
+back reproduces the original bytes. You can also drop `practice.ne5p` into
+drawbar to see its panel controls.
 
-| Command | Works on |
+## Choose a task
+
+| To… | Use |
 |---|---|
-| `inspect` | Files: print what is in them |
-| `verify` | Files: check that they re-encode byte for byte |
-| `edit` | Files: change fields in any editable file |
-| `bundle` | Nord Sound Manager bundles: made from the instrument, packed and unpacked |
-| `device` | The instrument: what is attached and what it holds |
-| `program`, `setlist`, `live`, `settings` | Programs, set lists, live slots and settings on the instrument |
-| `sample`, `piano` | Sample instruments and piano libraries, on the instrument or as files |
+| See what's in a file, check it or unpack a bundle | [Inspect files and unpack bundles](files.md) |
+| List the editable settings and try an edit on a copy | [Edit a file or slot](editing.md) |
+| List the keyboard's banks, copy a program or send one back | [Work with an instrument](instrument.md) |
+| Extract a WAV, build a sample instrument or trim a piano | [Work with samples and pianos](libraries.md) |
 
-`program`, `setlist`, `sample` and `piano` share the same verbs: `get` and `put`
-to transfer, `move`, `rename`, `duplicate`, `delete` and `select` to organize,
-`info`, `deps`, `list` and `focus` to look, and `edit`. `live` and `settings`
-keep only the verbs that make sense for them. The read-only verbs and `edit` also
-take a file in place of a slot. The hidden `raw --class N` reaches the
-partition at index `N`, as `nord device geometry` lists them, for anything without a
-command of its own.
+Add `--help` at the level you're using. For example, `nord piano --help`
+lists the piano commands, and `nord piano build --help` explains the inputs for
+building one library.
 
 ## Slots
 
-Slots are written `BANK:SLOT`, counted from 1, the way the instrument shows
-them. `7:4` is bank 7, slot 4.
+A slot address is `BANK:SLOT`, counted from 1 as on the panel. For example,
+`nord program get 7:4` reads bank 7, slot 4 from the keyboard.
+`nord program get practice.ne5p` reads a file on your computer.
+`live` and `settings` have fewer commands than `program`. Use their own
+`--help` to list them.
 
 ## Output
 
-Color and Unicode appear only on a terminal, and piped output is plain ASCII.
-`--color=always`, `--color=never` and `NO_COLOR` override the color choice.
-`--yes` answers a confirmation in advance. Off a terminal, a command that would
-ask for confirmation fails instead unless you pass `--yes`.
+Results go to standard output. Progress, warnings and confirmation prompts
+go to standard error, so you can redirect the results to a file. Piped output
+uses plain ASCII. Use `--color=always`, `--color=never` or the `NO_COLOR`
+environment variable to control color.
 
-Next: [Files](files.md), [The instrument](instrument.md),
-[Editing](editing.md), and [Samples and pianos](libraries.md).
+For an operation that asks for confirmation, Enter cancels. Outside an
+interactive terminal, supply `--yes` to authorize the change in a script.

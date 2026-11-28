@@ -700,7 +700,7 @@ fn a_file_changed_outside_under_an_unsaved_edit_asks_whose_to_keep() {
         .bench
         .workspace
         .replace_bytes(id, mine.clone(), &mut session.bench.log);
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
 
     session.refocus();
     let (title, answers) = session.bench.browser.asking().expect("a question");
@@ -772,7 +772,7 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     let id = session.create();
     session.sync();
     let theirs = with_gain(&session.bytes(id), "12");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
 
     session.refocus();
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
@@ -789,6 +789,25 @@ fn puts(io: &toshokan::Io, at: &str) -> bool {
         toshokan::Io::Rename { to, .. } => to.as_str() == at,
         toshokan::Io::Create { path, .. } => copies && path.as_str() == at,
         _ => false,
+    }
+}
+
+/// Write `bytes` over the file at `at` at a time the file did not have, as another program
+/// does later. A clock that ticks slowly gives two writes close together one time, and
+/// bodies of one length then look alike.
+fn write_later(root: &Temp, at: &str, bytes: &[u8]) {
+    let path = root.at(at);
+    let modified = || fs::metadata(&path).and_then(|file| file.modified()).ok();
+    let before = modified();
+    let patience = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        fs::write(&path, bytes).unwrap();
+        if modified() != before {
+            return;
+        }
+        let waited = std::time::Instant::now() < patience;
+        assert!(waited, "{at}: the clock moved on");
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -813,7 +832,7 @@ fn a_file_whose_time_alone_changed_is_not_said_to_have_changed() {
     assert_eq!(session.said("changed on disk"), 0);
 
     let theirs = with_gain(&session.bytes(id), "12");
-    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    write_later(&root, "untitled.ne5p", &theirs);
     session.refocus();
     assert_eq!(session.bytes(id), theirs, "a change after it is still seen");
 }
@@ -3240,6 +3259,19 @@ impl Session {
         workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
         assert!(workspace.save_edit(id));
     }
+
+    /// Rename the sample instrument `id` rests in to `name`, send its save without
+    /// waiting, and type `during` while it is out.
+    fn rename_during_save(&mut self, id: u64, name: &str, during: &str) {
+        self.rename_resting(id, name);
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        assert!(self.store.sync(workspace, browser, Pass::Last));
+        assert!(workspace.saving_edit(id), "the save is out");
+        let sets = [name, during].map(|name| ("name".to_string(), name.to_string()));
+        workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets.to_vec())));
+    }
 }
 
 /// An edit of a sample instrument resting in its file is saved by copying the file
@@ -3310,6 +3342,64 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
     assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
+}
+
+/// A save whose answer is lost leaves an edit made during it, back to the file it was
+/// asked of or to a third name, made over the file the look finds.
+#[test]
+fn an_edit_made_during_a_save_whose_answer_is_lost_stays_over_the_file_found() {
+    for during in ["Alpha", "Gamma"] {
+        let root = Temp::new();
+        let (mut session, id, _) = resting_sample(&root);
+        session.rename_resting(id, "Alpha");
+        session.sync();
+        session.store.fault(Fault::Next(Box::new(Fault::Unread)));
+        session.rename_during_save(id, "Beta", during);
+        session.settle();
+
+        let workspace = &session.bench.workspace;
+        let rests = workspace.get(id).unwrap().rests().unwrap().clone();
+        let crate::ondisk::Index::Sample(index) = &rests.index else {
+            panic!("it rests in a sample instrument");
+        };
+        assert_eq!(
+            index.outline().name().ok().as_deref(),
+            Some("Beta"),
+            "the save landed"
+        );
+        let over = workspace.edit_of(id).map(|(over, _)| over.serial);
+        assert_eq!(
+            over,
+            Some(rests.serial),
+            "the edit to {during:?} is held over the file the save wrote"
+        );
+        assert!(workspace.get(id).unwrap().is_unsaved());
+    }
+}
+
+/// A save that fails while the edit held changes nothing over the file says only that
+/// it was not saved.
+#[test]
+fn a_failed_save_of_an_instrument_edited_back_does_not_say_an_edit_is_kept() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    session.rename_resting(id, "Alpha");
+    session.sync();
+    let path = root.at("Zoned.nsmp");
+    let time = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut theirs = fs::read(&path).unwrap();
+    let last = theirs.len() - 3;
+    theirs[last] ^= 0x40;
+    fs::write(&path, &theirs).unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(time).unwrap();
+
+    session.rename_during_save(id, "Beta", "Alpha");
+    session.settle();
+
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(session.said("The edit is kept"), 0);
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out
@@ -3732,7 +3822,7 @@ fn a_resting_sample_changed_outside_under_an_edit_is_never_read_whole() {
         .unwrap()
         .clone();
     let theirs = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184);
-    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+    write_later(&root, "Zoned.nsmp", &theirs);
 
     session.settle();
 
@@ -3899,7 +3989,7 @@ fn an_edit_their_file_already_holds_is_let_go_without_asking() {
     let root = Temp::new();
     let (mut session, id, bytes) = resting_sample(&root);
     let theirs = session.edit_resting(id, &bytes);
-    fs::write(root.at("Zoned.nsmp"), &theirs).unwrap();
+    write_later(&root, "Zoned.nsmp", &theirs);
 
     session.settle();
 
@@ -5104,7 +5194,7 @@ fn a_changed_tagged_file_that_cannot_be_read_is_reported_and_the_rest_opens() {
     first.close();
     let mut changed = program.clone();
     changed[program.len() / 2] ^= 1;
-    fs::write(root.at("Song.ne5p"), &changed).unwrap();
+    write_later(&root, "Song.ne5p", &changed);
     fs::write(root.at("Other.ne5p"), &program).unwrap();
     let mode = |mode| {
         let locked = fs::Permissions::from_mode(mode);
@@ -5579,6 +5669,25 @@ fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
     assert_ne!(first.store.undo_label(), Some(refused));
     first.undo();
     assert!(tagged(&first).is_empty());
+}
+
+#[test]
+fn an_undo_refused_over_this_drawbars_own_delete_names_no_other_drawbar() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for trashed in fs::read_dir(writer.path().join("trash")).unwrap() {
+        fs::remove_file(trashed.unwrap().path()).unwrap();
+    }
+    session.undo();
+    session.undo();
+    let told = "New “untitled.ne5p” cannot be undone: it has changed since.";
+    assert_eq!(session.said(told), 1);
 }
 
 #[test]

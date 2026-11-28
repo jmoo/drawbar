@@ -1703,20 +1703,24 @@ struct Held {
     edit: Edit,
     /// Moves whenever the edit does.
     stamp: u64,
-    /// The file the edit was last made over.
-    over: Arc<OnDisk>,
-    /// The rewrite that writes the edit into `over`, or why it does not apply there.
-    rewrite: Result<Arc<Rewrite>, String>,
-    save: Save,
+    made: Made,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Save {
-    No,
-    /// The store has still to send it.
-    Asked,
-    /// The store has sent the edit of this stamp and not heard back.
-    Sent(u64),
+/// What file the edit held of an asset is made over.
+enum Made {
+    /// The file the asset rests in, with the rewrite that writes the edit there or why it
+    /// does not apply. `asked` says a save is asked and not yet sent.
+    Over {
+        over: Arc<OnDisk>,
+        rewrite: Result<Arc<Rewrite>, String>,
+        asked: bool,
+    },
+    /// None while the store saves the edit of stamp `sent`, since the file the save writes
+    /// is not yet known. `again` says a save was asked since.
+    Saving { sent: u64, again: bool },
+    /// None until the asset rests in the file a save answered with. `asked` says a save
+    /// is to be asked once it is made there.
+    Unmade { asked: bool },
 }
 
 /// Assets decoded off the frame, each answered with the stamp of the bytes decoded.
@@ -3032,12 +3036,14 @@ impl Workspace {
     /// held of it written through, or the file as it is. `None` for one that does not
     /// rest in a file, or holds an edit that does not apply to it.
     pub fn copy_of(&self, id: u64) -> Option<CopyOf> {
-        self.get(id)?.rests()?;
+        let file = self.get(id)?.rests()?;
         let Some(held) = self.edits.get(&id) else {
             return Some(CopyOf::Asset(id));
         };
-        let rewrite = held.rewrite.as_ref().ok()?;
-        let pieces = rewrite.pieces(&held.over).ok()?;
+        let Some(rewrite) = held.edit.over(file).ok()? else {
+            return Some(CopyOf::Asset(id));
+        };
+        let pieces = rewrite.pieces(file).ok()?;
         Some(CopyOf::Edited(id, Arc::new(pieces)))
     }
 
@@ -3422,26 +3428,40 @@ impl Workspace {
     /// Hold the edit an editor made of an asset resting in its file, made over that file,
     /// or let it go with `None`. An edit that changes nothing there is let go.
     ///
-    /// ⚠️ A save already sent carries on with the edit it was sent with, and an edit
-    /// made since is made again over the file it writes.
+    /// ⚠️ A save already sent carries on with the edit it was sent with. An edit made
+    /// since is made over the file the save leaves, and `None` leaves that save's edit
+    /// held.
     pub fn hold_edit(&mut self, id: u64, edit: Option<Edit>) {
-        let save = self.edits.get(&id).map_or(Save::No, |held| held.save);
+        let saving =
+            (self.edits.get(&id)).is_some_and(|held| matches!(held.made, Made::Saving { .. }));
         let Some(edit) = edit else {
-            if !matches!(save, Save::Sent(_)) {
+            if !saving {
                 self.let_go_edit(id);
             }
             return;
         };
+        let stamp = self.stamp();
+        let asked = match self.edits.get_mut(&id) {
+            Some(Held {
+                made: Made::Over { asked, .. },
+                ..
+            }) => *asked,
+            Some(held) => {
+                (held.edit, held.stamp) = (edit, stamp);
+                self.revision += 1;
+                return;
+            }
+            None => false,
+        };
         let Some(over) = self.get(id).and_then(LocalEntity::rests).cloned() else {
             return;
         };
-        let stamp = self.stamp();
-        self.make_edit(id, edit, stamp, over, save);
+        self.make_edit(id, edit, stamp, over, asked);
     }
 
     /// Hold `edit` of an asset made over `over`, the file it rests in, or let it go where
-    /// it changes nothing there.
-    fn make_edit(&mut self, id: u64, edit: Edit, stamp: u64, over: Arc<OnDisk>, save: Save) {
+    /// it changes nothing there. A save is asked only of an edit that applies.
+    fn make_edit(&mut self, id: u64, edit: Edit, stamp: u64, over: Arc<OnDisk>, asked: bool) {
         let rewrite = match edit.over(&over) {
             Ok(None) => {
                 self.let_go_edit(id);
@@ -3450,22 +3470,21 @@ impl Workspace {
             Ok(Some(rewrite)) => Ok(Arc::new(rewrite)),
             Err(why) => Err(why),
         };
-        let held = Held {
-            edit,
-            stamp,
+        let asked = asked && rewrite.is_ok();
+        let made = Made::Over {
             over,
             rewrite,
-            save,
+            asked,
         };
-        self.edits.insert(id, held);
+        self.edits.insert(id, Held { edit, stamp, made });
         self.mark_pending(id, true);
         self.revision += 1;
     }
 
-    /// Make the edit held of an asset again over the file it rests in, where that is
-    /// another file than the one it was made over. A save asked of it is asked again
-    /// only once someone asks, since the file it would write over is not the one it was
-    /// asked of.
+    /// Make the edit held of an asset over the file it rests in, where it is made over
+    /// another file or none and no save is out. A save asked over another file is asked
+    /// again only once someone asks, since the file it would write over is not the one it
+    /// was asked of.
     fn follow_edit(&mut self, id: u64) {
         let Some(file) = self.get(id).and_then(LocalEntity::rests).cloned() else {
             return;
@@ -3473,11 +3492,14 @@ impl Workspace {
         let Some(held) = self.edits.get(&id) else {
             return;
         };
-        if Arc::ptr_eq(&held.over, &file) || matches!(held.save, Save::Sent(_)) {
-            return;
-        }
+        let asked = match &held.made {
+            Made::Over { over, .. } if Arc::ptr_eq(over, &file) => return,
+            Made::Saving { .. } => return,
+            Made::Over { .. } => false,
+            Made::Unmade { asked } => *asked,
+        };
         let (edit, stamp) = (held.edit.clone(), held.stamp);
-        self.make_edit(id, edit, stamp, file, Save::No);
+        self.make_edit(id, edit, stamp, file, asked);
     }
 
     /// Let go of the edit held of an asset, and return whether there was one.
@@ -3499,12 +3521,12 @@ impl Workspace {
     /// Why the edit held of an asset does not apply to the file it rests in, where it
     /// does not.
     pub fn unapplied(&self, id: u64) -> Option<&str> {
-        self.edits
-            .get(&id)?
-            .rewrite
-            .as_ref()
-            .err()
-            .map(String::as_str)
+        match &self.edits.get(&id)?.made {
+            Made::Over {
+                rewrite: Err(why), ..
+            } => Some(why),
+            _ => None,
+        }
     }
 
     /// The assets an edit is held of.
@@ -3518,31 +3540,46 @@ impl Workspace {
         self.edits.get(&id).map(|held| (&held.edit, held.stamp))
     }
 
-    /// The edit held of an asset resting in its file, where it applies to that file: the
-    /// file it is made over, and the rewrite that writes it.
+    /// The edit held of an asset resting in its file, where it is made over that file and
+    /// applies there: the file, and the rewrite that writes it.
     pub fn edit_of(&self, id: u64) -> Option<(&Arc<OnDisk>, &Arc<Rewrite>)> {
-        let held = self.edits.get(&id)?;
-        Some((&held.over, held.rewrite.as_ref().ok()?))
+        match &self.edits.get(&id)?.made {
+            Made::Over {
+                over,
+                rewrite: Ok(rewrite),
+                ..
+            } => Some((over, rewrite)),
+            _ => None,
+        }
     }
 
     /// Ask the store to save the edit held of an asset resting in its file into that
-    /// file. Returns whether there is an edit that applies to save.
+    /// file, or into the file a save already out leaves. Returns whether there is an edit
+    /// that applies to save.
     pub fn save_edit(&mut self, id: u64) -> bool {
-        let Some(held) = self.edits.get_mut(&id).filter(|held| held.rewrite.is_ok()) else {
+        let Some(held) = self.edits.get_mut(&id) else {
             return false;
         };
-        if held.save == Save::No {
-            held.save = Save::Asked;
-            self.revision += 1;
+        match &mut held.made {
+            Made::Over {
+                rewrite: Ok(_),
+                asked,
+                ..
+            }
+            | Made::Saving { again: asked, .. } => *asked = true,
+            Made::Over { .. } | Made::Unmade { .. } => return false,
         }
+        self.revision += 1;
         true
     }
 
     /// Whether a save of an asset's edit is asked for and not yet answered.
     pub fn saving_edit(&self, id: u64) -> bool {
-        self.edits
-            .get(&id)
-            .is_some_and(|held| held.save != Save::No)
+        self.edits.get(&id).is_some_and(|held| match held.made {
+            Made::Over { asked, .. } => asked,
+            Made::Saving { .. } => true,
+            Made::Unmade { .. } => false,
+        })
     }
 
     /// The assets whose edits the store is asked to save and has not sent.
@@ -3550,40 +3587,74 @@ impl Workspace {
         let asked = self
             .edits
             .iter()
-            .filter(|(_, held)| held.save == Save::Asked);
+            .filter(|(_, held)| matches!(held.made, Made::Over { asked: true, .. }));
         asked.map(|(id, _)| *id).collect()
     }
 
     /// Take an edit the store is asked to save, as it sends the save.
     pub(crate) fn send_edit(&mut self, id: u64) -> Option<(Arc<OnDisk>, Arc<Rewrite>)> {
         let held = self.edits.get_mut(&id)?;
-        let (over, rewrite) = (held.over.clone(), held.rewrite.as_ref().ok()?.clone());
-        held.save = Save::Sent(held.stamp);
-        Some((over, rewrite))
+        let Made::Over {
+            over,
+            rewrite: Ok(rewrite),
+            ..
+        } = &held.made
+        else {
+            return None;
+        };
+        let sent = (over.clone(), rewrite.clone());
+        held.made = Made::Saving {
+            sent: held.stamp,
+            again: false,
+        };
+        Some(sent)
     }
 
     /// An edit's save did not land. The edit stays, made over the file the asset rests in
     /// now, and is saved again only when asked.
     pub fn edit_not_saved(&mut self, id: u64) {
-        if let Some(held) = self.edits.get_mut(&id) {
-            held.save = Save::No;
-            self.revision += 1;
-        }
+        self.answer_edit(id, false);
         self.follow_edit(id);
     }
 
+    /// Whether an edit's save landed is not known. The edit stays, made over no file
+    /// until the asset rests in the file as it is read again.
+    pub fn edit_unheard(&mut self, id: u64) {
+        self.answer_edit(id, true);
+    }
+
     /// An edit's save landed in `file`, which the asset now rests in. An edit made since
-    /// the save was sent stays, made again over that file.
+    /// the save was sent stays, made again over that file, and is saved there where a
+    /// save was asked since.
     pub fn edit_saved(&mut self, id: u64, file: Arc<OnDisk>) {
-        let sent = self.edits.get_mut(&id).map(|held| {
-            let sent = held.save == Save::Sent(held.stamp);
-            held.save = Save::No;
-            sent
-        });
-        if sent == Some(true) {
-            self.let_go_edit(id);
+        let stamp = self.edits.get(&id).map(|held| held.stamp);
+        if let Some(sent) = self.answer_edit(id, true) {
+            if Some(sent) == stamp {
+                self.let_go_edit(id);
+            }
         }
         self.adopt_file(id, file);
+    }
+
+    /// Answer the save out of an asset's edit, leaving the edit made over no file and
+    /// asked again where `again` and a save was asked since. Returns the stamp sent, where
+    /// a save was out. One asked and not sent is no longer asked.
+    fn answer_edit(&mut self, id: u64, again: bool) -> Option<u64> {
+        let held = self.edits.get_mut(&id)?;
+        self.revision += 1;
+        match &mut held.made {
+            Made::Saving { sent, again: asked } => {
+                let sent = *sent;
+                held.made = Made::Unmade {
+                    asked: again && *asked,
+                };
+                Some(sent)
+            }
+            Made::Over { asked, .. } | Made::Unmade { asked } => {
+                *asked = false;
+                None
+            }
+        }
     }
 
     /// Make the current bytes the saved baseline.
@@ -3719,7 +3790,7 @@ impl Workspace {
     /// Swap in edited bytes, keeping the entity's identity.
     ///
     /// The decode and the verify run again, as they do for a file from disk.
-    pub fn replace_bytes(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
+    pub fn replace_bytes(&mut self, id: u64, bytes: impl Into<Bytes>, log: &mut Log) {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
@@ -4195,6 +4266,35 @@ mod tests {
         assert!(Arc::ptr_eq(over, &saved));
         assert!(workspace.get(id).unwrap().is_unsaved());
         assert!(!workspace.saving_edit(id), "and waits to be saved again");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_edit_back_to_the_file_made_during_a_save_that_fails_leaves_nothing_unsaved() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let named = |names: &[&str]| {
+            let sets = names
+                .iter()
+                .map(|name| ("name".to_string(), name.to_string()));
+            Edit::Sample(sets.collect())
+        };
+        workspace.hold_edit(id, Some(named(&["Vibes"])));
+        assert!(workspace.save_edit(id));
+        workspace.send_edit(id).expect("the store takes it");
+        workspace.hold_edit(id, Some(named(&["Vibes", "Marimba"])));
+        assert!(
+            workspace.get(id).unwrap().is_unsaved(),
+            "held while the save is out"
+        );
+
+        workspace.edit_not_saved(id);
+
+        assert_eq!(workspace.edit(id), None);
+        assert!(!workspace.get(id).unwrap().is_unsaved());
     }
 
     /// The write records the checksum of the file the slot took.
