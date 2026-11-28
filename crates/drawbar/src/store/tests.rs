@@ -10517,6 +10517,32 @@ fn a_quit_while_a_redo_of_a_save_that_never_lands_waits_keeps_the_edit() {
 }
 
 #[test]
+fn a_document_whose_redo_of_a_save_waits_to_finish_makes_no_room_and_keeps_the_edit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, made, edited) = session.saved_once("96");
+    fs::write(root.at("Other.ne5p"), with_gain(&made, "12")).unwrap();
+    session.settle();
+    let other = session.named("Other.ne5p");
+    session.undo();
+    session.store.fault(Fault::Refuse(moves_out));
+    session.redo();
+    session.later();
+    session.store.budget(made.len() as u64 + 1);
+    session.read(&[other]);
+    let entity = session.bench.workspace.get(id).expect("listed");
+    assert!(entity.holds_body(), "only it holds what the redo leaves");
+    session.close();
+    drop_pending(&root);
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the redo never landed");
+    let id = again.named("untitled.ne5p");
+    assert_eq!(again.bytes(id), edited, "the edit is kept");
+    assert!(again.unsaved(id));
+}
+
+#[test]
 fn an_undo_of_a_save_given_up_partway_leaves_the_document_its_edit_unsaved() {
     let root = Temp::new();
     let mut session = Session::open(&root);

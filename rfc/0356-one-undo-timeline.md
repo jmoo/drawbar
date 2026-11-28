@@ -522,7 +522,7 @@ and they are why these documents lose their edit steps at a save.
 | A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
 | A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
 | The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. That read moves only the baseline: equal bytes read saved again, and other bytes leave the document unsaved over them. |
-| An undo or redo of a save stops partway | Each file the save wrote is taken to hold what the step leaves, as the next write or open finishes it. A document holding its body is unsaved where it holds something else, and a Save writes it once the step is finished. While the step waits, each such document is kept as a draft over that file whatever it reads, so a quit loses nothing however the step ends. |
+| An undo or redo of a save stops partway | Each file the save wrote is taken to hold what the step leaves, as the next write or open finishes it. A document holding its body is unsaved where it holds something else, and a Save writes it once the step is finished. While the step waits, each such document is kept as a draft over that file whatever it reads and is not let go of for memory, so a quit loses nothing however the step ends. |
 | The next write leaves such a step neither finished nor waiting, because its record never landed or the library gave it up | Each file it names is read again, as after a lost answer. That read moves only the baseline. A Save that is that write expected what the step would have left, so it is refused once, and the next Save writes. |
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
@@ -537,7 +537,7 @@ and they are why these documents lose their edit steps at a save.
 | An edit of a body is made while its save is in flight | It is recorded. The save's step lands after it, and the two are independent. |
 | An edit is made while an undo or redo is in flight | It is recorded. A redo in flight joins `done`. An undo in flight is dropped. |
 | An asset leaves and returns | It has a new id. The edit steps made before it left are let go, and a save step that named it follows its file as any library step does. |
-| A document was let go of for memory since a save of it | The undo of that save marks what is remembered of it stale, and it is read from its file when next shown. |
+| A document was let go of for memory since a save of it | The undo of that save marks what is remembered of it stale, and it is read from its file when next shown. Shown before that save is redone, it holds what it read, which the redo leaves unsaved over the file. |
 
 ### Order of work
 

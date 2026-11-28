@@ -1285,8 +1285,9 @@ impl Store {
     /// where that would not make the room. Returns whether `need` fits.
     ///
     /// ⚠️ Only an asset its file can give back goes: one whose record says drawbar holds
-    /// the file as last read or written, with nothing in flight over it, no working copy
-    /// and no send waiting. See [`Workspace::evictable`] for what the workspace keeps.
+    /// the file as last read or written, with nothing in flight over it, no change over it
+    /// waiting to finish, no working copy and no send waiting. See
+    /// [`Workspace::evictable`] for what the workspace keeps.
     fn make_room(
         &mut self,
         need: u64,
@@ -1312,6 +1313,7 @@ impl Store {
             .filter(|(id, record)| {
                 let saved = workspace.get(**id).map(|entity| entity.saved.stamp());
                 saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
+                    && !self.unsettled.contains(*id)
                     && !queue.holds(**id)
             })
             .filter_map(|(id, _)| {
