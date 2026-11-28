@@ -45,16 +45,16 @@ choose them.
 | **Delete…** | Removes the sound after you confirm. There is no undo. | At once |
 | Drag onto another slot in the same folder | Swaps the two slots | At once |
 
-Everything else waits in the [send queue](sending.md#sending) until you choose
-**Send all**. That includes a sound dragged from **This computer** onto a slot,
-and saving a library file that came from a slot.
+Everything else waits until you [sync](sending.md#sync). That includes a sound
+dragged from **This computer** onto a slot, and a saved change to a file linked
+to a slot.
 
 <details>
 <summary>Names of samples and pianos</summary>
 
 A file's name, without its extension, becomes the slot name. The instrument
 keeps one sample or piano of each name in a folder, so if the name is already
-in use, drawbar queues the file to replace that slot. Rename your file first
+in use, the file goes on Sync to replace that slot. Rename your file first
 to keep both.
 
 Samples and pianos cannot be renamed or duplicated on the instrument. Copy one
@@ -69,7 +69,7 @@ copy of the old sound. If the transfer fails, it tries to put that sound back.
 If it can't, the activity log tells you where to find the copy. [Recover a sound after an interrupted write](recovery.md#a-change-was-interrupted).
 
 If a browser tab was open during a drawbar update, reload it before replacing
-a sound. Until it can keep a recovery copy, drawbar sends only to empty slots.
+a sound. Until it can keep a recovery copy, drawbar writes only to empty slots.
 
 A damaged piano or sample fails verification and cannot be sent. If a piano is
 too large for the free memory, [trim it to fit](pianos.md#trim-to-fit).

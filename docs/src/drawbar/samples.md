@@ -17,7 +17,7 @@ recorded, where the sample plays at its original pitch.
 5. Choose **Build → .nsmp** at the top. The instrument opens in its own tab.
    Click keys on either side of a zone boundary to hear where the sound
    changes.
-6. [Send the instrument](sending.md#sending) when you're ready.
+6. [Send the instrument](sending.md#sync) when you're ready.
 
 The build writes a v2 instrument beside the project and uses the project as it
 is in drawbar, unsaved edits included. A later build gets a numbered name.

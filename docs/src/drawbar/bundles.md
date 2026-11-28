@@ -17,8 +17,9 @@ piano or sample. A Nord Sound Manager *bundle* carries them together.
 <details>
 <summary>Why a piano or sample can be left out</summary>
 
-A program file identifies its piano and sample by number. drawbar learns their
-names by asking the instrument when it copies the program from its slot.
+A program file identifies its piano and sample by a number worked out from their
+names, so drawbar finds one that is on this computer with or without an
+instrument attached. The activity log lists one it could not find.
 
 </details>
 

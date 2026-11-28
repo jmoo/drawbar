@@ -4,7 +4,7 @@
 |---|---|
 | drawbar won't start in my browser | [Loading problems](../getting-started/install.md#if-drawbar-does-not-load) |
 | My instrument isn't listed | [Connect over USB](instrument.md#connecting) |
-| Sending is unavailable or a transfer stopped | [Review the send queue](sending.md#sending) |
+| Sync is unavailable or a transfer stopped | [Open the Sync list](sending.md#sync) |
 | I can't find my sounds, tags or unsaved edits | [Recover files and edits](recovery.md) |
 | My project says WAVs are missing | [Find the project's audio](samples.md#open-an-existing-project) |
 | I want to try the demo again | [Try it without a keyboard](overview.md#try-it-without-a-keyboard) |

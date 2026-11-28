@@ -22,11 +22,11 @@ Audio files have their own editors. See [sample instruments](samples.md),
    | Keep the new version as a separate file | **Export…** in the document header |
    | Go back to the last save | **Revert** |
 
-5. To hear the program on the keyboard, [send it to a slot](sending.md#sending),
+5. To hear the program on the keyboard, [sync it to a slot](sending.md#sync),
    then load that slot.
 
-Saving a copy that came from a slot also queues it for that slot. Saving a
-document you opened from an instrument slot writes the slot at once.
+Saving a file linked to a slot writes the file, and Sync then writes the slot.
+Saving a document you opened from an instrument slot writes the slot at once.
 
 ## Work with the panel controls
 
@@ -45,8 +45,8 @@ To edit from the computer keyboard, press Tab to reach a control.
 
 **Choose a piano.** With the instrument connected, choose the piano **Type**,
 then choose a **Model** from the pianos it holds. The program uses that piano
-when you send it. Without the instrument, a program may identify a piano or
-sample only by number.
+when you sync it. A program names its piano or sample when that sound is on
+this computer or on the instrument.
 
 **Change a morph.** A morph lets a playing control, such as a wheel, move a
 setting toward a second value. Three dots mark a control with a morph. Pick the
@@ -56,8 +56,12 @@ source in the inspector's **Morph** card and set its target value. Choose
 ## The document header
 
 The strip above the controls names the sound, where it is and whether it has
-unsaved edits. Hover over an icon or status for details. **Basic** shows the
-playing controls, and **Advanced** shows the file's fields.
+unsaved edits. Where it is carries the Library's mark: `↑ Programs 1:7` is newer
+here, `↓ Programs 1:7` is newer on the keyboard, and `! Programs 7:14` waits for
+your pick. Its main action is **Save**, **Send to…**, **Load on instrument**, or
+**Sync…** when the document and its slot differ. Hover over an icon or status
+for details. **Basic** shows the playing controls, and **Advanced** shows the
+file's fields.
 
 <details>
 <summary>Every field and raw values</summary>

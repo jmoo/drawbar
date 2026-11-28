@@ -5,6 +5,7 @@
 pub mod about;
 pub mod app;
 pub mod audio;
+pub mod bring;
 pub mod browser;
 pub mod builds;
 pub mod bundle;
@@ -30,6 +31,7 @@ pub mod knob;
 pub mod led;
 pub mod libraries;
 pub mod library;
+pub mod link;
 pub mod log;
 pub mod menu;
 #[cfg(target_os = "macos")]
@@ -41,6 +43,7 @@ pub mod newproject;
 pub mod ondisk;
 pub mod panel;
 pub mod platform;
+mod plays;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod presence;
 pub mod queue;

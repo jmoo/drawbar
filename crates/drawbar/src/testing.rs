@@ -574,6 +574,34 @@ impl Bench {
             &mut self.log,
         );
     }
+
+    /// Press Sync, let the read it asks for land, and press the sheet's Sync.
+    pub fn sync(&mut self) {
+        self.act(vec![Act::Sync(None)]);
+        self.land();
+        self.press();
+    }
+
+    /// Press the sheet's Sync on what it shows now.
+    pub fn press(&mut self) {
+        let sync = crate::bring::Rows::of(&self.device.state, &self.workspace, &self.queue);
+        crate::bring::accept(&mut self.device, &sync, &self.workspace);
+        self.act(vec![Act::SyncAll]);
+    }
+
+    /// Finish every walk asked for, as the keyboard would once it had answered, and hear
+    /// it.
+    pub fn land(&mut self) {
+        while let Some(class) = self.device.state.scan.take() {
+            self.device.state.scan.finished(class);
+        }
+        self.device.poll(
+            &mut self.log,
+            &mut self.workspace,
+            &mut self.tabs,
+            &mut self.queue,
+        );
+    }
 }
 
 #[cfg(test)]

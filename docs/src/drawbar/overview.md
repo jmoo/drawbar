@@ -30,7 +30,7 @@ right end of the top bar.
 | **File** | New files and folders, **Import…**, **Open folder…** for a library, **Save** and **Export…** |
 | **Edit** | **Undo** and **Redo** |
 | **View** | The **Keyboard** tab, the side panels, the **Activity log**, zoom and **Theme** |
-| **Instrument** | **Connect…**, **Read everything**, the send queue and **Listen to MIDI controllers** |
+| **Instrument** | **Connect…**, **Read everything**, **Sync…** and **Listen to MIDI controllers** |
 | **Help** | This guide, **Welcome**, **Report a problem…** and **About drawbar** |
 
 The menus show the shortcuts for your platform, and

@@ -561,7 +561,7 @@ impl DrawbarApp {
     /// Hold a send to the instrument until the library's files have been checked for
     /// changes made outside this app. The store lets it go once they have.
     fn hold_sends(&mut self, acts: Vec<browser::Act>) -> Vec<browser::Act> {
-        let sending = acts.iter().any(|act| matches!(act, browser::Act::SendAll));
+        let sending = acts.iter().any(|act| matches!(act, browser::Act::SyncAll));
         let Some(store) = self.store.as_mut().filter(|_| sending) else {
             return acts;
         };
@@ -569,7 +569,7 @@ impl DrawbarApp {
             return acts;
         }
         acts.into_iter()
-            .filter(|act| !matches!(act, browser::Act::SendAll))
+            .filter(|act| !matches!(act, browser::Act::SyncAll))
             .collect()
     }
 
@@ -777,9 +777,8 @@ impl DrawbarApp {
             self.document.forget(id);
         }
         if unqueued > 0 {
-            self.log.say(format!(
-                "{unqueued} waiting to be sent left the queue with the library they are in."
-            ));
+            self.log
+                .say(format!("{unqueued} left out of Sync with their library."));
         }
         self.browser.leave_library();
         self.shell.filter.keep_tags(&self.browser.tags);
@@ -1140,17 +1139,13 @@ impl eframe::App for DrawbarApp {
                 }
             }
         }
-        // An edit to an asset with a waiting entry changes what that write would do; the
-        // queue diffs it again against the occupant it already read.
-        crate::queue::follow(
-            &self.workspace,
-            &mut self.device,
-            &mut self.queue,
-            &mut self.log,
-        );
         self.tabs.prune(&self.workspace);
-        self.workspace
+        let kept = self
+            .workspace
             .close_views(|id| self.tabs.holds(id), &self.queue, &mut self.log);
+        for id in kept {
+            crate::device::link_kept(&self.device.state, &mut self.workspace, id);
+        }
         self.midi.report(&mut self.log);
         // ⚠️ Drained every frame, whatever is in front, so keys played over the library
         // or the keyboard are dropped instead of sounding when a document comes forward.
@@ -1186,7 +1181,7 @@ impl eframe::App for DrawbarApp {
             self.tell_risk();
         }
         if released {
-            arrived.push(browser::Act::SendAll);
+            arrived.push(browser::Act::SyncAll);
         }
         drop_hint(ctx);
         // Drawn before anything else this frame: it is a modal over the whole window.
@@ -1236,17 +1231,6 @@ impl eframe::App for DrawbarApp {
         self.browser_card(ctx, &mut acts);
         self.inspector_cards(ctx, &mut acts);
         self.center(ctx, &played, &mut acts);
-        // An instrument that goes away takes its queue's review with it.
-        self.shell.review_open &= self.attached();
-        if self.shell.review_open {
-            self.shell.review_open = crate::queue::review(
-                ctx,
-                &mut self.queue,
-                &self.workspace,
-                &self.device.state,
-                &mut acts,
-            );
-        }
         if self.shell.log_open {
             self.shell.log_open =
                 self.log
@@ -1255,13 +1239,15 @@ impl eframe::App for DrawbarApp {
         if self.shell.zoom_open {
             self.shell.zoom_open = self.zoom_popover(ctx, frame);
         }
+        self.asks(ctx, &mut acts);
 
         // ⚠️ Between the panels and the acts they requested: a piano library's plan is
         // not in its bytes yet, and any act that would carry those bytes waits here until
         // it is.
+        let sync = crate::bring::writes(&self.device);
         let acts = self
             .document
-            .settle(ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            .settle(ctx, acts, &mut self.workspace, &sync, &mut self.log);
         let acts = match released {
             true => acts,
             false => self.hold_sends(acts),
@@ -1279,6 +1265,8 @@ impl eframe::App for DrawbarApp {
             &mut self.builds,
             &mut self.log,
         );
+        let held = self.store.as_ref().is_some_and(Store::holds_send);
+        crate::bring::let_go(&mut self.device, held || self.document.holds_sync());
         self.builds.poll(
             &mut self.workspace,
             &self.browser.folders,
@@ -1302,6 +1290,17 @@ impl eframe::App for DrawbarApp {
 }
 
 impl DrawbarApp {
+    /// The Sync sheet, and an Undo pressed in the activity log.
+    fn asks(&mut self, ctx: &egui::Context, acts: &mut Vec<browser::Act>) {
+        let sync = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
+        let (device, workspace, log) = (&mut self.device, &mut self.workspace, &mut self.log);
+        crate::queue::sheet(ctx, device, (&self.queue, &sync), workspace, acts);
+        crate::bring::show_picked(device, &sync, log);
+        log.undo_pressed(workspace);
+    }
+
     /// The row of tabs between the two panel toggles, and the front tab's view in the
     /// document card under it.
     ///
@@ -1399,8 +1398,12 @@ impl DrawbarApp {
         played: &Played,
         acts: &mut Vec<browser::Act>,
     ) {
+        let sync = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
         let around = crate::document::Around {
             queue: &self.queue,
+            sync: &sync,
             tags: self.browser.tags(),
             played,
             builds: &self.builds,
@@ -1414,21 +1417,23 @@ impl DrawbarApp {
             &mut self.log,
             &around,
         );
-        if let Some(send) = wants.send {
-            acts.push(browser::Act::Send {
-                id: send.id,
-                class: send.class,
-                at: send.at,
-            });
-        }
         if let Some((class, at)) = wants.load {
             acts.push(browser::Act::LoadOnInstrument { class, at });
+        }
+        if wants.pick {
+            acts.push(browser::Act::SendTo(id));
+        }
+        if wants.save {
+            acts.push(browser::Act::SaveDoc(id));
         }
         if wants.keep {
             acts.push(browser::Act::Keep(id));
         }
         if wants.build {
             acts.push(browser::Act::Build(id));
+        }
+        if wants.sync {
+            acts.push(browser::Act::Sync(Some(id)));
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));
@@ -2279,7 +2284,9 @@ mod tests {
             7,
             &["", "", "", "Africa Split"],
         );
-        app.device.relink(&mut app.workspace);
+        let print = app.workspace.get(id).unwrap().saved_print().unwrap();
+        let class = nord_usb::ObjectClass::Program;
+        crate::device::link_copy(&app.device.state, &mut app.workspace, id, class, at, print);
 
         let frame = |app: &mut DrawbarApp, events: Vec<egui::Event>| {
             let mut acts = Vec::new();

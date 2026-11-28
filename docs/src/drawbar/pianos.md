@@ -19,9 +19,9 @@ the space for the part you'll play.
    range is silent. You can switch a cut back on while you try others.
 5. When the meter says the piano fits, choose **Save**. Use **Export…** if you
    also want the smaller file elsewhere.
-6. [Send the piano to the keyboard](sending.md#sending).
+6. [Send the piano to the keyboard](sending.md#sync).
 
-Until the piano fits, it can't be queued, and **Queue send** reads as a
+Until the piano fits, it can't be sent, and **Send to…** reads as a
 warning such as `Won't fit · 70 MB over`.
 
 | If you play | Try cutting |
@@ -81,7 +81,7 @@ own, not together with one-stroke WAVs.
    select **Don't decay long notes**. For a piano, leave the box clear so the
    sound fades as you hold the key.
 5. Choose **Create**. Try keys on the map and check the roots.
-6. [Choose a destination and review the send](sending.md#sending).
+6. [Choose a slot and sync](sending.md#sync).
 
 <details>
 <summary>Loops and releases</summary>

@@ -38,7 +38,9 @@ several computers.
 After a change on one computer, wait for the sync to finish, then return to the
 drawbar window on the other to see it. Unsaved edits stay on the computer where
 you made them. Different tags added to the same sound on two computers while
-offline all appear once both have synced.
+offline all appear once both have synced. Update drawbar on all of the computers
+together: an older drawbar cannot undo some changes to sounds a newer one has
+linked.
 
 <details>
 <summary>While a sync is still settling</summary>

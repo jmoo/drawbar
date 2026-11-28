@@ -26,7 +26,7 @@ drawbar runs in your browser or as a desktop app.
 ### Your keyboard
 
 Connect over USB to see every bank and slot beside your own files. Copy a sound
-to your computer, edit it, and queue it to send back when you're ready.
+to your computer, edit it, and sync it back when you're ready.
 
 [Your keyboard](drawbar/instrument.md) · [Copy and send](drawbar/sending.md)
 

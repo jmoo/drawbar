@@ -18,7 +18,10 @@ use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
+use super::{
+    slot_label, DeviceCmd, DeviceEvent, Expect, Fetched, Outgoing, Partition, Payload, Purpose,
+};
+use crate::link::Print;
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -242,44 +245,6 @@ async fn execute<T: Transport>(
             Ok(Some(note))
         }
 
-        // The instrument reports no checksum for a piano or sample slot, so its occupant
-        // is read through a CRC-32, and nothing of it is held.
-        DeviceCmd::Get {
-            class,
-            at,
-            why: Purpose::Compare,
-        } if class.is_library() => {
-            let read = device
-                .read(class, async |s| {
-                    op::read_into(s, at, &mut std::io::sink()).await
-                })
-                .await;
-            let received = match read {
-                Ok(received) => received,
-                Err(Error::DeviceStatus(op::VACANT)) => {
-                    emit.send(DeviceEvent::Vacant {
-                        class,
-                        at,
-                        why: Purpose::Compare,
-                    });
-                    return Ok(None);
-                }
-                Err(e) => return Err(spoil(fault, Some(at))(e)),
-            };
-            let note = format!(
-                "read {:?} from {} through its checksum ({} bytes)",
-                received.info.name,
-                shown(at),
-                received.info.body_len
-            );
-            emit.send(DeviceEvent::Summed {
-                class,
-                at,
-                received,
-            });
-            Ok(Some(note))
-        }
-
         DeviceCmd::Get { class, at, why } => {
             let (info, bytes) = match read_object(device, class, at).await {
                 Ok(read) => read,
@@ -297,7 +262,7 @@ async fn execute<T: Transport>(
                 bytes.len()
             );
             emit.send(DeviceEvent::Got {
-                name: entity_name(&info),
+                info,
                 origin: Origin::Device { class, at },
                 bytes,
                 why,
@@ -321,18 +286,20 @@ async fn execute<T: Transport>(
             at,
             name,
             payload,
+            expect,
         } => {
-            let note = put_one(device, class, at, &name, &payload, scratch, emit, fault)
+            let item = Outgoing {
+                id,
+                at,
+                name,
+                payload,
+                expect,
+            };
+            let wrote = put_one(device, class, &item, scratch, emit, fault)
                 .await
                 .map_err(spoil(fault, Some(at)))??;
             // Reported as sent only once its session has closed.
-            emit.send(DeviceEvent::Sent {
-                id,
-                class,
-                at,
-                sent: payload,
-            });
-            Ok(Some(note))
+            Ok(landed(class, item, wrote, emit))
         }
 
         DeviceCmd::SendAll { class, items } => {
@@ -480,6 +447,48 @@ async fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
     format!("its former contents are kept at {place}. Put them back")
 }
 
+/// How a [`put`] that did not fail ended.
+enum Wrote {
+    /// The note for the log.
+    Done(String),
+    /// The slot did not hold what the write expected, so nothing was written. What it
+    /// holds instead, `None` where it is empty.
+    Changed(Option<ProgramInfo>),
+}
+
+/// Report how one write ended, as [`DeviceEvent::Sent`] or [`DeviceEvent::Changed`], and
+/// return the note for the log.
+fn landed(class: ObjectClass, item: Outgoing, wrote: Wrote, emit: &Emit) -> Option<String> {
+    let Outgoing {
+        id,
+        at,
+        name,
+        payload,
+        ..
+    } = item;
+    match wrote {
+        Wrote::Done(note) => {
+            emit.send(DeviceEvent::Sent {
+                id,
+                class,
+                at,
+                name,
+                sent: payload,
+            });
+            Some(note)
+        }
+        Wrote::Changed(holds) => {
+            emit.send(DeviceEvent::Changed {
+                id,
+                class,
+                at,
+                holds,
+            });
+            None
+        }
+    }
+}
+
 /// Why a [`put`] stopped short of writing.
 enum Stop {
     Said(String),
@@ -514,28 +523,37 @@ fn stopped(stop: Stop, undo: &mut Option<Undo>) -> String {
 /// Replace a slot inside the caller's session. The caller checks the address against
 /// the geometry first; this sends frames.
 ///
-/// ⚠️ The occupant is read back first, into a file from `scratch` that is on disk before
-/// the delete ([`back_up`]). If the write then fails, it is handed back in [`Stop::Undo`],
-/// to be put back once this session has closed.
-#[allow(clippy::too_many_arguments)]
+/// ⚠️ The slot is asked what it holds first, and a slot not holding what the item
+/// expects is left alone. The occupant is then read back, into a file from `scratch`
+/// that is on disk before the delete ([`back_up`]). If the write then fails, it is handed
+/// back in [`Stop::Undo`], to be put back once this session has closed.
 async fn put<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     unit: AllocationUnit,
-    at: Location,
-    what: &str,
-    payload: &Payload,
+    item: &Outgoing,
     scratch: &Scratch,
     emit: &Emit,
     fault: &mut Fault,
-) -> Result<Result<String, Stop>, Error> {
+) -> Result<Result<Wrote, Stop>, Error> {
     let class = s.class();
     let timestamp = unix_now()?;
+    let Outgoing {
+        at,
+        name: what,
+        payload,
+        expect,
+        ..
+    } = item;
+    let at = *at;
 
     let existing = match op::info(s, at).await {
         Ok(info) => Some(info),
         Err(Error::DeviceStatus(op::VACANT)) => None,
         Err(e) => return Ok(Err(Stop::Said(spoil(fault, Some(at))(e)))),
     };
+    if !expect.matches(&Expect::of(existing.as_ref())) {
+        return Ok(Ok(Wrote::Changed(existing)));
+    }
     // Confirmed on hardware.
     // Library slots take their name from `BEGIN_WRITE`; buffer classes discard it.
     let write_name = slot_label(what)
@@ -591,7 +609,7 @@ async fn put<T: Transport>(
     Ok(match (written, backup) {
         (Ok(()), backup) => {
             discard(backup, emit).await;
-            Ok(wrote(class, at, what, &write_name))
+            Ok(Wrote::Done(wrote(class, at, what, &write_name)))
         }
         (Err(Error::Io(e)), None) => Err(Stop::Said(unreadable(what, &e))),
         (Err(e), None) => Err(Stop::Said(spoil(fault, Some(at))(e))),
@@ -683,17 +701,15 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
-    at: Location,
-    what: &str,
-    payload: &Payload,
+    item: &Outgoing,
     scratch: &Scratch,
     emit: &Emit,
     fault: &mut Fault,
-) -> Result<Result<String, String>, Error> {
+) -> Result<Result<Wrote, String>, Error> {
+    let at = item.at;
     let geometry = device.geometry().await?;
     if let Some(why) = geometry.check_address(class, at)? {
         return Ok(Err(format!("{}: {why}", shown(at))));
@@ -703,7 +719,7 @@ async fn put_one<T: Transport>(
     let mut undo = None;
     let outcome = device
         .destructive(class, async |s| {
-            let put = put(s, unit, at, what, payload, scratch, emit, fault).await?;
+            let put = put(s, unit, item, scratch, emit, fault).await?;
             Ok(put.map_err(|stop| stopped(stop, &mut undo)))
         })
         .await;
@@ -713,7 +729,8 @@ async fn put_one<T: Transport>(
     }
 }
 
-/// Send a batch until its first refusal; completed writes remain committed.
+/// Send a batch until its first refusal; completed writes remain committed. An item whose
+/// slot is not as it expects is skipped, and its event says so.
 async fn send_all<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
@@ -730,6 +747,7 @@ async fn send_all<T: Transport>(
     .await;
     let refusal = outcome.map_err(spoil(fault, None))?;
     match refusal {
+        None if done < total => Ok(None),
         None => Ok(Some(format!(
             "wrote {done} of {total} to {}",
             class.label()
@@ -771,26 +789,12 @@ async fn batch<T: Transport>(
                 if let Some(why) = refused {
                     return Ok(Some(format!("{}: {why}", shown(item.at))));
                 }
-                let put = put(
-                    s,
-                    unit,
-                    item.at,
-                    &item.name,
-                    &item.payload,
-                    scratch,
-                    emit,
-                    fault,
-                );
-                match put.await? {
-                    Ok(note) => {
-                        *done += 1;
-                        emit.send(DeviceEvent::Note(note));
-                        emit.send(DeviceEvent::Sent {
-                            id: item.id,
-                            class,
-                            at: item.at,
-                            sent: item.payload.clone(),
-                        });
+                match put(s, unit, item, scratch, emit, fault).await? {
+                    Ok(wrote) => {
+                        *done += usize::from(matches!(wrote, Wrote::Done(_)));
+                        if let Some(note) = landed(class, item.clone(), wrote, emit) {
+                            emit.send(DeviceEvent::Note(note));
+                        }
                     }
                     Err(stop) => return Ok(Some(stopped(stop, &mut undo))),
                 }
@@ -1143,13 +1147,12 @@ async fn copy_all<T: Transport>(
                     }
                     Err(e) => return Err(e),
                 };
-                let name = entity_name(&info);
                 if info.body_len <= HELD_COPY {
                     let bytes = op::read_program(s, at).await?;
                     let origin = Origin::Device { class, at };
                     let why = Purpose::Copy;
                     emit.send(DeviceEvent::Got {
-                        name,
+                        info,
                         origin,
                         bytes,
                         why,
@@ -1237,24 +1240,33 @@ async fn fetch<T: Transport, C>(
     let extension = info.format.trim_end_matches('\0');
     let name = format!("fetched-{}-{}.{extension}", at.bank, at.slot);
     let mut kept = scratch.create(&name).await.map_err(Error::Io)?;
-    let read: Result<(), Error> = async {
-        op::read_into(s, at, &mut kept).await?;
+    let read: Result<u32, Error> = async {
+        let received = op::read_into(s, at, &mut kept).await?;
         kept.close().await?;
-        Ok(kept.finish().await?)
+        kept.finish().await?;
+        Ok(received.body_crc32)
     }
     .await;
     let file = match read {
-        Ok(()) => kept.outside().await.map_err(Error::Io),
+        Ok(crc) => kept
+            .outside()
+            .await
+            .map_err(Error::Io)
+            .map(|file| (file, crc)),
         Err(e) => Err(e),
     };
     match file {
-        Ok(file) => Ok(Fetched {
+        Ok((file, crc)) => Ok(Fetched {
             class,
             at,
             name: entity_name(info),
             tag: extension.to_string(),
             len: u64::from(info.body_len) + nord_format::cbin::Generation::V1.body_start(),
             file,
+            print: Print {
+                crc,
+                len: info.body_len,
+            },
         }),
         Err(e) => {
             let _ = kept.remove().await;
@@ -1309,7 +1321,7 @@ fn unix_now() -> Result<u32, Error> {
 }
 
 /// Name a fetched entity after the name its slot reports.
-fn entity_name(info: &ProgramInfo) -> String {
+pub(super) fn entity_name(info: &ProgramInfo) -> String {
     let name = info.name.trim();
     match name.is_empty() {
         true => "unnamed".to_string(),
@@ -1418,6 +1430,8 @@ mod wire_tests {
         /// What every occupied slot reports holding: its body's length and format tag.
         /// A read of it answers [`occupant_byte`]s.
         occupant: (u32, &'static str),
+        /// The checksum every occupied slot reports, `u32::MAX` for none.
+        crc: u32,
         /// A folder whose files are taken down, by name, when the first delete is heard,
         /// and whose names are taken down at every read.
         watched: Option<std::path::PathBuf>,
@@ -1475,6 +1489,7 @@ mod wire_tests {
                 data: nord_format::crc::Crc32Stream::new(),
                 data_len: 0,
                 occupant: (121, "ne5p"),
+                crc: u32::MAX,
                 watched: None,
                 at_delete: None,
                 at_reads: Vec::new(),
@@ -1487,6 +1502,12 @@ mod wire_tests {
         #[cfg(unix)]
         fn pulling(mut self, dir: &crate::testing::Temp) -> Puppet {
             self.pulled = Some(dir.0.clone());
+            self
+        }
+
+        /// Every occupied slot reports `crc` as its body's checksum.
+        fn checksummed(mut self, crc: u32) -> Puppet {
+            self.crc = crc;
             self
         }
 
@@ -1698,11 +1719,13 @@ mod wire_tests {
                     }
                     match &self.filled {
                         Some(_) => match self.holds(at) {
-                            Some(name) => Some((0, info_payload(at, name, self.occupant))),
+                            Some(name) => {
+                                Some((0, info_payload(at, name, self.occupant, self.crc)))
+                            }
                             None => Some((1, Vec::new())),
                         },
                         None => match self.info {
-                            0 => Some((0, info_payload(at, "something", self.occupant))),
+                            0 => Some((0, info_payload(at, "something", self.occupant, self.crc))),
                             status => Some((status, Vec::new())),
                         },
                     }
@@ -1789,7 +1812,7 @@ mod wire_tests {
     /// The schema version every occupant reports.
     const OCCUPANT_VERSION: u32 = 4;
 
-    fn info_payload(at: Location, name: &str, (len, format): (u32, &str)) -> Vec<u8> {
+    fn info_payload(at: Location, name: &str, (len, format): (u32, &str), crc: u32) -> Vec<u8> {
         let mut p = words(&[at.bank, at.slot, len]);
         p.extend_from_slice(format.as_bytes());
         p.extend_from_slice(&words(&[
@@ -1799,7 +1822,7 @@ mod wire_tests {
             name.len() as u32,
         ]));
         p.extend_from_slice(name.as_bytes());
-        p.extend_from_slice(&u32::MAX.to_be_bytes());
+        p.extend_from_slice(&crc.to_be_bytes());
         p
     }
 
@@ -1889,13 +1912,14 @@ mod wire_tests {
         workspace.get(id).expect("just made").bytes.to_vec()
     }
 
-    fn put_a_program(at: Location) -> DeviceCmd {
+    fn put_a_program(at: Location, expect: Expect) -> DeviceCmd {
         DeviceCmd::Put {
             id: 1,
             class: ObjectClass::Program,
             at,
             name: "Africa-Split.ne5p".into(),
             payload: Payload::Bytes(a_program()),
+            expect,
         }
     }
 
@@ -1989,6 +2013,7 @@ mod wire_tests {
                     at,
                     name: "Africa-Split.ne5p".into(),
                     payload: Payload::Bytes(a_program()),
+                    expect: Expect::Vacant,
                 },
             );
 
@@ -2080,7 +2105,7 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_the_first_write();
-        let (_, events) = drive(&mut device, put_a_program(at));
+        let (_, events) = drive(&mut device, put_a_program(at, holds("Squabble B", 121)));
 
         assert_eq!(written_names(&device), ["Africa-Split", "Squabble B"]);
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2101,7 +2126,11 @@ mod wire_tests {
         let dir = crate::testing::Temp::new();
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).refusing_every_write();
-        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
+        let (flow, events) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", 121)),
+            &scratch_in(&dir),
+        );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2135,7 +2164,11 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 3 };
         let dir = crate::testing::Temp::new();
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).watching(&dir);
-        let (flow, _) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
+        let (flow, _) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", 121)),
+            &scratch_in(&dir),
+        );
         assert!(flow == Flow::Continue);
 
         let held = device.at_delete.clone().expect("a delete was sent");
@@ -2159,7 +2192,11 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
             .holding(len, "ne5p")
             .watching(&dir);
-        let (flow, _) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
+        let (flow, _) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", len)),
+            &scratch_in(&dir),
+        );
         assert!(flow == Flow::Continue);
 
         assert_eq!(device.at_reads.len(), 4, "a read of four chunks");
@@ -2182,7 +2219,11 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
             .holding(2 * 32720, "ne5p")
             .spoiling(&dir);
-        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
+        let (flow, events) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", 2 * 32720)),
+            &scratch_in(&dir),
+        );
         assert!(flow == Flow::Continue);
 
         assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
@@ -2203,7 +2244,11 @@ mod wire_tests {
         let scratch = Scratch::default();
         scratch.keep_in(Some(dir.at("tmp")));
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).pulling(&dir);
-        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch);
+        let (flow, events) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", 121)),
+            &scratch,
+        );
         assert!(flow == Flow::Continue);
 
         assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
@@ -2218,7 +2263,11 @@ mod wire_tests {
         let mut device =
             Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]).hanging_up_on_delete();
         let dir = crate::testing::Temp::new();
-        let (flow, events) = drive_keeping(&mut device, put_a_program(at), &scratch_in(&dir));
+        let (flow, events) = drive_keeping(
+            &mut device,
+            put_a_program(at, holds("Squabble B", 121)),
+            &scratch_in(&dir),
+        );
         assert!(flow == Flow::Lost, "the instrument stopped answering");
 
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -2238,6 +2287,7 @@ mod wire_tests {
             at: Location { bank: 6, slot },
             name: name.into(),
             payload: Payload::Bytes(bytes.clone()),
+            expect: Expect::Vacant,
         };
         let mut device = Puppet::new(1);
         let (flow, events) = drive(
@@ -2269,22 +2319,23 @@ mod wire_tests {
     #[test]
     fn a_put_into_a_buffer_class_never_deletes_the_slot() {
         let at = Location { bank: 0, slot: 2 };
-        let put = |class| DeviceCmd::Put {
+        let put = |class, name| DeviceCmd::Put {
             id: 1,
             class,
             at,
             name: "Africa-Split.ne5p".into(),
             payload: Payload::Bytes(a_program()),
+            expect: holds(name, 121),
         };
 
         let mut live = Puppet::stocked(&[("Live", 3)], &[(at, "Live 3")]);
-        let (flow, _) = drive(&mut live, put(ObjectClass::Live));
+        let (flow, _) = drive(&mut live, put(ObjectClass::Live, "Live 3"));
         assert!(flow == Flow::Continue, "the instrument is still there");
         assert_eq!(counted(&live, cmd::DELETE), 0, "nothing was emptied");
         assert_eq!(counted(&live, cmd::BEGIN_WRITE), 1, "and the bytes went");
 
         let mut program = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Africa")]);
-        drive(&mut program, put(ObjectClass::Program));
+        drive(&mut program, put(ObjectClass::Program, "Africa"));
         assert_eq!(
             counted(&program, cmd::DELETE),
             1,
@@ -2304,6 +2355,7 @@ mod wire_tests {
                 at,
                 name: "Africa-Split.ne5l".into(),
                 payload: Payload::Bytes(a_program()),
+                expect: holds("Live 3", 121),
             },
         );
         assert!(flow == Flow::Continue);
@@ -2323,6 +2375,7 @@ mod wire_tests {
                 at: Location { bank: 6, slot: 3 },
                 name: "   ".into(),
                 payload: Payload::Bytes(a_program()),
+                expect: Expect::Vacant,
             },
         );
         assert!(flow == Flow::Continue);
@@ -2342,6 +2395,7 @@ mod wire_tests {
                 at,
                 name: "   ".into(),
                 payload: Payload::Bytes(a_program()),
+                expect: holds("Squabble B", 121),
             },
         );
 
@@ -2356,6 +2410,7 @@ mod wire_tests {
             at: Location { bank: 6, slot },
             name: name.into(),
             payload: Payload::Bytes(bytes.clone()),
+            expect: Expect::Vacant,
         };
         let mut device = Puppet::new(1);
         let (flow, _) = drive(
@@ -2378,6 +2433,136 @@ mod wire_tests {
             .filter(|command| *command == cmd::SESSION_OPEN)
             .count();
         assert_eq!(opens, 1);
+    }
+
+    /// A program write to `at` that expects to find `expect` there.
+    fn put_expecting(at: Location, expect: Expect) -> DeviceCmd {
+        DeviceCmd::Put {
+            id: 1,
+            class: ObjectClass::Program,
+            at,
+            name: "Africa-Split.ne5p".into(),
+            payload: Payload::Bytes(a_program()),
+            expect,
+        }
+    }
+
+    /// Each [`DeviceEvent::Changed`] as the item's id and the name its slot holds now.
+    fn changed(said: &[DeviceEvent]) -> Vec<(u64, Option<String>)> {
+        said.iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Changed { id, holds, .. } => {
+                    Some((*id, holds.as_ref().map(|info| info.name.clone())))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_put_whose_slot_is_not_as_expected_changes_nothing_and_says_what_it_holds() {
+        let at = Location { bank: 0, slot: 3 };
+        let held = || Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")]);
+        let empty = || Puppet::stocked(&[("Bank 1", 50)], &[]);
+        let summed = |crc| Expect::Holds {
+            crc: Some(crc),
+            len: 121,
+            name: "Squabble B".into(),
+        };
+        let squabble = Some("Squabble B");
+        let crc = occupant_crc(121);
+        let cases = [
+            (
+                "another checksum",
+                held().checksummed(crc),
+                summed(!crc),
+                squabble,
+            ),
+            ("another name", held(), holds("Squabble A", 121), squabble),
+            ("another length", held(), holds("Squabble B", 120), squabble),
+            ("emptied", empty(), holds("Squabble B", 121), None),
+            ("filled", held(), Expect::Vacant, squabble),
+        ];
+        for (case, mut device, expect, now) in cases {
+            let (flow, events) = drive(&mut device, put_expecting(at, expect));
+            assert!(flow == Flow::Continue, "{case}");
+
+            for (command, what) in [(cmd::READ, "read"), (cmd::DELETE, "deleted")] {
+                assert_eq!(counted(&device, command), 0, "{case}: nothing was {what}");
+            }
+            assert_eq!(
+                counted(&device, cmd::BEGIN_WRITE),
+                0,
+                "{case}: nothing written"
+            );
+            let said: Vec<DeviceEvent> = events.try_iter().collect();
+            assert_eq!(changed(&said), [(1, now.map(String::from))], "{case}");
+            assert!(failures(&said).is_empty(), "{case}: {:?}", failures(&said));
+            let sent = said
+                .iter()
+                .any(|event| matches!(event, DeviceEvent::Sent { .. }));
+            assert!(!sent, "{case}: nothing was reported sent");
+        }
+    }
+
+    #[test]
+    fn a_slot_whose_checksum_is_as_expected_is_written_whatever_its_name() {
+        let at = Location { bank: 0, slot: 3 };
+        let crc = occupant_crc(121);
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Renamed")]).checksummed(crc);
+        let expect = Expect::Holds {
+            crc: Some(crc),
+            len: 121,
+            name: "Squabble B".into(),
+        };
+        let (_, events) = drive(&mut device, put_expecting(at, expect));
+
+        assert_eq!(written_name(&device), "Africa-Split");
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert!(changed(&said).is_empty());
+        assert!(said
+            .iter()
+            .any(|event| matches!(event, DeviceEvent::Sent { .. })));
+    }
+
+    #[test]
+    fn a_batch_skips_an_item_whose_slot_is_not_as_expected_and_writes_the_rest() {
+        let bytes = a_program();
+        let item = |slot, name: &str| Outgoing {
+            id: slot as u64,
+            at: Location { bank: 0, slot },
+            name: name.into(),
+            payload: Payload::Bytes(bytes.clone()),
+            expect: Expect::Vacant,
+        };
+        let filled = Location { bank: 0, slot: 4 };
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(filled, "Squabble B")]);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::SendAll {
+                class: ObjectClass::Program,
+                items: vec![
+                    item(3, "One.ne5p"),
+                    item(4, "Two.ne5p"),
+                    item(5, "Three.ne5p"),
+                ],
+            },
+        );
+        assert!(flow == Flow::Continue);
+
+        assert_eq!(written_names(&device), ["One", "Three"]);
+        assert_eq!(counted(&device, cmd::DELETE), 0, "the occupant stayed");
+        let said: Vec<DeviceEvent> = events.try_iter().collect();
+        assert_eq!(changed(&said), [(4, Some("Squabble B".to_string()))]);
+        let sent: Vec<u64> = said
+            .iter()
+            .filter_map(|event| match event {
+                DeviceEvent::Sent { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [3, 5]);
+        assert!(failures(&said).is_empty(), "{:?}", failures(&said));
     }
 
     #[test]
@@ -2858,7 +3043,10 @@ mod wire_tests {
     #[test]
     fn a_geometry_that_cannot_be_read_stops_the_write_before_any_frame_of_it() {
         let mut device = Puppet::stocked(&[("Bank 1", 50)], &[]).garbling_geometry();
-        let (flow, _) = drive(&mut device, put_a_program(Location { bank: 0, slot: 3 }));
+        let (flow, _) = drive(
+            &mut device,
+            put_a_program(Location { bank: 0, slot: 3 }, Expect::Vacant),
+        );
         assert!(flow == Flow::Continue, "not a disconnection");
         assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0);
         assert_eq!(counted(&device, cmd::WRITE_DATA), 0);
@@ -2883,7 +3071,10 @@ mod wire_tests {
     #[test]
     fn a_write_past_the_end_is_refused_before_anything_is_deleted() {
         let mut device = a_small_library();
-        let (flow, events) = drive(&mut device, put_a_program(Location { bank: 6, slot: 0 }));
+        let (flow, events) = drive(
+            &mut device,
+            put_a_program(Location { bank: 6, slot: 0 }, Expect::Vacant),
+        );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
 
         let why = refused(events);
@@ -2909,14 +3100,26 @@ mod wire_tests {
         (dir, file, bytes)
     }
 
-    /// A write of `payload` to bank 1 slot 1 of the piano library.
-    fn put_piano(payload: Payload) -> DeviceCmd {
+    /// A write of `payload` to bank 1 slot 1 of the piano library, which it expects to
+    /// find as `expect` says.
+    fn put_piano(payload: Payload, expect: Expect) -> DeviceCmd {
         DeviceCmd::Put {
             id: 1,
             class: ObjectClass::Piano,
             at: Location { bank: 0, slot: 0 },
             name: "Upright.npno".into(),
             payload,
+            expect,
+        }
+    }
+
+    /// What a write expects of a slot the puppet fills under `name`, with an occupant of
+    /// `len` bytes. The puppet reports no checksum.
+    fn holds(name: &str, len: u32) -> Expect {
+        Expect::Holds {
+            crc: None,
+            len,
+            name: name.into(),
         }
     }
 
@@ -2960,10 +3163,14 @@ mod wire_tests {
         let mut device = Puppet::stocked(&[("Bank 1", 4000)], &[]).forgetful();
         let payload = Payload::File {
             file: file.clone(),
-            crc32,
+            print: Print {
+                crc: crc32,
+                len: body.len() as u32,
+            },
         };
-        let ((flow, events), largest) =
-            crate::testing::largest_allocation(|| drive(&mut device, put_piano(payload)));
+        let ((flow, events), largest) = crate::testing::largest_allocation(|| {
+            drive(&mut device, put_piano(payload, Expect::Vacant))
+        });
 
         assert!(flow == Flow::Continue);
         let said: Vec<DeviceEvent> = events.try_iter().collect();
@@ -3000,11 +3207,14 @@ mod wire_tests {
         let at = Location { bank: 0, slot: 0 };
         let mut sent = Vec::new();
         for payload in [
-            Payload::File { file, crc32: 0 },
+            Payload::File {
+                file,
+                print: Print { crc: 0, len: 0 },
+            },
             Payload::Bytes(bytes.clone()),
         ] {
             let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
-            let (flow, events) = drive(&mut device, put_piano(payload));
+            let (flow, events) = drive(&mut device, put_piano(payload, holds("Grand", 121)));
             assert!(flow == Flow::Continue);
             let said: Vec<DeviceEvent> = events.try_iter().collect();
             assert_eq!(failures(&said), Vec::<&str>::new());
@@ -3024,11 +3234,11 @@ mod wire_tests {
         let (_dir, file, _) = resting_piano(40);
         let payload = || Payload::File {
             file: file.clone(),
-            crc32: 0,
+            print: Print { crc: 0, len: 0 },
         };
         drive(
             &mut Puppet::stocked(&[("Bank 1", 400)], &[]),
-            put_piano(payload()),
+            put_piano(payload(), Expect::Vacant),
         );
         let reads = file.take_reads().len();
         let at = Location { bank: 0, slot: 0 };
@@ -3039,9 +3249,10 @@ mod wire_tests {
                 at,
                 name: "Upright.npno".into(),
                 payload: payload(),
+                expect: holds("Grand", 121),
             }],
         };
-        for send in [put_piano(payload()), batch] {
+        for send in [put_piano(payload(), holds("Grand", 121)), batch] {
             let label = send.label();
             file.vanish_after(reads - 2);
             let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
@@ -3074,11 +3285,11 @@ mod wire_tests {
         let (_dir, file, _) = resting_piano(40);
         let payload = || Payload::File {
             file: file.clone(),
-            crc32: 0,
+            print: Print { crc: 0, len: 0 },
         };
         drive(
             &mut Puppet::stocked(&[("Bank 1", 400)], &[]),
-            put_piano(payload()),
+            put_piano(payload(), Expect::Vacant),
         );
         let reads = file.take_reads().len();
         // The last two reads are the transfer's last two chunks.
@@ -3086,7 +3297,7 @@ mod wire_tests {
 
         let at = Location { bank: 0, slot: 0 };
         let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]);
-        let (flow, events) = drive(&mut device, put_piano(payload()));
+        let (flow, events) = drive(&mut device, put_piano(payload(), holds("Grand", 121)));
 
         assert!(flow == Flow::Continue, "a file is not the instrument");
         assert_eq!(
@@ -3146,7 +3357,11 @@ mod wire_tests {
         let payload = Payload::Bytes(crate::testing::piano(2));
 
         let ((flow, events), largest) = crate::testing::largest_allocation(|| {
-            drive_keeping(&mut device, put_piano(payload), &scratch)
+            drive_keeping(
+                &mut device,
+                put_piano(payload, holds("Grand", len)),
+                &scratch,
+            )
         });
 
         assert!(flow == Flow::Continue);
@@ -3184,7 +3399,10 @@ mod wire_tests {
             .refusing_the_first_write();
         drive_keeping(
             &mut restored,
-            put_piano(Payload::Bytes(crate::testing::piano(2))),
+            put_piano(
+                Payload::Bytes(crate::testing::piano(2)),
+                holds("Grand", len),
+            ),
             &scratch_in(&dir),
         );
         let mut written = Puppet::stocked(&[("Bank 1", 400)], &[]);
@@ -3196,6 +3414,7 @@ mod wire_tests {
                 at,
                 name: "Grand.npno".into(),
                 payload: Payload::Bytes(occupant_file(at, len)),
+                expect: Expect::Vacant,
             },
         );
 
@@ -3230,7 +3449,10 @@ mod wire_tests {
             .refusing_every_write();
         let (flow, events) = drive_keeping(
             &mut device,
-            put_piano(Payload::Bytes(crate::testing::piano(2))),
+            put_piano(
+                Payload::Bytes(crate::testing::piano(2)),
+                holds("Grand", len),
+            ),
             &scratch_in(&dir),
         );
         assert!(flow == Flow::Continue, "a refusal is not a disconnection");
@@ -3256,50 +3478,6 @@ mod wire_tests {
             failed[0].contains(&format!("kept at {}", kept.display())),
             "{}",
             failed[0]
-        );
-    }
-
-    /// A piano slot something is queued for is read through its checksum: the queue hears
-    /// the body's length and CRC-32, nothing of the body is held, and nothing is kept.
-    #[test]
-    fn a_piano_slot_is_compared_through_its_checksum_in_bounded_memory() {
-        let len: u32 = 48 << 20;
-        let crc = occupant_crc(len);
-        let at = Location { bank: 0, slot: 0 };
-        let mut device = Puppet::stocked(&[("Bank 1", 400)], &[(at, "Grand")]).holding(len, "npno");
-
-        let ((flow, events), largest) = crate::testing::largest_allocation(|| {
-            drive(
-                &mut device,
-                DeviceCmd::Get {
-                    class: ObjectClass::Piano,
-                    at,
-                    why: Purpose::Compare,
-                },
-            )
-        });
-
-        assert!(flow == Flow::Continue);
-        assert!(
-            largest < len as usize / 100,
-            "the largest allocation was {largest} bytes, of a {len}-byte occupant"
-        );
-        let said: Vec<DeviceEvent> = events.try_iter().collect();
-        let summed: Vec<(u32, u32)> = said
-            .iter()
-            .filter_map(|event| match event {
-                DeviceEvent::Summed { received, .. } => {
-                    Some((received.info.body_len, received.body_crc32))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(summed, [(len, crc)]);
-        assert!(
-            !said
-                .iter()
-                .any(|event| matches!(event, DeviceEvent::Got { .. })),
-            "no bytes reach the queue"
         );
     }
 

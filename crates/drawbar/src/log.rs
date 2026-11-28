@@ -11,10 +11,16 @@ use eframe::egui;
 
 use crate::app::{bad, caption, tint, warn};
 use crate::icon::{painted, sized, Glyph};
+use crate::link::{Held, Keyboard, Link, Spot};
+use crate::strings::{display_name, place};
+use crate::workspace::Workspace;
 
 /// Entries kept before the oldest is dropped. A session that opens a hundred files
 /// still fits; a runaway loop cannot grow the app without bound.
 const CAPACITY: usize = 500;
+
+/// The most bytes one entry keeps for its Undo.
+pub const KEPT: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -38,6 +44,243 @@ pub struct Entry {
     pub text: String,
     /// Seconds since the app started.
     pub at: f64,
+    /// What its Undo button takes back, until it is pressed.
+    pub undo: Option<Undo>,
+    /// Counts entries from the session's first, so one can be found after older ones go.
+    serial: u64,
+}
+
+/// What drawbar did on its own, as the one change that takes it back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Undo {
+    /// Files linked on their own, each to its slot: keep each off that keyboard, unless it
+    /// is linked to another slot now.
+    Unlink {
+        keyboard: Keyboard,
+        links: Vec<(u64, Held)>,
+    },
+    /// Files brought in from the keyboard, each as it was before.
+    Restore(Vec<Restored>),
+    /// Links drawbar moved or removed: put back each still as that left it, unless
+    /// another file is linked to one of those slots now.
+    Relink {
+        keyboard: Keyboard,
+        links: Vec<Relinked>,
+    },
+    /// Files unlinked from a slot another file kept, each with that file: link back
+    /// each with nothing stored for that keyboard since, in place of that one and of no
+    /// other file.
+    Reclaim {
+        keyboard: Keyboard,
+        links: Vec<(u64, Held, u64)>,
+    },
+}
+
+/// A link drawbar moved or removed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Relinked {
+    pub id: u64,
+    pub before: Held,
+    /// What the change left stored for the file on that keyboard.
+    pub left: Option<Link>,
+}
+
+/// A file as it was before it was brought in, and the link bringing it in left.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Restored {
+    pub id: u64,
+    pub bytes: Vec<u8>,
+    pub keyboard: Keyboard,
+    pub before: Held,
+    /// The link it was brought in under.
+    pub after: Held,
+    /// CRC-32 over the whole file as brought in, its header included.
+    pub whole: u32,
+}
+
+impl Undo {
+    /// Take the change back, and say what was taken back. A file that is gone is left
+    /// alone; a file brought in is put back, and a link taken back, only while it is as
+    /// the change left it. `None` when every file it names is gone.
+    pub fn perform(self, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
+        match self {
+            Undo::Unlink { keyboard, links } => {
+                let links = links.into_iter().filter(|(id, _)| here(workspace, *id));
+                let (links, changed): (Vec<_>, Vec<_>) = links.partition(|(id, held)| {
+                    let now = workspace.get(*id).and_then(|it| it.held_on(&keyboard));
+                    now.is_none_or(|now| slot(now) == slot(held))
+                });
+                let unlinked = files(&links);
+                for id in &unlinked {
+                    workspace.keep_off(*id, &keyboard);
+                }
+                let done = (!unlinked.is_empty())
+                    .then(|| format!("Unlinked {}", named(workspace, &unlinked, "files")));
+                said(done, workspace, &files(&changed))
+            }
+            Undo::Restore(kept) => restore(kept, workspace, log),
+            Undo::Relink { keyboard, links } => {
+                let links = links.into_iter().filter(|link| here(workspace, link.id));
+                let (links, changed): (Vec<_>, Vec<_>) = links
+                    .partition(|link| stands(workspace, &keyboard, link.id, link.left.as_ref()));
+                let changed: Vec<u64> = changed.iter().map(|link| link.id).collect();
+                let links: Vec<(u64, Held)> =
+                    links.into_iter().map(|it| (it.id, it.before)).collect();
+                let ours = files(&links);
+                relink(
+                    workspace,
+                    &keyboard,
+                    links,
+                    |_, other| ours.contains(&other),
+                    &changed,
+                )
+            }
+            Undo::Reclaim { keyboard, links } => {
+                let links = links.into_iter().filter(|(id, ..)| here(workspace, *id));
+                let (links, changed): (Vec<_>, Vec<_>) =
+                    links.partition(|(id, ..)| stands(workspace, &keyboard, *id, None));
+                let changed: Vec<u64> = changed.iter().map(|(id, ..)| *id).collect();
+                let kept: Vec<(Held, u64)> = links
+                    .iter()
+                    .map(|(_, held, kept)| (held.clone(), *kept))
+                    .collect();
+                let over = |held: &Held, other| kept.contains(&(held.clone(), other));
+                let links = links.into_iter().map(|(id, held, _)| (id, held)).collect();
+                relink(workspace, &keyboard, links, over, &changed)
+            }
+        }
+    }
+
+    /// The bytes it keeps.
+    pub fn weight(&self) -> usize {
+        match self {
+            Undo::Restore(kept) => kept.iter().map(|kept| kept.bytes.len()).sum(),
+            Undo::Unlink { .. } | Undo::Relink { .. } | Undo::Reclaim { .. } => 0,
+        }
+    }
+}
+
+/// Put back each file still as bringing it in left it: saved as the bytes brought in, and
+/// linked as bringing it in linked it.
+fn restore(kept: Vec<Restored>, workspace: &mut Workspace, log: &mut Log) -> Option<String> {
+    let mut put = Vec::new();
+    let mut changed = Vec::new();
+    for Restored {
+        id,
+        bytes,
+        keyboard,
+        before,
+        after,
+        whole,
+    } in kept
+    {
+        let Some(entity) = workspace.get(id) else {
+            continue;
+        };
+        let left = !entity.is_unsaved()
+            && !entity.unread()
+            && nord_format::crc::crc32(&entity.bytes) == whole
+            && entity.held_on(&keyboard) == Some(&after);
+        if !left {
+            changed.push(id);
+            continue;
+        }
+        workspace.save_over(id, bytes, None, log);
+        workspace.link(id, &keyboard, before);
+        put.push(id);
+    }
+    let (put, changed) = (
+        named(workspace, &put, "sounds"),
+        named(workspace, &changed, "sounds"),
+    );
+    match (put.is_empty(), changed.is_empty()) {
+        (true, true) => None,
+        (true, false) => Some(format!("Not undone: {changed} changed since.")),
+        (false, true) => Some(format!("Put back {put}.")),
+        (false, false) => Some(format!("Put back {put}; {changed} changed since.")),
+    }
+}
+
+/// Link each file of `links` to its slot again, unless one of those slots is linked now
+/// to a file the link may not go `over`. `changed` are the files left alone.
+fn relink(
+    workspace: &mut Workspace,
+    keyboard: &Keyboard,
+    links: Vec<(u64, Held)>,
+    over: impl Fn(&Held, u64) -> bool,
+    changed: &[u64],
+) -> Option<String> {
+    let taken = links.iter().find_map(|(_, held)| {
+        let other = workspace.linked_at(keyboard, held.class(), &held.spot)?;
+        (!over(held, other)).then_some((other, held))
+    });
+    if let Some((other, held)) = taken {
+        let name = named(workspace, &[other], "files");
+        return Some(format!(
+            "Not undone: {name} is linked to {} now.",
+            spot(held)
+        ));
+    }
+    let linked = files(&links);
+    for (id, held) in links {
+        workspace.link(id, keyboard, held);
+    }
+    let done = (!linked.is_empty())
+        .then(|| format!("Linked {} again", named(workspace, &linked, "files")));
+    said(done, workspace, changed)
+}
+
+/// Whether what is stored for `id` on `keyboard` is as the change being taken back left
+/// it: a link to the same slot, that it is kept off, or nothing.
+fn stands(workspace: &Workspace, keyboard: &Keyboard, id: u64, left: Option<&Link>) -> bool {
+    let slot = |link: &Link| link.held.as_ref().map(slot);
+    let now = workspace.get(id).and_then(|it| it.link_on(keyboard));
+    now.map(slot) == left.map(slot)
+}
+
+fn slot(held: &Held) -> (nord_usb::ObjectClass, Spot) {
+    (held.class(), held.spot.clone())
+}
+
+/// The files `links` name.
+fn files(links: &[(u64, Held)]) -> Vec<u64> {
+    links.iter().map(|(id, _)| *id).collect()
+}
+
+/// What an Undo of links says: what it has `done`, and which files it left alone because
+/// their links `changed` since. `None` where it names no file.
+fn said(done: Option<String>, workspace: &Workspace, changed: &[u64]) -> Option<String> {
+    let changed = named(workspace, changed, "files");
+    match (done, changed.is_empty()) {
+        (done, true) => done.map(|done| format!("{done}.")),
+        (None, false) => Some(format!("Not undone: {changed} changed since.")),
+        (Some(done), false) => Some(format!("{done}; {changed} changed since.")),
+    }
+}
+
+/// Whether a file is still on this computer.
+fn here(workspace: &Workspace, id: u64) -> bool {
+    workspace.get(id).is_some_and(|it| it.kept)
+}
+
+/// One file by its name, several by their count, none as nothing.
+fn named(workspace: &Workspace, ids: &[u64], many: &str) -> String {
+    match ids {
+        [] => String::new(),
+        [id] => format!(
+            "“{}”",
+            display_name(workspace.get(*id).map_or("", |it| it.name.as_str()))
+        ),
+        _ => format!("{} {many}", ids.len()),
+    }
+}
+
+/// The slot a link names, as the user knows it.
+fn spot(held: &Held) -> String {
+    match held.location() {
+        Some(at) => place(held.class(), at),
+        None => held.name().unwrap_or_default().to_string(),
+    }
 }
 
 pub struct Log {
@@ -49,6 +292,10 @@ pub struct Log {
     clock: f64,
     /// The sentence the status strip shows when nothing is running.
     status: (Level, String),
+    /// The serial the next entry takes.
+    next: u64,
+    /// An Undo pressed in the popover, until taken.
+    pressed: Option<Undo>,
 }
 
 impl Default for Log {
@@ -57,6 +304,8 @@ impl Default for Log {
             entries: VecDeque::new(),
             clock: 0.0,
             status: (Level::Info, "Ready.".to_string()),
+            next: 0,
+            pressed: None,
         }
     }
 }
@@ -105,7 +354,47 @@ impl Log {
             level,
             text: text.into(),
             at: self.clock,
+            undo: None,
+            serial: self.next,
         });
+        self.next += 1;
+    }
+
+    /// Give the newest entry an Undo, unless it would keep more than [`KEPT`] bytes.
+    /// Returns the entry's serial, for [`Log::entry_mut`].
+    pub fn offer(&mut self, undo: Undo) -> Option<u64> {
+        let entry = self.entries.back_mut()?;
+        entry.undo = (undo.weight() <= KEPT).then_some(undo);
+        Some(entry.serial)
+    }
+
+    /// The entry [`Log::offer`] returned `serial` for, while the log still holds it.
+    pub fn entry_mut(&mut self, serial: u64) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|entry| entry.serial == serial)
+    }
+
+    /// Take back what the Undo pressed in the popover since the last call undoes, and say
+    /// what it took back.
+    pub fn undo_pressed(&mut self, workspace: &mut Workspace) {
+        let Some(undo) = self.pressed.take() else {
+            return;
+        };
+        if let Some(said) = undo.perform(workspace, self) {
+            self.say(said);
+        }
+    }
+
+    /// Press the Undo of the newest entry that says `text`, as a click in the popover
+    /// does. Returns whether it had one.
+    #[cfg(test)]
+    pub fn press(&mut self, text: &str) -> bool {
+        let entry = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.text.contains(text));
+        self.pressed = entry.and_then(|entry| entry.undo.take());
+        self.pressed.is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -184,7 +473,9 @@ impl Log {
                         ui.set_min_size(size);
                         ui.set_max_size(size);
                         open = self.head(ui, problems_only);
-                        self.rows(ui, *problems_only);
+                        if let Some(pressed) = self.rows(ui, *problems_only) {
+                            self.pressed = Some(pressed);
+                        }
                     });
             });
         let (escape, clicked) = ctx.input(|input| {
@@ -253,8 +544,9 @@ impl Log {
         open
     }
 
-    /// The entries, newest first.
-    fn rows(&self, ui: &mut egui::Ui, problems_only: bool) {
+    /// The entries, newest first. Returns the Undo pressed, taken off its entry.
+    fn rows(&mut self, ui: &mut egui::Ui, problems_only: bool) -> Option<Undo> {
+        let mut pressed = None;
         egui::ScrollArea::vertical()
             .id_salt("activity_rows")
             .auto_shrink([false; 2])
@@ -262,13 +554,15 @@ impl Log {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 let shown = self
                     .entries
-                    .iter()
+                    .iter_mut()
                     .rev()
                     .filter(|entry| !problems_only || entry.level != Level::Info);
                 let mut any = false;
                 for entry in shown {
                     any = true;
-                    row(ui, entry);
+                    if row(ui, entry) {
+                        pressed = entry.undo.take();
+                    }
                 }
                 if !any {
                     ui.add_space(12.0);
@@ -278,6 +572,7 @@ impl Log {
                     });
                 }
             });
+        pressed
     }
 }
 
@@ -288,16 +583,24 @@ const POPOVER: egui::Vec2 = egui::vec2(640.0, 360.0);
 const TIME: f32 = 62.0;
 const MARK: f32 = 16.0;
 
-/// One entry: when, how it went, and what happened. An error's row is tinted.
-fn row(ui: &mut egui::Ui, entry: &Entry) {
+/// The width kept at a row's right for its Undo button.
+const UNDO: f32 = 56.0;
+
+/// One entry: when, how it went, and what happened, and its Undo where it has one. An
+/// error's row is tinted. Returns whether Undo was pressed.
+fn row(ui: &mut egui::Ui, entry: &Entry) -> bool {
     let visuals = ui.visuals().clone();
     let width = ui.available_width() - 16.0;
     let text_left = TIME + MARK + 16.0;
+    let undo = match entry.undo {
+        Some(_) => UNDO,
+        None => 0.0,
+    };
     let galley = ui.painter().layout(
         entry.text.clone(),
         egui::FontId::proportional(12.5),
         visuals.text_color(),
-        width - text_left - 10.0,
+        width - text_left - 10.0 - undo,
     );
     let height = (galley.size().y + 8.0).max(26.0);
     let (rect, response) = ui.allocate_exact_size(
@@ -336,6 +639,16 @@ fn row(ui: &mut egui::Ui, entry: &Entry) {
         galley,
         visuals.text_color(),
     );
+    if entry.undo.is_none() {
+        return false;
+    }
+    let button = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - UNDO / 2.0, top),
+        egui::vec2(UNDO - 8.0, 22.0),
+    );
+    let label = egui::RichText::new("Undo").size(11.5);
+    ui.put(button, egui::Button::new(label).corner_radius(7.0))
+        .clicked()
 }
 
 /// A segmented control: one segment per choice, the chosen one raised.

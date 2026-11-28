@@ -55,7 +55,8 @@ nord bundle unpack gig.ne5pbundle -o gig
 nord bundle pack gig -o revised.ne5pbundle
 ```
 
-Without a manifest, `pack` makes one listing which songs use which programs.
+Without a manifest, `pack` makes one listing which songs use which programs and
+which programs use which pianos and samples.
 `inspect` and `unpack` read the uncompressed bundles Nord Sound Manager writes.
 A compressed or damaged entry, repeated name or path outside the folder is
 refused. [Supported bundle formats](../getting-started/support.md#files).

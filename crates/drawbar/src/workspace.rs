@@ -16,6 +16,7 @@ use nord_format::formats::{ne5, ns2, ns3, ns4, nsmpproj};
 use nord_format::{Entity, OrganPreset, PianoPreset, Program, Synth};
 use nord_usb::{Location, ObjectClass};
 
+use crate::link::{self, Keyboard, Link, Print};
 use crate::log::Log;
 use crate::newproject::{Draft, Making};
 use crate::ondisk::{self, OnDisk};
@@ -228,6 +229,27 @@ impl Container {
     pub fn body_len(&self) -> u64 {
         self.body.len() as u64
     }
+
+    /// What a slot holding this body reports. `None` for a body longer than a slot's
+    /// length can say.
+    pub fn print(&self) -> Option<Print> {
+        let len = u32::try_from(self.body_len()).ok()?;
+        Some(Print {
+            crc: self.body_crc32,
+            len,
+        })
+    }
+}
+
+/// A slot drawbar moved or renamed: the link at the first spot goes to the second, or off
+/// the keyboard where there is none, under the name drawbar gave the slot where it renamed
+/// it.
+pub type Moved = (link::Spot, Option<link::Spot>, Option<String>);
+
+/// What a slot holding the body of the container `bytes` reports. `None` for bytes that
+/// are not one.
+pub fn print_of(bytes: &[u8]) -> Option<Print> {
+    Container::read(bytes)?.print()
 }
 
 /// Where the body sits in a file `inspect` read.
@@ -309,12 +331,12 @@ pub enum Content {
     /// A file nothing has read this session, `len` bytes long, as its listing gave it.
     /// `failed` is why the last read of it failed.
     ///
-    /// ⚠️ `slot_crc` is a slot checksum a former read or summary left behind, which
-    /// nothing vouches for any longer. It still matches the asset to a slot.
+    /// ⚠️ `slot` is what a slot holding it reports, as a former read or summary left it
+    /// behind, which nothing vouches for any longer. It still matches the asset to a slot.
     Unread {
         len: u64,
         failed: Option<String>,
-        slot_crc: Option<u32>,
+        slot: Option<Print>,
     },
     /// A file nothing has read this session, `len` bytes long, and what a read of it
     /// found before, which it draws as until something needs its bytes.
@@ -331,12 +353,12 @@ pub enum Content {
 pub struct Facts {
     /// CRC-32 over all the bytes, where it was taken as they arrived.
     whole_crc: Option<u32>,
-    /// The checksum a slot holding them reports, where it has been taken.
+    /// What a slot holding them reports, where it has been taken.
     ///
     /// ⚠️ `Baseline::read` takes it from the header at once. A baseline that is the
     /// asset's own bytes, still to be decoded, has none until `decoded()` takes it from
     /// the decode.
-    slot_crc: Option<u32>,
+    slot: Option<Print>,
 }
 
 /// How far the check of a resting file's stored checksum has got.
@@ -368,7 +390,7 @@ impl Content {
         Content::Unread {
             len,
             failed: None,
-            slot_crc: None,
+            slot: None,
         }
     }
 
@@ -427,21 +449,48 @@ impl Baseline {
         }
     }
 
-    /// The checksum a slot holding these bytes would report. [`crate::device::link`] and
-    /// [`crate::library::agrees`] both decide on it.
+    /// The checksum a slot holding these bytes would report.
     ///
     /// `None` for bytes that are not a CBIN container, and for a file whose checksum has
     /// not been checked. See [`Container::body_crc32`].
     pub fn crc32(&self) -> Option<u32> {
         match &self.content {
-            Content::Unread { slot_crc, .. } => *slot_crc,
-            Content::Remembered { summary, .. } => summary.crc32,
-            Content::Resident { facts, .. } => facts.slot_crc,
             Content::Resting { check, .. } => match check {
                 Check::Checking { reported } => *reported,
                 Check::Checked(container) => Some(container.body_crc32),
                 Check::Unchecked | Check::Failed(_) => None,
             },
+            Content::Unread { .. } | Content::Remembered { .. } | Content::Resident { .. } => {
+                self.print().map(|print| print.crc)
+            }
+        }
+    }
+
+    /// What a slot holding these bytes would report: [`Baseline::crc32`] and the body's
+    /// length. `None` where either is unknown, as for a file whose check has not
+    /// answered and that no send has reported a checksum for.
+    pub fn print(&self) -> Option<Print> {
+        match &self.content {
+            Content::Unread { slot, .. } => *slot,
+            Content::Remembered { summary, .. } => summary.slot,
+            Content::Resident { facts, .. } => facts.slot,
+            Content::Resting {
+                check: Check::Checked(container),
+                ..
+            } => container.print(),
+            Content::Resting {
+                file,
+                check: Check::Checking {
+                    reported: Some(crc),
+                },
+            } => {
+                let len = file.index.header().generation.body_len(file.len)?;
+                Some(Print {
+                    crc: *crc,
+                    len: u32::try_from(len).ok()?,
+                })
+            }
+            Content::Resting { .. } => None,
         }
     }
 
@@ -464,7 +513,7 @@ impl Baseline {
     pub(crate) fn read(bytes: Bytes, stamp: u64) -> Baseline {
         let facts = Facts {
             whole_crc: Some(nord_format::crc::crc32(&bytes)),
-            slot_crc: Container::read(&bytes).map(|held| held.body_crc32),
+            slot: Container::read(&bytes).and_then(|held| held.print()),
         };
         Baseline::new(Content::Resident { bytes, facts }, stamp)
     }
@@ -536,15 +585,15 @@ impl Baseline {
     /// The baseline an edit is measured against: of a file nothing has read, only its
     /// length and the slot checksum it had.
     fn under_edit(&mut self) {
-        let (len, slot_crc) = match &self.content {
-            Content::Unread { len, slot_crc, .. } => (*len, *slot_crc),
-            Content::Remembered { len, summary } => (*len, summary.crc32),
+        let (len, slot) = match &self.content {
+            Content::Unread { len, slot, .. } => (*len, *slot),
+            Content::Remembered { len, summary } => (*len, summary.slot),
             Content::Resident { .. } | Content::Resting { .. } => return,
         };
         self.content = Content::Unread {
             len,
             failed: None,
-            slot_crc,
+            slot,
         };
     }
 
@@ -567,22 +616,11 @@ impl Baseline {
     }
 }
 
-/// A write this app made: the slot it wrote to, and the checksum of the bytes it wrote.
-///
-/// It is evidence for a class whose slots report no checksum, and only while the asset is
-/// still saved as those bytes: `crc32` is compared with [`Baseline::crc32`].
-#[derive(Clone, Copy)]
-pub struct Wrote {
-    pub class: ObjectClass,
-    pub at: Location,
-    pub crc32: u32,
-}
-
 /// What a set of bytes decodes to, worked out once, when they land.
 struct Decoded {
     container: Option<Container>,
     entity: Option<Box<Entity>>,
-    plays: Option<Plays>,
+    plays: Vec<Plays>,
     parse_error: Option<String>,
     verify: VerifyState,
     words: bool,
@@ -596,7 +634,7 @@ impl Decoded {
         Decoded {
             container: None,
             entity: None,
-            plays: None,
+            plays: Vec::new(),
             parse_error: Some(why.to_string()),
             verify: VerifyState::Failed(why.to_string()),
             words: false,
@@ -617,7 +655,7 @@ impl Decoded {
         };
         Decoded {
             container: Container::read(bytes),
-            plays: entity.as_deref().and_then(Plays::of),
+            plays: entity.as_deref().map(Plays::of).unwrap_or_default(),
             entity,
             parse_error,
             verify,
@@ -667,11 +705,11 @@ pub struct LocalEntity {
     pub bytes: Bytes,
     /// Boxed, since a decode is kilobytes and most assets of a large library have none.
     pub entity: Option<Box<Entity>>,
-    /// The library its decode plays, taken with the decode.
+    /// The pianos and samples its decode plays, taken with the decode.
     ///
-    /// ⚠️ Taken off the frame: finding it lists every field of the body, and every listed
-    /// row asks for it.
-    pub plays: Option<Plays>,
+    /// ⚠️ Taken off the frame: finding them lists every field of the body, and every
+    /// listed row asks for them.
+    pub plays: Vec<Plays>,
     pub parse_error: Option<String>,
     pub container: Option<Container>,
     /// Whether the bytes are words a note may hold, from `document::text::is_text`.
@@ -702,17 +740,12 @@ pub struct LocalEntity {
     /// tell when it is stale. It is the list revision when the bytes landed, so a rename
     /// or a send does not change it.
     pub stamp: u64,
-    /// The slot on the attached instrument that holds these bytes, from
-    /// [`crate::device::link`].
+    /// Its slot on each keyboard, as the library keeps them: at most one per keyboard, in
+    /// order.
     ///
-    /// Derived from the scan cache and never persisted. An edit leaves it alone, so an
-    /// edited asset still points at the slot it was matched to.
-    pub link: Option<(ObjectClass, Location)>,
-    /// The last write this app made from this asset. See [`Wrote`] and
-    /// [`crate::library::agrees`].
-    ///
-    /// [`Workspace::forget_writes`] clears it when the instrument goes.
-    pub wrote: Option<Wrote>,
+    /// ⚠️ Change them through [`Workspace::link`] and [`Workspace::unlink`], which keep
+    /// one asset per slot and ask the library to keep the change.
+    pub links: Vec<Link>,
     /// The frame something last needed it in, or 0 for never. See [`Workspace::hurry`].
     seen: std::cell::Cell<u64>,
     /// The tag and kind its name says, from [`crate::browser::tagged`], taken whenever
@@ -747,7 +780,7 @@ impl LocalEntity {
             Content::Unread {
                 len,
                 failed: None,
-                slot_crc: None,
+                slot: None,
             } => Content::listed(held.by_name, len),
             content => content,
         };
@@ -777,7 +810,7 @@ impl LocalEntity {
             ),
             bytes,
             entity: None,
-            plays: None,
+            plays: Vec::new(),
             parse_error: None,
             container: None,
             words: false,
@@ -785,8 +818,7 @@ impl LocalEntity {
             pending: false,
             kept: true,
             stamp,
-            link: None,
-            wrote: None,
+            links: Vec::new(),
             seen: Default::default(),
             by_name,
         }
@@ -848,20 +880,18 @@ impl LocalEntity {
     /// Take what its bytes decode to. They are what it was saved as, since nothing can
     /// edit an asset still being read.
     fn decoded(&mut self, decoded: Decoded) {
-        let slot_crc = decoded.container.as_ref().map(|held| held.body_crc32);
+        let container = decoded.container.as_ref();
         match &mut self.saved.content {
             Content::Resident { facts, .. } => {
-                facts.slot_crc = slot_crc;
+                facts.slot = container.and_then(Container::print);
                 facts.whole_crc = decoded.crc;
             }
             // ⚠️ Writes the slot checksum of the decoded bytes over the one a send
-            // reported for the file, which holds other bytes. A send that lands while the
-            // asset's own bytes wait to be decoded then leaves `library::wrote` not
-            // matching the slot.
+            // reported for the file, which holds other bytes.
             Content::Resting {
                 check: Check::Checking { reported },
                 ..
-            } => *reported = slot_crc,
+            } => *reported = container.map(|held| held.body_crc32),
             Content::Resting { .. } | Content::Unread { .. } | Content::Remembered { .. } => {}
         }
         self.container = decoded.container;
@@ -1005,6 +1035,14 @@ impl LocalEntity {
         }
     }
 
+    /// Whether a write of `sent` that landed leaves it nothing to save: what it is saved
+    /// as has moved since the write was queued over the baseline stamped `over`, as a
+    /// save moves it, or it holds `sent` already under bytes that have moved on.
+    fn settled(&self, sent: &[u8], over: Option<u64>) -> bool {
+        let moved = over.is_some_and(|over| self.saved.stamp != over);
+        moved || (self.saved.holds(sent) && !self.holds(sent))
+    }
+
     /// The extension its bytes call for. See `format_tag`. One not read yet takes the
     /// one its name carries.
     pub fn format_tag(&self) -> String {
@@ -1066,7 +1104,7 @@ impl LocalEntity {
     fn baseline(&self) -> Baseline {
         let facts = Facts {
             whole_crc: None,
-            slot_crc: self.container.as_ref().map(|held| held.body_crc32),
+            slot: self.container.as_ref().and_then(Container::print),
         };
         let bytes = self.bytes.clone();
         Baseline::new(Content::Resident { bytes, facts }, self.stamp)
@@ -1078,9 +1116,26 @@ impl LocalEntity {
         self.modified
     }
 
-    /// The slot this asset stands for: its link, or else the slot it came off.
-    pub fn spot(&self) -> Option<(ObjectClass, Location)> {
-        self.link.or_else(|| self.origin.slot())
+    /// The slot it is linked to on `keyboard`, and what the two last agreed on. `None`
+    /// where it has no link there, or is kept off it.
+    pub fn held_on(&self, keyboard: &Keyboard) -> Option<&link::Held> {
+        self.link_on(keyboard)?.held.as_ref()
+    }
+
+    /// Whether the user keeps it off `keyboard`: nothing links it there on its own.
+    pub fn kept_off(&self, keyboard: &Keyboard) -> bool {
+        self.link_on(keyboard)
+            .is_some_and(|link| link.held.is_none())
+    }
+
+    /// What is stored for it on `keyboard`: a link to a slot, or that it is kept off.
+    pub fn link_on(&self, keyboard: &Keyboard) -> Option<&Link> {
+        self.links.iter().find(|link| link.keyboard == *keyboard)
+    }
+
+    /// What a slot holding its saved bytes would report. See [`Baseline::print`].
+    pub fn saved_print(&self) -> Option<Print> {
+        self.saved.print()
     }
 
     /// A sample instrument's generation, `v2`, `v3` or `v4`, as
@@ -1616,10 +1671,16 @@ pub enum FileAsk {
     Delete { id: u64, path: LibPath },
 }
 
+/// Assets whose links changed, with the keyboards each changed on.
+pub type LinkAsks = std::collections::BTreeMap<u64, std::collections::BTreeSet<Keyboard>>;
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// The changes to files asked for and not yet taken.
     file_asks: Vec<FileAsk>,
+    /// The assets whose links changed here, with the keyboards they changed on, for the
+    /// library to keep, not yet taken.
+    link_asks: LinkAsks,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
     at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
@@ -1674,6 +1735,9 @@ pub struct Workspace {
     /// overwrites, with the stamp of the save that writes them. It goes only once that
     /// save has landed.
     saving_over: std::collections::BTreeMap<u64, (Leaving, u64)>,
+    /// The stamp each asset was saved under when a write of its bytes was queued, until
+    /// that write lands.
+    writing: std::collections::BTreeMap<u64, u64>,
     /// The files File ▸ Import… picked, not yet taken.
     picked: Vec<Outside>,
     unbundled: Vec<Unbundled>,
@@ -1768,6 +1832,7 @@ impl Workspace {
         Workspace {
             entities: Vec::new(),
             file_asks: Vec::new(),
+            link_asks: Default::default(),
             at: Default::default(),
             families: Default::default(),
             generations: Default::default(),
@@ -1796,6 +1861,7 @@ impl Workspace {
             bundling: None,
             moving_over: Default::default(),
             saving_over: Default::default(),
+            writing: Default::default(),
             picked: Vec::new(),
             unbundled: Vec::new(),
             undecoded: VecDeque::new(),
@@ -2007,8 +2073,14 @@ impl Workspace {
     /// ⚠️ A view is the only copy of what it holds: nothing lists it and the store skips
     /// it. An edited or owed view is promoted into the list instead, and only an
     /// untouched one is dropped.
-    pub fn close_views(&mut self, open: impl Fn(u64) -> bool, queue: &Queue, log: &mut Log) {
+    pub fn close_views(
+        &mut self,
+        open: impl Fn(u64) -> bool,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> Vec<u64> {
         let mut rescued = Vec::new();
+        let mut kept = Vec::new();
         let before = self.entities.len();
         self.entities.retain_mut(|entity| {
             if entity.kept || open(entity.id) {
@@ -2019,6 +2091,7 @@ impl Workspace {
             }
             entity.kept = true;
             rescued.push(entity.name.clone());
+            kept.push(entity.id);
             true
         });
         for name in &rescued {
@@ -2028,24 +2101,139 @@ impl Workspace {
             ));
         }
         if self.entities.len() == before && rescued.is_empty() {
-            return;
+            return kept;
         }
         self.moved();
+        kept
     }
 
-    /// Recompute every asset's link. Call whenever the instrument's scan cache changes,
-    /// with [`crate::device::link`] as `held_by`. Returns whether any link moved.
-    pub fn relink(
-        &mut self,
-        held_by: impl Fn(&LocalEntity) -> Option<(ObjectClass, Location)>,
-    ) -> bool {
-        let mut moved = false;
-        for entity in &mut self.entities {
-            let link = held_by(entity);
-            moved |= entity.link != link;
-            entity.link = link;
+    /// Link an asset to a slot on `keyboard`, in place of any link it had there, and
+    /// unlink every other asset from that slot. A view of a slot keeps no links.
+    pub fn link(&mut self, id: u64, keyboard: &Keyboard, held: link::Held) {
+        if !self.get(id).is_some_and(|entity| entity.kept) {
+            return;
         }
-        moved
+        let there = |link: &Link| {
+            let other = link.held.as_ref().filter(|_| link.keyboard == *keyboard);
+            other.is_some_and(|other| other.class() == held.class() && other.spot == held.spot)
+        };
+        let others = self.entities.iter().filter(|entity| entity.id != id);
+        let others = others.filter(|entity| entity.links.iter().any(there));
+        let others: Vec<u64> = others.map(|entity| entity.id).collect();
+        for other in others {
+            self.change_links(other, keyboard, |links| links.retain(|link| !there(link)));
+        }
+        let keyboard = keyboard.clone();
+        self.set_link(
+            id,
+            Link {
+                keyboard,
+                held: Some(held),
+            },
+        );
+    }
+
+    /// Unlink an asset from `keyboard`.
+    pub fn unlink(&mut self, id: u64, keyboard: &Keyboard) {
+        self.change_links(id, keyboard, |links| {
+            links.retain(|link| link.keyboard != *keyboard)
+        });
+    }
+
+    /// Keep an asset off `keyboard`: nothing links it there again on its own.
+    pub fn keep_off(&mut self, id: u64, keyboard: &Keyboard) {
+        let keyboard = keyboard.clone();
+        self.set_link(
+            id,
+            Link {
+                keyboard,
+                held: None,
+            },
+        );
+    }
+
+    /// The asset linked to the slot of `class` at `spot` on `keyboard`.
+    pub fn linked_at(
+        &self,
+        keyboard: &Keyboard,
+        class: ObjectClass,
+        spot: &link::Spot,
+    ) -> Option<u64> {
+        self.entities
+            .iter()
+            .find(|entity| {
+                entity
+                    .held_on(keyboard)
+                    .is_some_and(|held| held.class() == class && held.spot == *spot)
+            })
+            .map(|entity| entity.id)
+    }
+
+    /// Follow slots of `class` that drawbar moved or renamed on `keyboard`. Every move
+    /// happens at once, so a swap moves both links.
+    pub fn respot(&mut self, keyboard: &Keyboard, class: ObjectClass, moves: &[Moved]) {
+        let moved: Vec<(u64, Option<link::Held>)> = self
+            .entities
+            .iter()
+            .filter_map(|entity| {
+                let held = entity
+                    .held_on(keyboard)
+                    .filter(|held| held.class() == class)?;
+                let (_, to, name) = moves.iter().find(|(from, ..)| *from == held.spot)?;
+                let held = to.clone().map(|to| held.moved(to, name.as_deref()));
+                Some((entity.id, held))
+            })
+            .collect();
+        for (id, held) in moved {
+            self.change_links(id, keyboard, |links| {
+                links.retain(|link| link.keyboard != *keyboard);
+                links.extend(held.map(|held| Link {
+                    keyboard: keyboard.clone(),
+                    held: Some(held),
+                }));
+            });
+        }
+    }
+
+    /// Give an asset `link` in place of any link it had on that keyboard.
+    fn set_link(&mut self, id: u64, link: Link) {
+        let keyboard = link.keyboard.clone();
+        self.change_links(id, &keyboard, |links| {
+            links.retain(|held| held.keyboard != link.keyboard);
+            links.push(link);
+        });
+    }
+
+    /// Change an asset's links on `keyboard`, and on no other.
+    fn change_links(&mut self, id: u64, keyboard: &Keyboard, change: impl FnOnce(&mut Vec<Link>)) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.kept) else {
+            return;
+        };
+        let mut links = entity.links.clone();
+        change(&mut links);
+        links.sort();
+        if links == entity.links {
+            return;
+        }
+        entity.links = links;
+        let asked = self.link_asks.entry(id).or_default();
+        asked.insert(keyboard.clone());
+        self.revision += 1;
+    }
+
+    /// Show the links the library keeps for an asset, asking for nothing.
+    pub(crate) fn follow_links(&mut self, id: u64, links: Vec<Link>) {
+        let Some(entity) = self.get_mut(id).filter(|entity| entity.links != links) else {
+            return;
+        };
+        entity.links = links;
+        self.revision += 1;
+    }
+
+    /// The assets whose links changed since the last call, with the keyboards each
+    /// changed on.
+    pub fn take_link_asks(&mut self) -> LinkAsks {
+        std::mem::take(&mut self.link_asks)
     }
 
     /// Rename an asset held here. Nothing leaves this computer.
@@ -2146,6 +2334,8 @@ impl Workspace {
         if let Some(entity) = self.get_mut(id) {
             entity.resave(Baseline::read(theirs.into(), stamp));
         }
+        // Over the bytes it already holds, the asset is saved and no stamp moved.
+        self.revision += 1;
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
@@ -2214,7 +2404,7 @@ impl Workspace {
 
     /// Put `made` in place of an asset, keeping what an asset keeps whatever bytes it
     /// holds: where its file is and when the listing dates it, whether it is kept, its
-    /// link, its last write and its pending edit.
+    /// links and its pending edit.
     fn swap(&mut self, id: u64, made: impl FnOnce(&LocalEntity) -> LocalEntity) {
         let Some(entity) = self.get_mut(id) else {
             return;
@@ -2224,8 +2414,7 @@ impl Workspace {
             path: entity.path.take(),
             modified: entity.modified,
             kept: entity.kept,
-            link: entity.link,
-            wrote: entity.wrote,
+            links: std::mem::take(&mut entity.links),
             pending: entity.pending,
             seen: entity.seen.clone(),
             ..made
@@ -2517,7 +2706,7 @@ impl Workspace {
         entity.saved.content = Content::Unread {
             len: entity.saved.size(),
             failed: Some(why),
-            slot_crc: entity.saved.crc32(),
+            slot: entity.saved.print(),
         };
         self.revision += 1;
     }
@@ -2621,14 +2810,14 @@ impl Workspace {
     pub fn evict(&mut self, id: u64) -> Option<u64> {
         self.evictable(id)?;
         let entity = self.get(id)?;
-        let (len, crc32, known) = (entity.size(), entity.saved.crc32(), Summary::of(entity));
+        let (len, slot, known) = (entity.size(), entity.saved.print(), Summary::of(entity));
         let stamp = self.stamp();
         self.swap(id, |held| {
             let (name, origin) = (held.name.clone(), held.origin.clone());
             let unread = Content::Unread {
                 len,
                 failed: None,
-                slot_crc: crc32,
+                slot,
             };
             let mut listed = LocalEntity::listed_as(id, name, origin, unread, stamp);
             if let Some(known) = known {
@@ -2658,7 +2847,7 @@ impl Workspace {
                 entity.saved.content = Content::listed(entity.by_name, *len);
                 true
             }
-            Content::Unread { slot_crc, .. } => slot_crc.take().is_some(),
+            Content::Unread { slot, .. } => slot.take().is_some(),
             Content::Resident { .. } | Content::Resting { .. } => false,
         };
         if forgot {
@@ -2887,9 +3076,16 @@ impl Workspace {
 
     /// [`Workspace::arrive`] from a file the instrument was read into, which is deleted
     /// once the copy has landed.
-    pub fn arrive_fetched(&mut self, path: LibPath, origin: Origin, from: Outside, len: u64) {
+    pub fn arrive_fetched(
+        &mut self,
+        path: LibPath,
+        origin: Origin,
+        from: Outside,
+        len: u64,
+    ) -> u64 {
         let id = self.arrive(path, origin, CopyOf::Outside(from.clone()), len);
         self.fetched.insert(id, from);
+        id
     }
 
     /// The copy of `id` did not land: say whether it was of a file the instrument was read
@@ -3688,26 +3884,30 @@ impl Workspace {
         true
     }
 
+    /// Note what the asset `id` is saved as, as a write of the bytes it holds is queued.
+    /// One resting in its file sends the file.
+    pub fn queue_write(&mut self, id: u64) {
+        let held = self.get(id).filter(|it| it.rests().is_none());
+        if let Some(stamp) = held.map(|it| it.saved.stamp) {
+            self.writing.insert(id, stamp);
+        }
+    }
+
     /// Record a write that reached a slot: the bytes it carried become the saved
-    /// baseline, and the slot becomes the link.
+    /// baseline.
     ///
     /// ⚠️ The baseline is the bytes the send carried, never the bytes held now. An edit
     /// made while the write was in flight exists only on this computer, and calling it
-    /// saved would let it be discarded with its tab.
-    ///
-    /// ⚠️ The only place a link is set instead of derived. [`crate::device::link`] keeps
-    /// it until a walk of that slot says otherwise.
-    pub fn landed(&mut self, id: u64, class: ObjectClass, at: Location, sent: Vec<u8>) {
+    /// saved would let it be discarded with its tab. One saved since the write was
+    /// queued ([`Workspace::queue_write`]) keeps that save.
+    pub fn landed(&mut self, id: u64, sent: Vec<u8>) {
+        let over = self.writing.remove(&id);
         let resting = self
             .get(id)
             .filter(|entity| entity.rests().is_some())
             .map(|entity| entity.saved.reports(&sent));
         match resting {
             Some(true) => {
-                if let Some(entity) = self.get_mut(id) {
-                    entity.link = Some((class, at));
-                    entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
-                }
                 self.revision += 1;
                 return;
             }
@@ -3715,6 +3915,10 @@ impl Workspace {
             // was sent.
             Some(false) => {
                 self.respell(id, sent.clone().into());
+            }
+            None if self.get(id).is_some_and(|it| it.settled(&sent, over)) => {
+                self.revision += 1;
+                return;
             }
             None => {}
         }
@@ -3730,30 +3934,20 @@ impl Workspace {
         // not answered, its bytes are empty, so this saves it as empty bytes: its size
         // reads 0, and the file it rests in is dropped.
         entity.resave(Baseline::read(sent, stamp));
-        entity.link = Some((class, at));
-        entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
         if entity.kept && entity.path.is_some() {
             self.file_asks.push(FileAsk::Save(id));
         }
         self.revision += 1;
     }
 
-    /// Record a write that sent the file `file` to a slot, read from it a chunk at a time:
-    /// the slot becomes the link, and the write is recorded with `crc32`, the checksum a
-    /// slot holding the file reports.
+    /// Record a write that sent the file `file` to a slot, read from it a chunk at a time,
+    /// whose body has the checksum `crc32`.
     ///
     /// ⚠️ An asset resting in another file now, as one whose edit was saved while the
     /// file was sent does, keeps resting there: the edit is on disk, and the slot holds
     /// what it was saved as before. One holding bytes in memory instead is saved as the
     /// file again, under a stamp of its own, for the reason [`Workspace::landed`] gives.
-    pub fn landed_file(
-        &mut self,
-        id: u64,
-        class: ObjectClass,
-        at: Location,
-        file: Arc<OnDisk>,
-        crc32: u32,
-    ) {
+    pub fn landed_file(&mut self, id: u64, file: Arc<OnDisk>, crc32: u32) {
         let moved = self.get(id).is_some_and(|entity| {
             let saved = &entity.saved;
             let other = saved.size() != file.len || saved.crc32() != Some(crc32);
@@ -3772,19 +3966,7 @@ impl Workspace {
             };
             entity.resave(Baseline::new(Content::Resting { file, check }, stamp));
         }
-        entity.link = Some((class, at));
-        entity.wrote = Some(Wrote { class, at, crc32 });
         self.revision += 1;
-    }
-
-    /// Forget every write this app made.
-    ///
-    /// ⚠️ A write is evidence about the instrument that took it. With none attached, or
-    /// another one in its place, it says nothing about what is in any slot.
-    pub fn forget_writes(&mut self) {
-        for entity in &mut self.entities {
-            entity.wrote = None;
-        }
     }
 
     /// Swap in edited bytes, keeping the entity's identity.
@@ -3809,9 +3991,8 @@ impl Workspace {
     /// the verify result.
     ///
     /// ⚠️ The saved baseline is kept: it moves only when the asset is saved, so an edit
-    /// and its revert are measured against the same bytes. The link and the last write
-    /// are kept too, because both are evidence about a slot, which an edit here says
-    /// nothing about.
+    /// and its revert are measured against the same bytes. The links are kept too: an
+    /// edit here says nothing about a slot.
     fn respell(&mut self, id: u64, bytes: Bytes) -> Option<VerifyState> {
         if self.get(id).is_none_or(|entity| entity.holds(&bytes)) {
             return None;
@@ -3833,8 +4014,9 @@ impl Workspace {
             .get(id)
             .is_some_and(|entity| entity.saved.holds(&bytes));
         let entity = self.get_mut(id)?;
-        let (kept, link, wrote, pending) = (entity.kept, entity.link, entity.wrote, entity.pending);
+        let (kept, pending) = (entity.kept, entity.pending);
         let path = entity.path.take();
+        let links = std::mem::take(&mut entity.links);
         let mut saved = entity.saved.clone();
         saved.under_edit();
         let (bytes, stamp) = match held {
@@ -3846,9 +4028,8 @@ impl Workspace {
         let verify = replaced.verify();
         *entity = LocalEntity {
             kept,
-            link,
             saved,
-            wrote,
+            links,
             pending,
             path,
             modified: entity.modified,
@@ -3891,6 +4072,7 @@ impl Workspace {
         self.arriving.remove(&id);
         self.moving_over.remove(&id);
         self.saving_over.remove(&id);
+        self.writing.remove(&id);
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
@@ -3923,6 +4105,7 @@ impl Workspace {
         self.edits.retain(|id, _| held(*id));
         self.moving_over.retain(|id, _| held(*id));
         self.saving_over.retain(|id, _| held(*id));
+        self.writing.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
         self.hurried.get_mut().retain(|id| held(*id));
         self.wanted.get_mut().retain(|id, _| held(*id));
@@ -4312,17 +4495,31 @@ mod tests {
 
         workspace.edit_saved(id, edited.clone());
         workspace.settle_files(&mut log);
-        let (class, at) = (ObjectClass::Piano, Location::from_user(1, 1));
-        workspace.landed_file(id, class, at, sent, crc32);
+        workspace.landed_file(id, sent, crc32);
 
         let entity = workspace.get(id).unwrap();
         assert!(entity
             .rests()
             .is_some_and(|file| Arc::ptr_eq(file, &edited)));
         assert!(!entity.is_unsaved(), "the edit is saved");
-        assert_eq!(entity.link, Some((class, at)));
-        assert!(entity.wrote.is_some_and(|wrote| wrote.crc32 == crc32));
         assert_ne!(entity.saved.crc32(), Some(crc32), "so the slot is behind");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_asset_sent_from_a_file_reads_as_what_its_slot_reports_before_the_file_is_checked() {
+        let dir = crate::testing::Temp::new();
+        let now = crate::testing::piano(5);
+        let sent = crate::testing::on_disk(&dir, "Sent.npno", &now);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let piano = crate::testing::piano(4);
+        let id = workspace.ingest("Upright.npno".into(), Origin::Fresh, piano, &mut log);
+        let reported = print_of(&now).expect("a piano is a container");
+
+        workspace.landed_file(id, sent, reported.crc);
+
+        assert_eq!(workspace.get(id).unwrap().saved_print(), Some(reported));
     }
 
     #[test]
@@ -4626,35 +4823,6 @@ mod tests {
         );
         // The detail of what arrived is still recorded, view or not.
         assert!(log.iter().any(|entry| entry.text.contains("verified")));
-    }
-
-    /// ⚠️ A write is what this app knows about a slot without reading it back, and the
-    /// only basis for the Agrees mark on a class whose slots report no checksum. An edit
-    /// and its revert do not touch the slot, so they must keep that evidence.
-    #[test]
-    fn an_edit_and_a_revert_leave_the_write_this_app_made() {
-        let mut workspace = Workspace::new(egui::Context::default());
-        let mut log = Log::default();
-        let at = Location { bank: 6, slot: 3 };
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let sent = workspace.get(id).unwrap().bytes.to_vec();
-        workspace.landed(id, ObjectClass::Program, at, sent.clone());
-        let wrote = |workspace: &Workspace| {
-            workspace
-                .get(id)
-                .unwrap()
-                .wrote
-                .map(|held| (held.class, held.at, held.crc32))
-        };
-        let landed = wrote(&workspace).expect("a write this app made");
-
-        let (_, edited) =
-            crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
-        assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
-
-        workspace.revert(id, &mut log);
-        assert_eq!(wrote(&workspace), Some(landed), "and neither is a revert");
     }
 
     #[test]
@@ -4977,21 +5145,36 @@ mod tests {
     fn a_write_that_landed_saves_what_it_carried_rather_than_a_later_edit() {
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = Log::default();
-        let at = Location { bank: 6, slot: 3 };
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let sent = workspace.get(id).unwrap().bytes.to_vec();
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited.clone(), &mut log);
-        workspace.landed(id, ObjectClass::Program, at, sent.clone());
+        workspace.landed(id, sent.clone());
         assert!(
             workspace.get(id).unwrap().is_unsaved(),
             "the edit made in flight is still owed"
         );
         assert_eq!(*workspace.get(id).unwrap().saved.bytes(), sent);
 
-        workspace.landed(id, ObjectClass::Program, at, edited);
+        workspace.landed(id, edited);
+        assert!(
+            !workspace.get(id).unwrap().is_unsaved(),
+            "a write of what it holds leaves nothing owed"
+        );
+    }
+
+    #[test]
+    fn a_write_that_landed_saves_an_asset_whose_save_did_not_land() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = workspace.create(Fresh::Program, &mut log).unwrap();
+        let sent = workspace.get(id).unwrap().bytes.to_vec();
+        workspace.unsave(id);
+        assert!(workspace.get(id).unwrap().is_unsaved());
+
+        workspace.landed(id, sent);
         assert!(
             !workspace.get(id).unwrap().is_unsaved(),
             "a write of what it holds leaves nothing owed"
@@ -5751,7 +5934,6 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_write_that_landed_saves_the_asset_as_what_it_sent() {
-        let at = Location { bank: 6, slot: 3 };
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = Log::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
@@ -5759,13 +5941,11 @@ mod tests {
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
         workspace.replace_bytes(id, edited.clone(), &mut log);
-        workspace.landed(id, ObjectClass::Program, at, edited.clone());
+        workspace.landed(id, edited.clone());
         let entity = workspace.get(id).unwrap();
         assert!(!entity.is_unsaved());
         assert_eq!(*entity.saved.bytes(), edited);
         assert_eq!(entity.saved.crc32(), slot_of(&edited));
-        assert_eq!(entity.link, Some((ObjectClass::Program, at)));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&edited));
 
         let dir = crate::testing::Temp::new();
         let sample = crate::testing::sample_bytes();
@@ -5773,12 +5953,10 @@ mod tests {
         let (mut workspace, mut log) = restored(Content::resting(file.clone()), None);
         workspace.check_soon(1);
         workspace.settle_files(&mut log);
-        workspace.landed(1, ObjectClass::Sample, at, sample.clone());
+        workspace.landed(1, sample.clone());
         let entity = workspace.get(1).unwrap();
         assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));
         assert!(!entity.is_unsaved());
-        assert_eq!(entity.link, Some((ObjectClass::Sample, at)));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&sample));
     }
 
     /// The bytes the asset holds stay, now unsaved against that file.
@@ -5792,9 +5970,8 @@ mod tests {
         let mut log = Log::default();
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let held = workspace.get(id).unwrap().bytes.to_vec();
-        let at = Location::from_user(1, 1);
         let crc32 = slot_of(&piano).expect("a piano library is a container");
-        workspace.landed_file(id, ObjectClass::Piano, at, file.clone(), crc32);
+        workspace.landed_file(id, file.clone(), crc32);
 
         let entity = workspace.get(id).unwrap();
         assert!(entity
@@ -5802,8 +5979,6 @@ mod tests {
             .file()
             .is_some_and(|saved| Arc::ptr_eq(saved, &file)));
         assert_eq!(entity.saved.crc32(), Some(crc32));
-        assert_eq!(entity.wrote.map(|wrote| wrote.crc32), Some(crc32));
-        assert_eq!(entity.link, Some((ObjectClass::Piano, at)));
         assert_eq!(entity.bytes, held);
         assert!(entity.is_unsaved());
     }
@@ -5839,5 +6014,140 @@ mod tests {
         let entity = workspace.get(1).unwrap();
         assert_eq!(entity.verify().badge(), "ok");
         assert_eq!(entity.saved.crc32(), slot_of(&sample));
+    }
+
+    fn electro(serial: &str) -> Keyboard {
+        Keyboard {
+            model: "Nord Electro 5".into(),
+            serial: Some(serial.into()),
+        }
+    }
+
+    fn program_at(slot: u32) -> link::Held {
+        let base = Print { crc: 7, len: 121 };
+        link::Held::new(ObjectClass::Program, Location { bank: 0, slot }, "", base).unwrap()
+    }
+
+    fn two_programs() -> (Workspace, Log, [u64; 2]) {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let program = Fresh::Program.bytes().unwrap();
+        let ids = ["A.ne5p", "B.ne5p"]
+            .map(|name| workspace.ingest(name.into(), Origin::Fresh, program.clone(), &mut log));
+        (workspace, log, ids)
+    }
+
+    #[test]
+    fn linking_a_second_asset_to_a_slot_unlinks_the_first_on_that_keyboard_only() {
+        let (mut workspace, _, [first, second]) = two_programs();
+        let (here, there) = (electro("A1"), electro("B2"));
+        workspace.link(first, &here, program_at(6));
+        workspace.link(first, &there, program_at(6));
+        workspace.take_link_asks();
+        workspace.link(second, &here, program_at(6));
+
+        let linked = |id: u64, keyboard| workspace.get(id).unwrap().held_on(keyboard).cloned();
+        assert_eq!(linked(first, &here), None);
+        assert_eq!(linked(first, &there), Some(program_at(6)));
+        assert_eq!(linked(second, &here), Some(program_at(6)));
+        let asked = workspace.take_link_asks();
+        let on_here = [(first, [here.clone()].into()), (second, [here].into())];
+        assert_eq!(
+            asked,
+            on_here.into(),
+            "both are kept, on that keyboard alone"
+        );
+    }
+
+    #[test]
+    fn an_asset_has_one_link_per_keyboard_and_unlinking_apart_keeps_it_off() {
+        let (mut workspace, _, [id, _]) = two_programs();
+        let here = electro("A1");
+        workspace.link(id, &here, program_at(6));
+        workspace.link(id, &here, program_at(7));
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(entity.links.len(), 1);
+        assert_eq!(entity.held_on(&here), Some(&program_at(7)));
+
+        workspace.unlink(id, &here);
+        let entity = workspace.get(id).unwrap();
+        assert_eq!((entity.links.len(), entity.kept_off(&here)), (0, false));
+        workspace.keep_off(id, &here);
+        let entity = workspace.get(id).unwrap();
+        assert_eq!(
+            (entity.held_on(&here), entity.kept_off(&here)),
+            (None, true)
+        );
+        workspace.link(id, &here, program_at(6));
+        assert!(
+            !workspace.get(id).unwrap().kept_off(&here),
+            "a link replaces it"
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_the_links_and_a_duplicate_or_a_view_has_none() {
+        let (mut workspace, mut log, [id, _]) = two_programs();
+        let here = electro("A1");
+        workspace.link(id, &here, program_at(6));
+        let gain = [("center_panel.gain".into(), "40".into())];
+        let edited = crate::fields::apply(&workspace.get(id).unwrap().bytes, &gain);
+        let edited = edited.expect("the gain is a field").1;
+        workspace.replace_bytes(id, edited, &mut log);
+        assert_eq!(
+            workspace.get(id).unwrap().held_on(&here),
+            Some(&program_at(6))
+        );
+
+        let copy = workspace.duplicate(id, &mut log).expect("a copy");
+        assert_eq!(workspace.get(copy).unwrap().links, []);
+
+        let program = Fresh::Program.bytes().unwrap();
+        let at = Location::from_user(1, 7);
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let view = workspace.view("Slot.ne5p".into(), origin, program, &mut log);
+        workspace.take_link_asks();
+        workspace.link(view, &here, program_at(6));
+        assert_eq!(workspace.get(view).unwrap().links, []);
+        assert_eq!(workspace.take_link_asks(), LinkAsks::new());
+    }
+
+    /// The print of the saved bytes is what a walk reports for a slot holding the body
+    /// they wrap, whether the bytes are held whole, let go of, or rest in their file.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_saved_print_is_what_a_slot_holding_the_same_body_reports() {
+        let reported = |file: &[u8]| {
+            let body = nord_usb::envelope::unwrap(file).unwrap().body.0;
+            let len = u32::try_from(body.len()).unwrap();
+            Print {
+                crc: nord_format::crc::crc32(&body),
+                len,
+            }
+        };
+        let program = Fresh::Program.bytes().unwrap();
+        let (mut workspace, mut log) = restored(Content::unread(program.len() as u64), None);
+        assert_eq!(workspace.get(1).unwrap().saved_print(), None, "unread");
+        workspace.took(1, Some(program.clone()), None);
+        workspace.settle_files(&mut log);
+        assert_eq!(
+            workspace.get(1).unwrap().saved_print(),
+            Some(reported(&program))
+        );
+        workspace.evict(1).expect("a clean asset nothing needs");
+        let evicted = workspace.get(1).unwrap();
+        assert_eq!(evicted.saved_print(), Some(reported(&program)), "let go of");
+
+        let dir = crate::testing::Temp::new();
+        let sample = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        workspace.settle_files(&mut log);
+        let resting = workspace.get(id).unwrap();
+        assert!(resting.rests().is_some());
+        assert_eq!(resting.saved_print(), Some(reported(&sample)), "resting");
     }
 }

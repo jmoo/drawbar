@@ -129,8 +129,8 @@ impl Detect {
             ),
             Ok((found, limit)) => format!(
                 "{} of {}{}",
-                crate::queue::plural(found.kept, "hit", "hits"),
-                crate::queue::plural(found.notes, "note", "notes"),
+                crate::strings::counted(found.kept, "hit", "hits"),
+                crate::strings::counted(found.notes, "note", "notes"),
                 match found.too_quiet {
                     0 => String::new(),
                     n => format!(" · {}", skipped(n, *limit)),

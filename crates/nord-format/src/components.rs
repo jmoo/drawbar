@@ -1280,6 +1280,41 @@ impl<const LIBRARY: u8> From<LibraryRefOf<LIBRARY>> for LibraryRef {
     }
 }
 
+/// The id a program names a piano or sample by: MurmurHash2 (32-bit, seed 0) of the name
+/// the instrument keeps for it, so an object written under one name always gets one id,
+/// whatever its bytes or slot.
+///
+/// The hash reads each four-byte block of the name big-endian, where the reference
+/// algorithm reads little-endian; the tail and the final mix are the reference's.
+///
+/// Confirmed on hardware, on an Electro 5. Only ASCII names were observed; how the
+/// instrument encodes other characters is unknown, and this hashes the UTF-8 bytes.
+pub fn library_id(name: &str) -> u32 {
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+    let bytes = name.as_bytes();
+    // The seed is 0, and the reference mixes in the length modulo 2^32.
+    let mut h = bytes.len() as u32;
+    let mut blocks = bytes.chunks_exact(4);
+    for block in &mut blocks {
+        let mut k = u32::from_be_bytes([block[0], block[1], block[2], block[3]]);
+        k = k.wrapping_mul(M);
+        k ^= k >> R;
+        k = k.wrapping_mul(M);
+        h = h.wrapping_mul(M) ^ k;
+    }
+    let tail = blocks.remainder();
+    if !tail.is_empty() {
+        for (at, byte) in tail.iter().enumerate() {
+            h ^= u32::from(*byte) << (8 * at);
+        }
+        h = h.wrapping_mul(M);
+    }
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^ (h >> 15)
+}
+
 /// An id into the piano library (`.npno`).
 pub type PianoRef = LibraryRefOf<{ Library::Piano.code() }>;
 
@@ -1477,6 +1512,30 @@ sparse_enum!(
 mod tests {
     use super::*;
     use crate::fields::{ControlKind, Library, Unit};
+
+    /// The id an Electro 5 reported for a sample written under each name. Confirmed on
+    /// hardware.
+    #[test]
+    fn a_library_id_is_the_id_the_instrument_gives_that_name() {
+        let observed = [
+            ("a", 0x9268_5f5e),
+            ("b", 0x86b7_b9f4),
+            ("aa", 0x175d_9226),
+            ("ab", 0x1aa1_4063),
+            ("ba", 0x5aee_6595),
+            ("aaa", 0x2256_48c5),
+            ("aab", 0xf810_5ba2),
+            ("aaaa", 0x993e_c4ec),
+            ("aaaaaaaa", 0x9454_2f17),
+            ("A", 0x25f3_1569),
+            ("1", 0x4934_2faf),
+            ("tine-other", 0xaeb3_5621),
+            ("drawbar-tine", 0x92e0_cba2),
+        ];
+        for (name, id) in observed {
+            assert_eq!(library_id(name), id, "{name:?}: {:#010x}", library_id(name));
+        }
+    }
 
     /// Stage 4 octave shift is two's complement; Stage 2 and 3 use biased values.
     #[test]

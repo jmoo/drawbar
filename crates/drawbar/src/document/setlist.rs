@@ -1,8 +1,8 @@
 //! The set list document: the four programs an Electro 5 song plays.
 //!
 //! The file stores only four addresses: no names and no program bytes. A name shown here
-//! comes from the attached instrument's scan of that bank or from an asset on this
-//! computer that stands on that slot. Where neither answers, the row says so.
+//! comes from the attached instrument's scan of that bank or from the asset on this
+//! computer linked to that slot. Where neither answers, the row says so.
 
 use std::collections::HashMap;
 
@@ -19,7 +19,6 @@ use crate::app;
 use crate::browser::{Item, Kind};
 use crate::device::DeviceState;
 use crate::icon::{icon, painted, Glyph};
-use crate::library::{wanted, Needs};
 use crate::panel::cut;
 use crate::strings::{display_name, place, shown};
 use crate::workspace::{LocalEntity, Workspace};
@@ -177,7 +176,7 @@ impl Stands {
                 place(ObjectClass::Program, at)
             ),
             Stands::Needs { class, id } => format!(
-                "the program is there, and it plays a {} the instrument has not named ({id:#010x})",
+                "the program is there, and it plays a {} that is not here ({id:#010x})",
                 Kind::from_class(*class).chip()
             ),
         }
@@ -219,6 +218,19 @@ impl Row {
     }
 }
 
+/// The programs a set list plays, in order, each with its name where one resolves.
+pub(crate) fn programs(
+    entity: &Entity,
+    seen: &Catalog<'_>,
+) -> Option<Vec<(Location, Option<String>)>> {
+    let file = song(entity)?;
+    let resolved = file.body.programs().map(|at| {
+        let at = panel(at);
+        (at, resolve(at, seen).0)
+    });
+    Some(resolved.to_vec())
+}
+
 /// The address one-indexed, as the instrument shows it, in the [`Location`] the rest of
 /// the app addresses a slot with.
 fn panel(at: program::Location) -> Location {
@@ -229,8 +241,7 @@ fn panel(at: program::Location) -> Location {
 /// What is known about one address.
 ///
 /// ⚠️ The order matters: the attached instrument's scan comes first, and an asset here
-/// speaks only for the slot it came off. A file opened from disk stands on no slot and
-/// resolves nothing.
+/// speaks only for the slot it is linked to. A file linked to no slot resolves nothing.
 fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, Stands) {
     let slot = Item::Slot {
         class: ObjectClass::Program,
@@ -247,36 +258,34 @@ fn resolve(at: Location, seen: &Catalog<'_>) -> (Option<String>, Option<Item>, S
         Some(None) => return (None, None, Stands::Vacant),
         None => {}
     }
-    let Some(kept) = stands_on(at, seen.workspace) else {
+    let Some(kept) =
+        crate::device::standing_on(seen.device, seen.workspace, ObjectClass::Program, at)
+    else {
         return (None, None, Stands::Unread);
     };
     (
         Some(display_name(&kept.name).to_string()),
         Some(Item::Local(kept.id)),
-        plays(kept, seen.device),
+        plays(kept, seen),
     )
-}
-
-/// The asset on this computer that stands on `at`, where there is one.
-fn stands_on(at: Location, workspace: &Workspace) -> Option<&LocalEntity> {
-    workspace
-        .entities()
-        .iter()
-        .find(|held| held.spot() == Some((ObjectClass::Program, at)))
 }
 
 /// Whether the library a resolved program plays has a name.
 ///
 /// ⚠️ Only while an instrument is attached. With no instrument to ask, an unresolved
-/// piano id is normal ([`Needs::Wanted`] means unresolved, not missing), and flagging it
-/// would flag every entry of every set list opened from disk.
-fn plays(program: &LocalEntity, device: &DeviceState) -> Stands {
-    if !device.connected() {
+/// piano id is normal ([`crate::library::Needs::Wanted`] means unresolved, not missing),
+/// and flagging it would flag every entry of every set list opened from disk.
+fn plays(program: &LocalEntity, seen: &Catalog<'_>) -> Stands {
+    if !seen.device.connected() {
         return Stands::Resolves;
     }
-    match wanted(program, device) {
-        Needs::Wanted { class, id } => Stands::Needs { class, id },
-        Needs::Named { .. } | Needs::Nothing => Stands::Resolves,
+    let Some(plays) = crate::plays::named(program).first() else {
+        return Stands::Resolves;
+    };
+    let (class, id) = plays.key();
+    match crate::plays::name_of((class, id), seen.workspace, seen.device) {
+        Some(_) => Stands::Resolves,
+        None => Stands::Needs { class, id },
     }
 }
 
@@ -304,7 +313,7 @@ pub fn claim(entity: &Entity, seen: &Catalog<'_>) -> Option<super::StateLine> {
         words,
         ink,
         hint: "an entry points at a slot with no program, or at a program playing a \
-               library the instrument has not named"
+               library that is not here"
             .to_string(),
     })
 }
@@ -884,18 +893,20 @@ mod tests {
             }
         }
 
-        /// An asset on this computer that stands on a slot, which is the other place a
-        /// name can come from.
+        /// A program here linked to the slot `at` of the keyboard [`Device`] attaches as.
         fn kept(&mut self, at: Location, name: &str, bytes: Vec<u8>) {
-            self.workspace.ingest(
-                name.to_string(),
-                Origin::Device {
-                    class: ObjectClass::Program,
-                    at,
-                },
-                bytes,
-                &mut self.log,
-            );
+            let class = ObjectClass::Program;
+            let print = crate::workspace::print_of(&bytes).unwrap();
+            let origin = Origin::Device { class, at };
+            let id = self
+                .workspace
+                .ingest(name.to_string(), origin, bytes, &mut self.log);
+            let keyboard = crate::link::Keyboard {
+                model: "Nord Electro 5".into(),
+                serial: None,
+            };
+            let held = crate::link::Held::new(class, at, "", print).unwrap();
+            self.workspace.link(id, &keyboard, held);
         }
 
         /// One frame: every word it painted and where, and the sets it asked for.
@@ -968,8 +979,9 @@ mod tests {
             "{said:?}"
         );
 
-        // With nothing scanned, an asset here that stands on the slot names it.
+        // With nothing scanned, the asset here linked to the slot names it.
         let mut alone = Shown::new();
+        alone.device.pretend_attached();
         let bytes = Fresh::Program.bytes().unwrap();
         alone.kept(Location::from_user(1, 3), "Whiter Shade.ne5p", bytes);
         let said = alone.settle();
@@ -1088,7 +1100,7 @@ mod tests {
             claim.hint
         );
         assert!(
-            claim.hint.contains("has not named"),
+            claim.hint.contains("not here"),
             "the unnamed library: {}",
             claim.hint
         );

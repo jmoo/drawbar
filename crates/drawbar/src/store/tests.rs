@@ -8,6 +8,7 @@ use std::fs;
 use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
+use crate::link::{Held, Keyboard, Link, Print, Spot};
 use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
@@ -328,6 +329,7 @@ impl Session {
             builds,
             ..
         } = &mut self.bench;
+        let sync = crate::bring::Rows::of(&device.state, workspace, queue);
         let input = crate::testing::screen(eframe::egui::vec2(1280.0, 720.0), Vec::new());
         let output = crate::testing::run(&ctx.clone(), input, |ctx| {
             eframe::egui::CentralPanel::default().show(ctx, |ui| {
@@ -339,6 +341,7 @@ impl Session {
                     log,
                     &crate::document::Around {
                         queue,
+                        sync: &sync,
                         tags: &browser.tags,
                         played: &crate::midi::Played::default(),
                         builds,
@@ -472,6 +475,112 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
     );
     session.close();
     assert_eq!(root.read("untitled.ne5p"), edited);
+}
+
+#[test]
+fn a_send_landing_what_the_file_already_holds_saves_nothing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let sent = session.bytes(id);
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, with_gain(&sent, "96"), log);
+    assert!(workspace.take_file_asks().is_empty());
+
+    workspace.landed(id, sent);
+
+    let asks = workspace.take_file_asks();
+    assert!(asks.is_empty(), "the file holds what was sent: {asks:?}");
+    assert!(workspace.get(id).unwrap().is_unsaved());
+}
+
+/// A program saved in the library, edited with `gain` and not saved, with a write of it
+/// queued: the session, the program, and the bytes the write carries.
+fn queued_edit(root: &Temp, gain: &str) -> (Session, u64, Vec<u8>) {
+    let mut session = Session::open(root);
+    let id = session.create();
+    session.sync();
+    let sent = with_gain(&session.bytes(id), gain);
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, sent.clone(), log);
+    workspace.queue_write(id);
+    (session, id, sent)
+}
+
+#[test]
+fn a_write_of_unsaved_edits_that_lands_saves_them() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+
+    session.bench.workspace.landed(id, sent.clone());
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == sent,
+        "the file holds the edits"
+    );
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_landing_after_a_newer_save_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+    let saved = with_gain(&sent, "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    session.sync();
+
+    session.bench.workspace.landed(id, sent);
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == saved,
+        "the file keeps the newer save"
+    );
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_landing_after_a_newer_save_and_another_edit_leaves_the_file_as_saved() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+    let (saved, edited) = (with_gain(&sent, "96"), with_gain(&sent, "12"));
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    workspace.replace_bytes(id, edited.clone(), log);
+    session.sync();
+
+    session.bench.workspace.landed(id, sent);
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == saved,
+        "the file keeps the newer save"
+    );
+    assert!(session.bytes(id) == edited, "the later edit is still held");
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_write_of_edits_reverted_since_it_was_queued_still_saves_what_it_sent() {
+    let root = Temp::new();
+    let (mut session, id, sent) = queued_edit(&root, "40");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.revert(id, log);
+    assert!(!workspace.get(id).unwrap().is_unsaved());
+
+    session.bench.workspace.landed(id, sent.clone());
+
+    session.sync();
+    assert!(
+        root.read("untitled.ne5p") == sent,
+        "the file holds what was sent"
+    );
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
 /// A browser cannot wait for its library's answers, so it lets a library go only once it
@@ -778,6 +887,36 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
     assert_eq!(session.bytes(id), theirs);
     assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+#[test]
+fn a_send_held_for_a_look_that_cannot_read_a_changed_file_does_not_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let theirs = with_gain(&session.bytes(id), "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.store.fault(Fault::Next(Box::new(Fault::Unread)));
+
+    assert!(session.store.hold_send());
+    let mut released = false;
+    while session.store.scanning() {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut session.bench;
+        released |= session.store.poll(workspace, browser, queue, log);
+    }
+
+    assert!(!released && !session.store.holds_send());
+    assert_eq!(
+        session.said("“untitled.ne5p” could not be read again, so nothing was sent"),
+        1
+    );
 }
 
 /// Whether `io` puts a file at `at`: renames it into place, or, where the folder renames
@@ -1952,7 +2091,8 @@ fn search_kinds_and_counts_work_on_files_not_read_yet() {
             kind,
             ..Default::default()
         };
-        crate::library::rows(workspace, &device.state, queue, &browser.tags, &filter)
+        let sync = crate::bring::Rows::of(&device.state, workspace, queue);
+        crate::library::rows(workspace, &device.state, &browser.tags, &filter, &sync)
     };
     let names = |rows: &[crate::library::Row]| -> Vec<(String, u64)> {
         let mut named: Vec<(String, u64)> = rows
@@ -3169,6 +3309,73 @@ fn a_set_list_waits_for_unread_programs_and_names_two_that_claim_its_slot() {
     );
 }
 
+/// A bundle's program finds the piano and sample it plays by their names, so the bundle
+/// unpacks and exports again whole with nothing attached.
+#[test]
+fn an_unpacked_bundle_exports_again_with_what_its_program_plays() {
+    use crate::bundle::{lay_out, Laid};
+    use nord_format::components::library_id;
+
+    let (root, outside) = (Temp::new(), Temp::new());
+    let plays = [
+        ("piano_panel.id".into(), library_id("Tine").to_string()),
+        ("sample_panel.id".into(), library_id("Marimba").to_string()),
+    ];
+    let program = crate::fields::apply(&Fresh::Program.bytes().unwrap(), &plays)
+        .unwrap()
+        .1;
+    let (piano, sample) = (crate::testing::piano(1), crate::testing::sample_bytes());
+    let bundle = bundle_of(&[
+        ("Piano/Grand/Tine.npno", &piano),
+        ("Samp Lib/Samp Lib/Marimba.nsmp", &sample),
+        ("Program/Bank 1/Keys.ne5p", &program),
+    ]);
+    fs::write(outside.at("Keys.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Keys.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Keys.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+
+    let keys = session.named("Keys.ne5p");
+    let export = loop {
+        let state = &session.bench.device.state;
+        match lay_out(&[keys], &session.bench.workspace, state) {
+            Ok(Laid::Ready(export)) => break export,
+            Ok(Laid::Read(ids)) => session.read(&ids),
+            Err(why) => panic!("no bundle: {why}"),
+        }
+    };
+    let paths: Vec<&str> = export
+        .plan
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "Piano/Grand/Tine.npno",
+            "Samp Lib/Samp Lib/Marimba.nsmp",
+            "Program/Bank 1/Keys.ne5p",
+        ]
+    );
+    assert_eq!(export.plan.unmet, []);
+    assert!(export.left_out.is_empty(), "{:?}", export.left_out);
+}
+
 /// An object the instrument was read into a file for lands at the top of the library
 /// under its slot's name, past one already there, and the file it was read into goes.
 #[test]
@@ -3187,6 +3394,7 @@ fn a_fetched_object_lands_under_its_slot_name_and_its_file_goes() {
             tag: "nsmp".into(),
             file: scratch.at("fetched-0-4.nsmp"),
             len: sample.len() as u64,
+            print: crate::workspace::print_of(&sample).unwrap(),
         })]);
     session.sync();
 
@@ -3871,6 +4079,20 @@ fn planned_piano(root: &Temp) -> (Session, u64, crate::document::piano::Plan) {
     workspace.hold_edit(id, Some(crate::rewrite::Edit::Piano(plan.clone())));
     assert!(workspace.get(id).unwrap().is_unsaved());
     (session, id, plan)
+}
+
+#[test]
+fn a_save_asked_of_an_edit_in_a_read_only_library_is_answered_as_not_landed() {
+    let (root, _later) = newer_drawbar_wrote();
+    let (mut session, id, _) = planned_piano(&root);
+    assert!(session.store.read_only().is_some(), "opened read-only");
+    assert!(session.bench.workspace.save_edit(id));
+
+    session.sync();
+
+    let workspace = &session.bench.workspace;
+    assert!(!workspace.saving_edit(id), "the save is answered");
+    assert!(workspace.edit_of(id).is_some(), "and the edit is kept");
 }
 
 /// A piano library whose file is saved over outside drawbar under an unsaved plan keeps
@@ -9268,4 +9490,376 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
     session.answer_reads();
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
+}
+
+fn electro(serial: &str) -> Keyboard {
+    Keyboard {
+        model: "Nord Electro 5".into(),
+        serial: Some(serial.into()),
+    }
+}
+
+fn program_at(slot: u32) -> Held {
+    let base = Print { crc: 7, len: 121 };
+    Held::new(ObjectClass::Program, Location { bank: 0, slot }, "", base).unwrap()
+}
+
+impl Session {
+    fn links(&self, id: u64) -> Vec<Link> {
+        self.bench.workspace.get(id).expect("held").links.clone()
+    }
+
+    fn link(&mut self, id: u64, keyboard: &Keyboard, held: Held) {
+        self.bench.workspace.link(id, keyboard, held);
+        self.decided();
+    }
+
+    fn unlink(&mut self, id: u64, keyboard: &Keyboard, apart: bool) {
+        match apart {
+            true => self.bench.workspace.keep_off(id, keyboard),
+            false => self.bench.workspace.unlink(id, keyboard),
+        }
+        self.decided();
+    }
+}
+
+#[test]
+fn a_link_follows_its_file_through_a_rename_and_a_reopen() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.link(id, &electro("A1"), program_at(6));
+    let linked = session.links(id);
+    assert_eq!(linked.len(), 1);
+
+    let to = LibPath::root().join("Tine.ne5p");
+    session.bench.workspace.place(id, to);
+    session.sync();
+    assert_eq!(session.path(id).as_deref(), Some("Tine.ne5p"));
+    assert_eq!(session.links(id), linked);
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.links(again.named("Tine.ne5p")), linked);
+}
+
+#[test]
+fn linking_a_file_the_library_knows_nothing_of_adopts_it() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    assert!(matches!(session.store.key(id), Some(Key::File(_))));
+    session.link(id, &electro("A1"), program_at(6));
+    assert!(matches!(session.store.key(id), Some(Key::Entity(_))));
+    let linked = session.links(id);
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(again.links(again.only()), linked);
+}
+
+#[test]
+fn unlinking_removes_the_link_and_unlinking_apart_keeps_the_file_off_its_keyboard() {
+    let root = Temp::new();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.link(id, &here, program_at(6));
+    session.link(id, &there, program_at(6));
+    session.unlink(id, &here, false);
+    session.unlink(id, &there, true);
+    session.close();
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(again.only()).unwrap();
+    assert_eq!(
+        (entity.held_on(&here), entity.kept_off(&here)),
+        (None, false)
+    );
+    assert_eq!(
+        (entity.held_on(&there), entity.kept_off(&there)),
+        (None, true)
+    );
+}
+
+#[test]
+fn a_slot_a_second_file_is_linked_to_is_no_longer_the_first_files_after_a_reopen() {
+    let root = Temp::new();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::open(&root);
+    let first = session.create();
+    let second = session.create();
+    session.link(first, &here, program_at(6));
+    session.link(first, &there, program_at(6));
+    session.link(second, &here, program_at(6));
+    let names = [first, second].map(|id| session.bench.workspace.get(id).unwrap().name.clone());
+    session.close();
+
+    let again = Session::open(&root);
+    let [first, second] = names.map(|name| again.named(&name));
+    let first = again.bench.workspace.get(first).unwrap();
+    let second = again.bench.workspace.get(second).unwrap();
+    assert_eq!(first.held_on(&here), None);
+    assert_eq!(first.held_on(&there), Some(&program_at(6)));
+    assert_eq!(second.held_on(&here), Some(&program_at(6)));
+}
+
+#[test]
+fn another_drawbars_link_shows_once_its_change_is_read() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    let theirs = second.only();
+    second.link(theirs, &electro("A1"), program_at(6));
+
+    let ours = first.only();
+    assert_eq!(first.links(ours), [], "not read yet");
+    first.refresh();
+    assert_eq!(first.links(ours), second.links(theirs));
+}
+
+#[test]
+fn a_link_made_here_outlasts_the_answers_that_come_before_it_is_kept() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session
+        .bench
+        .workspace
+        .link(id, &electro("A1"), program_at(6));
+    let linked = session.links(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    while session.store.deciding() {
+        assert!(session.next(), "the library answered");
+        assert_eq!(session.links(id), linked, "while its file is written");
+    }
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.links(again.only()), linked);
+}
+
+#[test]
+fn a_file_sent_to_a_slot_is_linked_there_after_a_reopen() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    let class = ObjectClass::Program;
+    let at = Location::from_user(8, 1);
+    session.bench.device.pretend_attached();
+    let keyboard = session.bench.device.state.keyboard().cloned().unwrap();
+    let sent = session.bench.workspace.get(id).unwrap().bytes.to_vec();
+    session
+        .bench
+        .device
+        .pretend(crate::device::DeviceEvent::Sent {
+            id,
+            class,
+            at,
+            name: "Sent.ne5p".into(),
+            sent: crate::device::Payload::Bytes(sent),
+        });
+    let Bench {
+        log,
+        workspace,
+        tabs,
+        queue,
+        device,
+        ..
+    } = &mut session.bench;
+    device.poll(log, workspace, tabs, queue);
+    session.decided();
+    let name = session.bench.workspace.get(id).unwrap().name.clone();
+    session.close();
+
+    let again = Session::open(&root);
+    let entity = again.bench.workspace.get(again.named(&name)).unwrap();
+    let held = entity.held_on(&keyboard).expect("still linked");
+    assert_eq!(held.spot, Spot::at(at));
+}
+
+#[test]
+fn a_link_kept_on_one_keyboard_leaves_the_link_another_drawbar_kept_on_another() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    first.link(first.only(), &here, program_at(6));
+    second.link(second.only(), &there, program_at(7));
+    first.refresh();
+    let grand = first.bench.workspace.get(first.only()).unwrap();
+    assert_eq!(grand.held_on(&here), Some(&program_at(6)));
+    assert_eq!(grand.held_on(&there), Some(&program_at(7)));
+}
+
+/// How many entries this library's writers logged under `label`.
+fn logged(root: &Temp, label: &str) -> usize {
+    let entry = format!(r#""label":"{label}""#);
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    let segments = writers.flat_map(|writer| fs::read_dir(writer.unwrap().path()).unwrap());
+    let segments = segments.map(|segment| segment.unwrap().path());
+    let text = segments.filter_map(|segment| fs::read_to_string(segment).ok());
+    text.map(|text| text.lines().filter(|line| line.contains(&entry)).count())
+        .sum()
+}
+
+#[test]
+fn links_changed_in_one_pass_are_kept_as_one_change() {
+    let root = Temp::new();
+    for name in ["Grand.ne5p", "Tine.ne5p"] {
+        fs::write(root.at(name), Fresh::Program.bytes().unwrap()).unwrap();
+    }
+    let here = electro("A1");
+    let mut session = Session::listed(&root);
+    let (grand, tine) = (session.named("Grand.ne5p"), session.named("Tine.ne5p"));
+    session.bench.workspace.link(grand, &here, program_at(6));
+    session.link(tine, &here, program_at(7));
+    assert_eq!(logged(&root, "Link"), 1);
+    session.close();
+
+    let again = Session::listed(&root);
+    let held = |name| {
+        again
+            .bench
+            .workspace
+            .get(again.named(name))
+            .unwrap()
+            .held_on(&here)
+    };
+    assert_eq!(held("Grand.ne5p"), Some(&program_at(6)));
+    assert_eq!(held("Tine.ne5p"), Some(&program_at(7)));
+}
+
+#[test]
+fn undoing_the_tag_that_made_an_entity_of_a_linked_file_keeps_its_links() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let (here, there) = (electro("A1"), electro("B2"));
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    session.tag(&[id], "Live");
+    session.link(id, &here, program_at(6));
+    session.unlink(id, &there, true);
+    let linked = session.links(id);
+    session.undo();
+    assert_eq!(session.worn(id), Vec::<String>::new());
+    assert_eq!(session.links(id), linked, "undone");
+    session.redo();
+    assert_eq!(session.worn(id), ["Live"]);
+    assert_eq!(session.links(id), linked, "redone");
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(again.links(again.only()), linked);
+}
+
+#[test]
+fn a_link_made_where_the_library_cannot_keep_it_stays_for_the_session_and_is_said_once() {
+    let (root, _) = newer_drawbar_wrote();
+    for name in ["Grand.ne5p", "Tine.ne5p"] {
+        fs::write(root.at(name), Fresh::Program.bytes().unwrap()).unwrap();
+    }
+    let here = electro("A1");
+    let mut session = Session::listed(&root);
+    assert!(session.store.read_only().is_some());
+    let (grand, tine) = (session.named("Grand.ne5p"), session.named("Tine.ne5p"));
+    session.link(grand, &here, program_at(6));
+    session.link(tine, &here, program_at(7));
+    session.refresh();
+    let held = |id| {
+        session
+            .bench
+            .workspace
+            .get(id)
+            .unwrap()
+            .held_on(&here)
+            .cloned()
+    };
+    assert_eq!(held(grand), Some(program_at(6)));
+    assert_eq!(held(tine), Some(program_at(7)));
+    assert_eq!(
+        session.said("The links are kept only until drawbar closes"),
+        1
+    );
+}
+
+impl Session {
+    /// Drain what the instrument reported, as a frame does.
+    fn heard(&mut self) {
+        let Bench {
+            log,
+            workspace,
+            tabs,
+            queue,
+            device,
+            ..
+        } = &mut self.bench;
+        device.poll(log, workspace, tabs, queue);
+    }
+}
+
+#[test]
+fn bringing_in_a_slot_is_one_undo_and_once_undone_the_slot_is_newer_and_stays_there() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    let class = ObjectClass::Program;
+    let at = Location::from_user(1, 1);
+    let print = |bytes: &[u8]| crate::workspace::print_of(bytes).unwrap();
+    let device = &mut session.bench.device;
+    device.pretend_partitions(&crate::device::ELECTRO5);
+    device.pretend_geometry(class, &[("A", 1)]);
+    device.pretend_bodies(class, 1, &[Some(("untitled", print(&new).crc))]);
+    let keyboard = device.state.keyboard().cloned().unwrap();
+    let held = Held::new(class, at, "", print(&old)).unwrap();
+    session.link(id, &keyboard, held);
+    session.heard();
+    session.bench.sync();
+    session
+        .bench
+        .device
+        .pretend(crate::device::DeviceEvent::Got {
+            info: crate::device::reported(at, "untitled"),
+            origin: Origin::Device { class, at },
+            bytes: new.clone(),
+            why: crate::device::Purpose::Pull,
+        });
+    session.heard();
+    session.decided();
+    assert_eq!(root.read("untitled.ne5p"), new, "brought in");
+    let standing = |session: &Session| {
+        let entity = session.bench.workspace.get(id).unwrap();
+        crate::device::standing_of(&session.bench.device.state, entity).map(|it| it.standing)
+    };
+    assert_eq!(standing(&session), Some(crate::link::Standing::Same));
+
+    session.undo();
+    session.refocus();
+    session.read_all();
+    assert_eq!(root.read("untitled.ne5p"), old, "one step takes it back");
+    assert_eq!(session.only(), id);
+    assert_eq!(session.bytes(id), old);
+    let unsaved = session.bench.workspace.get(id).unwrap().is_unsaved();
+    assert!(!unsaved, "the document took its file back");
+    assert_eq!(standing(&session), Some(crate::link::Standing::Theirs));
+    session.heard();
+    let pulls = session.bench.device.queued().into_iter().filter(|cmd| {
+        matches!(
+            cmd,
+            crate::device::DeviceCmd::Get {
+                why: crate::device::Purpose::Pull,
+                ..
+            }
+        )
+    });
+    assert_eq!(pulls.count(), 1, "not brought in again");
 }

@@ -1635,7 +1635,7 @@ fn reference(
                 .font(egui::FontId::monospace(11.5))
                 .color(ink),
         )
-        .on_hover_text("the file stores the id; only the instrument knows the name");
+        .on_hover_text("the file stores the id, which is worked out from the name");
         ui.label(
             egui::RichText::new(under)
                 .font(egui::FontId::proportional(LABEL))
@@ -1769,7 +1769,7 @@ pub fn about(doc: &Doc<'_>, entity: &LocalEntity) -> Vec<(&'static str, String, 
             },
         ),
         ("Layout", layout.0, layout.1),
-        ("Stored at", super::header::lives(entity), String::new()),
+        ("Stored at", super::header::stored(entity), String::new()),
         (
             "Instrument",
             nord_format::accept::Family::of_tag(&entity.tag())
@@ -2202,12 +2202,9 @@ mod tests {
             id: None,
             name: None,
             dialed: None,
-            dialed_unnamed: false,
-            can_ask: false,
-            refused: false,
-            asked: false,
             models: Vec::new(),
             scan_disagrees: None,
+            sample: None,
         }
     }
 

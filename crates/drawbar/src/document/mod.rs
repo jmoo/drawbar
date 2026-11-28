@@ -33,7 +33,7 @@ mod panel;
 pub(crate) mod piano;
 mod project;
 pub(crate) mod sample;
-mod setlist;
+pub(crate) mod setlist;
 mod table;
 mod take;
 pub(crate) mod text;
@@ -43,6 +43,7 @@ pub(crate) mod wav;
 use advanced::Advanced;
 use controls::{Ctx, Sets};
 
+pub(crate) use header::action;
 pub use header::{Body, Cell, Click, Extras, Face, Ink, Loud, SizeLine, Stage, StateLine, Tone};
 pub use sample::note_picker;
 
@@ -147,18 +148,11 @@ fn shape(entity: &LocalEntity) -> Shape {
     }
 }
 
-/// A write to the instrument that the header asked for. The browser asks any question
-/// the write needs first.
-pub struct SendBack {
-    pub id: u64,
-    pub class: ObjectClass,
-    pub at: Location,
-}
-
 /// The window state a document reads: the send queue, this computer's tags, and what a
 /// MIDI controller played since the last frame.
 pub struct Around<'a> {
     pub queue: &'a Queue,
+    pub sync: &'a crate::bring::Rows,
     pub tags: &'a Tags,
     /// Keys played here strike the key map when the current face shows one.
     pub played: &'a Played,
@@ -169,14 +163,18 @@ pub struct Around<'a> {
 /// What a document's frame asked the app for.
 #[derive(Default)]
 pub struct Wants {
-    /// The write the header queued.
-    pub send: Option<SendBack>,
+    /// Whether the header asked to send the document to a slot the user picks.
+    pub pick: bool,
+    /// Whether the header asked to save the document.
+    pub save: bool,
     /// The slot the header asked the panel to play.
     pub load: Option<(ObjectClass, Location)>,
     /// The banner's offer to put a view of a slot on this computer.
     pub keep: bool,
     /// The header's build of this project.
     pub build: bool,
+    /// The header's Sync of this document.
+    pub sync: bool,
     /// An item a body asked to open, such as the program a set list entry points at.
     /// The browser opens it.
     pub open: Option<crate::browser::Item>,
@@ -470,6 +468,7 @@ impl Document {
                 showing: face,
                 device: &device.state,
                 queue: around.queue,
+                sync: around.sync,
                 tags: around.tags,
                 view: viewing,
                 renaming,
@@ -491,16 +490,18 @@ impl Document {
         }
 
         let mut wants = Wants {
-            send: act.send,
+            pick: act.pick,
+            save: act.save,
             load: act.load,
             build: act.build,
+            sync: act.sync,
             rename: act.rename,
             ..Wants::default()
         };
         let mut details = None;
         let mut typed = false;
         let mut asked = Vec::new();
-        let mut lookup = piano_lookup(entity, registry.as_deref(), device);
+        let mut lookup = piano_lookup(registry.as_deref(), workspace, device);
         // A child `Ui` with a salted id keeps the body's scroll state under one id,
         // whatever the header drew above it. See [`PAGE`].
         let mut page = ui.new_child(
@@ -590,13 +591,6 @@ impl Document {
                         refused(audition::hear(ask, held, player, id), log, "sample");
                     }
                 }
-            }
-        }
-        if let Some((class, at)) = workspace.get(id).and_then(|e| e.origin.slot()) {
-            match lookup.asked {
-                true => device.ask_deps_again(class, at, log),
-                false if lookup.wants_a_name() => device.read_deps(class, at, log),
-                false => {}
             }
         }
         if act.export {
@@ -750,7 +744,7 @@ impl Document {
         ctx: &egui::Context,
         acts: Vec<crate::browser::Act>,
         workspace: &mut Workspace,
-        queue: &Queue,
+        sync: &[u64],
         log: &mut Log,
     ) -> Vec<crate::browser::Act> {
         let mut ids = self.samples.ids();
@@ -762,7 +756,7 @@ impl Document {
         }
         let mut out = Vec::new();
         for act in acts {
-            let carried = act.carries(queue);
+            let carried = act.carries(sync);
             let held = self
                 .save_first(act, &carried, workspace, log)
                 .and_then(|act| self.piano.hold(ctx, act, workspace));
@@ -829,6 +823,12 @@ impl Document {
         }
         self.saving.push(Saving { files, act });
         None
+    }
+
+    /// Whether a Sync waits here for a save.
+    pub fn holds_sync(&self) -> bool {
+        let syncs = |held: &Saving| matches!(held.act, crate::browser::Act::SyncAll);
+        self.saving.iter().any(syncs)
     }
 
     /// The acts whose saves have all answered: each runs where every save landed, and
@@ -1503,7 +1503,6 @@ fn extras(
                 ink: Ink::Warn,
                 hint: format!("raw ≠ bits on {pending} fields"),
             }),
-            loud: queued(entity, device, pending),
             ..header::Extras::default()
         },
         Shape::SetList => header::Extras {
@@ -1520,11 +1519,16 @@ fn extras(
         },
         Shape::Verbatim => {
             // The strip's own write, relabeled for a body that cannot be edited.
-            let mut loud = header::action(entity, &device.state);
-            loud.label = "Send as-is".to_string();
-            loud.short = "Send".to_string();
+            let loud = header::action(entity, &device.state).map(|loud| match loud.click {
+                header::Click::Load(..) => loud,
+                _ => Loud {
+                    label: "Send as-is".to_string(),
+                    short: "Send".to_string(),
+                    ..loud
+                },
+            });
             header::Extras {
-                loud: Some(loud),
+                loud,
                 ..header::Extras::default()
             }
         }
@@ -1635,46 +1639,22 @@ fn viewing_banner(ui: &mut egui::Ui, entity: &LocalEntity) -> bool {
     keep
 }
 
-/// The header's loud action for a field document, with the pending count added.
-///
-/// ⚠️ The count is added only when the header already offers the write. A document
-/// with nothing to send to says so, and a count beside that message would read as an
-/// offer.
-fn queued(entity: &LocalEntity, device: &Device, pending: usize) -> Option<Loud> {
-    if pending == 0 {
-        return None;
-    }
-    let loud = header::action(entity, &device.state);
-    if loud.tone != Tone::Ready {
-        return None;
-    }
-    Some(Loud {
-        label: format!("Queue send · {pending}"),
-        short: format!("Send {pending}"),
-        hint: format!("{pending} pending edits. All are applied together, or none are applied."),
-        ..loud
-    })
-}
-
 /// What is known about the piano a program plays.
 ///
-/// ⚠️ The name can only come from the instrument. A `.ne5p` stores the piano's id and no
-/// name, and the category and model beside it are the panel's dial positions, which do
-/// not identify a piano. A document opened with no instrument attached shows the id and
-/// says so.
+/// A `.ne5p` stores the piano's id and no name. The piano is the one here or on the
+/// attached instrument whose name hashes to the id. The category and model beside it are
+/// the panel's dial positions, which name a piano only on the attached instrument.
 fn piano_lookup(
-    entity: &LocalEntity,
     registry: Option<&[Field]>,
+    workspace: &Workspace,
     device: &Device,
 ) -> panel::PianoLookup {
     let stored = registry
         .and_then(|fields| fields.iter().find(|field| field.path == panel::PIANO_ID))
         .and_then(|field| library_id(&field.value));
     let id = stored.filter(|id| *id != 0);
-    let slot = entity.origin.slot();
-    let name = id
-        .and_then(|id| device.state.dependency_name(ObjectClass::Piano, id))
-        .map(str::to_string);
+    let name =
+        id.and_then(|id| crate::plays::name_of((ObjectClass::Piano, id), workspace, &device.state));
     let models = registry
         .map(|fields| piano_models(fields, device))
         .unwrap_or_default();
@@ -1683,11 +1663,6 @@ fn piano_lookup(
         .and_then(current_model)
         .and_then(|n| models.iter().find(|(i, _)| *i == n))
         .map(|(_, piano)| piano.trim().to_string());
-    let dialed_unnamed = dialed
-        .as_deref()
-        .is_some_and(|piano| device.state.library_id(ObjectClass::Piano, piano).is_none());
-    // Dependency ids are authoritative; disagreement means the scanned position mapping
-    // is wrong.
     let scan_disagrees = match (&name, registry) {
         (Some(named), Some(fields)) => current_model(fields)
             .and_then(|n| models.iter().find(|(i, _)| *i == n))
@@ -1696,17 +1671,21 @@ fn piano_lookup(
             .cloned(),
         _ => None,
     };
+    let sample = registry
+        .and_then(|fields| fields.iter().find(|field| field.path == panel::SAMPLE_ID))
+        .and_then(|field| library_id(&field.value))
+        .filter(|id| *id != 0)
+        .and_then(|id| {
+            let name = crate::plays::name_of((ObjectClass::Sample, id), workspace, &device.state);
+            Some((id, name?))
+        });
     panel::PianoLookup {
         id,
         name,
         dialed,
-        dialed_unnamed,
-        can_ask: slot.is_some_and(|(class, _)| class.reports_dependencies())
-            && device.state.connected(),
-        refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
-        asked: false,
         models,
         scan_disagrees,
+        sample,
     }
 }
 
@@ -1715,8 +1694,8 @@ fn piano_lookup(
 ///
 /// The instrument's bank list names the piano banks after the panel's categories, in
 /// panel order, and a program's stored category and model match the bank and slot the
-/// instrument reports for the piano it depends on. The dependency name remains the
-/// check; see `scan_disagrees` in [`piano_lookup`].
+/// instrument reports for the piano it depends on. Where the id names another piano, the
+/// id wins; see `scan_disagrees` in [`piano_lookup`].
 fn piano_models(fields: &[Field], device: &Device) -> Vec<(u32, String)> {
     let Some(category) = fields
         .iter()
@@ -1749,11 +1728,16 @@ fn stored_category(category: &Field, value: &str) -> Option<u8> {
 }
 
 /// The id an edit that moves the Type or Model dial also writes, unless it sets the id
-/// itself: the id the instrument has given the piano now at that position, or 0.
+/// itself: the id of the piano the attached instrument holds at that position, or 0
+/// where no walk has read one there.
 ///
 /// ⚠️ The Electro 5 plays the piano the id names, whatever the dials say, and plays the
 /// piano at the dials' position only where the id is 0. Confirmed on hardware.
-fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(String, String)> {
+pub(crate) fn piano_follows(
+    sets: &Sets,
+    fields: &[Field],
+    device: &Device,
+) -> Option<(String, String)> {
     let set = |path: &str| {
         sets.iter()
             .rev()
@@ -1775,8 +1759,7 @@ fn piano_follows(sets: &Sets, fields: &[Field], device: &Device) -> Option<(Stri
     .zip(model.trim().parse::<usize>().ok());
     let id = at
         .and_then(|(category, model)| device.state.piano_at(category, model))
-        .and_then(|name| device.state.library_id(ObjectClass::Piano, name))
-        .unwrap_or(0);
+        .map_or(0, |name| crate::plays::slot_key(ObjectClass::Piano, name).1);
     Some((panel::PIANO_ID.to_string(), id.to_string()))
 }
 
@@ -1797,6 +1780,7 @@ pub(crate) fn library_id(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bring::Rows;
     use crate::testing::{self, nameless_sample_bytes, sample_bytes, wav_bytes, Bench, Word};
     use crate::workspace::{Fresh, Origin};
 
@@ -1872,9 +1856,10 @@ mod tests {
         #[cfg(not(target_arch = "wasm32"))]
         fn act(&mut self, acts: Vec<crate::browser::Act>) {
             let ctx = self.ctx.clone();
-            let acts =
-                self.document
-                    .settle(&ctx, acts, &mut self.workspace, &self.queue, &mut self.log);
+            let sync = crate::bring::writes(&self.device);
+            let acts = self
+                .document
+                .settle(&ctx, acts, &mut self.workspace, &sync, &mut self.log);
             crate::browser::apply(
                 &mut crate::browser::Browser::default(),
                 &mut crate::shell::Shell::default(),
@@ -1976,6 +1961,7 @@ mod tests {
                         &mut self.device,
                         &mut self.log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &self.queue,
                             tags: &self.tags,
                             played: &Played::default(),
@@ -2097,11 +2083,10 @@ mod tests {
         let Open {
             document,
             workspace,
-            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, &[], log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(workspace.saving_edit(id));
 
@@ -2111,7 +2096,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.nsmp")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &[], log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let whole = sample::apply(&bytes, &sets).unwrap();
@@ -2153,9 +2138,15 @@ mod tests {
         } = &mut open;
         document.apply(id, sets.clone(), workspace, log).unwrap();
         open.twice();
-        open.act(vec![Act::SendAll]);
+        open.act(vec![Act::Sync(None)]);
+        while let Some(class) = open.device.state.scan.take() {
+            open.device.state.scan.finished(class);
+        }
+        let sync = Rows::of(&open.device.state, &open.workspace, &open.queue);
+        crate::bring::accept(&mut open.device, &sync, &open.workspace);
+        open.act(vec![Act::SyncAll]);
         let sent = |open: &Open| {
-            let batch = open.device.queued().iter().find_map(|cmd| match cmd {
+            let batch = open.device.queued().into_iter().find_map(|cmd| match cmd {
                 DeviceCmd::SendAll { items, .. } => Some(items),
                 _ => None,
             });
@@ -2163,6 +2154,7 @@ mod tests {
         };
         assert!(sent(&open).is_none(), "nothing is sent before the save");
         assert!(open.workspace.saving_edit(id));
+        assert!(open.document.holds_sync(), "the Sync waits for it");
 
         let (from, edit) = open.workspace.send_edit(id).expect("the store takes it");
         let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
@@ -2176,9 +2168,49 @@ mod tests {
         let Some(Payload::File { file: sent, .. }) = sent(&open) else {
             panic!("the file the save wrote is sent: {:?}", open.log.status())
         };
+        assert!(!open.document.holds_sync());
         assert!(std::sync::Arc::ptr_eq(&sent, &saved));
         assert!(dir.read("Saved.nsmp") == sample::apply(&bytes, &sets).unwrap());
         assert_eq!(saved.take_reads(), [], "nothing read it to send it");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sync_saves_no_edit_of_a_sample_left_out_of_it() {
+        use crate::browser::Act;
+
+        let dir = testing::Temp::new();
+        let file = testing::on_disk(&dir, "Marimba.nsmp", &sample_bytes());
+        let mut open = Open::empty();
+        let id = testing::rest(&mut open.workspace, "Marimba.nsmp", file);
+        open.id = id;
+        open.workspace.settle_files(&mut open.log);
+        open.twice();
+        let (class, at) = (ObjectClass::Sample, Location::from_user(1, 1));
+        open.device.pretend_scanned(class, 1, &[""]);
+        open.act(vec![Act::Send { id, class, at }]);
+        let sets = vec![("name".to_string(), "Vibes".to_string())];
+        let Open {
+            document,
+            workspace,
+            log,
+            ..
+        } = &mut open;
+        document.apply(id, sets, workspace, log).unwrap();
+        open.twice();
+        open.act(vec![Act::Sync(None)]);
+        while let Some(class) = open.device.state.scan.take() {
+            open.device.state.scan.finished(class);
+        }
+
+        let sync = Rows::of(&open.device.state, &open.workspace, &open.queue);
+        let row = sync.list.iter().find(|row| row.id == id).expect("a row");
+        let sheet = open.device.asks.sheet.as_mut().expect("open");
+        sheet.turn(row, crate::bring::Way::Up, &sync.list, &open.workspace);
+        crate::bring::accept(&mut open.device, &sync, &open.workspace);
+        open.act(vec![Act::SyncAll]);
+        assert!(!open.workspace.saving_edit(id), "no save was asked for");
+        assert!(open.entity().is_unsaved(), "the edit is still only here");
     }
 
     /// An edit of a sample resting in its file is not sent as the file without it.
@@ -2220,7 +2252,7 @@ mod tests {
                 let has = |word: &str| said.iter().any(|held| held == word);
                 assert!(has("Basic"), "{kind:?} in {dark}: {said:?}");
                 assert!(has("Advanced"), "{kind:?} in {dark}: {said:?}");
-                assert!(has("Queue send"), "the loud action: {said:?}");
+                assert!(has("Send to…"), "the loud action: {said:?}");
                 assert!(has("Revert") && has("Export…"), "the quiet ones: {said:?}");
             }
         }
@@ -2265,9 +2297,10 @@ mod tests {
         }
         // The controls, and the glyphs painted where their icons would load. The kind
         // glyph at the far left is the only glyph that is not a control.
-        const CONTROLS: [&str; 6] = [
+        const CONTROLS: [&str; 7] = [
             "Send",
-            "Queue send",
+            "Send to…",
+            "Save",
             "Basic",
             "Advanced",
             "Revert",
@@ -2318,7 +2351,7 @@ mod tests {
                 .find(|word| word.text.ends_with(" kB"))
                 .expect("the size is painted");
             let wrapped = size.rect.top() > row.bottom();
-            let short = !said.iter().any(|word| word.text == "Queue send");
+            let short = !said.iter().any(|word| word.text == "Send to…");
             assert!(
                 !wrapped || short,
                 "at {width} px the size wrapped while the loud action kept its words"
@@ -2339,7 +2372,7 @@ mod tests {
         let full = at(1100.0);
         assert!(full.contains(&"Export…".to_string()), "{full:?}");
         assert!(full.contains(&"Basic".to_string()));
-        assert!(full.contains(&"Queue send".to_string()));
+        assert!(full.contains(&"Send to…".to_string()));
 
         let quiet = at(900.0);
         assert!(!quiet.contains(&"Export…".to_string()), "{quiet:?}");
@@ -2347,14 +2380,14 @@ mod tests {
             quiet.contains(&"Basic".to_string()),
             "the faces keep their labels"
         );
-        assert!(quiet.contains(&"Queue send".to_string()));
+        assert!(quiet.contains(&"Send to…".to_string()));
 
         let faces = at(800.0);
         assert!(!faces.contains(&"Basic".to_string()), "{faces:?}");
-        assert!(faces.contains(&"Queue send".to_string()));
+        assert!(faces.contains(&"Send to…".to_string()));
 
         let narrow = at(700.0);
-        assert!(!narrow.contains(&"Queue send".to_string()), "{narrow:?}");
+        assert!(!narrow.contains(&"Send to…".to_string()), "{narrow:?}");
         assert!(
             narrow.contains(&"Send".to_string()),
             "the loud action is never a bare glyph: {narrow:?}"
@@ -2637,37 +2670,6 @@ mod tests {
         open.set(&[("center_panel.split", "true")]);
         let said = open.twice();
         assert!(said.iter().any(|word| word == "2 pending"), "{said:?}");
-    }
-
-    /// A count on a dashed action would read as an offer.
-    #[test]
-    fn the_loud_action_carries_the_count_where_there_is_somewhere_to_send_it() {
-        let mut open = Open::fresh(Fresh::Program);
-        let bytes = open.entity().bytes.to_vec();
-        open.id = open.workspace.ingest(
-            "Africa Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 3 },
-            },
-            bytes,
-            &mut open.log,
-        );
-        open.set(&[("center_panel.gain", "96")]);
-
-        let unattached = open.twice();
-        assert!(
-            unattached.iter().any(|word| word == "Queue send"),
-            "with nothing attached, the action carries no count: {unattached:?}"
-        );
-
-        open.device
-            .pretend_scanned(ObjectClass::Program, 7, &["", "", "", "Africa Split"]);
-        let attached = open.twice();
-        assert!(
-            attached.iter().any(|word| word == "Queue send · 1"),
-            "{attached:?}"
-        );
     }
 
     /// A group is not in use when the file's state leaves its controls without effect.
@@ -3056,6 +3058,7 @@ mod tests {
                         &mut device,
                         &mut log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
@@ -3078,130 +3081,60 @@ mod tests {
         );
     }
 
-    /// A program stores its piano's id; only the instrument knows the name.
+    /// A program stores its piano's id, and the piano is named by the file or slot whose
+    /// name hashes to it. 0x92e0cba2 is the `library_id` of `drawbar-tine`.
     #[test]
-    fn a_pianos_name_comes_only_from_the_instrument() {
-        use nord_usb::{Location, ObjectClass};
-
+    fn a_pianos_name_is_that_of_the_file_or_slot_its_id_hashes_from() {
         let Bench {
             mut workspace,
-            device,
+            mut device,
             mut log,
             ..
         } = Bench::new();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0x92e0cba2".into())])
+            .unwrap()
+            .0;
+        let named = |workspace: &Workspace, device: &Device| {
+            piano_lookup(Some(&fields), workspace, device).name
+        };
+        assert_eq!(
+            named(&workspace, &device),
+            None,
+            "no piano goes by that name"
+        );
 
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        let bytes = workspace.get(id).unwrap().bytes.to_vec();
-        let fields = fields::apply(&bytes, &[]).unwrap().0;
-        let local = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
-        assert!(local.name.is_none(), "nothing has been asked");
-        assert!(!local.can_ask, "and nothing can be asked");
+        device.pretend_lengths(ObjectClass::Piano, 4, &[Some(("drawbar-tine", 1000))]);
+        assert_eq!(named(&workspace, &device).as_deref(), Some("drawbar-tine"));
 
-        let from_device = workspace.ingest(
-            "Africa-Split.ne5p".into(),
-            Origin::Device {
-                class: ObjectClass::Program,
-                at: Location { bank: 6, slot: 3 },
-            },
-            bytes,
+        let offline = Device::new(egui::Context::default());
+        workspace.ingest(
+            "drawbar-tine.npno".into(),
+            Origin::Fresh,
+            crate::testing::piano(1),
             &mut log,
         );
-        let copied = piano_lookup(workspace.get(from_device).unwrap(), Some(&fields), &device);
-        assert!(copied.name.is_none(), "still nothing has been asked");
-        // A fresh program stores 0, so its dials pick its piano.
-        assert_eq!(copied.id, None);
+        assert_eq!(
+            named(&workspace, &offline).as_deref(),
+            Some("drawbar-tine"),
+            "a piano file on this computer"
+        );
     }
 
-    /// The piano's name survives a read of another slot.
+    /// A program's name for its piano is worked out, so a document asks the instrument
+    /// nothing about what its slot plays.
     #[test]
-    fn a_document_asks_what_its_slot_plays_and_keeps_the_answer() {
-        use nord_usb::wire::Dependency;
-
-        let class = ObjectClass::Program;
+    fn a_document_from_a_slot_asks_nothing_about_what_it_plays() {
         let at = Location { bank: 6, slot: 3 };
-        let piano = 0x0102_0304;
-
         let mut open = Open::empty();
         open.device.pretend_attached();
-        let fresh = open
-            .workspace
-            .create(Fresh::Program, &mut open.log)
-            .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
-        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), piano.to_string())])
+        let bytes = Fresh::Program.bytes().unwrap();
+        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), "16909060".into())])
             .expect("a program can name a piano");
         open.id = open.workspace.ingest(
             "Africa-Split.ne5p".into(),
-            Origin::Device { class, at },
-            plays,
-            &mut open.log,
-        );
-
-        let reads = |open: &Open| {
-            open.device
-                .queued()
-                .iter()
-                .filter(|cmd| {
-                    matches!(cmd, crate::device::DeviceCmd::Deps { at: asked, .. }
-                    if *asked == at)
-                })
-                .count()
-        };
-        open.frame(Vec::new());
-        assert_eq!(reads(&open), 1, "the document asked what the slot plays");
-        open.frame(Vec::new());
-        assert_eq!(reads(&open), 1, "and asked only once");
-
-        let named = |open: &Open| {
-            let registry = fields::apply(&open.entity().bytes, &[])
-                .expect("the registry reads it")
-                .0;
-            piano_lookup(open.entity(), Some(&registry), &open.device)
-                .name
-                .clone()
-        };
-        assert_eq!(named(&open), None, "nothing has answered yet");
-
-        open.device.pretend_deps(
-            class,
-            at,
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: piano,
-                name: "Royal Grand 3D".into(),
-                location: None,
-            }],
-        );
-        assert_eq!(named(&open).as_deref(), Some("Royal Grand 3D"));
-
-        open.device
-            .pretend_deps(class, Location { bank: 0, slot: 0 }, Vec::new());
-        assert_eq!(
-            named(&open).as_deref(),
-            Some("Royal Grand 3D"),
-            "the name survives another slot's read"
-        );
-    }
-
-    /// The instrument refuses the dependency read for live slots, so a live slot's
-    /// document shows its piano by id and never asks.
-    #[test]
-    fn a_live_slot_document_never_asks_what_it_plays() {
-        let at = Location { bank: 0, slot: 0 };
-        let mut open = Open::empty();
-        open.device.pretend_attached();
-        let fresh = open
-            .workspace
-            .create(Fresh::Program, &mut open.log)
-            .expect("a fresh default");
-        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
-        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), "16909060".into())])
-            .expect("a live slot can name a piano");
-        open.id = open.workspace.ingest(
-            "Live-1.ne5l".into(),
             Origin::Device {
-                class: ObjectClass::Live,
+                class: ObjectClass::Program,
                 at,
             },
             plays,
@@ -3212,7 +3145,7 @@ mod tests {
         let asked = open
             .device
             .queued()
-            .iter()
+            .into_iter()
             .filter(|cmd| matches!(cmd, crate::device::DeviceCmd::Deps { .. }))
             .count();
         assert_eq!(asked, 0);
@@ -3221,8 +3154,6 @@ mod tests {
     /// Without a scan, the dial stays numeric and never shows a guessed name.
     #[test]
     fn the_model_dial_lists_the_scanned_pianos_of_the_current_category() {
-        use nord_usb::ObjectClass;
-
         let Bench {
             mut workspace,
             mut device,
@@ -3234,13 +3165,12 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let fields = fields::apply(&bytes, &[]).unwrap().0;
 
-        // Nothing scanned: the dial stays numeric.
-        let unscanned = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        let unscanned = piano_lookup(Some(&fields), &workspace, &device);
         assert!(unscanned.models.is_empty());
 
         // A fresh program's category sits at stored position 0, so its bank is 1.
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
-        let scanned = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        let scanned = piano_lookup(Some(&fields), &workspace, &device);
         assert_eq!(
             scanned.models,
             vec![
@@ -3249,70 +3179,95 @@ mod tests {
             ],
             "empty slots keep their positions"
         );
-        // No dependency name is in hand, so there is nothing to disagree with.
-        assert!(scanned.scan_disagrees.is_none());
+        assert!(scanned.scan_disagrees.is_none(), "the id is 0");
 
-        // Another bank belongs to another category.
         let mut other = Device::new(egui::Context::default());
         other.pretend_scanned(ObjectClass::Piano, 3, &["Clav D6"]);
-        let elsewhere = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &other);
-        assert!(elsewhere.models.is_empty());
+        let elsewhere = piano_lookup(Some(&fields), &workspace, &other);
+        assert!(
+            elsewhere.models.is_empty(),
+            "another bank, another category"
+        );
     }
 
-    /// The instrument plays the piano at the dials where the id is 0, and its
-    /// dependency reply gives that piano's id, which a bundle names it by.
     #[test]
-    fn a_zero_id_shows_the_dialed_piano_and_asks_for_its_id() {
-        use nord_usb::wire::Dependency;
-
+    fn dials_pointing_away_from_the_piano_the_id_names_are_called_out() {
         let Bench {
-            mut workspace,
+            workspace,
             mut device,
-            mut log,
             ..
         } = Bench::new();
-        let at = Location { bank: 6, slot: 3 };
+        let white = crate::plays::slot_key(ObjectClass::Piano, "White Grand").1;
+        let sets = [
+            (panel::PIANO_ID.into(), white.to_string()),
+            (panel::PIANO_MODEL.into(), "0".into()),
+        ];
+        let fields = fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .0;
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
+
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
+        assert_eq!(lookup.name.as_deref(), Some("White Grand"));
+        assert_eq!(lookup.scan_disagrees.as_deref(), Some("Royal Grand"));
+    }
+
+    #[test]
+    fn a_sample_id_shows_the_name_of_the_sample_it_names() {
+        let Bench {
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
+        let marimba = crate::plays::slot_key(ObjectClass::Sample, "Marimba").1;
+        let sets = [(panel::SAMPLE_ID.into(), marimba.to_string())];
+        let fields = fields::apply(&Fresh::Program.bytes().unwrap(), &sets)
+            .unwrap()
+            .0;
+        let stored = fields
+            .iter()
+            .find(|field| field.path == panel::SAMPLE_ID)
+            .unwrap();
+        assert_eq!(
+            piano_lookup(Some(&fields), &workspace, &device).names(stored),
+            None,
+            "nothing goes by it yet"
+        );
+
+        device.pretend_lengths(ObjectClass::Sample, 1, &[Some(("Marimba", 1000))]);
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
+        assert_eq!(lookup.names(stored), Some("Marimba"));
+    }
+
+    #[test]
+    fn a_zero_id_shows_the_dialed_piano() {
+        let Bench {
+            workspace,
+            mut device,
+            ..
+        } = Bench::new();
         let bytes = Fresh::Program.bytes().unwrap();
         let fields = fields::apply(&bytes, &[(panel::PIANO_ID.into(), "0".into())])
             .unwrap()
             .0;
-        let origin = Origin::Device {
-            class: ObjectClass::Program,
-            at,
-        };
-        let id = workspace.ingest("Dialed.ne5p".into(), origin, bytes, &mut log);
         let stored = fields
             .iter()
             .find(|field| field.path == panel::PIANO_ID)
             .unwrap();
-        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
-
-        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
-        assert_eq!(lookup.names(stored), Some("Royal Grand"));
-        assert!(
-            lookup.wants_a_name(),
-            "the instrument has not given it an id"
+        assert_eq!(
+            piano_lookup(Some(&fields), &workspace, &device).names(stored),
+            None,
+            "no instrument to dial"
         );
 
-        let royal = Dependency {
-            flag: 1,
-            class: ObjectClass::Piano,
-            id: 0x0102_0304,
-            name: "Royal Grand".into(),
-            location: None,
-        };
-        device.pretend_deps(ObjectClass::Program, at, vec![royal]);
-        let lookup = piano_lookup(workspace.get(id).unwrap(), Some(&fields), &device);
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand"]);
+        let lookup = piano_lookup(Some(&fields), &workspace, &device);
         assert_eq!(lookup.names(stored), Some("Royal Grand"));
-        assert!(!lookup.wants_a_name());
     }
 
-    /// The Electro 5 plays the piano the id names, so a dial moved under an old id would
-    /// keep playing the old piano.
+    /// 0x92e0cba2 is the `library_id` of `drawbar-tine`.
     #[test]
     fn moving_the_piano_dials_points_the_id_at_the_piano_now_there() {
-        use nord_usb::wire::Dependency;
-
         let Bench {
             mut workspace,
             mut device,
@@ -3324,18 +3279,7 @@ mod tests {
         let plays_royal = [(panel::PIANO_ID.to_string(), "0x01020304".to_string())];
         let fields = fields::apply(&bytes, &plays_royal).unwrap().0;
 
-        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "White Grand"]);
-        device.pretend_deps(
-            ObjectClass::Program,
-            Location { bank: 6, slot: 3 },
-            vec![Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id: 0x0a0b_0c0d,
-                name: "White Grand".into(),
-                location: None,
-            }],
-        );
+        device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand", "", "drawbar-tine"]);
         let follows = |device: &Device, sets: &[(&str, &str)]| {
             let sets: Sets = sets
                 .iter()
@@ -3343,26 +3287,16 @@ mod tests {
                 .collect();
             piano_follows(&sets, &fields, device).map(|(_, id)| id)
         };
-        let names = |device: &mut Device, slot, id, name: &str| {
-            let dep = Dependency {
-                flag: 1,
-                class: ObjectClass::Piano,
-                id,
-                name: name.into(),
-                location: None,
-            };
-            device.pretend_deps(ObjectClass::Program, Location { bank: 6, slot }, vec![dep]);
-        };
 
         assert_eq!(
             follows(&device, &[(panel::PIANO_MODEL, "2")]),
-            Some(0x0a0b_0c0d.to_string()),
-            "a piano the instrument has named"
+            Some(0x92e0_cba2_u32.to_string()),
+            "the id of the name the scan read there"
         );
         assert_eq!(
-            follows(&device, &[(panel::PIANO_MODEL, "0")]),
+            follows(&device, &[(panel::PIANO_MODEL, "1")]),
             Some("0".to_string()),
-            "a piano with no id in hand is left for the instrument to find by position"
+            "an empty position"
         );
         assert_eq!(
             follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
@@ -3379,19 +3313,11 @@ mod tests {
         );
         assert_eq!(follows(&device, &[("piano_panel.touch", "2")]), None);
 
-        device.pretend_scanned(ObjectClass::Piano, 2, &["Upright U1"]);
-        names(&mut device, 4, 0x0b0c_0d0e, "Upright U1");
+        device.pretend_scanned(ObjectClass::Piano, 2, &["drawbar-tine"]);
         assert_eq!(
             follows(&device, &[(panel::PIANO_CATEGORY, "Upright")]),
-            Some(0x0b0c_0d0e.to_string()),
+            Some(0x92e0_cba2_u32.to_string()),
             "the Type dial counts in its own bank"
-        );
-
-        names(&mut device, 5, 0x0c0d_0e0f, "White Grand");
-        assert_eq!(
-            follows(&device, &[(panel::PIANO_MODEL, "2")]),
-            Some("0".to_string()),
-            "two pianos the instrument calls White Grand"
         );
     }
 
@@ -3425,6 +3351,7 @@ mod tests {
                         &mut device,
                         &mut log,
                         &Around {
+                            sync: &Rows::default(),
                             queue: &queue,
                             tags: &tags,
                             played: &Played::default(),
@@ -4580,7 +4507,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
-            &open.queue,
+            &[],
             &mut open.log,
         );
         assert!(
@@ -4629,7 +4556,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::SaveDoc(open.id)],
             &mut open.workspace,
-            &open.queue,
+            &[],
             &mut open.log,
         );
         if acts.is_empty() {
@@ -4821,9 +4748,7 @@ mod tests {
 
     /// Record the piano library's working bytes as written to a slot.
     fn sent(open: &mut Open, bytes: Vec<u8>) {
-        let at = nord_usb::Location { bank: 0, slot: 0 };
-        let class = nord_usb::ObjectClass::Piano;
-        open.workspace.landed(open.id, class, at, bytes);
+        open.workspace.landed(open.id, bytes);
         open.twice();
     }
 
@@ -4868,7 +4793,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Export(id)],
             &mut open.workspace,
-            &open.queue,
+            &[],
             &mut open.log,
         );
         assert!(waiting.is_empty(), "the export waits for the lay-out");
@@ -4994,13 +4919,10 @@ mod tests {
             let ctx = open.ctx.clone();
             let mut acts = acts;
             loop {
-                let ran = open.document.settle(
-                    &ctx,
-                    acts,
-                    &mut open.workspace,
-                    &open.queue,
-                    &mut open.log,
-                );
+                let sync = crate::bring::writes(&open.device);
+                let ran =
+                    open.document
+                        .settle(&ctx, acts, &mut open.workspace, &sync, &mut open.log);
                 crate::browser::apply(
                     &mut self.browser,
                     &mut crate::shell::Shell::default(),
@@ -5131,11 +5053,10 @@ mod tests {
         let Open {
             document,
             workspace,
-            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, &[], log);
         assert_eq!(ran, [], "the save waits for the file");
         assert!(!document.piano.applying(), "nothing lays it out in memory");
 
@@ -5145,7 +5066,7 @@ mod tests {
         let saved = std::fs::File::open(dir.at("Saved.npno")).unwrap();
         let saved = crate::ondisk::OnDisk::open(saved, None).unwrap().unwrap();
         workspace.edit_saved(id, std::sync::Arc::new(saved));
-        let ran = document.settle(&ctx, Vec::new(), workspace, queue, log);
+        let ran = document.settle(&ctx, Vec::new(), workspace, &[], log);
         assert_eq!(ran, [Act::SaveDoc(id)]);
 
         let renamed = piano::snapshot(
@@ -5217,7 +5138,7 @@ mod tests {
             &ctx,
             vec![crate::browser::Act::Revert(open.id)],
             &mut open.workspace,
-            &open.queue,
+            &[],
             &mut open.log,
         );
         assert!(
@@ -5266,11 +5187,10 @@ mod tests {
         let Open {
             document,
             workspace,
-            queue,
             log,
             ..
         } = &mut open;
-        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, queue, log);
+        let ran = document.settle(&ctx, vec![Act::SaveDoc(id)], workspace, &[], log);
         assert_eq!(ran, [], "the save waits for the file");
         let (from, edit) = workspace.send_edit(id).expect("the store sends it");
 
@@ -5294,7 +5214,8 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_send_asked_during_the_save_of_an_edit_back_runs_once_that_edit_is_saved() {
+    fn a_sync_asked_during_the_save_of_an_edit_back_runs_once_that_edit_is_saved() {
+        use crate::bring::Rows;
         use crate::browser::Act;
         use crate::device::DeviceCmd;
 
@@ -5316,14 +5237,20 @@ mod tests {
         open.rename_sample("Marimba");
 
         let sent = |open: &Open| {
-            let mut queued = open.device.queued().iter();
+            let mut queued = open.device.queued().into_iter();
             queued.any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
         };
-        open.act(vec![Act::SendAll]);
+        open.act(vec![Act::Sync(None)]);
+        while let Some(class) = open.device.state.scan.take() {
+            open.device.state.scan.finished(class);
+        }
+        let sync = Rows::of(&open.device.state, &open.workspace, &open.queue);
+        crate::bring::accept(&mut open.device, &sync, &open.workspace);
+        open.act(vec![Act::SyncAll]);
         let (_, status) = open.log.status();
         assert!(
-            !sent(&open) && !status.starts_with("Nothing was sent"),
-            "the send waits for the save in flight: {status}"
+            !sent(&open) && !status.starts_with("Nothing was synced"),
+            "the Sync waits for the save in flight: {status}"
         );
 
         let (out, _) = testing::streamed(&edit.pieces(&from).unwrap(), &bytes);
@@ -5342,7 +5269,7 @@ mod tests {
         open.workspace.settle_files(&mut open.log);
         open.act(Vec::new());
 
-        assert!(sent(&open), "the send runs once the edit back is saved");
+        assert!(sent(&open), "the Sync runs once the edit back is saved");
         assert!(dir.read("Again.nsmp") == bytes, "and the file is as it was");
     }
 

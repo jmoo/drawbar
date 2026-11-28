@@ -71,10 +71,13 @@ With an instrument connected, more columns help:
 
 | Column | Shows |
 |---|---|
-| **Where** | **computer**, **keyboard** or **both**. **both =** means the copies match, and **both ≠** that they differ. |
-| **Needs** | The sample or piano a program uses, when drawbar knows it. The inspector lists it under **Dependencies**. |
+| **Where** | **computer**, **keyboard** or **both**. A file is on both when the slot it's [linked](sending.md#sync) to holds something. |
+| **At** | That slot. In gray, the slot hasn't been read yet, or its keyboard isn't attached. |
+| **Needs** | The piano or sample a program plays, once it's on this computer or on the keyboard. The inspector lists it under **Plays**, and a piano's or sample's **Played by** lists the programs that play it. |
 
-Choose **Waiting to send** to find sounds queued for the instrument.
+The mark before a name says how a file stands with its slot: `↑` when the file
+is newer, `↓` when the slot is, and `!` when it waits for your pick. Choose **To
+sync** or **Needs attention** to find those sounds.
 
 ## Rename, remove or undo
 

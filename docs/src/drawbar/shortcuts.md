@@ -9,7 +9,7 @@
 | Undo | <kbd>⌘Z</kbd> | <kbd>Ctrl+Z</kbd> |
 | Redo | <kbd>⇧⌘Z</kbd> | <kbd>Ctrl+Shift+Z</kbd> |
 | Rename the selected file | <kbd>F2</kbd> | <kbd>F2</kbd> |
-| Review the send queue | <kbd>⇧⌘S</kbd> | <kbd>Ctrl+Shift+S</kbd> |
+| Sync with the keyboard | <kbd>⇧⌘S</kbd> | <kbd>Ctrl+Shift+S</kbd> |
 | Read everything from the instrument | <kbd>⌘R</kbd> | <kbd>Ctrl+R</kbd> |
 | Close the tab | <kbd>⌘W</kbd> | <kbd>Ctrl+W</kbd> |
 | Show the Keyboard tab | <kbd>⌘2</kbd> | <kbd>Ctrl+2</kbd> |

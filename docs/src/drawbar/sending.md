@@ -1,8 +1,8 @@
 # Copy and send sounds
 
-Copy a sound from the keyboard to work on it on your computer, then send it
-back when you're ready. Sends wait in a queue, so you can check every
-destination before the instrument is written.
+Copy a sound from the keyboard to work on it on your computer, then sync it
+back when you're ready. Nothing is written to the instrument until you sync, so
+you can check every sound, and which way it goes, first.
 
 ## Copy a sound to this computer
 
@@ -10,40 +10,50 @@ destination before the instrument is written.
    it onto **This computer**. Select several slots to copy them together.
 2. Find the copy under **This computer** and double-click it to edit.
 
-The copy remembers the slot it came from. Saving it queues it for that slot
-and writes nothing yet. Opening the slot itself is different: **Save** there
-writes the slot at once.
+The copy is linked to the slot it came from. Saving it writes the file and
+nothing on the instrument; **Sync** writes it to that slot. Opening the slot
+itself is different: **Save** there writes the slot at once.
 
 To copy programs or songs with the sounds they depend on, [export a bundle](bundles.md).
 
-## Sending
+## Sync
 
-1. Queue the sound for a slot in one of these ways:
+A file is linked to a slot once you copy it from that slot or send it there.
+**Link to** and **Unlink** in a row's menu change a link. Sync compares each
+linked file with its slot.
+
+1. To put a file on a slot it isn't linked to, place it there first:
 
    | Start from | Do this |
    |---|---|
    | A file under **This computer** | Drag it onto a slot in the matching instrument folder. |
-   | A copy on this computer that came from a slot | Choose **Queue send** in its header, or save it. |
-   | Several copies changed since they came off the keyboard | Choose **Queue** beside **Send** in the top bar. |
-   | Checked files | Choose **Queue for sending** in the inspector's **Selection** card. |
+   | An open document | Choose **Send to…** in its header. |
+   | A row in **Library** | Choose **Send to…** in its menu. |
 
    Choose an empty slot to keep the sound already there.
-2. Click **Send** in the top bar. Its count tells you how many sounds are
-   waiting. Select a row to compare what the slot holds now with what you're
-   about to send. Click its destination to choose another slot, or **×** to
-   take it out of the queue.
-3. Store any unsaved changes on the keyboard's panel. Writing settings or the
+2. Click **Sync** in the top bar, or choose **Instrument ▸ Sync…**. drawbar
+   reads the keyboard and lists each sound that differs: `↑` writes a sound to
+   the keyboard, and `↓` brings one to this computer. The list opens by itself
+   when a keyboard you connect has changes of its own.
+3. Check each row. The lit arrow is the way it goes. Click the other arrow to
+   turn it, or the lit one to leave that sound out. A `!` row has none lit
+   until you pick.
+4. Store any unsaved changes on the keyboard's panel. Writing settings or the
    slot you're playing reloads the panel, and drawbar warns you before writing
    settings.
-4. Choose **Send all**.
-5. Load the program on the keyboard to hear it. **Load on instrument** in a
+5. Choose **Sync**.
+6. Load the program on the keyboard to hear it. **Load on instrument** in a
    document's header plays the version now in the slot.
 
-## When a send stops
+**Edit ▸ Undo** puts back a file Sync brought in. **Undo** in the activity log
+does too, and puts back a link Sync moved or removed, or one drawbar made on its
+own. A write to the keyboard has no undo.
 
-If the instrument refuses a transfer, the activity log says why, and the
-sounds not yet sent stay queued. A sound that changed on disk is not sent until
+## When a sync stops
+
+If the instrument refuses a transfer, the activity log says why, and the list
+opens again on what is left. A sound that changed on disk is not sent until
 you have looked at it.
 
-Disconnecting keeps the queue. Review the destinations again after
+Disconnecting keeps the sounds you placed on a slot. Check them again after
 reconnecting.

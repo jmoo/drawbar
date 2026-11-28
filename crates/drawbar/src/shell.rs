@@ -125,8 +125,6 @@ pub struct Shell {
     /// The activity popover over the status line, and whether it shows only problems.
     pub log_open: bool,
     pub log_problems: bool,
-    /// The send queue's review, over the whole window.
-    pub review_open: bool,
     /// Where the status line was last drawn: a click there toggles the popover, so the
     /// popover does not count it as a click outside itself.
     pub status_rect: egui::Rect,
@@ -159,7 +157,6 @@ impl Default for Shell {
             filter: Filter::default(),
             log_open: false,
             log_problems: false,
-            review_open: false,
             status_rect: egui::Rect::NOTHING,
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
@@ -710,7 +707,7 @@ impl DrawbarApp {
         self.theme_button(ui, frame);
         self.instrument_pill(ui, frame, narrow, acts);
         self.midi_chip(ui, narrow);
-        self.send_button(ui, narrow, acts);
+        self.sync_button(ui, narrow, acts);
     }
 
     /// The theme, as one glyph that cycles auto → light → dark.
@@ -840,19 +837,22 @@ impl DrawbarApp {
         .on_hover_text(detail);
     }
 
-    /// Send, which opens the review of what is waiting, with a warn dot while something
-    /// waiting cannot go as it is. Before it, the offer to queue saved changes a send
-    /// would otherwise skip. Neither is drawn without an instrument.
-    fn send_button(&self, ui: &mut egui::Ui, narrow: bool, acts: &mut Vec<Act>) {
+    /// Sync, which reads the keyboard and opens the sheet, counting the rows the sheet
+    /// would list, with a warn dot while something waiting cannot go as it is. Not drawn
+    /// without an instrument.
+    fn sync_button(&mut self, ui: &mut egui::Ui, narrow: bool, acts: &mut Vec<Act>) {
         if !self.attached() {
             return;
         }
         let visuals = ui.visuals().clone();
         let lit = accent(&visuals);
-        let waiting = self.queue.len();
-        let label = match waiting {
-            0 => "Send".to_string(),
-            n => format!("Send {n}"),
+        let synced = self
+            .library
+            .synced(&self.workspace, &self.device, &self.queue);
+        let rows = synced.list.len();
+        let label = match rows {
+            0 => "Sync".to_string(),
+            n => format!("Sync {n}"),
         };
         let troubled = self
             .queue
@@ -860,41 +860,32 @@ impl DrawbarApp {
             .iter()
             .any(|held| held.failure.is_some());
         let mac = crate::platform::mac_keyboard(ui.ctx());
-        let keys = key_text(Command::ReviewQueue, self.platform, mac).unwrap_or_default();
-        let send = Pill {
-            glyph: Glyph::Upload,
+        let keys = key_text(Command::Sync, self.platform, mac).unwrap_or_default();
+        let (fill, border) = match rows {
+            0 => (visuals.widgets.inactive.weak_bg_fill, None),
+            _ => (
+                tint(lit, 0.16),
+                Some(egui::Stroke::new(1.0_f32, tint(lit, 0.55))),
+            ),
+        };
+        let sync = Pill {
+            glyph: Glyph::RefreshCw,
             mark: lit,
-            label: (!narrow || waiting > 0).then_some(label.as_str()),
+            label: (!narrow || rows > 0).then_some(label.as_str()),
             ink: visuals.widgets.active.fg_stroke.color,
-            fill: tint(lit, 0.16),
-            border: Some(egui::Stroke::new(1.0_f32, tint(lit, 0.55))),
+            fill,
+            border,
             dashed: false,
             lamp: troubled.then(|| warn(&visuals)),
             radius: 8.0,
         }
         .show(ui)
-        .on_hover_text(format!("Review the send queue  {keys}"));
-        if send.clicked() {
-            acts.push(Act::ReviewQueue);
-        }
-        let offer = crate::queue::offer(&self.workspace, &self.device.state, &self.queue);
-        if let Some((label, hint)) = offer {
-            let queue = Pill {
-                glyph: Glyph::Plus,
-                mark: visuals.widgets.inactive.fg_stroke.color,
-                label: Some(&label),
-                ink: visuals.widgets.inactive.fg_stroke.color,
-                fill: visuals.widgets.inactive.weak_bg_fill,
-                border: None,
-                dashed: false,
-                lamp: None,
-                radius: 8.0,
-            }
-            .show(ui)
-            .on_hover_text(hint);
-            if queue.clicked() {
-                acts.push(Act::QueueChanged);
-            }
+        .on_hover_text(match troubled {
+            true => format!("Sync with the keyboard  {keys}\nA sound placed on a slot cannot go."),
+            false => format!("Sync with the keyboard  {keys}"),
+        });
+        if sync.clicked() {
+            acts.push(Act::Sync(None));
         }
     }
 
@@ -2208,12 +2199,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         attach(&mut app);
-        app.shell.review_open = true;
+        crate::bring::open(&mut app.device, None);
         let _ = settled(&ctx, &mut app, SCREEN);
-        assert!(crate::menu::covered(&ctx), "the review is a modal");
+        assert!(crate::menu::covered(&ctx), "the sheet is a modal");
 
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![zoom_key(egui::Key::Plus)]);
-        assert!(app.shell.review_open, "the review stays up");
+        assert!(app.device.asks.sheet.is_some(), "the sheet stays up");
         assert_eq!(app.zoom.percent(), 110);
     }
 
@@ -2574,7 +2565,7 @@ mod tests {
                     content: crate::workspace::Content::Unread {
                         len: 1,
                         failed: None,
-                        slot_crc: None,
+                        slot: None,
                     },
                     unsaved: None,
                 };
@@ -2662,10 +2653,9 @@ mod tests {
         assert_eq!(crushed.end - crushed.start, SEARCH_LEAST);
     }
 
-    /// The offer to queue what a send would skip counts the changed set, and is not drawn
-    /// when nothing has changed.
+    /// The toolbar's Sync counts the rows its sheet would list.
     #[test]
-    fn the_queue_button_offers_what_a_send_would_skip() {
+    fn the_sync_button_counts_the_rows_the_sheet_would_list() {
         use nord_usb::Location;
 
         let class = ObjectClass::Program;
@@ -2689,32 +2679,21 @@ mod tests {
         let held = app.workspace.get(id).unwrap().saved.crc32().unwrap();
         app.device
             .pretend_bodies(class, 7, &[Some(("Africa Split", held))]);
-        app.device.relink(&mut app.workspace);
-        assert!(
-            !settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
-            "the slot holds what this is saved as"
-        );
+        let print = app.workspace.get(id).unwrap().saved_print().unwrap();
+        crate::device::link_copy(&app.device.state, &mut app.workspace, id, class, at, print);
+        let rows = |app: &DrawbarApp| {
+            crate::bring::rows(&app.device.state, &app.workspace, &app.queue).len()
+        };
+        assert_eq!(rows(&app), 0, "the slot holds what this is saved as");
+        let painted = settled(&ctx, &mut app, SCREEN);
+        assert!(!painted.wrote("Sync 1"));
 
-        // Saved on this computer and nowhere else: the slot holds the older body.
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
         app.workspace.replace_bytes(id, edited, &mut app.log);
         app.workspace.mark_saved(id);
-        app.device.relink(&mut app.workspace);
-        assert!(
-            settled(&ctx, &mut app, SCREEN).wrote("Queue 1"),
-            "one to offer"
-        );
-
-        crate::queue::queue_changed(
-            &app.workspace,
-            &mut app.device,
-            &mut app.queue,
-            &mut app.log,
-        );
-        let painted = settled(&ctx, &mut app, SCREEN);
-        assert!(!painted.wrote("Queue 1"), "nothing is left to offer");
-        assert!(painted.wrote("Send 1"), "and the change is waiting");
+        assert_eq!(rows(&app), 1);
+        assert!(settled(&ctx, &mut app, SCREEN).wrote("Sync 1"));
     }
 
     /// ⚠️ With nothing attached there is nothing to send to and no room to report. Every
@@ -2722,7 +2701,7 @@ mod tests {
     /// connect one instead. The selection's card stays either way.
     #[test]
     fn no_instrument_means_no_instrument_controls() {
-        const ONLY_WITH_ONE: [&str; 3] = ["Send", "Room", "Info"];
+        const ONLY_WITH_ONE: [&str; 3] = ["Sync", "Room", "Info"];
 
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
@@ -2824,10 +2803,10 @@ mod tests {
     }
 
     /// ⚠️ egui matches a shortcut's modifiers logically, so an extra Shift is ignored and
-    /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to review the send queue would then
+    /// an unconsumed ⇧⌘S goes on to match ⌘S. Asking to Sync would then
     /// mark the open document saved and lose its revert.
     #[test]
-    fn the_send_queue_shortcut_never_falls_through_to_save() {
+    fn the_sync_shortcut_never_falls_through_to_save() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx, None);
         let id = app
@@ -2841,16 +2820,19 @@ mod tests {
         app.tabs.open(id);
         assert!(app.workspace.get(id).unwrap().is_unsaved());
 
-        let review = || {
+        let sync = || {
             pressed(
                 egui::Key::S,
                 egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
             )
         };
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![sync()]);
         assert!(!app.attached(), "nothing was attached");
-        assert!(!app.shell.review_open, "there is no queue to review");
+        assert!(
+            !app.device.asks.sheet.is_some(),
+            "there is no keyboard to sync with"
+        );
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
             "and no save either"
@@ -2858,16 +2840,45 @@ mod tests {
 
         attach(&mut app);
         let _ = drawn(&ctx, &mut app);
-        let _ = frame_of(&ctx, &mut app, SCREEN, vec![review()]);
-        assert!(app.shell.review_open);
+        let _ = frame_of(&ctx, &mut app, SCREEN, vec![sync()]);
+        assert!(app.device.asks.sheet.is_some());
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
-            "reviewing the queue is not saving"
+            "opening the sheet is not saving"
         );
     }
 
-    /// A key acts on nothing a modal covers: ⌘S behind the send queue's review leaves the
-    /// open document's revert point where it was, and saves again once the review closes.
+    #[test]
+    fn a_pressed_sync_that_nothing_holds_takes_choices_again() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx, None);
+        attach(&mut app);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let (class, at) = (ObjectClass::Program, nord_usb::Location::from_user(1, 1));
+        let waiting = (
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        crate::queue::enqueue(waiting.0, waiting.1, waiting.2, waiting.3, id, class, at);
+        crate::bring::open(&mut app.device, None);
+        let _ = settled(&ctx, &mut app, SCREEN);
+        let sync = crate::bring::Rows::of(&app.device.state, &app.workspace, &app.queue);
+        crate::bring::accept(&mut app.device, &sync, &app.workspace);
+        let pressed = |app: &DrawbarApp| app.device.asks.sheet.as_ref().map(|it| it.pressed());
+        assert_eq!(pressed(&app), Some(Some(1)));
+
+        let painted = settled(&ctx, &mut app, SCREEN);
+        assert_eq!(pressed(&app), Some(None), "the sheet stays up");
+        assert!(painted.words.iter().any(|word| word.text == "Sync 1"));
+    }
+
+    /// A key acts on nothing a modal covers: ⌘S behind the Sync sheet leaves the
+    /// open document's revert point where it was, and saves again once the sheet closes.
     #[test]
     fn a_shortcut_behind_a_modal_does_nothing() {
         let ctx = egui::Context::default();
@@ -2883,17 +2894,29 @@ mod tests {
         app.workspace.replace_bytes(id, edited, &mut app.log);
         app.tabs.open(id);
         let save = || pressed(egui::Key::S, egui::Modifiers::COMMAND);
+        let other = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let (class, at) = (ObjectClass::Program, nord_usb::Location::from_user(1, 1));
+        let waiting = (
+            &app.workspace,
+            &mut app.device,
+            &mut app.queue,
+            &mut app.log,
+        );
+        crate::queue::enqueue(waiting.0, waiting.1, waiting.2, waiting.3, other, class, at);
 
-        app.shell.review_open = true;
+        crate::bring::open(&mut app.device, None);
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![save()]);
-        assert!(app.shell.review_open, "the review stays up");
+        assert!(app.device.asks.sheet.is_some(), "the sheet stays up");
         assert!(
             app.workspace.get(id).unwrap().is_unsaved(),
             "and the document behind it is not saved"
         );
 
-        app.shell.review_open = false;
+        app.device.asks.sheet = None;
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![save()]);
         assert!(
@@ -3021,7 +3044,7 @@ mod tests {
             let _ = frame_from(&ctx, app, input);
             settled(&ctx, app, LARGE)
         };
-        let queue = crate::browser::Bulk::Queue.label();
+        let more = "…";
 
         let morph = in_inspector(&painted, "Morph").expect("the Morph card");
         let selection = in_inspector(&painted, "Selection").expect("the Selection card");
@@ -3033,7 +3056,7 @@ mod tests {
             in_inspector(&painted, "Tags").is_some(),
             "the Tags card's header"
         );
-        for body in [queue, "Add tag"] {
+        for body in [more, "Add tag"] {
             assert!(
                 in_inspector(&painted, body).is_none(),
                 "{body} is folded away"
@@ -3042,12 +3065,12 @@ mod tests {
 
         let picked = press(&mut app, own.center());
         assert!(
-            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, queue).is_none(),
+            in_inspector(&picked, "Morph").is_some() && in_inspector(&picked, more).is_none(),
             "a click on its own row in the browser leaves it followed"
         );
 
         let opened = press(&mut app, selection.center());
-        assert!(in_inspector(&opened, queue).is_some(), "a click unfolds it");
+        assert!(in_inspector(&opened, more).is_some(), "a click unfolds it");
 
         let browsing = press(&mut app, upright.center());
         assert!(
@@ -3308,9 +3331,10 @@ mod tests {
             let _ = frame_of(&ctx, app, LARGE, testing::click(at.center()));
         };
 
-        click(&mut app, crate::browser::Bulk::Queue.label());
+        click(&mut app, "Send to…");
         assert!(app.queue.holds(split), "the document is queued");
         assert!(!app.queue.holds(grand), "the library's selection is not");
+        app.device.asks.sheet = None;
 
         click(&mut app, "Sunday");
         assert_eq!(
@@ -3360,7 +3384,7 @@ mod tests {
         assert!(app.shell.log_open && app.shell.log_problems);
     }
 
-    /// Escape closes the review or the activity log and leaves the selection as it was;
+    /// Escape closes the Sync sheet or the activity log and leaves the selection as it was;
     /// with neither open, it lets go of the selection.
     #[test]
     fn escape_closes_an_overlay_without_letting_go_of_the_selection() {
@@ -3375,10 +3399,10 @@ mod tests {
         let picked = |app: &DrawbarApp| app.browser.picked().items().count();
         let _ = settled(&ctx, &mut app, SCREEN);
         app.browser.check(crate::browser::Item::Local(id));
-        app.shell.review_open = true;
+        crate::bring::open(&mut app.device, None);
         let _ = settled(&ctx, &mut app, SCREEN);
         let _ = frame_of(&ctx, &mut app, SCREEN, vec![escape()]);
-        assert!(!app.shell.review_open, "Escape closes the review");
+        assert!(app.device.asks.sheet.is_none(), "Escape closes the sheet");
         assert_eq!(picked(&app), 1, "and keeps the selection");
 
         app.shell.log_open = true;
@@ -3667,6 +3691,9 @@ mod tests {
         run(testing::click(
             testing::where_(&seen, "Africa Split").center(),
         ));
+        let seen = run(Vec::new());
+        run(testing::click(testing::where_(&seen, "…").center()));
+        run(Vec::new());
         let seen = run(Vec::new());
         run(testing::click(testing::where_(&seen, "Delete…").center()));
         // A sheet is laid out unseen on its first frame.
