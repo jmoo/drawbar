@@ -98,7 +98,7 @@ pub(super) struct Sync {
     conflicts: usize,
     /// Which copy changes each writer's log: the first copy to hold it.
     writers: BTreeMap<String, usize>,
-    /// How many changes to a writer's log the model has taken in.
+    /// How many changes to a writer's log the model has taken in after its first.
     logged: usize,
     /// The paths a chaos event or a conflict touched.
     strange: BTreeSet<String>,
@@ -158,7 +158,7 @@ impl Sync {
         sync
     }
 
-    /// How many changes to a writer's log the model has taken in.
+    /// How many changes to a writer's log the model has taken in after its first.
     pub fn logged(&self) -> usize {
         self.logged
     }
@@ -264,7 +264,8 @@ impl Sync {
             .strip_prefix(&writers)
             .and_then(|r| r.split('/').next())
         {
-            self.logged += 1;
+            let known = self.writers.contains_key(writer);
+            self.logged += usize::from(known);
             let writes = *self.writers.entry(writer.to_string()).or_insert(copy);
             if writes != copy {
                 return Err(format!(
