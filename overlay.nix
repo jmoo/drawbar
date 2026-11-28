@@ -1,1163 +1,181 @@
 final: prev:
 let
-  inherit (final.lib)
-    all
-    attrNames
-    attrValues
-    boolToString
-    cleanSource
-    cleanSourceWith
-    concatLines
-    concatMap
+  inherit (final) lib;
+  inherit (lib)
     concatMapAttrs
-    concatMapStringsSep
-    concatStringsSep
-    crane
-    elem
-    elemAt
-    escapeShellArgs
-    filter
     filterAttrs
     genAttrs
-    hasInfix
-    hasPrefix
-    hasSuffix
-    importTOML
-    isBool
-    listToAttrs
-    makeLibraryPath
-    makeOverridable
     mapAttrs
     mapAttrs'
-    mapAttrsToList
     nameValuePair
-    optional
     optionalAttrs
-    optionals
-    optionalString
-    readFile
-    replaceStrings
-    splitString
-    tail
-    toUpper
     ;
-
-  workspace = ./crates;
-
-  workspaceManifest = (importTOML (workspace + "/Cargo.toml")).workspace;
-  inherit (workspaceManifest) members;
-  inherit (workspaceManifest.package) edition;
-
-  commonArgs = {
-    src = cleanSourceWith {
-      name = "source";
-      src = workspace;
-      filter =
-        path: type:
-        (
-          crane.filterCargoSources path type
-          || hasSuffix ".script" path
-          || hasInfix "/nord-cli/checks/" path
-          # The About box's test compares its copy against this.
-          || path == toString (workspace + "/LICENSE")
-          # The committed specimens and replay scripts, whatever their extensions.
-          || hasInfix "/tests/fixtures/" path
-          || hasInfix "/tests/scripts/" path
-          # The vendored glyphs and fonts, which drawbar `include_bytes!`s.
-          || hasInfix "/drawbar/assets/" path
-          # The license texts the About box `include_str!`s.
-          || hasInfix "/drawbar/licenses/" path
-          # The page, whose small-screen gate a test holds to the shell's.
-          || path == toString (workspace + "/drawbar/index.html")
-          # The page's icon, which a test holds to the titlebar's mark.
-          || path == toString (workspace + "/drawbar/favicon.svg")
-          # The collector's schema, which a test holds to the rows drawbar sends.
-          || path == toString (workspace + "/drawbar/telemetry.json")
-        );
-    };
-
-    strictDeps = true;
-  };
-
-  # Share one dependency build, excluding drawbar so library builds do not compile its
-  # GUI stack. `drawbarArtifacts` is that crate's own.
-  cargoArtifacts = crane.buildDepsOnly (
-    commonArgs
-    // {
-      cargoExtraArgs = "--locked --workspace --exclude drawbar";
-      pname = "workspace";
-      version = "0";
-    }
-  );
-
-  # Every member's `[package]` table, keyed by the name cargo knows it by.
-  manifests = listToAttrs (
-    map (
-      member:
-      let
-        crate = (importTOML (workspace + "/${member}/Cargo.toml")).package;
-      in
-      nameValuePair crate.name crate
-    ) members
-  );
-
-  # Crates declare test-only features in `package.metadata.nix.testFeatures`, so new
-  # workspace members need no overlay wiring.
-  testFeaturesFor = name: manifests.${name}.metadata.nix.testFeatures or [ ];
-
-  featureArgs =
-    features: optionalString (features != [ ]) "--features ${concatStringsSep "," features}";
-
-  mkCrate = makeOverridable (
-    { crate, ... }@args:
-    crane.buildPackage (
-      commonArgs
-      // {
-        inherit cargoArtifacts;
-        cargoExtraArgs = "--locked -p ${crate}";
-        cargoTestExtraArgs = featureArgs (testFeaturesFor crate);
-        pname = crate;
-        inherit (manifests.${crate}) version;
-      }
-      // builtins.removeAttrs args [ "crate" ]
-    )
-  );
-
-  testFeatures = concatMap (name: map (feature: "${name}/${feature}") (testFeaturesFor name)) (
-    attrNames manifests
-  );
-
-  testArgs =
-    commonArgs
-    // audioArgs
-    // {
-      CARGO_PROFILE = "release-tests";
-      cargoExtraArgs = "--locked --workspace ${featureArgs testFeatures}";
-      pname = "workspace-tests";
-      version = "0";
-    };
-
-  testArtifacts = crane.buildDepsOnly testArgs;
-
-  tests = crane.mkCargoDerivation (
-    testArgs
-    // {
-      NORD_TEST_FEATURES = concatStringsSep "," testFeatures;
-      buildPhaseCargoCommand = "bash ${./scripts/test.bash}";
-      cargoArtifacts = testArtifacts;
-      doInstallCargoArtifacts = false;
-      installPhaseCommand = ''touch "$out"'';
-      nativeBuildInputs = (testArgs.nativeBuildInputs or [ ]) ++ [ final.jq ];
-    }
-  );
-
-  # ⚠️ winit, glutin and xkbcommon `dlopen` these: builds succeed without them, then
-  # die with `NoWaylandLib`. Packages and the dev shell must set the loader path.
-  guiLibs = optionals final.stdenv.hostPlatform.isLinux (
-    with final;
-    [
-      libGL
-      libx11
-      libxcursor
-      libxi
-      libxkbcommon
-      libxrandr
-      wayland
-    ]
-  );
-
-  audioArgs = optionalAttrs final.stdenv.hostPlatform.isLinux {
-    buildInputs = [ final.alsa-lib ];
-    nativeBuildInputs = [ final.pkg-config ];
-  };
-
-  # The shared build above excludes drawbar, so its GUI stack needs a dependency build
-  # of its own; without one, every edit under `drawbar/src` recompiles all of it.
-  drawbarArtifacts = crane.buildDepsOnly (
-    commonArgs
-    // audioArgs
-    // {
-      cargoExtraArgs = "--locked -p drawbar";
-      pname = "drawbar";
-      inherit (manifests.drawbar) version;
-    }
-  );
-
-  crates = mapAttrs (name: _: mkCrate { crate = name; }) manifests // {
-    drawbar =
-      let
-        pkg = mkCrate (
-          {
-            cargoArtifacts = drawbarArtifacts;
-            crate = "drawbar";
-            meta.mainProgram = "drawbar";
-          }
-          // audioArgs
-        );
-      in
-      if guiLibs == [ ] then
-        pkg
-      else
-        pkg.overrideAttrs (old: {
-          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.makeWrapper ];
-          postInstall = ''
-            wrapProgram "$out/bin/drawbar" \
-              --prefix LD_LIBRARY_PATH : ${makeLibraryPath guiLibs}
-          '';
-        });
-
-    # `nord-cli` also runs the binary it installed, as an install check.
-    nord-cli =
-      (mkCrate {
-        crate = "nord-cli";
-        meta.mainProgram = "nord";
-      }).overrideAttrs
-        (pocInstallCheck {
-          bin = "bin/nord";
-        });
-  };
-
-  # drawbar.app around the binary `packages` builds, so CI compiles drawbar once.
-  # scripts/dmg.bash checks it with the system's own tools and makes the disk image.
-  drawbarApp =
-    let
-      inherit (manifests.drawbar) version;
-      bin = crates.drawbar.overrideAttrs { doCheck = false; };
-      info = final.writeText "Info.plist" (
-        final.lib.generators.toPlist { escape = true; } {
-          CFBundleDisplayName = "drawbar";
-          CFBundleExecutable = "drawbar";
-          CFBundleIconFile = "drawbar";
-          CFBundleIdentifier = "app.drawbar";
-          CFBundleInfoDictionaryVersion = "6.0";
-          CFBundleName = "drawbar";
-          CFBundlePackageType = "APPL";
-          CFBundleShortVersionString = version;
-          CFBundleVersion = version;
-          LSMinimumSystemVersion = "@minos@";
-          NSHighResolutionCapable = true;
-        }
-      );
-    in
-    final.runCommand "drawbar-app-${version}"
-      {
-        nativeBuildInputs = [
-          final.darwin.binutils-unwrapped
-          final.file
-          final.libicns
-          final.resvg
-        ];
-        meta.description = "drawbar as a macOS application bundle";
-      }
-      ''
-        contents="$out/drawbar.app/Contents"
-        mkdir -p "$contents/MacOS" "$contents/Resources"
-        install -m 755 ${bin}/bin/drawbar "$contents/MacOS/drawbar"
-
-        # ⚠️ The Rust standard library links libiconv, and nixpkgs resolves it to its own
-        # build. Nothing calls into it; the system's copy has the same compatibility
-        # version. cctools' install_name_tool renews the linker's ad-hoc signature.
-        install_name_tool -change ${final.libiconv}/lib/libiconv.2.dylib /usr/lib/libiconv.2.dylib \
-          "$contents/MacOS/drawbar"
-
-        # A library outside these two trees is missing from a Mac without Nix.
-        while IFS= read -r -d "" file; do
-          case "$(file -b "$file")" in Mach-O*) ;; *) continue ;; esac
-          foreign="$(otool -L "$file" | tail -n +2 | awk '{ print $1 }' | grep -Ev '^(/usr/lib|/System/Library)/' || true)"
-          if [ -n "$foreign" ]; then
-            echo "''${file#"$out/"} links what a Mac without Nix lacks:" $foreign >&2
-            exit 1
-          fi
-        done < <(find "$out" -type f -print0)
-
-        minos="$(otool -l "$contents/MacOS/drawbar" | awk '$1 == "cmd" { cmd = $2 } cmd == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }')"
-        [ -n "$minos" ] || {
-          echo "drawbar carries no LC_BUILD_VERSION to read its minimum macOS from" >&2
-          exit 1
-        }
-        substitute ${info} "$contents/Info.plist" --replace-fail @minos@ "$minos"
-
-        # The icon is the favicon, which is the titlebar's mark.
-        for size in 16 32 128 256 512 1024; do
-          resvg -w "$size" -h "$size" ${./crates/drawbar/favicon.svg} "$size.png"
-        done
-        png2icns "$contents/Resources/drawbar.icns" {16,32,128,256,512,1024}.png
-      '';
-
-  targets = {
-    windows = {
-      crossPkgs = final.pkgsCross.mingwW64;
-      libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
-    };
-
-    wasip1 = {
-      cargoFlags = [
-        "--no-default-features"
-        "--features"
-        "replay"
-      ];
-      crossPkgs = final.pkgsCross.wasi32;
-      testRunner = {
-        # The suite reads its scripts off the source tree, which a wasm sandbox
-        # sees only through a preopened directory.
-        cmd = "wasmtime --dir /";
-        packages = [
-          final.lld
-          final.wasmtime
-        ];
-      };
-    };
-  }
-  # ⚠️ A musl cross set links against the store's `ld-musl` unless told otherwise;
-  # `static` links musl in, and mkCross refuses a binary that still names a loader.
-  // optionalAttrs final.stdenv.hostPlatform.isLinux {
-    linux-aarch64 = {
-      crossPkgs = final.pkgsCross.aarch64-multiplatform-musl;
-      static = true;
-    };
-    linux-x86_64 = {
-      crossPkgs = final.pkgsCross.musl64;
-      static = true;
-    };
-  };
-
-  # How this host runs a target's executables: an emulator, or null where it runs them
-  # itself. A target missing here is built and never run.
-  emulators =
-    optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
-      linux-aarch64 = {
-        cmd = "qemu-aarch64";
-        package = final.qemu;
-      };
-      linux-x86_64 = null;
-    }
-    // optionalAttrs (final.stdenv.hostPlatform.system == "aarch64-linux") {
-      linux-aarch64 = null;
-    };
-
-  # Where cargo puts the artifacts, and what BUILD_INFO records.
-  tripleOf = spec: spec.triple or spec.crossPkgs.stdenv.hostPlatform.rust.rustcTarget;
-
-  # CARGO_TARGET_<TRIPLE>_LINKER wants the triple upper-cased with underscores.
-  envTriple = triple: toUpper (builtins.replaceStrings [ "-" ] [ "_" ] triple);
-
-  # ⚠️ ELF and PE need the cross linker; wasm needs rustc's lld. Cross clang rejects
-  # wasm's lld arguments with the misleading error `no such file or directory: wasm`.
-  needsLinker = spec: spec ? crossPkgs && !hasPrefix "wasm" (tripleOf spec);
-
-  # A target's linker and extra static libs reach cargo through the environment, not
-  # through the cc wrapper.
-  targetEnv =
-    spec:
-    optionalAttrs (needsLinker spec) (
-      let
-        inherit (spec.crossPkgs.stdenv) cc;
-        triple = tripleOf spec;
-      in
-      {
-        # rustc needs a real linker for a foreign target; the cross set's cc is it.
-        "CARGO_TARGET_${envTriple triple}_LINKER" = "${cc}/bin/${cc.targetPrefix}cc";
-        # Build scripts that compile C, such as ring's, need the target's compiler and
-        # archiver too, or the `cc` crate builds host objects the target linker skips.
-        "CC_${triple}" = "${cc}/bin/${cc.targetPrefix}cc";
-        "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
-      }
-    )
-    // optionalAttrs (spec ? libs || spec.static or false) (
-      let
-        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs or [ ];
-      in
-      {
-        # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
-        # `-l:` requests.
-        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatStringsSep " " (
-          optional (spec.static or false) "-C target-feature=+crt-static" ++ optional (spec ? libs) paths
-        );
-      }
-      // optionalAttrs (spec ? libs) {
-        # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
-        # doctests are all the target's.
-        RUSTDOCFLAGS = paths;
-      }
-    )
-    // optionalAttrs (spec ? testRunner) {
-      # cargo hands each test binary to this runner, which is what lets a foreign
-      # target's tests run here.
-      "CARGO_TARGET_${envTriple (tripleOf spec)}_RUNNER" = spec.testRunner.cmd;
-    };
-
-  mkCross =
-    crate: name: spec:
-    let
-      # Swap only rustc: sandbox tools stay native while the compiler supplies target std.
-      crossLib = crane.overrideScope (
-        _: _: { rustc = if spec ? crossPkgs then spec.crossPkgs.buildPackages.rustc else final.rustc; }
-      );
-
-      args =
-        commonArgs
-        // {
-          CARGO_BUILD_TARGET = tripleOf spec;
-          cargoExtraArgs = escapeShellArgs (
-            [
-              "--locked"
-              "-p"
-              crate
-            ]
-            ++ spec.cargoFlags or [ ]
-          );
-          # A foreign binary cannot be executed here unless the target brought
-          # something that can run it.
-          doCheck = spec ? testRunner;
-          nativeBuildInputs =
-            optional (needsLinker spec) spec.crossPkgs.stdenv.cc
-            ++ optional (spec.static or false) final.file
-            ++ spec.testRunner.packages or [ ];
-          pname = "${crate}-${name}";
-          inherit (manifests.${crate}) version;
-        }
-        // optionalAttrs (spec ? testRunner) {
-          # wasmtime caches compiled modules under HOME, which the sandbox lacks;
-          # without one it fails on /homeless-shelter.
-          preCheck = ''
-            export HOME="$TMPDIR/home"
-            mkdir -p "$HOME"
-          '';
-        }
-        // targetEnv spec;
-
-      pkg = crossLib.buildPackage (
-        args
-        // {
-          cargoArtifacts = crossLib.buildDepsOnly args;
-
-          # Crane skips rlibs; install lib-only cross artifacts manually and require output.
-          doNotPostBuildInstallCargoBinaries = true;
-
-          installPhaseCommand = ''
-            mkdir -p "$out"
-            rel="target/${tripleOf spec}/release"
-
-            # Keep real artifacts, not Cargo bookkeeping. Match mode too, because Unix
-            # executables have no extension and an empty cross-build output can otherwise pass.
-            find "$rel" -maxdepth 1 -type f \
-              \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.a' -o -name '*.wasm' \
-                 -o -name '*.exe' -o -name '*.dll' -o -name '*.so' -o -name '*.dylib' \
-                 -o -perm -u+x \) \
-              ! -name '*.d' \
-              -exec cp -t "$out/" {} +
-
-            # A cross build that produces no artifact fails.
-            if [ -z "$(find "$out" -maxdepth 1 -type f -print -quit)" ]; then
-              echo "no artifacts found in $rel; the build produced nothing" >&2
-              ls -la "$rel" >&2 || true
-              exit 1
-            fi
-
-            ${optionalString (spec.static or false) ''
-              # `file` calls a static position-independent executable `static-pie linked`.
-              for bin in $(find "$out" -maxdepth 1 -type f -perm -u+x); do
-                linkage="$(file -b "$bin")"
-                case $linkage in
-                *interpreter* | *dynamically\ linked*)
-                  echo "$bin is not static: $linkage" >&2
-                  exit 1
-                  ;;
-                *statically\ linked* | *static-pie\ linked*) ;;
-                *)
-                  echo "$bin: no linkage in $linkage" >&2
-                  exit 1
-                  ;;
-                esac
-              done
-            ''}
-            echo "${crate} ${manifests.${crate}.version} built for ${tripleOf spec}" > "$out/BUILD_INFO"
-            echo "installed:" >&2
-            ls -la "$out" >&2
-          '';
-
-          meta.description = "${crate} cross-compiled for ${tripleOf spec}";
-
-          # ⚠️ Dependency artifacts include dummy workspace outputs at the target root.
-          # Clear them so installation cannot pass on a stand-in; dependencies stay in `deps/`.
-          preBuild = ''
-            find "target/${tripleOf spec}/release" -maxdepth 1 -type f -delete
-          '';
-        }
-      );
-    in
-    # Add the executable check only where a runner exists. `overrideAttrs` keeps it
-    # off the dependency build, whose workspace binary is Crane's inert stand-in.
-    if crate == "nord-cli" && emulators ? ${name} then
-      pkg.overrideAttrs (pocInstallCheck {
-        bin = if spec.crossPkgs.stdenv.hostPlatform.isWindows then "nord.exe" else "nord";
-        emulator = emulators.${name};
-      })
-    else
-      pkg;
-
-  # Cross-build applications to exercise their whole dependency stack. `nord-usb`
-  # also keeps wasip1 because its own suite executes there in a wasm VM, and
-  # `toshokan` builds for Windows because its Windows renames compile only there.
-  crateTargets = {
-    # A CLI has no use on WASI.
-    nord-cli = filter (t: t != "wasip1") (attrNames targets);
-    nord-usb = [ "wasip1" ];
-    drawbar = [ "windows" ];
-    toshokan = [ "windows" ];
-  };
-
-  # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
-  # ⚠️ Its CLI must match the crate pin; move the Cargo pin when they diverge.
-  drawbar-web =
-    let
-      args = commonArgs // {
-        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-        # The size-tuned profile from the workspace manifest.
-        CARGO_PROFILE = "web";
-        # ⚠️ `--lib` prevents the same-named binary stub from winning `drawbar.wasm`
-        # and producing a package with no exports.
-        cargoExtraArgs = "--locked -p drawbar --lib";
-        # A wasm module runs in a browser, not here.
-        doCheck = false;
-        # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none;
-        # without it the cdylib fails to link.
-        nativeBuildInputs = [ final.lld ];
-        pname = "drawbar-web";
-        inherit (manifests.drawbar) version;
-      };
-    in
-    crane.buildPackage (
-      args
-      // {
-        cargoArtifacts = crane.buildDepsOnly args;
-
-        installPhaseCommand = ''
-          mkdir -p "$out"
-          wasm-bindgen --target web --no-typescript --out-dir "$out/pkg" \
-            target/wasm32-unknown-unknown/web/drawbar.wasm
-
-          # ⚠️ Pages serves this gzipped, and inlining a function into its only caller
-          # shrinks the file but grows the gzip. Data starts at 1 MiB and the stack grows
-          # down from it, so only an overflowing stack reaches the low KiB that
-          # `--low-memory-unused` assumes is unused. rustc emits no `target_features`
-          # section, so the two features its output uses are named here.
-          wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int \
-            --one-caller-inline-max-function-size=0 -Oz --converge --low-memory-unused \
-            --strip-producers -o optimized.wasm "$out/pkg/drawbar_bg.wasm"
-          mv optimized.wasm "$out/pkg/drawbar_bg.wasm"
-
-          # Pages caches for ten minutes, so a cached glue file can meet a freshly
-          # fetched module; the content hash in each name keeps that pair unreachable.
-          wasm="drawbar_bg-$(sha256sum "$out/pkg/drawbar_bg.wasm" | cut -c-16).wasm"
-          mv "$out/pkg/drawbar_bg.wasm" "$out/pkg/$wasm"
-          substituteInPlace "$out/pkg/drawbar.js" --replace-fail drawbar_bg.wasm "$wasm"
-
-          js="drawbar-$(sha256sum "$out/pkg/drawbar.js" | cut -c-16).js"
-          mv "$out/pkg/drawbar.js" "$out/pkg/$js"
-
-          # The page fetches the module itself to report progress, so it needs the
-          # hashed name and the byte count the renamed file actually has.
-          substitute ${./crates/drawbar/index.html} "$out/index.html" \
-            --replace-fail pkg/drawbar.js "pkg/$js" \
-            --replace-fail pkg/drawbar_bg.wasm "pkg/$wasm" \
-            --replace-fail @version@ "${manifests.drawbar.version}" \
-            --replace-fail @wasmBytes@ "$(stat -c %s "$out/pkg/$wasm")"
-          cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
-          # The demo sounds the welcome sheet fetches, beside the app that reads them.
-          cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
-
-          if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
-            echo "an unhashed asset name survived the rewrite" >&2
-            exit 1
-          fi
-
-          for stale in pkg/drawbar.js pkg/drawbar_bg.wasm @version@ @wasmBytes@; do
-            if grep -qF "$stale" "$out/index.html"; then
-              echo "index.html still holds $stale after the rewrite" >&2
-              exit 1
-            fi
-          done
-
-          # The page imports `start` from the module; a bundle without it loads
-          # and does nothing.
-          grep -q 'function start' "$out/pkg/$js" || {
-            echo "wasm-bindgen output lacks the page's entry point" >&2
-            exit 1
-          }
-        '';
-
-        meta.description = "drawbar built for the browser";
-        nativeBuildInputs = args.nativeBuildInputs ++ [
-          final.binaryen
-          final.wasm-bindgen-cli
-        ];
-
-        # ⚠️ Dependency artifacts contain a dummy `drawbar.wasm`; clear it before
-        # binding so only the real module can satisfy the install.
-        preBuild = ''
-          find "target/wasm32-unknown-unknown/web" -maxdepth 1 -type f -delete
-        '';
-      }
-    );
-
-  browserSuites =
-    final.lib.mapAttrsToList
-      (
-        name: manifest:
-        let
-          # ⚠️ Only the suites' own build names them: the dependency build compiles
-          # stand-in sources, which hold no test target.
-          suites = escapeShellArgs (
-            concatMap (suite: [
-              "--test"
-              suite
-            ]) (manifest.metadata.nix.browserTests or [ ])
-          );
-          args = commonArgs // {
-            CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-            CARGO_PROFILE = "release-tests";
-            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)}";
-            nativeBuildInputs = [ final.lld ];
-            pname = "${name}-browser-tests";
-            inherit (manifest) version;
-          };
-        in
-        crane.mkCargoDerivation (
-          args
-          // {
-            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
-            WASM_BINDGEN_TEST_TIMEOUT = "300";
-            WASM_BINDGEN_TEST_WEBDRIVER_JSON = final.writeText "webdriver.json" (
-              builtins.toJSON {
-                "goog:chromeOptions" = {
-                  args = [
-                    "--disable-dev-shm-usage"
-                    "--no-sandbox"
-                  ];
-                  binary = final.lib.getExe final.chromium;
-                };
-                "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
-              }
-            );
-            buildPhaseCargoCommand = ''
-              export HOME="$TMPDIR/home"
-              mkdir -p "$HOME"
-              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
-              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
-            '';
-            cargoArtifacts = crane.buildDepsOnly args;
-            doInstallCargoArtifacts = false;
-            installPhaseCommand = ''touch "$out"'';
-            nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
-          }
-        )
-      )
-      (final.lib.filterAttrs (_: manifest: (manifest.metadata.nix.browserTests or [ ]) != [ ]) manifests);
-
-  # The power-loss workloads and checker in a page whose runs a driver kills, in
-  # Chromium and Firefox; Linux only, as the other browser suites.
-  toshokanBrowserCrash = final.callPackage ./crates/toshokan/power-loss/browser {
-    wasm =
-      let
-        args = commonArgs // {
-          CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-          cargoExtraArgs = "--locked -p toshokan --features web";
-          # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
-          nativeBuildInputs = [ final.lld ];
-          pname = "toshokan-browser-crash";
-          inherit (manifests.toshokan) version;
-        };
-      in
-      crane.mkCargoDerivation (
-        args
-        // {
-          buildPhaseCargoCommand = "cargo build --release $cargoExtraArgs --example browser_crash";
-          cargoArtifacts = crane.buildDepsOnly args;
-          doInstallCargoArtifacts = false;
-          installPhaseCommand = ''
-            wasm-bindgen --target web --no-typescript --out-dir "$out" \
-              target/wasm32-unknown-unknown/release/examples/browser_crash.wasm
-          '';
-          nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
-        }
-      );
-  };
-
-  # drawbar as one Linux executable: the tested binary, set to run on the host's
-  # libraries, and the AppImage runtime.
-  drawbarAppImage = final.callPackage ./crates/drawbar/appimage {
-    inherit (crates) drawbar;
-    inherit (workspaceManifest.package) repository;
-    inherit guiLibs;
-  };
-
-  # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
-  # of the source means a local `mdbook build` cannot change this derivation.
-  docs = final.stdenvNoCC.mkDerivation {
-    pname = "drawbar-docs";
-    inherit (manifests.drawbar) version;
-
-    src = cleanSourceWith {
-      name = "docs";
-      src = cleanSource ./docs;
-      filter = path: type: !(type == "directory" && hasSuffix "/book" path);
-    };
-
-    nativeBuildInputs = [
-      final.mdbook
-      final.mdbook-mermaid
-    ];
-
-    dontConfigure = true;
-    dontInstall = true;
-
-    buildPhase = ''
-      runHook preBuild
-      mdbook build --dest-dir "$out"
-
-      # A book whose summary renders nothing still exits 0.
-      if [ ! -f "$out/index.html" ]; then
-        echo "mdbook rendered no index.html" >&2
-        exit 1
-      fi
-
-      # mdBook copies `additional-js` and nothing beside it.
-      cp LICENSE-mermaid.txt "$out/"
-      runHook postBuild
-    '';
-
-    meta.description = "the drawbar user guide";
-  };
-
-  # The stable name under drawbar.app/download/ of each release file scripts/assets.tsv lists.
-  downloadNames = {
-    drawbar-app = "macos";
-    drawbar-appimage = "linux";
-    drawbar-windows = "windows";
-    nord-cli-linux-aarch64-tarball = "nord-linux-aarch64";
-    nord-cli-linux-x86_64-tarball = "nord-linux-x86_64";
-    nord-cli-windows = "nord-windows";
-  };
-
-  # A page per release file that redirects to it at the given crate versions.
-  downloads =
-    versions:
-    final.symlinkJoin {
-      name = "drawbar-downloads";
-      paths = map (
-        line:
-        let
-          row = splitString "\t" line;
-          crate = elemAt row 0;
-          tag = "${crate}-v${versions.${crate}}";
-          asset = replaceStrings [ "@version@" ] [ versions.${crate} ] (elemAt row 5);
-          url = "https://github.com/jmoo/drawbar/releases/download/${tag}/${asset}";
-        in
-        final.writeTextDir "download/${downloadNames.${elemAt row 2}}/index.html" ''
-          <!doctype html>
-          <meta charset="utf-8">
-          <meta http-equiv="refresh" content="0; url=${url}">
-          <title>${asset}</title>
-          <p><a href="${url}">Download ${asset}</a></p>
-        ''
-      ) (tail (filter (line: line != "") (splitString "\n" (readFile ./scripts/assets.tsv))));
-    };
-
-  # The GitHub Pages tree: the browser build at the root, the guide under /docs,
-  # and the download redirects under /download.
-  # Copies, not links: the tree leaves the store as a tarball.
-  # `web` and `nordCliVersion` are parameters so the deployed tree can pair released
-  # builds with this checkout's guide; scripts/site.bash overrides them, and passes
-  # the release before `web` as `previous`.
-  site = makeOverridable (
-    {
-      nordCliVersion ? manifests.nord-cli.version,
-      previous ? null,
-      web,
-    }:
-    final.runCommand "drawbar-site-${web.version}"
-      {
-        meta.description = "drawbar and its guide, laid out for GitHub Pages";
-      }
-      ''
-        mkdir -p "$out/docs"
-        cp -rL ${web}/. "$out/"
-        cp -rL ${docs}/. "$out/docs/"
-        cp -rL ${
-          downloads {
-            drawbar = web.version;
-            nord-cli = nordCliVersion;
-          }
-        }/. "$out/"
-
-        # Pages runs Jekyll over an unmarked tree and drops `_`-prefixed paths.
-        touch "$out/.nojekyll"
-
-        # The page's metadata names files by absolute URL, some of them the guide's.
-        for url in $(grep -o 'https://drawbar\.app/[^"]*' "$out/index.html" | sort -u); do
-          [ -e "$out/''${url#https://drawbar.app/}" ] || {
-            echo "index.html names $url, which the site lacks" >&2
-            exit 1
-          }
-        done
-
-        ${optionalString (previous != null) ''
-          # A page cached before a deploy names the modules of the release before,
-          # which stay beside the new ones under their own hashed names.
-          chmod -R u+w "$out/pkg"
-          cp -rL --update=none ${previous}/pkg/. "$out/pkg/"
-        ''}
-      ''
-  ) { web = drawbar-web; };
-
-  toshokanModels = import ./crates/toshokan/spec/models.nix;
-
-  # A model's TLC config: the baseline's constants under its own, and its
-  # checks, or only the property it violates.
-  toshokanConfig =
-    model:
-    let
-      inherit (toshokanModels) baseline checks;
-      checked =
-        if model ? violates then
-          mapAttrs (_: filter (name: name == model.violates)) checks.safety
-        else
-          checks.${model.checks};
-      section = keyword: lines: optionals (lines != [ ]) ([ keyword ] ++ map (line: "  ${line}") lines);
-      tla = value: if isBool value then toUpper (boolToString value) else toString value;
-    in
-    concatLines (
-      [ "SPECIFICATION Spec" ]
-      ++ section "CONSTANTS" (
-        mapAttrsToList (name: value: "${name} = ${tla value}") (baseline // model.constants)
-      )
-      ++ section "INVARIANTS" checked.invariants
-      ++ section "PROPERTIES" checked.properties
-      ++ optional (model.symmetry or false) "SYMMETRY Symmetric"
-      ++ [ "CHECK_DEADLOCK FALSE" ]
-    );
-
-  # Portable.tla beside every model's config.
-  toshokanSpecConfigs =
-    assert all (
-      model:
-      elem model.suite [
-        null
-        "toshokan-spec"
-        "toshokan-spec-deep"
-      ]
-    ) (attrValues toshokanModels.models);
-    final.linkFarm "toshokan-spec-configs" (
-      [
-        {
-          name = "Portable.tla";
-          path = ./crates/toshokan/spec/Portable.tla;
-        }
-      ]
-      ++ mapAttrsToList (name: model: {
-        name = "${name}.cfg";
-        path = final.writeText "${name}.cfg" (toshokanConfig model);
-      }) toshokanModels.models
-    );
-
-  # TLC over every model of one suite. A model that violates a property must
-  # report that violation; any other must pass.
-  toshokanSpec =
-    suite:
-    final.runCommand suite
-      {
-        nativeBuildInputs = [ final.tlaplus18 ];
-        src = toshokanSpecConfigs;
-      }
-      ''
-        cp "$src"/* .
-        workers=''${NIX_BUILD_CORES:-0}
-        [ "$workers" -gt 0 ] && [ "$workers" -le 8 ] || workers=8
-        check_model() {
-          status=0
-          tlc -workers "$workers" -lncheck final -cleanup -config "$1.cfg" Portable.tla \
-            > "$1.log" 2>&1 || status=$?
-          if ! grep -q "$2" "$1.log"; then
-            cat "$1.log" >&2
-            echo "$1: expected \"$2\", TLC exited $status" >&2
-            exit 1
-          fi
-          echo "$1: $2"
-          grep -E 'distinct states found|depth of|Finished in' "$1.log" | tail -n 3
-        }
-        ${concatLines (
-          mapAttrsToList (
-            name: model:
-            escapeShellArgs [
-              "check_model"
-              name
-              (if model ? violates then "${model.violates} is violated" else "No error has been found")
-            ]
-          ) (filterAttrs (_: model: model.suite == suite) toshokanModels.models)
-        )}
-        touch "$out"
-      '';
-
-  crossBuilds = concatMapAttrs (
-    crate: names:
-    listToAttrs (map (n: nameValuePair "${crate}-${n}" (mkCross crate n targets.${n})) names)
-  ) crateTargets;
-
-  # What a release attaches for each static target: `nord`, the project's license, and
-  # the notices of what is compiled into it.
-  tarballs = mapAttrs' (
-    name: spec:
-    let
-      inherit (manifests.nord-cli) version;
-      inherit (spec.crossPkgs.stdenv.hostPlatform) parsed;
-      stem = "nord-${version}-${parsed.cpu.name}-${parsed.kernel.name}";
-      notices = ./crates/nord-cli/THIRD-PARTY-NOTICES.txt;
-    in
-    nameValuePair "nord-cli-${name}-tarball" (
-      crane.mkCargoDerivation (
-        commonArgs
-        // {
-          pname = "nord-cli-${name}-tarball";
-          inherit version;
-          cargoArtifacts = null;
-          doInstallCargoArtifacts = false;
-          # Every registry crate linked into the binary must be named in the notices.
-          buildPhaseCargoCommand = ''
-            cargo tree --locked --offline -p nord-cli --edges normal,no-proc-macro \
-              --target ${tripleOf spec} --prefix none --format '{p}' |
-              sed -e 's/ (\*)$//' | grep -v ' (/' | sed -e 's/ v/ /' | sort -u >linked
-            [ -s linked ] || {
-              echo "cargo tree listed no crates" >&2
-              exit 1
-            }
-            while read -r crate; do
-              grep -qxF -- "- $crate" ${notices} || unlisted="''${unlisted:+$unlisted, }$crate"
-            done <linked
-            if [ -n "''${unlisted-}" ]; then
-              echo "THIRD-PARTY-NOTICES.txt lacks $unlisted; run scripts/licenses.bash" >&2
-              exit 1
-            fi
-          '';
-          installPhaseCommand = ''
-            mkdir -p "${stem}" "$out"
-            cp ${crossBuilds."nord-cli-${name}"}/nord "${stem}/nord"
-            cp ${./crates/LICENSE} "${stem}/LICENSE"
-            cp ${notices} "${stem}/THIRD-PARTY-NOTICES.txt"
-            chmod -R u+w,go-w "${stem}"
-            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -c "${stem}" |
-              gzip -9n >"$out/${stem}.tar.gz"
-          '';
-        }
-      )
-    )
-  ) (filterAttrs (_: spec: spec.static or false) targets);
-
-  # Expose each host-supported `<crate>-<target>` package in one set, alongside
-  # the host-independent web bundle and the release tarballs.
-  crossed = crossBuilds // tarballs // { inherit drawbar-web; };
-
-  # The read-only inventory sweep, replayed. Exercises transport → wire → session
-  # → op → CLI without a device, so the same proof runs on every target.
-  pocScript = ./crates/nord-usb/tests/scripts/device/inventory.script;
-
-  # An editor-written Sample Editor project, for the file-verb edit check.
-  pocProject = ./crates/nord-format/tests/fixtures/nsmpproj/one-zone.nsmpproj;
-
-  # Run CLI checks against the installed binary, through an emulator when foreign.
-  # This proves that the binary runs and behaves, not only that it links.
-  pocInstallCheck =
-    {
-      bin,
-      emulator ? null,
-    }:
-    {
-      doInstallCheck = true;
-      installCheckPhase = ''
-        runHook preInstallCheck
-        NORD_RUNNER=${optionalString (emulator != null) emulator.cmd} \
-          POC_SCRIPT=${pocScript} \
-          POC_PROJECT=${pocProject} \
-          bash ${./crates/nord-cli/checks}/check.sh "$out/${bin}"
-        runHook postInstallCheck
-      '';
-      nativeInstallCheckInputs = optional (emulator != null) emulator.package;
-    };
-
-  # ⚠️ Corpus suites fetch a private repo, so evaluating this overlay needs read access.
-
-  corpusTree = builtins.fetchGit {
-    rev = "c6f940562e51f2b4dcf2ba72ef4789ee45f27fd9";
-    url = "git+ssh://git@github.com/jmoo/nord-corpus.git";
-  };
-
-  # The corpus package supplies its library-filtered committed tier; `full` adds
-  # the R2 vendor samples, untrimmed captures and bundles.
-  corpus = final.callPackage corpusTree { };
-  corpusFull = corpus.override { full = true; };
-
-  # The crates with a `corpus` feature. Both tiers and both roll-ups come from
-  # this one list.
-  corpusCrates = [
-    "nord-format"
-    "nord-usb"
-  ];
-
-  # Override `final` crates with the corpus root and feature so later overlays
-  # still flow into their suites.
-  committed = genAttrs corpusCrates (
-    name:
-    final.nord.crates.${name}.override {
-      NORD_CORPUS_ROOT = "${corpus}";
-      cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
-      pname = "${name}-corpus";
-    }
-  );
-
-  # The full tier is the committed suite pointed at the bigger assembly.
-  full = mapAttrs (
-    name: suite:
-    suite.override {
-      NORD_CORPUS_ROOT = "${corpusFull}";
-      pname = "${name}-corpus-full";
-    }
-  ) committed;
-
+  inherit (final.stdenv.hostPlatform) isDarwin isLinux;
 in
 {
-  # Crates, cross builds, corpus suites, roll-ups and flake metadata share one scope.
-  nord =
-    crates
-    // crossed
-    # Not in `all`: they start browsers, and only on Linux.
-    // optionalAttrs final.stdenv.hostPlatform.isLinux {
-      browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
-      drawbar-appimage = drawbarAppImage;
-      toshokan-browser-crash = toshokanBrowserCrash;
-    }
-    // optionalAttrs final.stdenv.hostPlatform.isDarwin { drawbar-app = drawbarApp; }
-    // mapAttrs' (name: nameValuePair "${name}-corpus") committed
-    // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
-    // {
-      # `all` excludes corpus roll-ups; the R2 tier needs credentials this build
+  # Everything the project builds, and what builds it. Each file states its inputs
+  # as arguments, which `callPackage` fills from this scope and then from nixpkgs.
+  drawbarPackages = lib.makeScope final.newScope (
+    self:
+    let
+      inherit (self) callPackage workspace;
+    in
+    {
+      workspace = import ./nix/workspace.nix { inherit lib; };
+
+      craneLib = lib.crane;
+      commonArgs = import ./nix/common-args.nix {
+        inherit lib;
+        inherit (self) craneLib workspace;
+      };
+      inherit (callPackage ./crates/drawbar/native-libs.nix { }) audioArgs guiLibs;
+      cargoArtifacts = callPackage ./nix/cargo-artifacts.nix { };
+      mkCrate = callPackage ./nix/crate.nix { };
+
+      # A crate with a `package.nix` builds itself; any other is `mkCrate`'s.
+      crates = mapAttrs (
+        crate: dir:
+        if builtins.pathExists (dir + "/package.nix") then
+          callPackage (dir + "/package.nix") { }
+        else
+          self.mkCrate { inherit crate; }
+      ) workspace.dirs;
+
+      nordInstallCheck = callPackage ./crates/nord-cli/install-check.nix { };
+
+      inherit (callPackage ./nix/cross/targets.nix { }) crateTargets emulators targets;
+      crossEnv = import ./nix/cross/env.nix { inherit lib; };
+      mkCross = callPackage ./nix/cross/build.nix { };
+      cross = mapAttrs (
+        crate: names: genAttrs names (name: self.mkCross crate name self.targets.${name})
+      ) self.crateTargets;
+
+      tarballs = mapAttrs (
+        target: spec: callPackage ./crates/nord-cli/tarball.nix { inherit spec target; }
+      ) (filterAttrs (_: spec: spec.static or false) self.targets);
+
+      # Every `<crate>-<target>` this host builds, the release tarballs and the web
+      # bundle in one set, because the names are host-dependent and a consumer
+      # enumerating them cannot write the list down.
+      crossPackages =
+        concatMapAttrs (crate: mapAttrs' (target: nameValuePair "${crate}-${target}")) self.cross
+        // mapAttrs' (target: nameValuePair "nord-cli-${target}-tarball") self.tarballs
+        // {
+          inherit (self) drawbar-web;
+        };
+
+      tests = callPackage ./nix/tests.nix { };
+      clippy = callPackage ./nix/clippy.nix { };
+      rustdoc = callPackage ./nix/rustdoc.nix { };
+      browser-tests = callPackage ./nix/browser-tests.nix { };
+
+      drawbar-web = callPackage ./crates/drawbar/web.nix { };
+      drawbar-web-launch = callPackage ./crates/drawbar/web-launch.nix { };
+      drawbar-app = callPackage ./crates/drawbar/macos-app.nix { };
+
+      # drawbar as one Linux executable: the tested binary, set to run on the host's
+      # libraries, and the AppImage runtime.
+      drawbar-appimage = callPackage ./crates/drawbar/appimage {
+        inherit (self.crates) drawbar;
+        inherit (workspace) repository;
+      };
+
+      # The power-loss workloads and checker in a page whose runs a driver kills, in
+      # Chromium and Firefox; Linux only, as the other browser suites.
+      toshokan-browser-crash = callPackage ./crates/toshokan/power-loss/browser {
+        wasm = callPackage ./crates/toshokan/power-loss/browser/wasm.nix { };
+      };
+
+      # The portable-root protocol, model-checked: the small suite, and the deep one.
+      toshokan-spec = callPackage ./crates/toshokan/spec { suite = "toshokan-spec"; };
+      toshokan-spec-configs = callPackage ./crates/toshokan/spec/configs.nix { };
+      toshokan-spec-deep = callPackage ./crates/toshokan/spec { suite = "toshokan-spec-deep"; };
+
+      docs = callPackage ./nix/docs.nix { };
+      mkDownloads = callPackage ./nix/downloads.nix { };
+      site = callPackage ./nix/site.nix { web = self.drawbar-web; };
+
+      # The corpus package supplies its library-filtered committed tier; `full` adds
+      # the R2 vendor samples, untrimmed captures and bundles.
+      corpus = final.callPackage (import ./nix/corpus.nix) { };
+      corpus-full = self.corpus.override { full = true; };
+
+      # The full tier is the committed suite pointed at the bigger assembly.
+      corpusSuites = {
+        committed = genAttrs workspace.corpusCrates (
+          crate: callPackage ./nix/corpus-suite.nix { inherit crate; }
+        );
+        full = mapAttrs (
+          _: suite:
+          suite.override {
+            corpus = self.corpus-full;
+            tier = "corpus-full";
+          }
+        ) self.corpusSuites.committed;
+      };
+
+      # `all` excludes the corpus roll-ups; the R2 tier needs credentials this build
       # cannot assume.
-      all = final.linkFarm "all" (crates // crossed // { inherit docs; });
-
-      all-corpus = final.linkFarm "all-corpus" committed;
-
+      all = final.linkFarm "all" (
+        self.crates
+        // self.crossPackages
+        // {
+          inherit (self) docs;
+        }
+      );
+      all-corpus = final.linkFarm "all-corpus" self.corpusSuites.committed;
       # ⚠️ R2 stays outside checks because it needs credentials or a store seeded
       # by `corpus nix-add`.
-      all-corpus-full = final.linkFarm "all-corpus-full" full;
-
-      # Clippy over every crate and target, with each crate's test features and
-      # `corpus` on so every suite is linted, the corpus ones included; compiling them
-      # needs no specimens. A warning fails it. `nix flake check` runs it.
-      clippy = crane.cargoClippy (
-        commonArgs
-        // audioArgs
-        // {
-          inherit cargoArtifacts;
-          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          cargoExtraArgs = "--locked --workspace ${
-            featureArgs (
-              concatMap (
-                name: map (f: "${name}/${f}") (testFeaturesFor name ++ optional (elem name corpusCrates) "corpus")
-              ) (attrNames manifests)
-            )
-          }";
-          pname = "workspace-clippy";
-          version = "0";
-        }
-      );
-
-      # Every crate's public documentation. A warning, such as a link from a public
-      # item to a private one, fails it. `nix flake check` runs it.
-      rustdoc = crane.cargoDoc (
-        commonArgs
-        // audioArgs
-        // {
-          inherit cargoArtifacts;
-          RUSTDOCFLAGS = "--deny warnings";
-          cargoDocExtraArgs = "--no-deps";
-          cargoExtraArgs = "--locked --workspace";
-          pname = "workspace-rustdoc";
-          version = "0";
-        }
-      );
-
-      # The portable-root protocol, model-checked. `nix flake check` runs the
-      # small suite; `toshokan-spec-configs` holds every model's config.
-      toshokan-spec = toshokanSpec "toshokan-spec";
-      toshokan-spec-configs = toshokanSpecConfigs;
-      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep";
-
-      # The corpus assemblies themselves.
-      inherit corpus;
-      corpus-full = corpusFull;
-
-      # The workspace's own crates, keyed by the name cargo knows them by.
-      inherit crates;
-
-      # The cross builds as a set, because their names are host-dependent and a
-      # consumer enumerating them cannot write the list down.
-      crossPackages = crossed;
-
-      # `site` stays out of `all`: it only rearranges outputs `all` already
-      # builds, and the Pages deploy reaches it through scripts/site.bash.
-      inherit docs site tests;
+      all-corpus-full = final.linkFarm "all-corpus-full" self.corpusSuites.full;
 
       # Each crate's shipping build on its own features; `tests` runs the suites.
-      packages = final.linkFarm "packages" (
-        mapAttrs (_: crate: crate.overrideAttrs { doCheck = false; }) crates
+      shipping = final.linkFarm "packages" (
+        mapAttrs (_: crate: crate.overrideAttrs { doCheck = false; }) self.crates
       );
+    }
+  );
+
+  # The names flake.nix, CI and the scripts address the scope by.
+  nord =
+    let
+      scope = final.drawbarPackages;
+    in
+    scope.crates
+    // scope.crossPackages
+    # Not in `all`: they start browsers, and only on Linux.
+    // optionalAttrs isLinux {
+      inherit (scope) browser-tests drawbar-appimage toshokan-browser-crash;
+    }
+    // optionalAttrs isDarwin { inherit (scope) drawbar-app; }
+    // mapAttrs' (name: nameValuePair "${name}-corpus") scope.corpusSuites.committed
+    // mapAttrs' (name: nameValuePair "${name}-corpus-full") scope.corpusSuites.full
+    // {
+      inherit (scope)
+        all
+        all-corpus
+        all-corpus-full
+        clippy
+        corpus
+        corpus-full
+        crates
+        crossPackages
+        docs
+        drawbar-web-launch
+        guiLibs
+        rustdoc
+        site
+        tests
+        toshokan-spec
+        toshokan-spec-configs
+        toshokan-spec-deep
+        ;
+      inherit (scope.workspace) edition;
+      inherit (final) rustfmt;
+
+      packages = scope.shipping;
 
       # `nix run .#toshokan-browser-crash -- --stride 1`: the whole crash sweep,
       # with WebKit on macOS.
-      toshokan-browser-crash-sweep = toshokanBrowserCrash.sweep;
-
-      # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
-      # guide the app links to is there under /docs.
-      drawbar-web-launch = final.writeShellApplication {
-        name = "drawbar-web";
-        runtimeInputs = [ final.miniserve ];
-        text = ''
-          port="''${DRAWBAR_PORT:-8080}"
-          url="http://127.0.0.1:$port/"
-
-          # ⚠️ Store paths carry epoch mtimes, so without this the browser's heuristic
-          # freshness keeps a stale bundle for years and the glue no longer matches
-          # the wasm. `no-cache` forces revalidation; the ETag still answers 304.
-          miniserve --index index.html --interfaces 127.0.0.1 --port "$port" \
-            --header "Cache-Control: no-cache" \
-            ${final.nord.site} &
-          server=$!
-          trap 'kill "$server" 2>/dev/null || true' EXIT
-
-          for _ in $(seq 40); do
-            if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-              break
-            fi
-            sleep 0.25
-          done
-
-          if command -v open >/dev/null 2>&1; then
-            open "$url"
-          elif command -v xdg-open >/dev/null 2>&1; then
-            xdg-open "$url"
-          else
-            echo "no opener found; open $url yourself" >&2
-          fi
-
-          wait "$server"
-        '';
-      };
-
-      inherit edition;
-
-      # Native drawbar's `dlopen`ed display/GL libraries, empty off Linux. Package
-      # wrapping and the dev shell give `cargo run` the same loader path.
-      inherit guiLibs;
-
-      inherit (final) rustfmt;
+      toshokan-browser-crash-sweep = scope.toshokan-browser-crash.sweep;
     };
 }
