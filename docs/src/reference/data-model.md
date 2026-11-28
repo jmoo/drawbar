@@ -151,8 +151,8 @@ failed write leaves each path holding its old bytes or its new ones
 drawbar never reads a file whole to write it: a copy, or an edit
 of a resting file, streams a chunk at a time.
 
-Undo reaches only this session's intents. It is refused where another drawbar
-changed the same thing since
+Undo reaches only this session's intents. It is refused where the same thing
+was changed since
 ([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#undo-and-redo)),
 and drawbar then lets go of that step, so the next undo reaches the one before.
 An intent too large for one log entry is refused before it writes anything.

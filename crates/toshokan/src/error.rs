@@ -89,8 +89,8 @@ pub enum Refusal {
     /// The intent is not valid against the current view.
     #[error("{0}")]
     Invalid(Invalid),
-    /// Another writer changed what the undo or redo would change since this writer
-    /// did.
+    /// A write made since changed what the undo or redo would change. `by` is its
+    /// writer, which is this one where the write is no step its history holds.
     #[error("{by} changed it since")]
     ChangedSince { by: WriterId, entry: EntryHash },
     /// There is nothing to undo, redo, settle, compact or adopt.

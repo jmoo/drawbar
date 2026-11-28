@@ -98,7 +98,9 @@
 //! files went, an undo's included. A save takes bytes or a source the driver
 //! streams into staging a chunk at a time, such as a [`Splice`](plan::Splice) of
 //! the file being rewritten, so a file of hundreds of megabytes is never held
-//! whole.
+//! whole. [`Committed::files`] gives the fact the commit logged of each file its
+//! effects end with at a path, read once the effects were carried out and before
+//! the entry was appended.
 //!
 //! A commit whose file effects fail logs nothing and fails. The next write, or the
 //! next open, finishes them first, and where it cannot, the library is read-only
@@ -111,8 +113,8 @@
 //! Undo reaches the intents of this session, and ends at close. An intent that
 //! only dismisses runs, only joins entities or settles another writer's record, or
 //! one committed as final, is no step of it, and [`Committed::undoable`] says which
-//! a commit is. An undo is refused with [`Refusal::ChangedSince`] where another
-//! writer changed the same thing since.
+//! a commit is. An undo is refused with [`Refusal::ChangedSince`] where a write
+//! made since changed the same thing.
 //!
 //! ## What needs the user
 //!

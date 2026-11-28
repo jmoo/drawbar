@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
 use crate::io::IoError;
-use crate::log::Run;
+use crate::log::{FileFact, Run};
 use crate::path::RelPath;
 use crate::plan::FactChange;
 
@@ -242,6 +242,9 @@ pub struct Committed {
     /// file it did not know of keeps, where moving a tree moves its files one
     /// by one.
     pub left: Vec<RelPath>,
+    /// The fact the intent logged of each file its effects end with at a path,
+    /// read once the effects were carried out and before the entry was appended.
+    pub files: Vec<FileFact>,
     /// Whether it is a step of this instance's undo history, as every intent is
     /// but one that only dismisses runs, only joins entities or settles another
     /// writer's record, or one committed as final.
