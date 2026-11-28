@@ -524,8 +524,8 @@ and they are why these documents lose their edit steps at a save.
 | A file changes from outside while a save of it is unanswered | The document keeps what it holds, and the user is asked which side to keep. |
 | A piano library's plan is reverted or undone while a send or save waits for it to be laid out | The send or save is dropped. |
 | The answer to an undo or redo of a save is lost | What the file holds is unknown. Each document the save wrote that holds its body reads unsaved, and its file is read again. That read moves only the baseline: equal bytes read saved again, and other bytes leave the document unsaved over them. |
-| An undo or redo of a save stops partway | Each file the save wrote is taken to hold what the step leaves, as the next write or open finishes it. A document holding its body is unsaved where it holds something else, and a Save writes it once the step is finished. While the step waits, each such document is kept as a draft over that file whatever it reads and is not let go of for memory, so a quit loses nothing however the step ends. |
-| The next write leaves such a step neither finished nor waiting, because its record never landed or the library gave it up | Each file it names is read again, as after a lost answer. That read moves only the baseline. A Save that is that write expected what the step would have left, so it is refused once, and the next Save writes. |
+| An undo or redo of a save stops partway | Each file the save wrote is taken to hold what the step leaves, as the next write or open finishes it. A document holding its body is unsaved where it holds something else, and a Save writes it once the step is finished. While the library says the step waits, through a lost answer and an open that still cannot finish it, each such document is kept as a draft over that file whatever it reads and is not let go of for memory, so a quit loses nothing however the step ends. |
+| The next write leaves such a step neither finished nor waiting, because its record never landed or the library gave it up | Each file a step names is read again once the step no longer waits, as after a lost answer. That read moves only the baseline, and one that fails is made again with the next look at the folder. A Save that is that write expected what the step would have left, so it is refused once, and the next Save writes. |
 | A save is asked in a library that cannot be written | The document reads saved in memory only, and its file is still known to hold what it held. A change to the file from outside asks. |
 | A save of an edit held over its file is asked in a library that cannot be written | The save is refused and the edit stays. What waited on it is dropped, with a word. |
 | The library refuses an undo or redo over what the folder or its history holds | The step is let go, and the log says why. Nothing is written, and Undo names the step before it. |
@@ -757,9 +757,9 @@ list of whole states.
 - A set of a sample instrument takes the place of one of the same value just
   before it, and no other. A gesture that sets two values at once keeps every
   set it made, so dragged there and back it leaves a step that changes nothing.
-- A read that follows a lost answer cannot tell drawbar's own bytes from
-  another writer's. The document keeps what it holds, unsaved, and is not asked
-  about either.
+- A read that follows a lost answer, or a step that stopped partway, cannot
+  tell drawbar's own bytes from another writer's. The document keeps what it
+  holds, unsaved, and is not asked about either.
 - A file resting in the library is known by the identity toshokan samples. A
   write from outside that keeps its length and changes only bytes the identity
   does not sample is not seen, and an edit held over the file still matches its

@@ -11164,9 +11164,98 @@ fn a_rescan_while_an_undo_of_a_save_waits_to_finish_leaves_the_edit_unsaved_and_
     session.settle();
 
     assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    assert_eq!(session.said("Finished saving"), 0, "nothing was saved");
     assert_eq!(session.bytes(id), longer);
     assert!(session.unsaved(id));
     session.close();
     let again = Session::open(&root);
     assert_eq!(again.bytes(again.only()), longer, "the edit is kept");
+}
+
+/// Let the trash of each writer of the library at `root` take a file, or refuse each one.
+fn trash_takes(root: &Temp, takes: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if takes { 0o755 } else { 0o555 };
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    for writer in writers {
+        let trash = writer.unwrap().path().join("trash");
+        fs::set_permissions(trash, fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+#[test]
+fn an_answer_lost_while_an_undo_of_a_save_still_waits_keeps_the_edit_through_a_quit() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, made, edited) = session.saved_once("96");
+    session.store.fault(Fault::Refuse(moves_out));
+    session.undo();
+    trash_takes(&root, false);
+    session.store.fault(Fault::Unread);
+    session.make_tag("Sunday");
+    session.settle();
+    assert_eq!(root.read("untitled.ne5p"), edited, "the undo still waits");
+    session.close();
+    trash_takes(&root, true);
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    let id = again.only();
+    assert_eq!(again.bytes(id), edited, "the document holds its edit");
+    assert!(again.unsaved(id));
+}
+
+#[test]
+fn an_open_that_cannot_finish_an_undo_of_a_save_keeps_the_edit_for_the_open_that_does() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (_, made, edited) = session.saved_once("96");
+    session.store.fault(Fault::Refuse(moves_out));
+    session.undo();
+    trash_takes(&root, false);
+    session.close();
+
+    let blocked = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), edited, "the undo still waits");
+    let id = blocked.only();
+    assert_eq!(blocked.bytes(id), edited);
+    assert!(!blocked.unsaved(id), "its file holds it");
+    assert_eq!(blocked.said("has the unsaved edit it had"), 0);
+    blocked.close();
+    trash_takes(&root, true);
+
+    let again = Session::open(&root);
+    assert_eq!(root.read("untitled.ne5p"), made, "the undo is finished");
+    let id = again.only();
+    assert_eq!(again.bytes(id), edited, "the document holds its edit");
+    assert!(again.unsaved(id));
+}
+
+#[test]
+fn a_file_that_does_not_read_once_its_undo_never_landed_is_read_again_with_the_folder() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let (id, _, edited) = session.saved_once("96");
+    session.store.fault(Fault::Refuse(moves_out));
+    session.undo();
+    drop_pending(&root);
+    let mode = |mode| {
+        let file = root.at("untitled.ne5p");
+        fs::set_permissions(file, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(0o000);
+    session.make_tag("Sunday");
+    session.settle();
+    assert!(session.unsaved(id), "what its file holds is not known");
+    mode(0o644);
+    session.refocus();
+    session.settle();
+
+    assert_eq!(root.read("untitled.ne5p"), edited, "nothing was undone");
+    assert!(!session.unsaved(id));
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 0);
 }

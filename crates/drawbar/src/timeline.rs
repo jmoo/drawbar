@@ -486,6 +486,11 @@ impl Timeline {
         None
     }
 
+    /// Whether what waits to be finished is a change, and not an undo or a redo.
+    pub fn waits_for_change(&self) -> bool {
+        matches!(self.waiting, Some(Asked::Change { .. }))
+    }
+
     /// Whether `asked` is of the library history that still stands. A step taken in one
     /// that ended is in neither list of the library's any longer.
     fn stands(&self, asked: &Asked) -> bool {

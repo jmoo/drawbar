@@ -226,17 +226,16 @@ pub struct Store {
     /// them is not known. Such a read moves the baseline of one holding its body, and
     /// leaves what it holds.
     settling: BTreeSet<u64>,
-    /// The paths a change of drawbar's own names that its next change finishes.
+    /// The paths a change of drawbar's own names that its next change finishes. An
+    /// asset holding its body at one is kept as a draft whatever it reads, since the
+    /// change may never finish.
     finishing: BTreeSet<LibPath>,
-    /// Assets whose file waits for such a change, and is read again once it is finished.
+    /// Assets whose file waits for such a change, and is read again once it no longer
+    /// does.
     awaiting: BTreeSet<u64>,
     /// A change of this session's own failed partway and waits for the next change to
     /// finish it. An undo or a redo would reverse that change, not the step it names.
     waits: bool,
-    /// The assets whose files such a change, an undo or redo of a save, names. Each is
-    /// kept as a draft while it waits, whatever it reads, since the change may never
-    /// finish, and its file is read again if the change goes unfinished.
-    unsettled: BTreeSet<u64>,
     /// Each change, undo or redo sent and not answered, in order.
     answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
@@ -396,7 +395,6 @@ impl Store {
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
             waits: false,
-            unsettled: BTreeSet::new(),
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
@@ -982,8 +980,17 @@ impl Store {
     /// that waits to finish names.
     fn unsaved(&self, entity: &LocalEntity, workspace: &Workspace) -> bool {
         let unfiled = !self.open() && workspace.unfiled(entity.id);
-        let unsettled = self.unsettled.contains(&entity.id) && entity.holds_body();
-        entity.is_unsaved() || unfiled || unsettled
+        let waits = self.finishes(entity.id) && entity.holds_body();
+        entity.is_unsaved() || unfiled || waits
+    }
+
+    /// Whether a change of drawbar's own that waits to be finished names an asset's file.
+    fn finishes(&self, id: u64) -> bool {
+        let path = self
+            .records
+            .get(&id)
+            .and_then(|record| record.path.as_ref());
+        path.is_some_and(|path| self.finishing.contains(path))
     }
 
     /// Where the library is, as the user would look for it.
@@ -1313,7 +1320,7 @@ impl Store {
             .filter(|(id, record)| {
                 let saved = workspace.get(**id).map(|entity| entity.saved.stamp());
                 saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
-                    && !self.unsettled.contains(*id)
+                    && !self.finishes(**id)
                     && !queue.holds(**id)
             })
             .filter_map(|(id, _)| {
@@ -1420,10 +1427,15 @@ impl Store {
             if self.rechecking.remove(&id) {
                 match answer {
                     Ok(found) => self.changed(id, found, workspace, browser, log),
-                    Err(_) => {
+                    Err(why) => {
                         self.quietly.remove(&id);
-                        self.settling.remove(&id);
-                        self.rescan();
+                        let settling = self.settling.remove(&id);
+                        // What drawbar's own change left in a file that is there and
+                        // does not read is looked for again with the folder.
+                        match settling && !matches!(why, Failure::Moved) {
+                            true => self.await_finished(id),
+                            false => self.rescan(),
+                        }
                     }
                 }
                 continue;
@@ -1636,25 +1648,21 @@ impl Store {
                 let landed = made.is_some();
                 self.waits = waiting != Waiting::Nothing;
                 let asked = self.answering.pop_front().map(Sent::asked);
-                let settled = match waiting {
-                    Waiting::Earlier => BTreeSet::new(),
-                    Waiting::Nothing | Waiting::This => std::mem::take(&mut self.unsettled),
-                };
-                // A step that waited and is not finished first never landed, or was given
-                // up partway.
-                if finished.is_none() {
-                    for id in settled {
-                        self.unheard(id, workspace);
-                    }
-                }
                 // A step that stopped partway is taken to finish at the next write or open.
                 match (&asked, landed, waiting) {
                     (Some(asked), true, _) => self.refiled(asked.leaves(), workspace),
                     (Some(asked), false, Waiting::This) => {
                         self.refiled(asked.leaves(), workspace);
-                        self.unsettled = asked.leaves().into_iter().map(|(id, _)| id).collect();
+                        let ids = asked.leaves().into_iter().map(|(id, _)| id);
+                        self.await_finish(ids.collect());
                     }
                     _ => {}
+                }
+                if finished.is_some() && timeline.waits_for_change() {
+                    let unsaved = workspace.listed().filter(|entity| entity.is_unsaved());
+                    for entity in unsaved.filter(|entity| self.finishes(entity.id)) {
+                        log.say(format!("Finished saving “{}”.", entity.name));
+                    }
                 }
                 let answer = timeline::Answer {
                     made,
@@ -1725,14 +1733,13 @@ impl Store {
             Event::Unheard { label } => {
                 self.uncommit();
                 let sent = self.answering.pop_front();
-                // What an undo or redo of a save, this one or one it may have finished,
-                // left in each file is not known until the file is read.
+                // What an undo or redo of a save left in each file is not known until the
+                // file is read.
                 let asked = sent.iter().map(|sent| &sent.step);
-                let mut left: BTreeSet<u64> = asked
+                let left: BTreeSet<u64> = asked
                     .flat_map(timeline::Asked::leaves)
                     .map(|(id, _)| id)
                     .collect();
-                left.append(&mut self.unsettled);
                 for id in left {
                     self.unheard(id, workspace);
                 }
@@ -1820,8 +1827,11 @@ impl Store {
             Event::Restarted => {
                 timeline.forget_library();
                 self.waits = false;
-                // What waited to be finished never will be, but as the user settles it.
-                self.awaiting.clear();
+                // What waited to be finished never will be, but as the user settles it:
+                // what it left in each file is not known until the file is read.
+                for id in std::mem::take(&mut self.awaiting) {
+                    self.unheard(id, workspace);
+                }
                 log.say(
                     "Undo no longer reaches the changes made before: drawbar could not go on \
                      with its record of this library, so it began a new one.",
@@ -2544,9 +2554,6 @@ impl Store {
                 continue;
             }
             if let (true, Some(path)) = (self.awaiting.remove(&id), record.path.clone()) {
-                if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
-                    log.say(format!("Finished saving “{}”.", entity.name));
-                }
                 // One no read is sent for, as a file never written before, is followed
                 // as the listing finds it.
                 if self.read_unheard(id, path, workspace) {
@@ -3660,6 +3667,25 @@ impl Store {
             record.missing = false;
             record.holds = holds;
         }
+    }
+
+    /// The files of `ids` wait for a change that stopped partway, as the next view says
+    /// of every file such a change names.
+    fn await_finish(&mut self, ids: Vec<u64>) {
+        for id in ids {
+            let Some(path) = self.records.get(&id).and_then(|record| record.path.clone()) else {
+                continue;
+            };
+            self.finishing.insert(path);
+            self.await_finished(id);
+        }
+    }
+
+    /// The file of `id` is read again with the next view, unless a change that waits to
+    /// be finished still names it.
+    fn await_finished(&mut self, id: u64) {
+        self.awaiting.insert(id);
+        self.deferred.insert(id);
     }
 
     /// Follow the library's undo or redo of a save: the file of each document it saved
