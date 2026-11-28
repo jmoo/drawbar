@@ -1808,6 +1808,7 @@ mod tests {
             entity: E,
             replaces: Vec::new(),
             observed: Vec::new(),
+            into: None,
             take: None,
         };
         let entries = vec![entry(None, vec![add, delete], "both")];
@@ -1901,6 +1902,7 @@ mod tests {
                         entity,
                         replaces,
                         observed: Vec::new(),
+                        into: None,
                         take: None,
                     },
                     1 => Op::Create {

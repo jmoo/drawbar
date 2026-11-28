@@ -415,12 +415,15 @@ An intent may join one entity into another, as the app does for each entity a
 scan reports joined. It logs an `add` to the other of each member of each set
 the one holds and the other does not, a `write` to the other of each register
 the one holds a value of and the other holds none of, the one's shown value
-where its writes conflict, and then the one's `delete`. A register both hold a
-value of keeps the other's. Two writers joining the same entity converge: an
-add of a member already held and a second delete of one entity change nothing
-shown. The delete observes only the writes its writer saw, so a change to the
-joined entity another writer made without seeing the join is a deletion
-conflict. An intent that only joins entities is final (see Undo and redo).
+where its writes conflict, and then the one's `delete`, whose `into` names the
+other (see Relations). A register both hold a value of keeps the other's. Two
+writers joining the same entity converge: an add of a member already held and a
+second delete of one entity change nothing shown. An intent joins an entity
+once, neither deletes nor joins an entity it joins or joins into, and brings
+back none it joins; one that does is refused. The delete observes only the
+writes its writer saw, so a change to the joined entity another writer made
+without seeing the join is a deletion conflict. An intent that only joins
+entities is final (see Undo and redo).
 
 An intent may save, rename or trash a library file no entity is bound to, by its
 path, without making it an entity: a file nothing is said about stays without
@@ -447,6 +450,49 @@ the move. The move back logs a `tree` op, so a redo
 moves the tree again.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
+
+## Relations
+
+A relation is a register or a set whose values each name an entity, the value's
+**target**, by its id. How a value names its target is the app's, as the value
+is. Nothing about a relation is logged but its values: what an id names now,
+and which entities name it, every reader derives from the merged state and the
+binding.
+
+A `delete` that a join logs says in `into` which entity it joined its own into.
+It is the existence write any delete is: a `create` that replaces it, or a later
+`delete`, ends what it says with it. Another delete names no entity, but the one
+an undo or a redo logs (see Undo and redo) and the one that takes a forked
+writer's join.
+
+An id **resolves** to an entity a reader shows, or to none:
+
+1. The id of an entity shown resolves to that entity.
+2. The id of an entity not shown resolves as the id its join names: the `into`
+   of its live deletes that have one, and of several the latest, by clock, then
+   writer, then entry. It resolves to none where no live delete of it has an
+   `into`, and where following them comes back to an id already passed.
+3. Where the binding joins the entity of step 1 or 2 into another (see
+   Binding), the id resolves to that other.
+
+So a value written before its target was joined, or by a writer that had not
+seen the join, names the entity that has the file, and no join rewrites a value.
+An id that resolves to none is kept as written: its target was deleted, or the
+entries that create it have not arrived. Undoing the delete, or the entries
+arriving, resolves it again. An entity deleted and brought back resolves to
+itself, and to none once it is deleted again by other than a join. Deleting the
+entity an id resolves to leaves it resolving to none, unless that delete is a
+join's. A joined entity that a deletion conflict shows again resolves as any
+entity shown does until the conflict is settled, as joining it again does. Where
+two writers join one entity into different ones, the later join alone is
+followed, so undo, which logs one delete, can put back what was shown.
+
+The entities that name an entity are those whose value's target is its id, or
+resolves to what its id resolves to. Readers that hold the same merged state and
+bind the same files resolve every id alike.
+
+A join by a build that writes no `into` leaves the id it deleted resolving to
+none.
 
 ## File effects and pending records
 
@@ -713,7 +759,11 @@ before it. Undo takes what a join or a settlement wrote for another writer's.
   another writer's included; a clear where there was none.
 - An add is reversed by a remove, a remove by an add.
 - A create is reversed by a delete, and a delete by a create replacing it, with
-  the register values, members and file the delete ended.
+  the register values, members and file the delete ended. The delete names the
+  `into` that Relations follows among the deletes the create replaced, so
+  undoing the return of a joined entity, or redoing a join, joins it again. A
+  delete is not reversed while a surviving delete of its entity says otherwise:
+  another `into`, or none where it named one.
 - A `file` op is reversed by putting back what it changed: the displaced bytes
   from the trash, under a precondition on what the path holds now; the old name;
   or the trash, for a file the intent added. A save over a file that was gone

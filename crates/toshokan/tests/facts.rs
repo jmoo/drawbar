@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
 use toshokan::binding::Bindings;
 use toshokan::contribution::Contribution;
 use toshokan::derive::{derive, Seen, SeenSegment};
@@ -17,15 +18,37 @@ use toshokan::undo::{Before, Entering, History};
 use toshokan::view::{Conflicted, Parts, View};
 use toshokan::{
     EntityId, EntryHash, Field, Hlc, Identity, Invalid, Nonce, Random, Raw, Refusal, Register,
-    RelPath, Schema, Set, WriterId,
+    RelPath, Related, Relates, Schema, Set, WriterId,
 };
 
 const NAME: Register<String> = Register::new("name");
 const NOTE: Register<Option<String>> = Register::new("note");
 const TAGS: Set<String> = Set::new("tags");
+const SOURCES: Set<Source> = Set::new("sources");
+const TEMPLATE: Register<EntityId> = Register::new("template");
+
+/// A value of a relation that holds more than the entity it names.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+struct Source {
+    to: EntityId,
+    role: String,
+}
+
+impl Relates for Source {
+    fn target(&self) -> EntityId {
+        self.to
+    }
+}
 
 fn schema() -> Schema {
-    Schema::of(&[NAME.key(), NOTE.key(), TAGS.key()]).unwrap()
+    let keys = [
+        NAME.key(),
+        NOTE.key(),
+        TAGS.key(),
+        SOURCES.key(),
+        TEMPLATE.key(),
+    ];
+    Schema::of(&keys).unwrap()
 }
 
 /// A change an intent makes to an entity.
@@ -1138,6 +1161,7 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
                 entity: gone,
                 replaces: vec![first],
                 observed: Vec::new(),
+                into: None,
                 take: None,
             },
         ],
@@ -1193,6 +1217,771 @@ fn members_no_build_knows_survive_merges_and_snapshots() {
         assert!(canonical.iter().all(|entry| !entry.unknown_members()));
         for state in folded(&canonical) {
             assert_eq!(state.extended().count(), 0, "seed {seed}");
+        }
+    }
+}
+
+fn source(to: EntityId) -> Source {
+    Source {
+        to,
+        role: "take".into(),
+    }
+}
+
+/// Every entity shown holding `sources`, each with what its sources resolve to.
+fn sources(view: &View) -> Vec<(EntityId, Vec<Option<EntityId>>)> {
+    let mut by_holder: BTreeMap<EntityId, Vec<Option<EntityId>>> = BTreeMap::new();
+    for related in view.relations(SOURCES).related {
+        by_holder.entry(related.from).or_default().push(related.to);
+    }
+    by_holder.into_iter().collect()
+}
+
+/// A writer that made the entities `made` and then `library`, whose sources
+/// name each of `named`.
+fn library_of(made: &[EntityId], library: EntityId, named: &[EntityId]) -> Writer {
+    let mut a = Writer::new(0xa);
+    for (at, made) in made.iter().enumerate() {
+        let (create, _) = creating("Add", &[*made]).create(|new| {
+            new.set(NAME, format!("made {at}"));
+        });
+        a.commit(plan(create), 1).unwrap();
+    }
+    let (create, _) = creating("Build", &[library]).create(|new| {
+        for named in named {
+            new.add(SOURCES, source(*named));
+        }
+    });
+    a.commit(plan(create), 2).unwrap();
+    a
+}
+
+#[test]
+fn a_relation_reads_each_value_with_the_entity_it_names() {
+    let [take, donor, library] = [entity(1), entity(2), entity(3)];
+    let mut a = library_of(&[take, donor], library, &[take]);
+    a.commit(plan(intent("").set(library, TEMPLATE, donor)), 3)
+        .unwrap();
+    for folded in [a.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        let held = view.entity(library).unwrap();
+        let named = Related {
+            from: library,
+            value: source(take),
+            to: Some(take),
+        };
+        assert_eq!(
+            held.relations(SOURCES).related,
+            std::slice::from_ref(&named)
+        );
+        assert_eq!(view.relations(SOURCES).related, [named]);
+        let template = Related {
+            from: library,
+            value: donor,
+            to: Some(donor),
+        };
+        assert_eq!(view.relations(TEMPLATE).related, [template]);
+        assert_eq!(view.referrers(SOURCES, take), [library]);
+        assert_eq!(view.referrers(SOURCES, donor), []);
+        assert_eq!(view.referrers(TEMPLATE, donor), [library]);
+        assert_eq!(view.entity(take).unwrap().relations(SOURCES).related, []);
+    }
+}
+
+#[test]
+fn a_deleted_target_stays_named_and_resolves_again_once_it_is_brought_back() {
+    let [take, library] = [entity(1), entity(2)];
+    let mut a = library_of(&[take], library, &[take]);
+    a.commit(plan(intent("Delete").delete(take)), 3).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(take), None);
+    assert_eq!(sources(&view), [(library, vec![None])]);
+    let [related] = &view.relations(SOURCES).related[..] else {
+        panic!("the value is kept");
+    };
+    assert_eq!(related.value, source(take));
+    assert_eq!(view.referrers(SOURCES, take), [library], "by the id named");
+
+    a.undo(4).unwrap();
+    let view = a.view();
+    assert_eq!(sources(&view), [(library, vec![Some(take)])]);
+    assert_eq!(view.referrers(SOURCES, take), [library]);
+}
+
+#[test]
+fn a_target_whose_writer_has_not_arrived_resolves_once_it_does() {
+    let [take, library] = [entity(1), entity(2)];
+    let a = library_of(&[take], entity(9), &[]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    let (create, _) = creating("Build", &[library]).create(|new| {
+        new.add(SOURCES, source(take));
+    });
+    b.commit(plan(create), 3).unwrap();
+
+    let mut c = Writer::new(0xc);
+    c.sync(&b);
+    assert_eq!(sources(&c.view()), [(library, vec![None])]);
+    c.sync(&a);
+    assert_eq!(sources(&c.view()), [(library, vec![Some(take)])]);
+}
+
+/// Writers `a` and `b` who have both seen `low` and `high`, each made by one of
+/// them as two writers adopt one file, and `library`, which names `high`.
+fn named_twice(low: EntityId, high: EntityId, library: EntityId) -> (Writer, Writer) {
+    let mut a = library_of(&[high], library, &[high]);
+    let mut b = Writer::new(0xb);
+    let (create, _) = creating("Tag", &[low]).create(|new| {
+        new.add(TAGS, "b".into());
+    });
+    b.commit(plan(create), 1).unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    (a, b)
+}
+
+#[test]
+fn what_names_a_joined_entity_names_the_one_it_was_joined_into() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.sync(&a);
+    for folded in [a.folded.clone(), b.folded.clone(), b.compacted()] {
+        let view = view(folded);
+        assert!(view.entity(high).is_none());
+        assert_eq!(view.resolve(high), Some(low));
+        assert_eq!(view.resolve(low), Some(low));
+        assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+        assert_eq!(view.referrers(SOURCES, low), [library]);
+        assert_eq!(view.referrers(SOURCES, high), [library]);
+        assert_eq!(view.conflicts(), []);
+    }
+}
+
+#[test]
+fn a_relation_made_without_seeing_the_join_names_the_survivor_too() {
+    let [low, high, library, later] = [entity(1), entity(2), entity(3), entity(4)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    let (create, _) = creating("Build", &[later]).create(|new| {
+        new.add(SOURCES, source(high));
+    });
+    b.commit(plan(create), 3).unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for writer in [&a, &b] {
+        let view = writer.view();
+        assert_eq!(view.conflicts(), []);
+        assert_eq!(
+            sources(&view),
+            [(library, vec![Some(low)]), (later, vec![Some(low)])]
+        );
+        assert_eq!(view.referrers(SOURCES, low), [library, later]);
+    }
+}
+
+#[test]
+fn a_write_made_without_seeing_the_join_shows_the_joined_entity_until_it_is_joined_again() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.commit(plan(intent("Tag").add(high, TAGS, "late".into())), 3)
+        .unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.conflicts(), [Conflicted::Existence { entity: high }]);
+        assert_eq!(view.resolve(high), Some(high));
+        assert_eq!(sources(&view), [(library, vec![Some(high)])]);
+    }
+
+    a.commit(plan(intent("Join").join(high, low)), 4).unwrap();
+    let view = a.view();
+    assert_eq!(view.conflicts(), []);
+    assert_eq!(tags(&a, low), ["b", "late"]);
+    assert_eq!(view.resolve(high), Some(low));
+    assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+}
+
+#[test]
+fn writers_who_each_join_one_entity_agree_on_what_it_names() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    for writer in [&mut a, &mut b] {
+        writer
+            .commit(plan(intent("Join").join(high, low)), 3)
+            .unwrap();
+    }
+    a.sync(&b);
+    b.sync(&a);
+    for writer in [&a, &b] {
+        let view = writer.view();
+        assert_eq!(view.conflicts(), []);
+        assert_eq!(view.resolve(high), Some(low));
+        assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+    }
+}
+
+#[test]
+fn an_entity_joined_into_one_that_is_then_joined_resolves_to_the_last() {
+    let [low, middle, high, library] = [entity(1), entity(2), entity(3), entity(4)];
+    let mut a = library_of(&[low, middle, high], library, &[high, middle]);
+    a.commit(plan(intent("Join").join(high, middle)), 3)
+        .unwrap();
+    a.commit(plan(intent("Join").join(middle, low)), 4).unwrap();
+    for folded in [a.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.resolve(high), Some(low));
+        assert_eq!(view.resolve(middle), Some(low));
+        assert_eq!(sources(&view), [(library, vec![Some(low), Some(low)])]);
+        assert_eq!(view.referrers(SOURCES, high), [library], "once");
+    }
+}
+
+#[test]
+fn an_intent_that_ends_an_entity_it_joins_or_joins_into_is_refused() {
+    let [low, middle, high] = [entity(1), entity(2), entity(3)];
+    let a = library_of(&[low, middle, high], entity(4), &[]);
+    let join = |pairs: &[(EntityId, EntityId)]| {
+        let joining = intent("Join");
+        pairs
+            .iter()
+            .fold(joining, |built, (one, into)| built.join(*one, *into))
+    };
+    for (what, built, absent) in [
+        (
+            "into one joined after",
+            join(&[(high, middle), (middle, low)]),
+            middle,
+        ),
+        (
+            "into one joined before",
+            join(&[(middle, low), (high, middle)]),
+            middle,
+        ),
+        ("around", join(&[(high, low), (low, high)]), low),
+        ("twice", join(&[(high, low), (high, middle)]), high),
+        ("into one deleted", join(&[(high, low)]).delete(low), low),
+        ("of one deleted", join(&[(high, low)]).delete(high), high),
+        (
+            "of one brought back",
+            join(&[(high, low)]).revive(high),
+            high,
+        ),
+    ] {
+        assert_eq!(
+            ops(&plan(built), &a.folded, &schema()),
+            Err(Invalid::NoEntity(absent)),
+            "{what}"
+        );
+    }
+    let star = join(&[(high, low), (middle, low)]);
+    assert!(ops(&plan(star), &a.folded, &schema()).is_ok());
+}
+
+#[test]
+fn deleting_the_entity_joined_into_unresolves_what_named_either_until_undo() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, _) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    let before = a.view();
+    a.commit(plan(intent("Delete").delete(low)), 4).unwrap();
+    let view = a.view();
+    assert_eq!((view.resolve(high), view.resolve(low)), (None, None));
+    assert_eq!(sources(&view), [(library, vec![None])]);
+    let changed = view.changed_since(&before).entities;
+    assert_eq!(changed, BTreeSet::from([low]), "not the entity naming it");
+    assert_eq!(before.referrers(SOURCES, low), [library], "found before");
+    assert_eq!(view.referrers(SOURCES, low), [], "and not after");
+
+    a.undo(5).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), Some(low));
+    assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+}
+
+#[test]
+fn undoing_an_intent_that_also_joined_takes_back_the_join() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, _) = named_twice(low, high, library);
+    let joining = intent("Tidy").join(high, low).add(low, TAGS, "kept".into());
+    a.commit(plan(joining), 3).unwrap();
+    assert_eq!(a.view().resolve(high), Some(low));
+
+    a.undo(4).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), Some(high), "itself again");
+    assert_eq!(sources(&view), [(library, vec![Some(high)])]);
+
+    a.redo(5).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), Some(low), "joined again");
+    assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+}
+
+#[test]
+fn an_entity_brought_back_is_itself_until_it_is_joined_again() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, _) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    a.commit(plan(intent("Keep").revive(high)), 4).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), Some(high));
+    assert_eq!(sources(&view), [(library, vec![Some(high)])]);
+
+    a.commit(plan(intent("Delete").delete(high)), 5).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), None, "this delete is no join");
+    assert_eq!(sources(&view), [(library, vec![None])]);
+
+    a.commit(plan(intent("Keep").revive(high)), 6).unwrap();
+    a.commit(plan(intent("Join").join(high, library)), 7)
+        .unwrap();
+    assert_eq!(a.view().resolve(high), Some(library));
+}
+
+#[test]
+fn undoing_the_return_of_a_joined_entity_joins_it_again() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, _) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    a.commit(plan(intent("Keep").revive(high)), 4).unwrap();
+    a.undo(5).unwrap();
+    for folded in [a.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.resolve(high), Some(low));
+        assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+    }
+}
+
+/// Writers `a` and `b`, of whom `a` has seen both join `gone`, which `library`
+/// names: `a` into `first` at the clock reading `at.0`, `b` into `second` at
+/// `at.1`.
+fn joined_apart(
+    first: EntityId,
+    second: EntityId,
+    gone: EntityId,
+    at: (u64, u64),
+) -> (Writer, Writer) {
+    let mut a = library_of(&[first, second, gone], entity(3), &[gone]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("Join").join(gone, first)), at.0)
+        .unwrap();
+    b.commit(plan(intent("Join").join(gone, second)), at.1)
+        .unwrap();
+    a.sync(&b);
+    (a, b)
+}
+
+#[test]
+fn where_writers_join_one_entity_into_different_ones_the_later_join_is_followed() {
+    let [first, second, gone, library] = [entity(1), entity(2), entity(7), entity(3)];
+    for (at, later, why) in [
+        ((4, 3), first, "by clock"),
+        ((3, 4), second, "by clock"),
+        ((3, 3), second, "by writer, where the clocks agree"),
+    ] {
+        let (mut a, mut b) = joined_apart(first, second, gone, at);
+        b.sync(&a);
+        for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
+            let view = view(folded);
+            assert_eq!(view.resolve(gone), Some(later), "{why}");
+            assert_eq!(sources(&view), [(library, vec![Some(later)])], "{why}");
+        }
+
+        a.commit(plan(intent("Delete").delete(later)), 5).unwrap();
+        assert_eq!(a.view().resolve(gone), None, "the earlier join is not");
+    }
+}
+
+#[test]
+fn undoing_the_return_of_an_entity_two_writers_joined_follows_the_later_join_again() {
+    let [first, second, gone] = [entity(1), entity(2), entity(7)];
+    for (at, later) in [((4, 3), first), ((3, 4), second)] {
+        let (mut a, _) = joined_apart(first, second, gone, at);
+        a.commit(plan(intent("Keep").revive(gone)), 5).unwrap();
+        assert_eq!(a.view().resolve(gone), Some(gone));
+        a.undo(6).unwrap();
+        assert_eq!(a.view().resolve(gone), Some(later));
+    }
+}
+
+#[test]
+fn a_delete_beside_a_join_leaves_the_join_followed() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.commit(plan(intent("Delete").delete(high)), 4).unwrap();
+    a.sync(&b);
+    for folded in [a.folded.clone(), a.compacted()] {
+        assert_eq!(view(folded).resolve(high), Some(low));
+    }
+
+    a.commit(plan(intent("Keep").revive(high)), 5).unwrap();
+    a.undo(6).unwrap();
+    assert_eq!(a.view().resolve(high), Some(low));
+}
+
+#[test]
+fn undoing_the_return_that_settled_a_conflict_over_a_join_joins_it_again() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, mut b) = named_twice(low, high, library);
+    a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    b.commit(plan(intent("Delete").delete(high)), 3).unwrap();
+    b.commit(plan(intent("Keep").revive(high)), 4).unwrap();
+    a.sync(&b);
+    let conflict = Conflicted::Existence { entity: high };
+    for folded in [a.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.conflicts(), std::slice::from_ref(&conflict));
+        assert_eq!(view.resolve(high), Some(high), "it was brought back");
+    }
+    a.commit(plan(intent("Keep").revive(high)), 5).unwrap();
+    assert_eq!(a.view().conflicts(), []);
+
+    a.undo(6).unwrap();
+    let view = a.view();
+    assert_eq!(view.resolve(high), Some(low));
+    assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+}
+
+#[test]
+fn undoing_a_delete_is_refused_once_another_writer_deleted_the_entity_otherwise() {
+    let [low, middle, high, library] = [entity(1), entity(2), entity(3), entity(4)];
+    let tidy = || intent("Tidy").join(high, low).add(low, TAGS, "kept".into());
+    let delete = || intent("Delete").delete(high);
+    let join = |into| intent("Join").join(high, into);
+    for (what, own, other) in [
+        ("a join, beside a delete", tidy(), delete()),
+        ("a join, beside another join", tidy(), join(middle)),
+        ("a delete, beside a join", delete(), join(low)),
+    ] {
+        let mut a = library_of(&[low, middle, high], library, &[high]);
+        let mut b = Writer::new(0xb);
+        b.sync(&a);
+        a.commit(plan(own), 3).unwrap();
+        b.commit(plan(other), 3).unwrap();
+        a.sync(&b);
+        let refused = a.undo(4);
+        assert!(
+            matches!(refused, Err(Refusal::ChangedSince { .. })),
+            "{what}: {refused:?}"
+        );
+    }
+
+    for (what, own, other) in [
+        ("the same join", tidy(), join(low)),
+        ("a delete beside a delete", delete(), delete()),
+    ] {
+        let mut a = library_of(&[low, middle, high], library, &[high]);
+        let mut b = Writer::new(0xb);
+        b.sync(&a);
+        a.commit(plan(own), 3).unwrap();
+        b.commit(plan(other), 3).unwrap();
+        a.sync(&b);
+        a.undo(4).unwrap();
+        assert_eq!(a.view().resolve(high), Some(high), "{what}");
+    }
+}
+
+#[test]
+fn deleting_what_holds_a_relation_ends_its_values_until_undo() {
+    let [take, library] = [entity(1), entity(2)];
+    let mut a = library_of(&[take], library, &[take]);
+    a.commit(plan(intent("Delete").delete(library)), 3).unwrap();
+    let view = a.view();
+    assert_eq!(sources(&view), []);
+    assert_eq!(view.referrers(SOURCES, take), []);
+
+    a.undo(4).unwrap();
+    let view = a.view();
+    assert_eq!(sources(&view), [(library, vec![Some(take)])]);
+    assert_eq!(view.referrers(SOURCES, take), [library]);
+}
+
+/// A writer that made `made`, each with no field, and then `library`, whose
+/// sources name each of `named`.
+fn bare(made: &[EntityId], library: EntityId, named: &[EntityId]) -> Writer {
+    let mut a = Writer::new(0xa);
+    let create = made
+        .iter()
+        .fold(creating("Add", made), |built, _| built.create(|_| {}).0);
+    a.commit(plan(create), 1).unwrap();
+    let (create, _) = creating("Build", &[library]).create(|new| {
+        for named in named {
+            new.add(SOURCES, source(*named));
+        }
+    });
+    a.commit(plan(create), 2).unwrap();
+    a
+}
+
+#[test]
+fn joins_that_lead_back_to_where_they_began_resolve_to_none() {
+    let [one, other, library] = [entity(1), entity(2), entity(3)];
+    let mut a = bare(&[one, other], library, &[one, other]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("Join").join(one, other)), 3).unwrap();
+    b.commit(plan(intent("Join").join(other, one)), 3).unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for folded in [a.folded.clone(), b.folded.clone(), a.compacted()] {
+        let view = view(folded);
+        assert_eq!((view.resolve(one), view.resolve(other)), (None, None));
+        assert_eq!(sources(&view), [(library, vec![None, None])]);
+    }
+}
+
+#[test]
+fn an_entity_that_gained_from_a_join_its_delete_did_not_see_is_what_both_ids_name() {
+    let [one, other, library] = [entity(1), entity(2), entity(3)];
+    let mut a = library_of(&[one, other], library, &[one, other]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("").add(one, TAGS, "one".into())), 3)
+        .unwrap();
+    a.commit(plan(intent("Join").join(one, other)), 4).unwrap();
+    b.commit(plan(intent("Join").join(other, one)), 4).unwrap();
+    a.sync(&b);
+    let view = a.view();
+    assert_eq!(view.conflicts(), [Conflicted::Existence { entity: other }]);
+    assert_eq!(
+        (view.resolve(one), view.resolve(other)),
+        (Some(other), Some(other))
+    );
+}
+
+#[test]
+fn joins_two_writers_made_apart_are_followed_through_both() {
+    let [low, middle, high, library] = [entity(1), entity(2), entity(3), entity(4)];
+    let mut a = bare(&[low, middle, high], library, &[high]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("Join").join(high, middle)), 3)
+        .unwrap();
+    b.commit(plan(intent("Join").join(middle, low)), 3).unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for folded in [a.folded.clone(), b.folded.clone(), b.compacted()] {
+        let view = view(folded);
+        assert_eq!(view.conflicts(), []);
+        assert_eq!(
+            (view.resolve(high), view.resolve(middle)),
+            (Some(low), Some(low))
+        );
+        assert_eq!(sources(&view), [(library, vec![Some(low)])]);
+        assert_eq!(view.referrers(SOURCES, low), [library]);
+    }
+}
+
+#[test]
+fn a_join_into_an_entity_another_writer_joined_away_keeps_it_in_conflict() {
+    let [low, middle, high, library] = [entity(1), entity(2), entity(3), entity(4)];
+    let mut a = library_of(&[low, middle, high], library, &[high]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("").add(high, TAGS, "high".into())), 3)
+        .unwrap();
+    a.commit(plan(intent("Join").join(high, middle)), 4)
+        .unwrap();
+    b.commit(plan(intent("Join").join(middle, low)), 4).unwrap();
+    a.sync(&b);
+    let view = a.view();
+    assert_eq!(view.conflicts(), [Conflicted::Existence { entity: middle }]);
+    assert_eq!(
+        tags(&a, middle),
+        ["high"],
+        "what the other join did not see"
+    );
+    assert_eq!(view.resolve(high), Some(middle));
+
+    a.commit(plan(intent("Join").join(middle, low)), 5).unwrap();
+    let view = a.view();
+    assert_eq!(view.conflicts(), []);
+    assert_eq!(tags(&a, low), ["high"]);
+    assert_eq!(view.resolve(high), Some(low));
+}
+
+#[test]
+fn a_join_into_an_entity_deleted_meanwhile_leaves_it_deleted() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let mut a = bare(&[low, high], library, &[high]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("Delete").delete(low)), 3).unwrap();
+    b.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    a.sync(&b);
+    b.sync(&a);
+    for writer in [&a, &b] {
+        let view = writer.view();
+        assert_eq!(view.conflicts(), []);
+        assert_eq!(view.entities().len(), 1, "the library alone");
+        assert_eq!((view.resolve(high), view.resolve(low)), (None, None));
+        assert_eq!(sources(&view), [(library, vec![None])]);
+    }
+}
+
+#[test]
+fn a_join_writes_the_entity_joined_into_and_a_plain_delete_writes_none() {
+    let [low, high, library] = [entity(1), entity(2), entity(3)];
+    let (mut a, _) = named_twice(low, high, library);
+    let joined = a.commit(plan(intent("Join").join(high, low)), 3).unwrap();
+    let json = joined.json();
+    let into = format!(r#","into":"{low}""#);
+    assert_eq!(json.matches(&into).count(), 1, "{json}");
+
+    let deleted = a.commit(plan(intent("Delete").delete(library)), 4).unwrap();
+    assert!(!deleted.json().contains("into"), "{}", deleted.json());
+}
+
+#[test]
+fn a_value_that_does_not_decode_names_nothing_and_is_listed() {
+    let [take, library] = [entity(1), entity(2)];
+    let mut a = library_of(&[take], library, &[take]);
+    let newer = Raw::new(r#"{"into":"x"}"#).unwrap();
+    let add = Op::Add {
+        entity: library,
+        key: "sources".into(),
+        value: newer.clone(),
+        replaces: Vec::new(),
+        take: None,
+    };
+    a.intent(3, vec![add], Vec::new());
+    let view = a.view();
+    let relations = view.relations(SOURCES);
+    assert_eq!(relations.unreadable, [(library, newer)]);
+    assert_eq!(relations.related.len(), 1);
+    assert_eq!(view.referrers(SOURCES, take), [library]);
+}
+
+#[test]
+fn each_side_of_a_conflicted_relation_is_read() {
+    let [one, two, library] = [entity(1), entity(2), entity(3)];
+    let mut a = library_of(&[one, two], library, &[]);
+    let mut b = Writer::new(0xb);
+    b.sync(&a);
+    a.commit(plan(intent("").set(library, TEMPLATE, one)), 3)
+        .unwrap();
+    b.commit(plan(intent("").set(library, TEMPLATE, two)), 3)
+        .unwrap();
+    a.sync(&b);
+    let view = a.view();
+    let named: Vec<Option<EntityId>> = view
+        .relations(TEMPLATE)
+        .related
+        .into_iter()
+        .map(|r| r.to)
+        .collect();
+    assert_eq!(named, [Some(one), Some(two)]);
+    assert_eq!(view.referrers(TEMPLATE, one), [library]);
+    assert_eq!(view.referrers(TEMPLATE, two), [library]);
+}
+
+/// Seeded walks of three writers that make entities, name them, join, delete,
+/// bring back and sync at random. Once each holds every entry, all resolve each id
+/// to the same entity, which they show, and agree on who names it, as does a
+/// reader of their snapshots.
+#[test]
+fn writers_that_hold_the_same_entries_resolve_every_id_alike() {
+    for seed in 0..200 {
+        let mut random = SeededRandom::new(seed);
+        let mut pick = |below: usize| (random.next_u128() % below as u128) as usize;
+        let mut writers = [Writer::new(0xa), Writer::new(0xb), Writer::new(0xc)];
+        let mut made: Vec<EntityId> = Vec::new();
+        for step in 0..40u64 {
+            let at = pick(3);
+            let shown = writers[at].folded.entities();
+            let now = step + 1;
+            let any = |pick: &mut dyn FnMut(usize) -> usize, of: &[EntityId]| {
+                (!of.is_empty()).then(|| of[pick(of.len())])
+            };
+            let built = match pick(7) {
+                0 | 1 => {
+                    let id = entity(made.len() as u128 + 1);
+                    let named = any(&mut pick, &made);
+                    made.push(id);
+                    let (create, _) = creating("Add", &[id]).create(|new| {
+                        new.set(NAME, "made".into());
+                        if let Some(named) = named {
+                            new.add(SOURCES, source(named));
+                        }
+                    });
+                    Some(create)
+                }
+                2 => {
+                    let pair = (any(&mut pick, &shown), any(&mut pick, &shown));
+                    match pair {
+                        (Some(one), Some(into)) if one != into => {
+                            Some(intent("Join").join(one, into))
+                        }
+                        _ => None,
+                    }
+                }
+                3 => any(&mut pick, &shown).map(|gone| intent("Delete").delete(gone)),
+                4 => any(&mut pick, &made).map(|back| intent("Keep").revive(back)),
+                5 => {
+                    let pair = (any(&mut pick, &shown), any(&mut pick, &made));
+                    match pair {
+                        (Some(holder), Some(named)) => {
+                            Some(intent("Name").add(holder, SOURCES, source(named)))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => {
+                    let from = writers[(at + 1 + pick(2)) % 3].clone();
+                    writers[at].sync(&from);
+                    None
+                }
+            };
+            if let Some(built) = built {
+                // A change the writer's state refuses, such as a revive of an
+                // entity it has not seen, is no step of the walk.
+                let _ = writers[at].commit(plan(built), now);
+            }
+        }
+        let held = writers.clone();
+        for writer in &mut writers {
+            for from in &held {
+                writer.sync(from);
+            }
+        }
+        let compacted = view(writers[0].compacted());
+        let views: Vec<View> = writers
+            .iter()
+            .map(Writer::view)
+            .chain([compacted])
+            .collect();
+        let read = |view: &View| {
+            let resolved: Vec<Option<EntityId>> = made.iter().map(|id| view.resolve(*id)).collect();
+            for to in resolved.iter().flatten() {
+                assert!(view.entity(*to).is_some(), "seed {seed}: {to} is not shown");
+                assert_eq!(
+                    view.resolve(*to),
+                    Some(*to),
+                    "seed {seed}: {to} resolves on"
+                );
+            }
+            let related = view.relations(SOURCES).related;
+            let naming = |id: &EntityId| {
+                let now = view.resolve(*id);
+                let names =
+                    |r: &&Related<Source>| r.value.to == *id || (now.is_some() && r.to == now);
+                let from: BTreeSet<EntityId> =
+                    related.iter().filter(names).map(|r| r.from).collect();
+                let from: Vec<EntityId> = from.into_iter().collect();
+                assert_eq!(view.referrers(SOURCES, *id), from, "seed {seed}: {id}");
+                from
+            };
+            let naming: Vec<Vec<EntityId>> = made.iter().map(naming).collect();
+            (resolved, naming, sources(view))
+        };
+        let first = read(&views[0]);
+        for view in &views[1..] {
+            assert_eq!(read(view), first, "seed {seed}");
         }
     }
 }

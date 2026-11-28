@@ -75,6 +75,23 @@
 //! metadata is the app's. [`View::changed_since`] gives the entities and files that
 //! differ from an earlier view, so an app can redraw only those.
 //!
+//! ## Relations
+//!
+//! A register or set whose values name entities is a relation. The value's type
+//! says which entity it names ([`Relates`]); an [`EntityId`] names itself. An id
+//! never changes and a file keeps its entity through renames and moves, so a
+//! relation holds no path. An intent that names a file with no entity creates the
+//! entity in the same step ([`Creating::adopt`](intent::Creating::adopt)).
+//!
+//! [`View::resolve`] gives the entity an id names now, which is another once its
+//! target is joined, or `None` while its target is deleted or has not arrived.
+//! The value stays as written, so an undo or a sync resolves it again.
+//! [`EntityView::relations`] reads the values of an entity's set with what each
+//! names, [`View::relations`] every entity's, and [`View::referrers`] the entities
+//! that name one. A change to a target is no change to the entities that name it:
+//! [`View::changed_since`] lists the target, and an app redraws its referrers in
+//! the earlier view and in the new one.
+//!
 //! ## Scans
 //!
 //! Opening scans no library file: each file is shown where its facts put it, as
@@ -89,7 +106,8 @@
 //! Two writers can each make an entity of one file before either sees the other's.
 //! The file is then the lowest entity's, and [`View::joined`] lists each other one,
 //! shown without a file. An app commits [`Intent::join`](intent::Intent::join) to
-//! give the lowest what each holds and delete the rest.
+//! give the lowest what each holds and delete the rest. What named one of the
+//! rest then names the lowest.
 //!
 //! ## Commits and undo
 //!
@@ -215,5 +233,5 @@ pub use layout::Layout;
 pub use path::RelPath;
 pub use plan::{Expect, Plan};
 pub use report::{Committed, Lag, Local, Opened, Outcome};
-pub use schema::{Field, Keyed, Members, Raw, Register, Schema, Set, Value};
-pub use view::{Changed, Counts, EntityView, FileRef, FileState, Listed, View};
+pub use schema::{Field, Keyed, Members, Raw, Register, Relates, Schema, Set, Value};
+pub use view::{Changed, Counts, EntityView, FileRef, FileState, Listed, Related, Relations, View};

@@ -8,13 +8,16 @@ use crate::ids::EntityId;
 use crate::merge::{side_by_side, Folded, Paired};
 use crate::path::RelPath;
 use crate::report::{Fork, Gap, Item, Joined, WriterInfo};
-use crate::schema::{Field, Key, KeyKind, Keyed, Members, Raw, Register, Set, Value, Written};
+use crate::schema::{
+    Field, Key, KeyKind, Keyed, Members, Raw, Register, Relates, Set, Value, Written,
+};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
 /// to and shared between threads.
 ///
-/// A lookup by value visits every entity shown; one by path is a search. Values
-/// compare by their JSON text, as toshokan writes it for the key's type.
+/// A lookup by value or of a relation visits every entity shown; one by path is a
+/// search. Values compare by their JSON text, as toshokan writes it for the key's
+/// type.
 #[derive(Clone)]
 pub struct View(Arc<Shared>);
 
@@ -92,6 +95,28 @@ pub struct Counts<T> {
     pub unreadable: Vec<(Raw, usize)>,
 }
 
+/// One value of a relation.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Related<T> {
+    /// The entity that holds the value.
+    pub from: EntityId,
+    pub value: T,
+    /// What the value's target [resolves](View::resolve) to; `None` while no
+    /// entity shown is its target.
+    pub to: Option<EntityId>,
+}
+
+/// The values of a relation, as [`View::relations`] and
+/// [`EntityView::relations`] read them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Relations<T> {
+    /// By holder, then by the value's JSON text.
+    pub related: Vec<Related<T>>,
+    /// Values that do not decode as the key's type, each with its holder. What
+    /// they name is unknown.
+    pub unreadable: Vec<(EntityId, Raw)>,
+}
+
 /// A key of an entity whose surviving writes disagree.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Conflicted {
@@ -118,13 +143,22 @@ impl View {
     /// Each entity shown holding a value under `key`, by id, with the values it
     /// holds there, sorted and once each.
     fn holding(&self, key: Key) -> impl Iterator<Item = (EntityId, Vec<&Raw>)> {
-        let shown = self.parts().folded.each_shown();
-        shown.filter_map(move |(entity, shown)| {
-            let values = shown?.values.into_iter();
-            let under = values.filter(|(kind, name, _)| *kind == key.kind && *name == key.name);
-            let held: Vec<&Raw> = under.map(|(_, _, value)| value).collect();
-            (!held.is_empty()).then_some((entity, held))
-        })
+        self.parts().folded.holding(key.kind, key.name)
+    }
+
+    /// `held`, the values `from` holds under a relation's key, each with what it
+    /// names now.
+    fn relate<T: Relates>(&self, relations: &mut Relations<T>, from: EntityId, held: Vec<&Raw>) {
+        for raw in held {
+            match raw.decode::<T>() {
+                Ok(value) => relations.related.push(Related {
+                    from,
+                    to: self.resolve(value.target()),
+                    value,
+                }),
+                Err(_) => relations.unreadable.push((from, raw.clone())),
+            }
+        }
     }
 
     /// The merged facts the view shows.
@@ -196,6 +230,71 @@ impl View {
     pub fn at(&self, path: &RelPath) -> Option<EntityView<'_>> {
         let id = *self.0.at.get(path)?;
         Some(EntityView { view: self, id })
+    }
+
+    /// The entity shown that `named` names now: itself while it is shown; else
+    /// the entity the join that deleted it names ([`crate::intent::Intent::join`]),
+    /// followed while that one is not shown either; and, of the entity reached,
+    /// the one a scan found it joined into ([`View::joined`]). Where joins
+    /// disagree, the latest is followed. `None` while no entity shown is it: it
+    /// was deleted, or its writer's entries have not arrived. A deleted entity
+    /// brought back resolves again.
+    ///
+    /// The entity has a file only where [`EntityView::file`] says so.
+    pub fn resolve(&self, named: EntityId) -> Option<EntityId> {
+        let folded = &self.parts().folded;
+        let mut shown = named;
+        let mut passed = BTreeSet::new();
+        while !folded.present(shown) {
+            if !passed.insert(shown) {
+                return None;
+            }
+            shown = folded.joined_into(shown)?;
+        }
+        let scanned = &self.parts().bindings.report.joined;
+        let found = scanned.binary_search_by_key(&shown, |joined| joined.entity);
+        Some(found.map_or(shown, |at| scanned[at].into))
+    }
+
+    /// Every value of the relation `key`, a register or a set, with what each
+    /// names now. A register holds the value of each write that survives, so each
+    /// side of a conflict is read; [`EntityView::get`] says which is shown.
+    pub fn relations<K>(&self, key: K) -> Relations<K::Value>
+    where
+        K: Keyed<Value: Relates>,
+    {
+        let mut relations = Relations {
+            related: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        for (from, held) in self.holding(key.key()) {
+            self.relate(&mut relations, from, held);
+        }
+        relations
+    }
+
+    /// The entities that hold a value of the relation `key` naming `target`, or
+    /// naming what `target` [resolves](View::resolve) to, by id and once each. A
+    /// value that does not decode names nothing here; [`View::relations`] lists
+    /// those.
+    pub fn referrers<K>(&self, key: K, target: EntityId) -> Vec<EntityId>
+    where
+        K: Keyed<Value: Relates>,
+    {
+        let now = self.resolve(target);
+        let mut from = Vec::new();
+        for (holder, held) in self.holding(key.key()) {
+            let names = |raw: &&Raw| {
+                raw.decode::<K::Value>().is_ok_and(|value| {
+                    let named = value.target();
+                    named == target || (now.is_some() && self.resolve(named) == now)
+                })
+            };
+            if held.iter().any(names) {
+                from.push(holder);
+            }
+        }
+        from
     }
 
     /// Every conflict among the entities shown, sorted.
@@ -271,7 +370,8 @@ impl View {
     }
 
     /// What differs from `before`, a view of the same library. Costs a step per
-    /// entity and file.
+    /// entity and file. An entity whose relation names one that differs is not
+    /// listed for that.
     pub fn changed_since(&self, before: &View) -> Changed {
         let (now, was) = (self.parts(), before.parts());
         let mut entities: BTreeSet<EntityId> =
@@ -378,6 +478,19 @@ impl EntityView<'_> {
             values: values.into_iter().collect(),
             unreadable,
         }
+    }
+
+    /// The members of the relation `key`, each with what it names now. A relation
+    /// kept in a register is read with [`EntityView::get`] and [`View::resolve`].
+    pub fn relations<T: Relates>(&self, key: Set<T>) -> Relations<T> {
+        let mut relations = Relations {
+            related: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        let folded = &self.view.parts().folded;
+        let held = folded.held(self.id, KeyKind::Set, key.name());
+        self.view.relate(&mut relations, self.id, held);
+        relations
     }
 
     /// Where the view binds the entity's file; [`FileState::Missing`] at the

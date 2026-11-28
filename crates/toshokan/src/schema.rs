@@ -23,12 +23,45 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use crate::error::{Error, Result};
-use crate::ids::{EntryHash, Hlc, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
 
 /// What a key's values may be. The app owns the type; toshokan stores its JSON.
 pub trait Value: Serialize + DeserializeOwned + Ord + Clone {}
 
 impl<T: Serialize + DeserializeOwned + Ord + Clone> Value for T {}
+
+/// A value that names an entity, its target. A register or set of such values is
+/// a relation, which [`crate::View::resolve`], [`crate::View::relations`] and
+/// [`crate::View::referrers`] read.
+///
+/// ```
+/// use serde::{Deserialize, Serialize};
+/// use toshokan::{EntityId, Relates, Set};
+///
+/// #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// struct Source {
+///     to: EntityId,
+///     role: String,
+/// }
+///
+/// impl Relates for Source {
+///     fn target(&self) -> EntityId {
+///         self.to
+///     }
+/// }
+///
+/// const BUILT_FROM: Set<Source> = Set::new("built from");
+/// const TEMPLATE: toshokan::Register<EntityId> = toshokan::Register::new("template");
+/// ```
+pub trait Relates: Value {
+    fn target(&self) -> EntityId;
+}
+
+impl Relates for EntityId {
+    fn target(&self) -> EntityId {
+        *self
+    }
+}
 
 /// A multi-value register: each write replaces the writes it observed, and
 /// concurrent writes of different values all survive, in conflict.

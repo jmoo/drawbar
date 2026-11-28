@@ -1465,10 +1465,15 @@ fn what_of(field: &contribution::FieldKey) -> What {
 /// The fact change that writes `value` to `field`; `None` for a file write of no
 /// file, which only trashing the file makes.
 fn fact_change(field: &contribution::FieldKey, value: &contribution::Value) -> Option<FactChange> {
-    use contribution::{FieldKey, Value};
+    use contribution::{Exists, FieldKey, Value};
     Some(match (field, value) {
-        (FieldKey::Exist(entity), Value::Exist(true)) => FactChange::Revive { entity: *entity },
-        (FieldKey::Exist(entity), Value::Exist(false)) => FactChange::Delete { entity: *entity },
+        (FieldKey::Exist(entity), Value::Exist(Exists::Created)) => {
+            FactChange::Revive { entity: *entity }
+        }
+        (FieldKey::Exist(entity), Value::Exist(Exists::Deleted { into })) => FactChange::Delete {
+            entity: *entity,
+            into: *into,
+        },
         (FieldKey::Register(entity, key), Value::Register(Some(value))) => FactChange::Set {
             entity: *entity,
             key: key.to_string(),

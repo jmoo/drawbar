@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use toshokan::report::{By, ItemKind, Mode, Opened, Start, What};
 use toshokan::{Field, FileState, MemDisk, Root};
 
-use crate::fixture::{fixtures, Library, NOTE, ORIGIN, TAGS};
+use crate::fixture::{fixtures, Library, NOTE, ORIGIN, SOURCES, TAGS};
 
 fn register<T: serde::Serialize>(field: Field<T>) -> Option<Value> {
     match field {
@@ -68,6 +68,15 @@ pub fn observed(library: &Library, opened: &Opened, folder: &MemDisk) -> Value {
         let tags = entity.members(TAGS);
         if !tags.values.is_empty() {
             facts.insert("tags".into(), json!(tags.values));
+        }
+        let sources = entity.relations(SOURCES);
+        if !sources.related.is_empty() {
+            let sources: Vec<Value> = sources
+                .related
+                .iter()
+                .map(|related| json!({ "names": related.value, "resolves": related.to }))
+                .collect();
+            facts.insert("sources".into(), json!(sources));
         }
         if let Some(file) = entity.file() {
             let file = json!({

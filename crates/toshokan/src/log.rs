@@ -142,11 +142,13 @@ pub enum Op {
         take: Option<Run>,
     },
     /// A write of the existence register: the entity is deleted. `observed` names
-    /// the field writes the deleting writer had seen.
+    /// the field writes the deleting writer had seen, and `into` the entity a join
+    /// gave what this one held.
     Delete {
         entity: EntityId,
         replaces: Vec<Ref>,
         observed: Vec<Observed>,
+        into: Option<EntityId>,
         take: Option<Run>,
     },
     /// A register write replacing the writes it names; `None` clears.
@@ -859,6 +861,8 @@ enum OpOut<'a> {
         replaces: &'a [Ref],
         observed: &'a [Observed],
         #[serde(skip_serializing_if = "Option::is_none")]
+        into: Option<EntityId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         take: Option<&'a Run>,
     },
     Write {
@@ -937,11 +941,13 @@ impl Serialize for Op {
                 entity,
                 replaces,
                 observed,
+                into,
                 take,
             } => OpOut::Delete {
                 entity: *entity,
                 replaces,
                 observed,
+                into: *into,
                 take: take.as_ref(),
             },
             Self::Write {
@@ -1049,8 +1055,17 @@ struct DeleteIn {
     entity: EntityId,
     replaces: Vec<Ref>,
     observed: Vec<Observed>,
+    #[serde(default, deserialize_with = "joined_into")]
+    into: Option<EntityId>,
     #[serde(default)]
     take: Option<Run>,
+}
+
+/// A delete's `into`. A value that is no id reads as none, as a build that does
+/// not know the member reads it, so both show the same entities.
+fn joined_into<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<EntityId>, D::Error> {
+    let value = Box::<RawValue>::deserialize(deserializer)?;
+    Ok(serde_json::from_str(value.get()).ok())
 }
 
 #[derive(Deserialize)]
@@ -1179,12 +1194,14 @@ fn decode_op(json: &str) -> Option<Op> {
                  entity,
                  replaces,
                  observed,
+                 into,
                  take,
                  ..
              }| Op::Delete {
                 entity,
                 replaces,
                 observed,
+                into,
                 take,
             },
         ),
@@ -1344,6 +1361,7 @@ mod tests {
                         at: r(5),
                     },
                 ],
+                into: Some(EntityId::from_u128(8)),
                 take: Some(run()),
             },
             Op::Write {
@@ -1676,6 +1694,27 @@ mod tests {
             again.json(),
             r#"{"prev":"00000000000000000000000000000009","n":4,"at":[4,0],"into":"y","kind":"merge"}"#
         );
+    }
+
+    #[test]
+    fn a_delete_whose_into_is_no_id_is_a_plain_delete_kept_whole() {
+        let prev = hash(1);
+        let e = "0000000000000000000000000000000e";
+        for into in ["7", "1e400", "null", r#""x""#, "{}"] {
+            let line = format!(
+                r#"{{"prev":"{prev}","n":2,"at":[1,2],"kind":"intent","label":"L","ops":[{{"op":"delete","entity":"{e}","replaces":[],"observed":[],"into":{into}}}]}}"#
+            );
+            let entry = Entry::decode(Line::seal(line.clone()).unwrap()).unwrap();
+            let EntryKind::Intent(logged) = entry.kind() else {
+                panic!("{:?}", entry.kind());
+            };
+            assert!(
+                matches!(logged.ops[..], [Op::Delete { into: None, .. }]),
+                "{line}"
+            );
+            assert!(entry.unknown_members(), "{line}");
+            assert_eq!(entry.json(), line);
+        }
     }
 
     #[test]

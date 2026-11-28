@@ -16,7 +16,7 @@ use toshokan::{EntityId, Expect, Io, MemDisk, Root};
 
 use crate::fixture::{
     identity, layout, open, path, put, Fault, Faulty, Library, COPYING, EMPTY_DIRS, NOTE, ORIGIN,
-    REVERSE, TAGS,
+    REVERSE, SOURCES, TAGS,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -143,6 +143,7 @@ fn readme(name: &str, seeds: &str, what: &str) -> String {
 #[ignore = "writes the fixture states; run once per new state"]
 fn fixtures() {
     one_writer();
+    one_writer_joined();
     two_writers_fork();
     pending();
     local();
@@ -302,6 +303,82 @@ fn one_writer() {
             "The history of `one-writer-open`, compacted into a snapshot, then one more \
              intent in a segment sealed at close, whose compaction failed to stage its \
              snapshot.",
+        ),
+    );
+}
+
+fn one_writer_joined() {
+    let clock = TestClock::at(1000);
+    let mut joined = machine(&MemDisk::new());
+    let backend = Faulty::new(&joined);
+    let (mut lib, _) = open(&backend, "fixture", 51, &clock);
+    lib.rescan().unwrap();
+    let tick = || clock.advance(1000);
+    let file = |name: &str| (path(&format!("{name}.syx")), name.as_bytes().to_vec());
+
+    tick();
+    let (intent, low) = lib.intent("Create").create(|e| {
+        let (at, bytes) = file("low");
+        e.save(&at, bytes, Expect::Absent);
+    });
+    let (intent, second) = intent.create(|e| {
+        let (at, bytes) = file("second");
+        e.add(TAGS, "second".into())
+            .save(&at, bytes, Expect::Absent);
+    });
+    let (intent, third) = intent.create(|e| {
+        let (at, bytes) = file("third");
+        e.set(ORIGIN, "third".into())
+            .save(&at, bytes, Expect::Absent);
+    });
+    let (intent, gone) = intent.create(|e| {
+        let (at, bytes) = file("gone");
+        e.save(&at, bytes, Expect::Absent);
+    });
+    let (intent, built) = intent.create(|e| {
+        let (at, bytes) = file("built");
+        e.add(SOURCES, second)
+            .add(SOURCES, third)
+            .add(SOURCES, gone)
+            .save(&at, bytes, Expect::Absent);
+    });
+    intent.commit().unwrap();
+
+    tick();
+    lib.intent("Join second")
+        .join(second, low)
+        .commit()
+        .unwrap();
+
+    tick();
+    lib.intent("Delete gone").delete(gone).commit().unwrap();
+
+    lib.compact().unwrap();
+    tick();
+    lib.intent("Join third").join(third, low).commit().unwrap();
+    let tmp = layout().tmp_dir(lib.writer_id().unwrap());
+    backend.fault(move |io| match io {
+        Io::Create { path, .. } if path.starts_with(&tmp) => Some(Fault::Fail),
+        _ => None,
+    });
+    lib.close().unwrap();
+    backend.heal();
+    joined.crash();
+
+    println!(
+        "one writer joined: low {low}, second {second}, third {third}, gone {gone}, \
+         built {built}"
+    );
+    write_state(
+        "one-writer-joined",
+        &joined,
+        &readme(
+            "one-writer-joined",
+            "seed 51",
+            "One writer whose entity `built` names three others in `sources`. It joins \
+             `second` into `low` and deletes `gone`, compacts into a snapshot that holds \
+             the join, then joins `third` into `low` in a segment sealed at close, whose \
+             compaction failed to stage its snapshot.",
         ),
     );
 }

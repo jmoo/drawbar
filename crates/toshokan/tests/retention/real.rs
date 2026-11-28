@@ -83,8 +83,8 @@ fn field(key: &FieldKey) -> Field {
 
 fn value(value: &Value) -> Option<Val> {
     match value {
-        Value::Exist(true) => Some(Val::Created),
-        Value::Exist(false) => Some(Val::Deleted),
+        Value::Exist(Exists::Created) => Some(Val::Created),
+        Value::Exist(Exists::Deleted { .. }) => Some(Val::Deleted),
         Value::Register(value) => value.as_ref().map(val),
         Value::Member(true) => Some(Val::In),
         Value::Member(false) => None,
@@ -230,6 +230,7 @@ impl Lines {
                     entity: e_id,
                     replaces,
                     observed: e.observed.iter().map(target).collect(),
+                    into: None,
                     take,
                 },
                 (Kind::Exist, _) => Op::Create {
@@ -340,7 +341,7 @@ fn shown(world: &World, lines: &Lines, derived: &Derived) -> Shown {
                 for w in folded.existence(e) {
                     let value = match w.value {
                         Exists::Created => Val::Created,
-                        Exists::Deleted => Val::Deleted,
+                        Exists::Deleted { .. } => Val::Deleted,
                     };
                     live.push(Live {
                         at: at(w.by, w.n, w.entry),
