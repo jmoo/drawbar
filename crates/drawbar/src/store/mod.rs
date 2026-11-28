@@ -40,7 +40,7 @@ pub use web::{copy_of, default_root, permission, Backend, Picked, Risk, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
 #[cfg(target_arch = "wasm32")]
-pub(crate) use worker::{from_js, glue, object, to_js, BOOTSTRAP};
+pub(crate) use worker::{bundle, from_js, object, to_js, BOOTSTRAP};
 #[cfg(target_arch = "wasm32")]
 pub use worker::{RescueIo, Unrun, Worker};
 
@@ -48,8 +48,8 @@ pub use worker::{RescueIo, Unrun, Worker};
 /// occupants a write to the instrument leaves while the library is open.
 pub const RESCUED: &str = "rescued";
 
-/// Why a worker could not start: the page's bundle is no longer where the page loaded it
-/// from, as once drawbar.app is updated.
+/// Why a worker could not start: its bundle is no longer where the page found it, as once
+/// drawbar.app is updated.
 #[derive(Debug)]
 pub struct Outdated;
 

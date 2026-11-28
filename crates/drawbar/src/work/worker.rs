@@ -70,11 +70,8 @@ fn spawn<T: DeserializeOwned + Send + 'static>(
 ) -> Result<Running, String> {
     let js = |e: JsValue| describe(&e);
     let (message, transfer) = store::to_js(wire::encode(task)?);
-    for (name, value) in [
-        ("kind", JsValue::from_str("job")),
-        ("glue", JsValue::from_str(&store::glue())),
-        ("module", wasm_bindgen::module()),
-    ] {
+    let kind = [("kind", JsValue::from_str("job"))];
+    for (name, value) in kind.into_iter().chain(store::bundle()?) {
         js_sys::Reflect::set(&message, &name.into(), &value).map_err(js)?;
     }
 

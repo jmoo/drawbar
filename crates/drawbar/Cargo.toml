@@ -20,6 +20,14 @@ name = "drawbar"
 name = "drawbar"
 path = "src/main.rs"
 
+# Each exports one entry point of the browser build: `page` the app's `start`, and
+# `worker` the library worker's `drawbarWorker`. The deployed build makes a module of
+# each alone, so the page downloads no more than it runs.
+[features]
+default = ["page", "worker"]
+page = []
+worker = []
+
 [dependencies]
 # glow (WebGL2 / OpenGL) makes a smaller wasm module than the default wgpu backend,
 # and every browser with WebUSB has WebGL2.
