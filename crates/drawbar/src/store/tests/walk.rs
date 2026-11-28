@@ -539,8 +539,8 @@ const UNHELD: &[Check] = &[
     Check::KeptUndoGoes,
     // Synced drawbars show a lost row at different paths once sync settles.
     Check::Converges,
-    // A save of an edit to a file another drawbar moved or deleted writes the file and
-    // lists it as another asset.
+    // A save to a file bound to no entity binds a lost row's entity there, and the
+    // drawbar lists the file as another asset.
     Check::SavingKeepsTheEdit,
 ];
 
