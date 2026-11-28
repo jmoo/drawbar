@@ -3259,6 +3259,19 @@ impl Session {
         workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets)));
         assert!(workspace.save_edit(id));
     }
+
+    /// Rename the sample instrument `id` rests in to `name`, send its save without
+    /// waiting, and type `during` while it is out.
+    fn rename_during_save(&mut self, id: u64, name: &str, during: &str) {
+        self.rename_resting(id, name);
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        assert!(self.store.sync(workspace, browser, Pass::Last));
+        assert!(workspace.saving_edit(id), "the save is out");
+        let sets = [name, during].map(|name| ("name".to_string(), name.to_string()));
+        workspace.hold_edit(id, Some(crate::rewrite::Edit::Sample(sets.to_vec())));
+    }
 }
 
 /// An edit of a sample instrument resting in its file is saved by copying the file
@@ -3329,6 +3342,64 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
     assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
+}
+
+/// A save whose answer is lost leaves an edit made during it, back to the file it was
+/// asked of or to a third name, made over the file the look finds.
+#[test]
+fn an_edit_made_during_a_save_whose_answer_is_lost_stays_over_the_file_found() {
+    for during in ["Alpha", "Gamma"] {
+        let root = Temp::new();
+        let (mut session, id, _) = resting_sample(&root);
+        session.rename_resting(id, "Alpha");
+        session.sync();
+        session.store.fault(Fault::Next(Box::new(Fault::Unread)));
+        session.rename_during_save(id, "Beta", during);
+        session.settle();
+
+        let workspace = &session.bench.workspace;
+        let rests = workspace.get(id).unwrap().rests().unwrap().clone();
+        let crate::ondisk::Index::Sample(index) = &rests.index else {
+            panic!("it rests in a sample instrument");
+        };
+        assert_eq!(
+            index.outline().name().ok().as_deref(),
+            Some("Beta"),
+            "the save landed"
+        );
+        let over = workspace.edit_of(id).map(|(over, _)| over.serial);
+        assert_eq!(
+            over,
+            Some(rests.serial),
+            "the edit to {during:?} is held over the file the save wrote"
+        );
+        assert!(workspace.get(id).unwrap().is_unsaved());
+    }
+}
+
+/// A save that fails while the edit held changes nothing over the file says only that
+/// it was not saved.
+#[test]
+fn a_failed_save_of_an_instrument_edited_back_does_not_say_an_edit_is_kept() {
+    let root = Temp::new();
+    let (mut session, id, _) = resting_sample(&root);
+    session.rename_resting(id, "Alpha");
+    session.sync();
+    let path = root.at("Zoned.nsmp");
+    let time = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut theirs = fs::read(&path).unwrap();
+    let last = theirs.len() - 3;
+    theirs[last] ^= 0x40;
+    fs::write(&path, &theirs).unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(time).unwrap();
+
+    session.rename_during_save(id, "Beta", "Alpha");
+    session.settle();
+
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(session.said("was not saved"), 1);
+    assert_eq!(session.said("The edit is kept"), 0);
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out

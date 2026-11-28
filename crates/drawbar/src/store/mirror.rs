@@ -3644,18 +3644,20 @@ impl Store {
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
             Err(Failure::Unheard) => {
-                workspace.edit_not_saved(id);
+                workspace.edit_unheard(id);
                 return self.read_unheard(id, path, workspace);
             }
         };
         workspace.edit_not_saved(id);
-        let name = workspace
-            .get(id)
-            .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
+        let entity = workspace.get(id);
+        let name = entity.map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
         log.error(format!("saving {path}: {why}"));
-        log.trouble(format!(
-            "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-        ));
+        log.trouble(match entity.is_some_and(LocalEntity::is_unsaved) {
+            true => format!(
+                "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
+            ),
+            false => format!("“{name}” was not saved, because {why}."),
+        });
     }
 
     /// Send the saves asked for of edits of files resting in the library, each once the
