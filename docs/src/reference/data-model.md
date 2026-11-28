@@ -147,7 +147,10 @@ of a resting file, streams a chunk at a time.
 Undo reaches only this session's intents. It is refused where the same thing
 was changed since
 ([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#undo-and-redo)),
-and drawbar then lets go of that step, so the next undo reaches the one before.
+and where a file no longer holds what the intent left there. drawbar lets go of
+a step the library refuses, so the next undo reaches the one before. A step
+that fails because the folder could not be read or written, or the library is
+read-only, stays, except a redo that a change made since has ended.
 An intent too large for one log entry is refused before it writes anything.
 
 The trash holds what a delete or a save displaced, for this session's undo and

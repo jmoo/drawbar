@@ -11,13 +11,16 @@ use nord_usb::ObjectClass;
 use crate::app::{accent, DrawbarApp, ThemeChoice};
 use crate::browser::{bulk, Act, Bulk};
 use crate::device::NO_USB;
+use crate::document::Editors;
 use crate::icon::{sized, Glyph};
 use crate::libraries::Picking;
 use crate::newproject::Making;
 use crate::platform::{written, Platform};
 use crate::shell::Dock;
+use crate::store::Store;
 use crate::strings::folder;
 use crate::tabs::Spot;
+use crate::timeline::{Aim, Asked, Next, Went};
 use crate::workspace::Fresh;
 use crate::zoom::Step;
 
@@ -26,7 +29,7 @@ use crate::zoom::Step;
 pub enum Command {
     /// Copy picked files into the library, as a drop does.
     Import,
-    /// Take back this session's last change to the library.
+    /// Take back this session's last edit or change to the library.
     Undo,
     /// Make again the change undone last.
     Redo,
@@ -408,6 +411,15 @@ fn unwritten(command: Command, platform: Platform) -> Option<egui::KeyboardShort
         .then(|| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))
 }
 
+/// Whether `event` presses `keys`, matched as egui matches a shortcut.
+fn presses(event: &egui::Event, keys: egui::KeyboardShortcut) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { key, modifiers, pressed: true, .. }
+            if *key == keys.logical_key && modifiers.matches_logically(keys.modifiers)
+    )
+}
+
 /// Whether a command undoes or redoes, which a field being typed in does for itself.
 pub(crate) fn undoes(command: Command) -> bool {
     matches!(command, Command::Undo | Command::Redo)
@@ -491,6 +503,13 @@ pub(crate) fn covered(ctx: &egui::Context) -> bool {
     ctx.memory(|memory| memory.top_modal_layer()).is_some()
 }
 
+/// Whether a text field has the keyboard, and with it undo keys of its own.
+fn typing(ctx: &egui::Context) -> bool {
+    let focused = ctx.memory(|memory| memory.focused());
+    // egui keeps a text field's cursor under the field's id from its first frame.
+    focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
 impl DrawbarApp {
     /// What a key or the Mac's menu bar may do with `command` now: its [`Self::offer`],
     /// disabled behind a modal unless it quits or zooms, which act on no part of the
@@ -499,7 +518,7 @@ impl DrawbarApp {
         let mut offer = self.offer(command)?;
         let over = matches!(command, Command::Quit | Command::Zoom(_));
         offer.enabled &= over || !covered(ctx);
-        offer.enabled &= !(undoes(command) && ctx.wants_keyboard_input());
+        offer.enabled &= !(undoes(command) && typing(ctx));
         Some(offer)
     }
 
@@ -587,12 +606,22 @@ impl DrawbarApp {
             }
             Command::Undo | Command::Redo => {
                 let store = self.store.as_ref();
-                let label = match command {
-                    Command::Undo => store.and_then(crate::store::Store::undo_label),
-                    _ => store.and_then(crate::store::Store::redo_label),
+                // An edit step needs no library, but waits while a change sent to one, as
+                // a save of what it holds is, has not been answered, and while a save of
+                // its document is asked and not sent.
+                let goes = |next: &Next| match next {
+                    Next::Library { .. } => store.is_some_and(Store::undoes),
+                    Next::Edit { id, .. } => {
+                        !store.is_some_and(Store::changing)
+                            && !self.document.awaits_save(*id, &self.workspace)
+                    }
                 };
-                match label {
-                    Some(label) => relabeled(label),
+                let next = match command {
+                    Command::Undo => self.timeline.next_undo(),
+                    _ => self.timeline.next_redo(),
+                };
+                match next.filter(goes) {
+                    Some(next) => relabeled(format!("{} {}", label(command), next.label())),
                     None => Offer {
                         enabled: false,
                         ..plain
@@ -657,7 +686,89 @@ impl DrawbarApp {
         })
     }
 
-    /// Do what `command` names, now.
+    /// Whether a key or the Mac's menu bar may run `command` now. Undo and Redo ask their
+    /// offer when they run, once the frame's edits are recorded.
+    pub(crate) fn may_run(&self, ctx: &egui::Context, command: Command) -> bool {
+        undoes(command)
+            || self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+    }
+
+    /// What `command` would take now, where it is Undo or Redo.
+    pub(crate) fn aim(&self, command: Command) -> Option<Aim> {
+        match command {
+            Command::Undo => Some(self.timeline.aim_undo()),
+            Command::Redo => Some(self.timeline.aim_redo()),
+            _ => None,
+        }
+    }
+
+    /// Run the Undo and Redo asked for this frame, in order, once its edits are recorded.
+    /// The first runs only while the step it named is still there to take, and each after
+    /// it is aimed at what the one before did, so all after one that did nothing are
+    /// dropped.
+    pub(crate) fn undo_asked(&mut self, ctx: &egui::Context) {
+        let asked = std::mem::take(&mut self.undoing);
+        if !asked.first().is_some_and(|aim| self.timeline.holds(*aim)) {
+            return;
+        }
+        for aim in asked {
+            let (command, again) = match aim {
+                Aim::Undo(_) => (Command::Undo, false),
+                Aim::Redo(_) => (Command::Redo, true),
+            };
+            if !self
+                .offer_now(ctx, command)
+                .is_some_and(|offer| offer.enabled)
+            {
+                return;
+            }
+            ctx.request_repaint();
+            if !self.undo(again) {
+                return;
+            }
+        }
+    }
+
+    /// Undo the step the timeline names next, or redo it `again`: a library step is asked
+    /// of the library, and an edit step brings its document to the front. Returns whether
+    /// a step moved.
+    fn undo(&mut self, again: bool) -> bool {
+        let mut documents = Editors {
+            document: &mut self.document,
+            workspace: &mut self.workspace,
+            log: &mut self.log,
+        };
+        let went = match again {
+            false => self.timeline.undo(&mut documents),
+            true => self.timeline.redo(&mut documents),
+        };
+        let taken = match went {
+            Went::Nowhere => return false,
+            Went::Edit(id) => {
+                self.tabs.open(id);
+                return true;
+            }
+            Went::Library(taken) => taken,
+        };
+        let asked = match self.store.as_mut() {
+            Some(store) if again => store.redo(taken),
+            Some(store) => store.undo(taken),
+            None => Err(taken),
+        };
+        let Err(taken) = asked else {
+            return true;
+        };
+        self.timeline.put_back(match again {
+            true => Asked::Redo(taken),
+            false => Asked::Undo(taken),
+        });
+        false
+    }
+
+    /// Do what `command` names, now, except Undo and Redo, which wait for the frame's
+    /// edits to be recorded.
     ///
     /// ⚠️ Listening to MIDI starts here, inside the click: a browser tab may ask for MIDI
     /// access only while the click's user activation is live.
@@ -671,8 +782,7 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Import => acts.push(Act::OpenFiles),
-            Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
-            Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
+            Command::Undo | Command::Redo => self.undoing.extend(self.aim(command)),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
@@ -761,7 +871,8 @@ impl DrawbarApp {
         }
     }
 
-    /// Run whatever command this frame's keys ask for, of those `admit` lets through.
+    /// Run the commands this frame's keys ask for, of those `admit` lets through, in the
+    /// order the keys were pressed.
     pub(crate) fn shortcuts(
         &mut self,
         ctx: &egui::Context,
@@ -770,22 +881,25 @@ impl DrawbarApp {
         acts: &mut Vec<Act>,
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
-        for command in KEYED {
-            // ⚠️ A field being typed in takes its own undo keys.
-            if undoes(command) && ctx.wants_keyboard_input() {
-                continue;
-            }
+        // ⚠️ A field being typed in takes its own undo keys.
+        let typing = typing(ctx);
+        let bound = |command: Command, event: &egui::Event| {
             let mut keys = shortcut(command, platform, mac)
                 .into_iter()
                 .chain(unwritten(command, platform));
-            if !keys.any(|keys| ctx.input_mut(|input| input.consume_shortcut(&keys))) {
-                continue;
-            }
-            if admit(command)
-                && self
-                    .offer_now(ctx, command)
-                    .is_some_and(|offer| offer.enabled)
-            {
+            !(undoes(command) && typing) && keys.any(|keys| presses(event, keys))
+        };
+        let pressed = ctx.input_mut(|input| {
+            let mut pressed = Vec::new();
+            input.events.retain(|event| {
+                let command = KEYED.into_iter().find(|command| bound(*command, event));
+                pressed.extend(command);
+                command.is_none()
+            });
+            pressed
+        });
+        for command in pressed {
+            if admit(command) && self.may_run(ctx, command) {
                 self.run(ctx, frame, command, acts);
             }
         }

@@ -82,10 +82,13 @@ Select a file and press F2 to rename it. Removing a folder moves its contents up
 one level. If drawbar finds hidden files in it, **Show them** lets you look
 before you decide.
 
-**Edit ▸ Undo** names the last library change it can take back, and **Edit ▸
-Redo** repeats it. A move, save, deletion or tag change across several files is
-one step. Undo lasts while this window has the library open. To drop an edit you
-haven't saved, choose **Revert** in the open document.
+**Edit ▸ Undo** names the last change it can take back, an
+[edit to a sound](editing.md#undo-an-edit) or a change to your files and tags,
+and **Edit ▸ Redo** repeats it. A move, save, deletion or tag change across
+several files is one step. Undo lasts while this window has the library open. If
+another drawbar, or a change made outside drawbar, has changed what an undo would
+take back, that undo is refused and let go, and the next Undo takes the change
+before it.
 
 Deleted and overwritten files are kept for Undo up to 1 GiB, oldest first out.
 Quitting empties that trash.

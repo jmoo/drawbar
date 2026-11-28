@@ -19,7 +19,7 @@ use crate::shell::{Dock, Shell};
 use crate::store::{names, outside_len, CopyOf, LibPath, Outside, Part};
 use crate::strings::place;
 use crate::tabs::{Spot, Tabs};
-use crate::workspace::{Fresh, LocalEntity, Origin, Unbundled, VerifyState, Workspace};
+use crate::workspace::{Cause, Fresh, LocalEntity, Origin, Unbundled, VerifyState, Workspace};
 
 /// What [`Act::LoadOnInstrument`] is called wherever it is offered.
 pub const LOAD_ON_INSTRUMENT: &str = "Load on instrument";
@@ -659,7 +659,7 @@ pub fn apply(
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
-            Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, log),
+            Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, Cause::Follow, log),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
             Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
@@ -1308,7 +1308,7 @@ fn keep_both(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id
         let copy = workspace.ingest(name.clone(), origin, mine, log);
         workspace.place(copy, dir.join(&name));
     }
-    workspace.drop_edits(id);
+    workspace.drop_edits(id, Cause::Follow);
     log.say(format!("Your edits are kept as “{name}”."));
 }
 
@@ -1909,7 +1909,9 @@ mod tests {
         let held = bench.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        bench.workspace.replace_bytes(id, edited, &mut bench.log);
+        bench
+            .workspace
+            .replace_bytes(id, edited, Cause::User, &mut bench.log);
 
         bench.act(vec![Act::SaveDoc(id)]);
 
@@ -2077,7 +2079,9 @@ mod tests {
             let held = bench.workspace.get(id).unwrap().bytes.to_vec();
             let (_, edited) =
                 crate::fields::apply(&held, &[("center_panel.gain".into(), "96".into())]).unwrap();
-            bench.workspace.replace_bytes(id, edited, &mut bench.log);
+            bench
+                .workspace
+                .replace_bytes(id, edited, Cause::User, &mut bench.log);
         }
 
         bench.act(vec![Act::SaveDoc(linked), Act::SaveDoc(alone)]);
@@ -3450,7 +3454,7 @@ mod tests {
         let incoming = with_gain(&bench.workspace.get(renamed).unwrap().bytes);
         bench
             .workspace
-            .replace_bytes(renamed, incoming.clone(), &mut bench.log);
+            .replace_bytes(renamed, incoming.clone(), Cause::User, &mut bench.log);
         bench.workspace.mark_saved(renamed);
 
         bench.act(vec![Act::RenameLocal {
@@ -3487,7 +3491,9 @@ mod tests {
             unreachable!()
         };
         let edited = with_gain(&bench.workspace.get(held).unwrap().bytes);
-        bench.workspace.replace_bytes(held, edited, &mut bench.log);
+        bench
+            .workspace
+            .replace_bytes(held, edited, Cause::User, &mut bench.log);
 
         bench.act(vec![Act::RenameLocal {
             id: moving,

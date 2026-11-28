@@ -2698,7 +2698,8 @@ mod tests {
         // Saved on this computer and nowhere else: the slot holds the older body.
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace
+            .replace_bytes(id, edited, crate::workspace::Cause::User, &mut app.log);
         app.workspace.mark_saved(id);
         app.device.relink(&mut app.workspace);
         assert!(
@@ -2837,7 +2838,8 @@ mod tests {
         let bytes = app.workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace
+            .replace_bytes(id, edited, crate::workspace::Cause::User, &mut app.log);
         app.tabs.open(id);
         assert!(app.workspace.get(id).unwrap().is_unsaved());
 
@@ -2880,7 +2882,8 @@ mod tests {
         let bytes = app.workspace.get(id).unwrap().bytes.clone();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        app.workspace.replace_bytes(id, edited, &mut app.log);
+        app.workspace
+            .replace_bytes(id, edited, crate::workspace::Cause::User, &mut app.log);
         app.tabs.open(id);
         let save = || pressed(egui::Key::S, egui::Modifiers::COMMAND);
 

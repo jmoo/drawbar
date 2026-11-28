@@ -28,6 +28,17 @@ Audio files have their own editors. See [sample instruments](samples.md),
 Saving a copy that came from a slot also queues it for that slot. Saving a
 document you opened from an instrument slot writes the slot at once.
 
+## Undo an edit
+
+**Edit ▸ Undo** takes back one gesture: a drag of a knob, a click, or what you
+typed in a box before you left it. It brings the sound to the front and sends
+nothing to the instrument. A **Revert** is a step too.
+
+Undo passes over a save and leaves the file as you saved it, so the sound reads
+unsaved. When the save itself is next, the menu reads **Undo Save**, which puts
+the file back. In a sample instrument or piano library edited in its file, a
+save ends what Undo can take back.
+
 ## Work with the panel controls
 
 Click a lamp to flip a switch, open a selector to choose a setting, or pull a

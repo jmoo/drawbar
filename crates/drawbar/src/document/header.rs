@@ -1710,7 +1710,7 @@ mod tests {
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         let mut edited = workspace.get(id).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, crate::workspace::Cause::User, &mut log);
 
         let mut facts = facts(&device.state, &queue, &tags);
         let held = state(workspace.get(id).unwrap(), &facts).expect("an unsaved document");
@@ -1946,7 +1946,7 @@ mod tests {
 
         let mut edited = workspace.get(copied).unwrap().bytes.to_vec();
         *edited.last_mut().expect("a byte to move") ^= 0xff;
-        workspace.replace_bytes(copied, edited, &mut log);
+        workspace.replace_bytes(copied, edited, crate::workspace::Cause::User, &mut log);
         assert_eq!(
             loads(workspace.get(copied).unwrap(), &attached.state),
             Some((ObjectClass::Program, at)),

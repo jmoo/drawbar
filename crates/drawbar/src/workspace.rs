@@ -808,10 +808,11 @@ impl LocalEntity {
         matches!(self.verify, VerifyState::Reading) && self.stamp == self.saved.stamp
     }
 
-    /// Count it saved as `saved` from now on, keeping what it says of its own bytes.
-    fn resave(&mut self, saved: Baseline) {
+    /// Count it saved as `saved` from now on, keeping what it says of its own bytes, and
+    /// return what it was saved as.
+    fn resave(&mut self, saved: Baseline) -> Baseline {
         self.verify = self.verify();
-        self.saved = saved;
+        std::mem::replace(&mut self.saved, saved)
     }
 
     /// What a read of its file found before it was let go of for room: its kind, tag,
@@ -995,6 +996,11 @@ impl LocalEntity {
             false => self.saved.bytes().len(),
         };
         (self.bytes.len() + saved) as u64
+    }
+
+    /// Whether it holds its body whole, rather than resting in its file or unread.
+    pub fn holds_body(&self) -> bool {
+        !self.unread() && self.rests().is_none()
     }
 
     /// Whether it holds `bytes`. Never, while it is unread.
@@ -1616,6 +1622,55 @@ pub enum FileAsk {
     Delete { id: u64, path: LibPath },
 }
 
+/// What the editor holds of a document. It is all of the document's content: a body is
+/// whole, and an edit names the baseline it is over.
+#[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum Working {
+    /// The whole body.
+    Body(Bytes),
+    /// An edit over the saved baseline stamped `over`, or none, where the document holds
+    /// what that baseline does.
+    Edit { over: u64, edit: Option<Edit> },
+}
+
+impl Working {
+    /// About how many bytes it holds.
+    pub fn size(&self) -> usize {
+        match self {
+            Working::Body(bytes) => bytes.len(),
+            Working::Edit { edit, .. } => edit.as_ref().map_or(0, Edit::size),
+        }
+    }
+
+    /// Whether both are bodies held in one allocation.
+    pub fn shares(&self, other: &Working) -> bool {
+        match (self, other) {
+            (Working::Body(mine), Working::Body(theirs)) => mine.shares(theirs),
+            _ => false,
+        }
+    }
+}
+
+/// Why a working copy changes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cause {
+    /// The user changed it: a step Undo takes back.
+    User,
+    /// It takes what a file, a kept draft or an undo gives it: no step.
+    Follow,
+}
+
+/// What a document held before the user first changed it in a frame
+/// ([`Workspace::take_notes`]).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Note {
+    pub id: u64,
+    pub before: Working,
+    /// Whether a revert changed it.
+    pub revert: bool,
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
     /// The changes to files asked for and not yet taken.
@@ -1694,6 +1749,16 @@ pub struct Workspace {
     /// The edit an editor made of each asset resting in its file, made over the file it
     /// rests in. See [`Workspace::hold_edit`].
     edits: std::collections::BTreeMap<u64, Held>,
+    /// What the file of each asset is known to hold while a save of it is unanswered,
+    /// where a save moved its saved baseline away from that.
+    on_file: std::collections::BTreeMap<u64, Baseline>,
+    /// The baseline each save the store has sent, and not heard back on, carries.
+    sent: std::collections::BTreeMap<u64, Baseline>,
+    /// The assets whose next save writes what a write of one sound over another put in
+    /// place of what the editor held, which is no save of an edit.
+    replaced: std::collections::BTreeSet<u64>,
+    /// What each document the user changed held first, since they were last taken.
+    notes: Vec<Note>,
     /// Counts the calls to [`Workspace::poll`], one a frame, from 1.
     frame: u64,
 }
@@ -1806,6 +1871,10 @@ impl Workspace {
             decoding: Vec::new(),
             flying: Default::default(),
             edits: Default::default(),
+            on_file: Default::default(),
+            sent: Default::default(),
+            replaced: Default::default(),
+            notes: Vec::new(),
             frame: 1,
         }
     }
@@ -2125,27 +2194,48 @@ impl Workspace {
     /// ⚠️ Only for an asset with nothing unsaved. Over an unsaved edit, see
     /// [`Workspace::rebase`].
     pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
-        self.replace_bytes(id, bytes, log);
+        self.replace_bytes(id, bytes, Cause::Follow, log);
         self.settle_saved(id);
+        self.forget_saves(id);
     }
 
     /// [`Workspace::adopt`] for a file left on disk: the asset rests in it.
     pub fn adopt_file(&mut self, id: u64, file: Arc<OnDisk>) {
         let stamp = self.stamp();
         self.rest(id, file, stamp);
+        self.forget_saves(id);
     }
 
-    /// Make `theirs` the saved baseline under an unsaved edit, which stays: the next save
-    /// writes the edit over them, and a revert takes them. An asset resting in its file
-    /// adopts them instead, and the edit held of it is made again over them.
+    /// Let go of what is kept of an asset's saves unanswered: its saved baseline is what a
+    /// read of its file found, whatever they answer, or it is gone.
+    fn forget_saves(&mut self, id: u64) {
+        self.on_file.remove(&id);
+        self.sent.remove(&id);
+    }
+
+    /// Make `theirs` the saved baseline, and keep what the asset holds, which is unsaved
+    /// where it differs from them: the next save writes it over them, and a revert takes
+    /// them. An asset resting in its file adopts them instead, and the edit held of it is
+    /// made again over them. Bytes it was saved as leave the baseline, and its stamp, as
+    /// they are.
+    ///
+    /// ⚠️ Compares two bodies, so it runs only when a file is read again.
     pub fn rebase(&mut self, id: u64, theirs: Vec<u8>, log: &mut Log) {
         if !self.apart(id) {
             return self.adopt(id, theirs, log);
+        }
+        if self
+            .get(id)
+            .is_some_and(|entity| entity.saved.holds(&theirs))
+        {
+            return self.forget_saves(id);
         }
         let stamp = self.stamp_for(id, &theirs);
         if let Some(entity) = self.get_mut(id) {
             entity.resave(Baseline::read(theirs.into(), stamp));
         }
+        self.forget_saves(id);
+        self.revision += 1;
     }
 
     /// [`Workspace::rebase`] onto a file left on disk.
@@ -2158,14 +2248,140 @@ impl Workspace {
             entity.resave(Baseline::on_disk(theirs.clone(), stamp));
         }
         self.check(id, theirs);
+        self.forget_saves(id);
     }
 
-    /// Count an asset as unsaved again, because the save it was counted saved by did not
-    /// land. One resting in its file holds what the file holds, and an edit held over it
-    /// stays unsaved.
-    pub fn unsave(&mut self, id: u64) {
+    /// Note that the store sends a save of an asset's saved baseline: over its file, or,
+    /// without `over`, as a file where none is known. Returns whether it saves what the
+    /// editor held, rather than what a write of one sound over another put in its place.
+    pub(crate) fn send_save(&mut self, id: u64, over: bool) -> bool {
+        let edited = !self.replaced.remove(&id);
+        let Some(saved) = self.get(id).map(|entity| entity.saved.clone()) else {
+            return edited;
+        };
+        self.sent.insert(id, saved);
+        if !over {
+            self.on_file.remove(&id);
+        }
+        edited
+    }
+
+    /// The store writes nothing for a save asked of an asset: its file holds the saved
+    /// baseline already, or it has no file to write.
+    pub(crate) fn skip_save(&mut self, id: u64) {
+        self.replaced.remove(&id);
+        if !self.sent.contains_key(&id) {
+            self.on_file.remove(&id);
+        }
+    }
+
+    /// Whether a save of an asset is asked and may still be answered: sent, or not yet
+    /// taken by the store.
+    pub(crate) fn saves_asked(&self, id: u64) -> bool {
+        self.sent.contains_key(&id) || self.file_asks.contains(&FileAsk::Save(id))
+    }
+
+    /// What an asset's file is known to hold: what a save asked and not answered
+    /// displaced, or else what the asset was saved as.
+    pub fn filed(&self, id: u64) -> Option<&Baseline> {
+        let saved = || self.get(id).map(|entity| &entity.saved);
+        self.on_file.get(&id).or_else(saved)
+    }
+
+    /// Whether an asset holds what its file does not: it is unsaved, or a save of it is
+    /// asked and not answered.
+    pub fn unfiled(&self, id: u64) -> bool {
+        let Some(entity) = self.get(id) else {
+            return false;
+        };
+        let filed = self.filed(id).map(Baseline::stamp);
+        entity.is_unsaved() || filed != Some(entity.saved.stamp)
+    }
+
+    /// The file an asset rests in was read again and holds what it held: the asset rests
+    /// in it under the stamp it had, and an edit held of it is made again over it. A save
+    /// asked of that edit and not sent stays asked, since the file is the one it was
+    /// asked of.
+    pub fn rest_again(&mut self, id: u64, file: Arc<OnDisk>) {
+        let entity = self.get(id).filter(|entity| entity.rests().is_some());
+        let Some(stamp) = entity.map(|entity| entity.saved.stamp) else {
+            return;
+        };
+        let asked = (self.edits.get(&id))
+            .is_some_and(|held| matches!(held.made, Made::Over { asked: true, .. }));
+        self.rest(id, file, stamp);
+        if asked {
+            self.save_edit(id);
+        }
+    }
+
+    /// An asset's file now holds `baseline`, as the library's undo or redo of a save left
+    /// it. What the asset holds stays, and is unsaved where it is not that.
+    pub fn refile(&mut self, id: u64, baseline: Baseline) {
+        if self.on_file.contains_key(&id) || self.sent.contains_key(&id) {
+            self.on_file.insert(id, baseline);
+            self.revision += 1;
+        } else {
+            self.resave_as(id, baseline);
+        }
+    }
+
+    /// [`Workspace::refile`] with the bytes a read found in the file.
+    pub fn refile_bytes(&mut self, id: u64, theirs: Vec<u8>) {
+        let stamp = self.stamp();
+        self.refile(id, Baseline::read(theirs.into(), stamp));
+    }
+
+    /// A save of an asset landed. A newer saved baseline still to be written leaves its
+    /// file known to hold what that save carried.
+    pub fn save_landed(&mut self, id: u64) {
+        let Some(sent) = self.sent.remove(&id) else {
+            return;
+        };
+        match self.newer_than(id, &sent) {
+            true => self.on_file.insert(id, sent),
+            false => self.on_file.remove(&id),
+        };
+    }
+
+    /// How many assets something is kept of for saves not answered.
+    #[cfg(test)]
+    pub(crate) fn saves_unanswered(&self) -> usize {
+        let mut ids: std::collections::BTreeSet<&u64> = self.on_file.keys().collect();
+        ids.extend(self.sent.keys());
+        ids.len()
+    }
+
+    /// Whether an asset's saved baseline has moved on from `sent`.
+    fn newer_than(&self, id: u64, sent: &Baseline) -> bool {
+        self.get(id)
+            .is_some_and(|entity| entity.saved.stamp != sent.stamp)
+    }
+
+    /// A save of an asset did not land, and returns whether a save of a newer saved
+    /// baseline still waits, which goes ahead. Otherwise its saved baseline is what its
+    /// file is known to hold again, or, where nothing is known of the file, the asset
+    /// counts as unsaved. One resting in its file holds what the file holds, and an edit
+    /// held over it stays unsaved.
+    pub fn unsave(&mut self, id: u64) -> bool {
         self.edit_not_saved(id);
-        if !self.apart(id) {
+        let sent = self.sent.remove(&id);
+        if sent.is_some_and(|sent| self.newer_than(id, &sent)) {
+            return true;
+        }
+        if let Some(on_file) = self.on_file.remove(&id) {
+            self.resave_as(id, on_file);
+            return false;
+        }
+        self.unfile(id);
+        false
+    }
+
+    /// What an asset's file holds is not known: the asset counts as unsaved until a read
+    /// of the file finds what it holds. One a save of is asked and not answered counts so
+    /// already, and one resting in its file holds what the file holds.
+    pub fn unfile(&mut self, id: u64) {
+        if !self.apart(id) || self.on_file.contains_key(&id) || self.sent.contains_key(&id) {
             return;
         }
         let stamp = self.stamp();
@@ -2174,6 +2390,32 @@ impl Workspace {
                 entity.resave(Baseline::new(entity.saved.content.clone(), stamp));
             }
         }
+    }
+
+    /// Count an asset saved as `saved`, which its file holds. One whose bytes are those
+    /// takes their stamp, or rests in the file, as a revert would leave it.
+    ///
+    /// ⚠️ Compares two bodies, so it runs only when a save is refused, undone or redone,
+    /// or a read finds the file holding what an unsaved asset was saved as.
+    fn resave_as(&mut self, id: u64, saved: Baseline) {
+        if !self.apart(id) {
+            return;
+        }
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        let same = saved.holds(&entity.bytes);
+        entity.resave(saved);
+        let stamp = entity.saved.stamp;
+        match (same, entity.saved.file().cloned()) {
+            (false, _) => {}
+            (true, Some(file)) => self.rest(id, file, stamp),
+            (true, None) => {
+                entity.bytes = entity.saved.bytes().clone();
+                entity.stamp = stamp;
+            }
+        }
+        self.revision += 1;
     }
 
     /// Whether an asset's bytes stand apart from what it was saved as, so that its saved
@@ -2976,12 +3218,13 @@ impl Workspace {
         from: Option<u64>,
         log: &mut Log,
     ) -> Option<u64> {
-        self.replace_bytes(id, bytes, log);
+        self.replace_bytes(id, bytes, Cause::Follow, log);
         let unsaved = self.get(id).filter(|entity| entity.is_unsaved());
         let Some(stamp) = unsaved.map(|entity| entity.stamp) else {
             return from;
         };
         self.mark_saved(id);
+        self.replaced.insert(id);
         if let Some(leaving) = from.and_then(|from| self.leaving(from)) {
             self.saving_over.insert(id, (leaving, stamp));
         }
@@ -3366,9 +3609,75 @@ impl Workspace {
         });
     }
 
-    /// [`Workspace::drop_edits`], and say so where it changed anything.
+    /// What an asset holds, where the workspace holds it: `None` for one unread.
+    pub fn working(&self, id: u64) -> Option<Working> {
+        let entity = self.get(id).filter(|entity| !entity.unread())?;
+        Some(match entity.rests() {
+            Some(_) => Working::Edit {
+                over: entity.saved.stamp,
+                edit: self.edit(id).cloned(),
+            },
+            None => Working::Body(entity.bytes.clone()),
+        })
+    }
+
+    /// Put back what an asset held, and return whether it holds exactly that now. An edit
+    /// over another baseline than the asset's is refused.
+    pub fn hold(&mut self, id: u64, working: &Working, log: &mut Log) -> bool {
+        match working {
+            Working::Body(bytes) => self.replace_bytes(id, bytes.clone(), Cause::Follow, log),
+            Working::Edit { over, edit } => {
+                let Some(entity) = self.get(id).filter(|entity| entity.saved.stamp == *over) else {
+                    return false;
+                };
+                let file = (entity.saved.file().cloned()).filter(|_| entity.rests().is_none());
+                if let Some(file) = file {
+                    self.rest(id, file, *over);
+                }
+                self.hold_edit(id, edit.clone(), Cause::Follow);
+            }
+        }
+        self.working(id).as_ref() == Some(working)
+    }
+
+    /// Note what an asset holds before the user changes it, unless it was noted since the
+    /// notes were last taken. `revert` marks the note as a revert's.
+    fn noted(&mut self, id: u64, cause: Cause, revert: bool) {
+        if cause == Cause::Follow {
+            return;
+        }
+        if let Some(note) = self.notes.iter_mut().find(|note| note.id == id) {
+            note.revert |= revert;
+            return;
+        }
+        if let Some(before) = self.working(id) {
+            self.notes.push(Note { id, before, revert });
+        }
+    }
+
+    /// Note `before` as what a document held before the user changed it, where its editor
+    /// holds what the workspace does not, unless it was noted since the notes were last
+    /// taken. `revert` marks the note as a revert's.
+    pub fn note(&mut self, id: u64, before: Working, revert: bool) {
+        match self.notes.iter_mut().find(|note| note.id == id) {
+            Some(note) => note.revert |= revert,
+            None => self.notes.push(Note { id, before, revert }),
+        }
+    }
+
+    /// What each document the user changed held before, since the last call.
+    pub fn take_notes(&mut self) -> Vec<Note> {
+        std::mem::take(&mut self.notes)
+    }
+
+    /// [`Workspace::drop_edits`] as the user's, and say so where it changed anything.
     pub fn revert(&mut self, id: u64, log: &mut Log) {
-        if !self.drop_edits(id) {
+        self.revert_as(id, Cause::User, log);
+    }
+
+    /// [`Workspace::revert`] for `cause`.
+    pub fn revert_as(&mut self, id: u64, cause: Cause, log: &mut Log) {
+        if !self.drop_edits(id, cause) {
             return;
         }
         if let Some(entity) = self.get(id) {
@@ -3381,7 +3690,8 @@ impl Workspace {
     ///
     /// ⚠️ A pending edit has not reached the bytes, so restoring them changes nothing.
     /// Reverting a piano library's plan only clears the flag.
-    pub fn drop_edits(&mut self, id: u64) -> bool {
+    pub fn drop_edits(&mut self, id: u64, cause: Cause) -> bool {
+        self.noted(id, cause, true);
         let Some(entity) = self.get(id) else {
             return false;
         };
@@ -3431,7 +3741,8 @@ impl Workspace {
     /// ⚠️ A save already sent carries on with the edit it was sent with. An edit made
     /// since is made over the file the save leaves, and `None` leaves that save's edit
     /// held.
-    pub fn hold_edit(&mut self, id: u64, edit: Option<Edit>) {
+    pub fn hold_edit(&mut self, id: u64, edit: Option<Edit>, cause: Cause) {
+        self.noted(id, cause, false);
         let saving =
             (self.edits.get(&id)).is_some_and(|held| matches!(held.made, Made::Saving { .. }));
         let Some(edit) = edit else {
@@ -3662,30 +3973,35 @@ impl Workspace {
     /// ⚠️ The bytes do not change, so the stamp stays and caches over them stay valid.
     /// The list revision moves, so the store is written again without the unsaved copy.
     pub fn mark_saved(&mut self, id: u64) {
-        if !self.settle_saved(id) {
-            return;
+        if let Some(displaced) = self.settle_saved(id) {
+            self.ask_save(id, displaced);
         }
+    }
+
+    /// Ask for a write of an asset's file with its saved baseline, which moved from
+    /// `displaced`, where it is kept and has a file.
+    fn ask_save(&mut self, id: u64, displaced: Baseline) {
         let kept = self.get(id).filter(|entity| entity.kept);
         if kept.is_some_and(|entity| entity.path.is_some()) {
             self.file_asks.push(FileAsk::Save(id));
+            // One kept already is older, and still what the file holds.
+            self.on_file.entry(id).or_insert(displaced);
         }
     }
 
     /// [`Workspace::mark_saved`] for bytes the asset's file already holds, asking for no
-    /// write. Returns whether the baseline moved.
-    fn settle_saved(&mut self, id: u64) -> bool {
-        let Some(entity) = self.get_mut(id) else {
-            return false;
-        };
+    /// write. Returns the baseline it moved from, where it moved.
+    fn settle_saved(&mut self, id: u64) -> Option<Baseline> {
+        let entity = self.get_mut(id)?;
         // Resting in its file, it holds what it was saved as, and only an editor's pending
         // edit, which the bytes do not hold, can make it unsaved.
         if !entity.is_unsaved() || entity.rests().is_some() {
-            return false;
+            return None;
         }
         let saved = entity.baseline();
-        entity.resave(saved);
+        let displaced = entity.resave(saved);
         self.revision += 1;
-        true
+        Some(displaced)
     }
 
     /// Record a write that reached a slot: the bytes it carried become the saved
@@ -3729,12 +4045,10 @@ impl Workspace {
         // ⚠️ Where the asset rests in a file that already holds `sent` and its check has
         // not answered, its bytes are empty, so this saves it as empty bytes: its size
         // reads 0, and the file it rests in is dropped.
-        entity.resave(Baseline::read(sent, stamp));
+        let displaced = entity.resave(Baseline::read(sent, stamp));
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
-        if entity.kept && entity.path.is_some() {
-            self.file_asks.push(FileAsk::Save(id));
-        }
+        self.ask_save(id, displaced);
         self.revision += 1;
     }
 
@@ -3790,7 +4104,8 @@ impl Workspace {
     /// Swap in edited bytes, keeping the entity's identity.
     ///
     /// The decode and the verify run again, as they do for a file from disk.
-    pub fn replace_bytes(&mut self, id: u64, bytes: impl Into<Bytes>, log: &mut Log) {
+    pub fn replace_bytes(&mut self, id: u64, bytes: impl Into<Bytes>, cause: Cause, log: &mut Log) {
+        self.noted(id, cause, false);
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
@@ -3803,6 +4118,12 @@ impl Workspace {
             verify.badge(),
             verify.detail()
         ));
+    }
+
+    /// Put bytes derived from an asset's working copy under it, which change nothing the
+    /// user holds: [`Workspace::replace_bytes`], noting nothing.
+    pub fn lay_out(&mut self, id: u64, bytes: impl Into<Bytes>, log: &mut Log) {
+        self.replace_bytes(id, bytes, Cause::Follow, log);
     }
 
     /// Put different bytes under one id, rebuild everything derived from them, and return
@@ -3892,6 +4213,7 @@ impl Workspace {
         self.moving_over.remove(&id);
         self.saving_over.remove(&id);
         self.edits.remove(&id);
+        self.forget_saves(id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
         if let (true, Some(path)) = (gone.kept, &gone.path) {
@@ -3921,6 +4243,9 @@ impl Workspace {
         let held = |id: u64| entities.iter().any(|entity| entity.id == id);
         self.checks.retain(|(id, _)| held(*id));
         self.edits.retain(|id, _| held(*id));
+        self.on_file.retain(|id, _| held(*id));
+        self.sent.retain(|id, _| held(*id));
+        self.replaced.retain(|id| held(*id));
         self.moving_over.retain(|id, _| held(*id));
         self.saving_over.retain(|id, _| held(*id));
         self.undecoded.retain(|id| held(*id));
@@ -4237,6 +4562,161 @@ mod tests {
         LocalEntity::new(1, name.into(), Origin::Fresh, bytes.into(), 0)
     }
 
+    /// A workspace holding one program whole.
+    fn program() -> (Workspace, u64, Log) {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let bytes = Fresh::Program.bytes().unwrap();
+        let id = workspace.ingest("Grand.ne5p".into(), Origin::Fresh, bytes, &mut log);
+        (workspace, id, log)
+    }
+
+    /// `bytes` with `tail` after them.
+    fn and(bytes: &[u8], tail: u8) -> Vec<u8> {
+        [bytes, &[tail]].concat()
+    }
+
+    fn body(workspace: &Workspace, id: u64) -> Vec<u8> {
+        workspace.get(id).unwrap().bytes.to_vec()
+    }
+
+    fn renamed(name: &str) -> Edit {
+        Edit::Sample(vec![("name".into(), name.into())])
+    }
+
+    #[test]
+    fn an_asset_held_whole_works_on_its_body() {
+        let (workspace, id, _) = program();
+        let bytes = workspace.get(id).unwrap().bytes.clone();
+        assert_eq!(workspace.working(id), Some(Working::Body(bytes)));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_asset_resting_in_its_file_works_on_an_edit_over_its_baseline() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let over = workspace.get(id).unwrap().saved.stamp();
+        let edit = None;
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
+
+        workspace.hold_edit(id, Some(renamed("Vibes")), Cause::User);
+        let edit = Some(renamed("Vibes"));
+        assert_eq!(workspace.working(id), Some(Working::Edit { over, edit }));
+    }
+
+    #[test]
+    fn a_users_change_notes_what_the_asset_held_first_in_a_frame() {
+        let (mut workspace, id, mut log) = program();
+        let before = workspace.working(id).unwrap();
+        let bytes = body(&workspace, id);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::User, &mut log);
+        workspace.replace_bytes(id, and(&bytes, 2), Cause::User, &mut log);
+        let revert = false;
+        assert_eq!(workspace.take_notes(), [Note { id, before, revert }]);
+        assert_eq!(workspace.take_notes(), [], "the notes were taken");
+    }
+
+    #[test]
+    fn a_change_that_follows_notes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = and(&body(&workspace, id), 1);
+        workspace.replace_bytes(id, bytes, Cause::Follow, &mut log);
+        assert_eq!(workspace.take_notes(), []);
+    }
+
+    #[test]
+    fn a_reverts_note_says_it_is_a_revert() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = and(&body(&workspace, id), 1);
+        workspace.replace_bytes(id, bytes, Cause::Follow, &mut log);
+        let before = workspace.working(id).unwrap();
+        workspace.revert(id, &mut log);
+        let revert = true;
+        assert_eq!(workspace.take_notes(), [Note { id, before, revert }]);
+    }
+
+    #[test]
+    fn holding_a_body_puts_back_its_allocation_and_notes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let bytes = body(&workspace, id);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::Follow, &mut log);
+        let held = workspace.working(id).unwrap();
+        workspace.replace_bytes(id, and(&bytes, 2), Cause::Follow, &mut log);
+
+        assert!(workspace.hold(id, &held, &mut log));
+        assert!(
+            workspace.working(id).unwrap().shares(&held),
+            "one allocation"
+        );
+        assert_eq!(workspace.take_notes(), []);
+    }
+
+    #[test]
+    fn holding_what_an_asset_works_on_changes_nothing() {
+        let (mut workspace, id, mut log) = program();
+        let held = workspace.working(id).unwrap();
+        let stamp = workspace.get(id).unwrap().stamp;
+        assert!(workspace.hold(id, &held, &mut log));
+        assert_eq!(workspace.working(id), Some(held));
+        assert_eq!(workspace.get(id).unwrap().stamp, stamp);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holding_an_edit_over_another_baseline_is_refused() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let held = workspace.working(id);
+        let over = workspace.get(id).unwrap().saved.stamp() + 1;
+        let edit = Some(renamed("Vibes"));
+
+        assert!(!workspace.hold(id, &Working::Edit { over, edit }, &mut log));
+        assert_eq!(workspace.working(id), held);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn holding_no_edit_while_a_save_of_the_edit_is_sent_is_refused() {
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &crate::testing::sample_bytes());
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        let unedited = workspace.working(id).unwrap();
+        workspace.hold_edit(id, Some(renamed("Vibes")), Cause::User);
+        assert!(workspace.save_edit(id));
+        workspace.send_edit(id).expect("the store takes it");
+
+        assert!(!workspace.hold(id, &unedited, &mut log));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_body_over_a_file_and_the_file_are_held_in_turn() {
+        let dir = crate::testing::Temp::new();
+        let bytes = crate::testing::sample_bytes();
+        let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &bytes);
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = Log::default();
+        let id = crate::testing::rest(&mut workspace, "Marimba.nsmp", file);
+        workspace.replace_bytes(id, and(&bytes, 1), Cause::Follow, &mut log);
+        let whole = workspace.working(id).unwrap();
+        workspace.revert(id, &mut log);
+        let resting = workspace.working(id).unwrap();
+        assert!(matches!(resting, Working::Edit { edit: None, .. }));
+
+        assert!(workspace.hold(id, &whole, &mut log), "the body back");
+        assert_eq!(workspace.working(id).as_ref(), Some(&whole));
+        assert!(workspace.hold(id, &resting, &mut log), "the file again");
+        assert_eq!(workspace.working(id).as_ref(), Some(&resting));
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn an_edit_made_during_its_save_is_kept_over_the_file_the_save_wrote() {
@@ -4251,10 +4731,10 @@ mod tests {
                 .map(|name| ("name".to_string(), name.to_string()));
             Edit::Sample(sets.collect())
         };
-        workspace.hold_edit(id, Some(named(&["Vibes"])));
+        workspace.hold_edit(id, Some(named(&["Vibes"])), Cause::User);
         assert!(workspace.save_edit(id));
         let (from, rewrite) = workspace.send_edit(id).expect("the store takes it");
-        workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])));
+        workspace.hold_edit(id, Some(named(&["Vibes", "Bells"])), Cause::User);
 
         let (out, _) = crate::testing::streamed(&rewrite.pieces(&from).unwrap(), &bytes);
         std::fs::write(dir.at("Saved.nsmp"), out.unwrap()).unwrap();
@@ -4282,10 +4762,10 @@ mod tests {
                 .map(|name| ("name".to_string(), name.to_string()));
             Edit::Sample(sets.collect())
         };
-        workspace.hold_edit(id, Some(named(&["Vibes"])));
+        workspace.hold_edit(id, Some(named(&["Vibes"])), Cause::User);
         assert!(workspace.save_edit(id));
         workspace.send_edit(id).expect("the store takes it");
-        workspace.hold_edit(id, Some(named(&["Vibes", "Marimba"])));
+        workspace.hold_edit(id, Some(named(&["Vibes", "Marimba"])), Cause::User);
         assert!(
             workspace.get(id).unwrap().is_unsaved(),
             "held while the save is out"
@@ -4552,7 +5032,7 @@ mod tests {
         let id = workspace.ingest("held".into(), Origin::Fresh, b"Set 1\n".to_vec(), &mut log);
         assert!(workspace.get(id).expect("held").is_text());
 
-        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], &mut log);
+        workspace.replace_bytes(id, vec![0x00, 0xff, 0x01, 0xfe], Cause::User, &mut log);
         let held = workspace.get(id).expect("held");
         assert!(!held.is_text(), "these bytes are no longer words");
         assert_eq!(crate::browser::Kind::of(held), crate::browser::Kind::Other);
@@ -4594,7 +5074,7 @@ mod tests {
 
         // Edited, it stays a view; kept, it stops being one and keeps its edit.
         let edited = workspace.get(viewed).unwrap().bytes.to_vec();
-        workspace.replace_bytes(viewed, [edited, vec![]].concat(), &mut log);
+        workspace.replace_bytes(viewed, [edited, vec![]].concat(), Cause::User, &mut log);
         assert!(workspace.is_view(viewed));
         workspace.keep(viewed, &mut log);
         assert!(!workspace.is_view(viewed));
@@ -4650,7 +5130,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert_eq!(wrote(&workspace), Some(landed), "an edit is not a write");
 
         workspace.revert(id, &mut log);
@@ -4707,7 +5187,7 @@ mod tests {
         let untouched = view(&mut workspace, 2, &mut log);
 
         let bytes = workspace.get(edited).unwrap().bytes.to_vec();
-        workspace.replace_bytes(edited, [bytes, vec![0]].concat(), &mut log);
+        workspace.replace_bytes(edited, [bytes, vec![0]].concat(), Cause::User, &mut log);
         let mut queue = Queue::default();
         crate::queue::enqueue(
             &workspace,
@@ -4879,7 +5359,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         let second = stamp(&workspace);
         assert_ne!(second, first);
 
@@ -4908,7 +5388,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         assert!(unsaved(&workspace));
         assert_eq!(*workspace.get(id).unwrap().saved.bytes(), opened);
 
@@ -4921,7 +5401,7 @@ mod tests {
         // Reverting moves the bytes back onto the baseline, which stays where it is.
         let (_, again) =
             crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
-        workspace.replace_bytes(id, again, &mut log);
+        workspace.replace_bytes(id, again, Cause::User, &mut log);
         assert!(unsaved(&workspace));
         workspace.revert(id, &mut log);
         assert!(!unsaved(&workspace));
@@ -4930,9 +5410,9 @@ mod tests {
         // An edit undone by hand is back at the baseline too.
         let (_, away) =
             crate::fields::apply(&edited, &[("center_panel.gain".into(), "12".into())]).unwrap();
-        workspace.replace_bytes(id, away, &mut log);
+        workspace.replace_bytes(id, away, Cause::User, &mut log);
         assert!(unsaved(&workspace));
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert!(!unsaved(&workspace), "it holds what it was saved as again");
     }
 
@@ -4983,7 +5463,7 @@ mod tests {
 
         let (_, edited) =
             crate::fields::apply(&sent, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         workspace.landed(id, ObjectClass::Program, at, sent.clone());
         assert!(
             workspace.get(id).unwrap().is_unsaved(),
@@ -5138,7 +5618,7 @@ mod tests {
         let bytes = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited, &mut log);
+        workspace.replace_bytes(id, edited, Cause::User, &mut log);
         assert_eq!(workspace.get(id).unwrap().name, "Africa-Split.ne5p");
         assert!(workspace.get(id).unwrap().is_unsaved());
 
@@ -5758,7 +6238,7 @@ mod tests {
         let opened = workspace.get(id).unwrap().bytes.to_vec();
         let (_, edited) =
             crate::fields::apply(&opened, &[("center_panel.gain".into(), "96".into())]).unwrap();
-        workspace.replace_bytes(id, edited.clone(), &mut log);
+        workspace.replace_bytes(id, edited.clone(), Cause::User, &mut log);
         workspace.landed(id, ObjectClass::Program, at, edited.clone());
         let entity = workspace.get(id).unwrap();
         assert!(!entity.is_unsaved());

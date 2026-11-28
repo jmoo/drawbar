@@ -51,6 +51,19 @@ struct Version {
 }
 
 impl Edit {
+    /// About how many bytes it holds.
+    pub fn size(&self) -> usize {
+        match self {
+            Edit::Sample(sets) => sets
+                .iter()
+                .map(|(path, value)| {
+                    std::mem::size_of::<(String, String)>() + path.len() + value.len()
+                })
+                .sum(),
+            Edit::Piano(plan) => plan.size(),
+        }
+    }
+
     /// The working copy that keeps this edit across a quit: RON text, versioned.
     pub fn working(&self) -> Result<Vec<u8>, String> {
         let kept = Working {

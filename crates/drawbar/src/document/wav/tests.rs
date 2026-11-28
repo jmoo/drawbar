@@ -73,7 +73,12 @@ fn opened(bytes: &[u8]) -> State {
 
 /// Put `bytes` in the working copy of `id`, unsaved.
 fn edited(workspace: &mut crate::workspace::Workspace, id: u64, bytes: Vec<u8>) {
-    workspace.replace_bytes(id, bytes, &mut crate::log::Log::default());
+    workspace.replace_bytes(
+        id,
+        bytes,
+        crate::workspace::Cause::User,
+        &mut crate::log::Log::default(),
+    );
     assert!(workspace.get(id).unwrap().is_unsaved());
 }
 

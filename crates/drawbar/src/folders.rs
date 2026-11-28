@@ -882,7 +882,12 @@ mod tests {
         assert_eq!(folders.censuses.get(), 1);
 
         let log = &mut log;
-        workspace.replace_bytes(id, Fresh::Live.bytes().unwrap(), log);
+        workspace.replace_bytes(
+            id,
+            Fresh::Live.bytes().unwrap(),
+            crate::workspace::Cause::User,
+            log,
+        );
         folders.count(None, &workspace);
         assert_eq!(folders.censuses.get(), 1, "an edit moves nothing");
 

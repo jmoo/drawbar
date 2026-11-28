@@ -84,6 +84,11 @@ impl Detect {
         }
     }
 
+    /// Let go of the search running, whose answer is for bytes the take no longer holds.
+    pub fn stop(&mut self) {
+        self.running = None;
+    }
+
     /// Take what the search found, once it has, as the set that marks it, where the take
     /// still holds the `audio` it searched: a result for audio since changed, as by a
     /// gain or Revert, is let go.

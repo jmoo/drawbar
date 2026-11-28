@@ -581,10 +581,10 @@ impl State {
     }
 
     /// Read the bytes again where they are no longer the ones read. Bytes this document
-    /// made keep the original and show their gain. Any others, and saved bytes, which
-    /// the next gain starts from, open the document again.
+    /// made keep the original and show their gain. Any others, and a saved baseline that
+    /// moved, which every gain is measured against, open the document again.
     pub fn follow(&mut self, entity: &LocalEntity) {
-        let saved = !entity.is_unsaved() && entity.saved.stamp() != self.saved_at;
+        let saved = entity.saved.stamp() != self.saved_at;
         if self.read.stamp == entity.stamp && !saved {
             return;
         }
@@ -613,6 +613,13 @@ impl State {
                 (self.view, self.close, self.audition, self.detect) =
                     (view, close, audition, detect);
             }
+        }
+        if self
+            .view
+            .picked
+            .is_some_and(|hit| !self.read.order.contains(&hit))
+        {
+            self.view.picked = None;
         }
     }
 

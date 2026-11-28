@@ -71,9 +71,14 @@ pub fn named(entity: &LocalEntity) -> Option<Result<Snapshot, String>> {
 
 /// Whether an asset is a piano library this document reads, decoded or resting in its
 /// file.
-fn is_piano(entity: &LocalEntity) -> bool {
+pub fn is_piano(entity: &LocalEntity) -> bool {
     entity.entity.as_deref().and_then(piano).is_some()
         || matches!(entity.indexed(), Some(ondisk::Index::Piano(_)))
+}
+
+/// Whether an asset is a piano library held whole, whose plan only this editor holds.
+pub fn held_whole(entity: &LocalEntity) -> bool {
+    entity.rests().is_none() && is_piano(entity)
 }
 
 fn read(piano: &npno::Piano) -> Result<Snapshot, String> {
@@ -89,18 +94,15 @@ const SPAN: Span = Span { low: 21, high: 108 };
 /// ⚠️ A baseline resting in its file is marked by the indexing of the file, which a rescan
 /// replaces whenever the file changed, and not by a checksum, which is known only once
 /// the file is checked: a mark that moved when the check answered would discard the plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Mark {
+    /// Against no baseline: the plan a working copy holds.
+    #[default]
+    Unmarked,
     /// Bytes held whole, by the [`LocalEntity::stamp`] of the body the plan was begun on.
     Held(u64),
     /// A file left on disk, by its [`crate::ondisk::OnDisk::serial`].
     Resting(u64),
-}
-
-impl Default for Mark {
-    fn default() -> Mark {
-        Mark::Held(0)
-    }
 }
 
 /// Where a document's strokes are read from: bytes held whole, or a file left on disk and
@@ -294,6 +296,31 @@ impl Plan {
                 against: self.against,
                 ..Plan::default()
             }
+    }
+
+    /// The edit alone, as the workspace holds it: an edit's working copy names its
+    /// baseline, so the plan in it names none.
+    pub fn unmarked(&self) -> Plan {
+        Plan {
+            against: Mark::default(),
+            ..self.clone()
+        }
+    }
+
+    /// About how many bytes it holds.
+    pub fn size(&self) -> usize {
+        fn entries<T>(len: usize) -> usize {
+            len * std::mem::size_of::<T>()
+        }
+        let names = [&self.name, &self.variant].into_iter().flatten();
+        std::mem::size_of::<Plan>()
+            + names.map(String::len).sum::<usize>()
+            + entries::<Bank>(self.banks.len())
+            + entries::<u8>(self.layers.len())
+            + entries::<((u8, u8), bool)>(self.roots.len())
+            + entries::<(u8, i8)>(self.fine_tune.len())
+            + entries::<((u8, u8, u8), i16)>(self.trims.len())
+            + entries::<(u8, Option<u8>)>(self.key_roots.len())
     }
 
     /// Whether one root keeps one layer: its own exception, or what the switch says.
@@ -1246,6 +1273,36 @@ enum Standing {
     Applying,
 }
 
+/// A plan against a baseline the document left, with the lay-out of it the working bytes
+/// held then.
+struct Folded {
+    plan: Plan,
+    laid: Option<Laid>,
+}
+
+impl Folded {
+    /// Whether the plan edits what `entity` holds again.
+    fn stands(&self, entity: &LocalEntity) -> bool {
+        edits(entity, Some(&self.plan), self.laid.as_ref()) == self.plan.against
+    }
+}
+
+/// What `plan` edits, with `laid` the lay-out of it the working bytes may hold; see
+/// [`State::baseline`].
+fn edits(entity: &LocalEntity, plan: Option<&Plan>, laid: Option<&Laid>) -> Mark {
+    if let Some(file) = entity.rests() {
+        return Mark::Resting(file.serial);
+    }
+    let Some(Mark::Held(begun)) = plan.map(|plan| plan.against) else {
+        return Mark::Held(entity.stamp);
+    };
+    let holds = match laid.filter(|laid| laid.made == entity.stamp) {
+        Some(laid) => entity.stamp != entity.saved.stamp() || plan != Some(&laid.plan),
+        None => begun == entity.stamp,
+    };
+    Mark::Held(if holds { begun } else { entity.stamp })
+}
+
 /// One act waiting on a document's apply.
 type Held = (u64, Act);
 
@@ -1269,6 +1326,9 @@ pub struct State {
     /// The plan each document's working bytes were last laid out from. A plan they still
     /// hold is not pending, and laying it again would copy the body for nothing.
     laid: HashMap<u64, Laid>,
+    /// The plan each document held against a baseline it has since left, taken up again
+    /// where that baseline comes back, as a refused save puts it back.
+    folded: HashMap<u64, Folded>,
     /// The apply in flight, and the acts held until it answers.
     job: Option<Laying>,
     held: Vec<Held>,
@@ -1302,21 +1362,8 @@ impl State {
             self.open = None;
             return Extras::default();
         }
+        self.follow(entity, held);
         let baseline = self.baseline(entity);
-        // A save makes the drops permanent: the rows show the file as it now is, and
-        // there is nothing left to put back but a plan the workspace made again over it.
-        if self
-            .plans
-            .get(&id)
-            .is_none_or(|plan| plan.against != baseline)
-        {
-            let plan = Plan {
-                against: baseline,
-                ..held.cloned().unwrap_or_default()
-            };
-            self.plans.insert(id, plan);
-            self.laid.remove(&id);
-        }
         let moved = self
             .open
             .as_ref()
@@ -1343,6 +1390,71 @@ impl State {
             return Extras::default();
         };
         extras(facts, summary.kept, self.free, standing)
+    }
+
+    /// Keep the plan of `entity` against what it edits. A save of a lay-out makes the drops
+    /// permanent: the rows show the body as it now is, and the plan is folded away, to be
+    /// taken up again where it edits what the document holds again, as after a refused
+    /// save. Otherwise the plan is `held`, the one the workspace holds of a library resting
+    /// in its file, or none.
+    pub fn follow(&mut self, entity: &LocalEntity, held: Option<&Plan>) {
+        let id = entity.id;
+        let back = self.returns(entity);
+        let baseline = self.baseline(entity);
+        let stands = self.plan(entity).is_some();
+        if stands && !back {
+            return;
+        }
+        let left = self.plans.remove(&id).map(|plan| Folded {
+            plan,
+            laid: self.laid.remove(&id),
+        });
+        let back = back.then(|| self.folded.remove(&id)).flatten();
+        if let Some(left) = left.filter(|left| !left.plan.is_empty()) {
+            self.folded.insert(id, left);
+        }
+        let plan = match back {
+            Some(Folded { plan, laid }) => {
+                self.laid.extend(laid.map(|laid| (id, laid)));
+                plan
+            }
+            None => Plan {
+                against: baseline,
+                ..held.cloned().unwrap_or_default()
+            },
+        };
+        self.plans.insert(id, plan);
+    }
+
+    /// Whether the plan folded away from `entity` edits what it holds again, where no
+    /// plan of its own does.
+    fn returns(&self, entity: &LocalEntity) -> bool {
+        self.plan(entity).is_none_or(Plan::is_empty)
+            && (self.folded.get(&entity.id)).is_some_and(|folded| folded.stands(entity))
+    }
+
+    /// The documents [`State::follow`] would change: each whose plan edits something else
+    /// than it holds, and each whose folded plan [`State::returns`]. One that is gone is
+    /// among them, for [`State::unplan`].
+    pub fn moved(&self, workspace: &Workspace) -> Vec<u64> {
+        let stale = |id: &u64| {
+            workspace
+                .get(*id)
+                .is_none_or(|entity| self.plan(entity).is_none() || self.returns(entity))
+        };
+        let mut ids: Vec<u64> = (self.plans.keys().chain(self.folded.keys()))
+            .copied()
+            .filter(stale)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Whether an act waits for the plan of `id` to be laid out.
+    #[cfg(test)]
+    pub fn holds_for(&self, id: u64) -> bool {
+        self.held.iter().any(|(held, _)| *held == id)
     }
 
     /// Recompute the figures where the plan or the free space it must fit in has
@@ -1383,20 +1495,11 @@ impl State {
     /// are it or the plan's lay-out of it, until that lay-out is saved with the plan
     /// unchanged since.
     fn baseline(&self, entity: &LocalEntity) -> Mark {
-        if let Some(file) = entity.rests() {
-            return Mark::Resting(file.serial);
-        }
-        let Some(plan) = self.plans.get(&entity.id) else {
-            return Mark::Held(entity.stamp);
-        };
-        let Mark::Held(begun) = plan.against else {
-            return Mark::Held(entity.stamp);
-        };
-        let holds = match self.laid(entity) {
-            Some(laid) => entity.stamp != entity.saved.stamp() || *plan != laid.plan,
-            None => begun == entity.stamp,
-        };
-        Mark::Held(if holds { begun } else { entity.stamp })
+        edits(
+            entity,
+            self.plans.get(&entity.id),
+            self.laid.get(&entity.id),
+        )
     }
 
     /// This document's plan, while it edits what the document holds.
@@ -1445,6 +1548,28 @@ impl State {
 
     fn facts(&self) -> Option<&Facts> {
         self.open.as_ref()?.facts.as_ref().ok()
+    }
+
+    /// Take `plan` up as the plan of `entity`, or none, as an undo or a revert leaves it.
+    /// An apply in flight for another plan is dropped when it answers, and so is every act
+    /// waiting for one that carries the document: it was asked of content the document no
+    /// longer holds. Any other act runs once nothing holds it.
+    pub fn adopt(&mut self, entity: &LocalEntity, plan: Option<&Plan>) {
+        let id = entity.id;
+        self.held.retain(|(_, act)| waits_on(act) != Some(id));
+        match plan.filter(|plan| !plan.is_empty()) {
+            Some(plan) => {
+                let against = edits(entity, None, None);
+                self.plans.insert(
+                    id,
+                    Plan {
+                        against,
+                        ..plan.clone()
+                    },
+                );
+            }
+            None => self.unplan(id),
+        }
     }
 
     /// Take one of the header's `path = value` sets into the plan.
@@ -1504,6 +1629,21 @@ impl State {
         over
     }
 
+    /// The plan the open library shows, as this frame's controls drafted it.
+    #[cfg(test)]
+    pub fn shown(&self) -> &Plan {
+        &self.draft
+    }
+
+    /// Leave `plan` as this frame's controls' draft of the open library's plan.
+    #[cfg(test)]
+    pub fn redraft(&mut self, plan: Plan) {
+        self.draft = Plan {
+            against: self.draft.against,
+            ..plan
+        };
+    }
+
     /// Put back the plan in hand, because the library refused the drafted one.
     pub fn discard(&mut self) {
         if let Some(plan) = self.open.as_ref().and_then(|open| self.plans.get(&open.id)) {
@@ -1511,13 +1651,20 @@ impl State {
         }
     }
 
+    /// Let go of the plans of a document that is gone. An act waiting on its lay-out is
+    /// freed as [`State::freed`] finds it gone.
+    pub fn unplan(&mut self, id: u64) {
+        self.plans.remove(&id);
+        self.laid.remove(&id);
+        self.folded.remove(&id);
+    }
+
     /// Forget this document's plan, and anything waiting on it.
     ///
     /// ⚠️ Only the document being drawn loses its draft and its facts: forgetting
     /// another document's plan must not close the open one.
     pub fn forget(&mut self, id: u64) {
-        self.plans.remove(&id);
-        self.laid.remove(&id);
+        self.unplan(id);
         self.held.retain(|(held, _)| *held != id);
         if self.job.as_ref().is_some_and(|job| job.id == id) {
             self.job = None;
@@ -1530,7 +1677,8 @@ impl State {
     }
 
     /// Let go of each body a lay-out kept once the working bytes no longer hold that
-    /// lay-out or its plan has ended, whether or not the document is drawn again.
+    /// lay-out or its plan has ended, whether or not the document is drawn again, and of
+    /// each folded plan once no save that could be refused can bring it back.
     pub fn let_go(&mut self, workspace: &Workspace) {
         let spent: Vec<u64> = (self.laid.keys().copied())
             .filter(|id| {
@@ -1542,6 +1690,11 @@ impl State {
         for id in spent {
             self.laid.remove(&id);
         }
+        self.folded.retain(|id, folded| {
+            workspace
+                .get(*id)
+                .is_some_and(|entity| workspace.saves_asked(*id) || folded.stands(entity))
+        });
     }
 
     /// Nothing is open anymore: the selection, the open rows, the key table, and the
@@ -1664,7 +1817,7 @@ impl State {
         });
         let made = match (fresh, made) {
             (true, Ok(bytes)) => {
-                workspace.replace_bytes(id, bytes, log);
+                workspace.lay_out(id, bytes, log);
                 if let Some(entity) = workspace.get(id) {
                     let made = entity.stamp;
                     self.laid.insert(id, Laid { plan, over, made });
@@ -4806,7 +4959,7 @@ mod tests {
         fn commit(&mut self, plan: Plan) {
             let entity = self.workspace.get(self.id).expect("it is open");
             if let Some(body) = self.state.commit(entity, plan) {
-                self.workspace.replace_bytes(self.id, body, &mut self.log);
+                self.workspace.lay_out(self.id, body, &mut self.log);
             }
         }
 

@@ -48,7 +48,7 @@ impl Index {
 
     /// The format a file starting `head` would be indexed as, where it is a piano or
     /// sample instrument.
-    fn tagged(head: &[u8]) -> Option<&'static str> {
+    pub(crate) fn tagged(head: &[u8]) -> Option<&'static str> {
         if head.get(..4)? != &cbin::MAGIC[..] {
             return None;
         }

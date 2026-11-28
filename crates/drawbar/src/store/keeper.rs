@@ -671,9 +671,9 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            // A step changed since, or whose trash item went, can never be taken
-            // back; any other refusal may pass once the files are looked at again.
-            Err(e @ Error::Refused(Refusal::ChangedSince { .. } | Refusal::Emptied)) => {
+            // Most refusals cannot pass, and one that could, as over a file a sync tool
+            // is replacing, costs its step. A read or write that failed may pass.
+            Err(e @ Error::Refused(_)) => {
                 let why = match e {
                     Error::Refused(Refusal::ChangedSince { by, .. })
                         if library.writer_id() != Some(by) =>
