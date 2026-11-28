@@ -11173,6 +11173,7 @@ fn a_rescan_while_an_undo_of_a_save_waits_to_finish_leaves_the_edit_unsaved_and_
 }
 
 /// Let the trash of each writer of the library at `root` take a file, or refuse each one.
+#[cfg(unix)]
 fn trash_takes(root: &Temp, takes: bool) {
     use std::os::unix::fs::PermissionsExt;
     let mode = if takes { 0o755 } else { 0o555 };
@@ -11183,6 +11184,7 @@ fn trash_takes(root: &Temp, takes: bool) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_answer_lost_while_an_undo_of_a_save_still_waits_keeps_the_edit_through_a_quit() {
     let root = Temp::new();
@@ -11205,6 +11207,7 @@ fn an_answer_lost_while_an_undo_of_a_save_still_waits_keeps_the_edit_through_a_q
     assert!(again.unsaved(id));
 }
 
+#[cfg(unix)]
 #[test]
 fn an_open_that_cannot_finish_an_undo_of_a_save_keeps_the_edit_for_the_open_that_does() {
     let root = Temp::new();
@@ -11231,6 +11234,7 @@ fn an_open_that_cannot_finish_an_undo_of_a_save_keeps_the_edit_for_the_open_that
     assert!(again.unsaved(id));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_file_that_does_not_read_once_its_undo_never_landed_is_read_again_with_the_folder() {
     use std::os::unix::fs::PermissionsExt;
