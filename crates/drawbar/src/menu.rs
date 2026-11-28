@@ -503,6 +503,13 @@ pub(crate) fn covered(ctx: &egui::Context) -> bool {
     ctx.memory(|memory| memory.top_modal_layer()).is_some()
 }
 
+/// Whether a text field has the keyboard, and with it undo keys of its own.
+fn typing(ctx: &egui::Context) -> bool {
+    let focused = ctx.memory(|memory| memory.focused());
+    // egui keeps a text field's cursor under the field's id from its first frame.
+    focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
 impl DrawbarApp {
     /// What a key or the Mac's menu bar may do with `command` now: its [`Self::offer`],
     /// disabled behind a modal unless it quits or zooms, which act on no part of the
@@ -511,7 +518,7 @@ impl DrawbarApp {
         let mut offer = self.offer(command)?;
         let over = matches!(command, Command::Quit | Command::Zoom(_));
         offer.enabled &= over || !covered(ctx);
-        offer.enabled &= !(undoes(command) && ctx.wants_keyboard_input());
+        offer.enabled &= !(undoes(command) && typing(ctx));
         Some(offer)
     }
 
@@ -875,7 +882,7 @@ impl DrawbarApp {
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
         // ⚠️ A field being typed in takes its own undo keys.
-        let typing = ctx.wants_keyboard_input();
+        let typing = typing(ctx);
         let bound = |command: Command, event: &egui::Event| {
             let mut keys = shortcut(command, platform, mac)
                 .into_iter()

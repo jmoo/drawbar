@@ -669,9 +669,11 @@ sounds have unsaved edits.
 ### Text fields
 
 A field being typed in keeps egui's undo, and the keys and the menu bar stay out
-of its way as they do now. A note's text reaches the working copy as it is
-typed, and forms one open step that closes when focus leaves. Every other box
-commits when it is left, which is one change and one step.
+of its way as they do now. Any other control that has the keyboard, such as a
+knob turned with the arrow keys, leaves them to the timeline. A note's text
+reaches the working copy as it is typed, and forms one open step that closes
+when focus leaves. Every other box commits when it is left, which is one change
+and one step.
 
 ### Browser and desktop
 

@@ -2867,6 +2867,43 @@ mod tests {
     }
 
     #[test]
+    fn the_undo_key_takes_back_an_edit_while_a_control_that_is_no_field_has_focus() {
+        let (ctx, mut app) = keyed();
+        let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let before = bytes(&app, id);
+        turn_gain(&ctx, &mut app, id, "40");
+        input(&ctx, &mut app, vec![crate::testing::key(egui::Key::Tab)]);
+        input(&ctx, &mut app, Vec::new());
+        let focused = ctx.memory(|memory| memory.focused()).expect("Tab focused");
+        assert!(egui::TextEdit::load_state(&ctx, focused).is_none());
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, id), before);
+    }
+
+    #[test]
+    fn the_undo_key_in_a_field_being_typed_in_takes_back_no_step() {
+        let (ctx, mut app) = keyed();
+        let (program, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
+        let turned = turn_gain(&ctx, &mut app, program, "40");
+        in_front(&ctx, &mut app, crate::workspace::Fresh::Text);
+        input(
+            &ctx,
+            &mut app,
+            crate::testing::click(egui::pos2(600.0, 500.0)),
+        );
+        input(&ctx, &mut app, Vec::new());
+        input(&ctx, &mut app, vec![egui::Event::Text("a".into())]);
+        let shown = steps(&app);
+
+        input(&ctx, &mut app, vec![undo_key(false)]);
+
+        assert_eq!(bytes(&app, program), turned);
+        assert_eq!(steps(&app).1, shown.1, "nothing went to Redo");
+    }
+
+    #[test]
     fn revert_is_a_step_whose_undo_brings_the_edits_back() {
         let (ctx, mut app) = keyed();
         let (id, _) = in_front(&ctx, &mut app, crate::workspace::Fresh::Program);
