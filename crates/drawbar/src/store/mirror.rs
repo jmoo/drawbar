@@ -1089,7 +1089,7 @@ impl Store {
             let Some(entity) = workspace.get(id) else {
                 continue;
             };
-            not_saved(log, &entity.name, "the library is read-only");
+            not_saved(log, &entity.name, "the library is read-only", true);
         }
         self.tell_unfinished(workspace.ctx(), browser, log);
         self.watch(browser);
@@ -3826,7 +3826,7 @@ impl Store {
             return;
         };
         log.error(format!("saving {path}: {why}"));
-        not_saved(log, &name, &why);
+        not_saved(log, &name, &why, true);
     }
 
     /// Take in what the save of an edit of a file resting in the library wrote: the asset
@@ -3871,17 +3871,17 @@ impl Store {
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
             Err(Failure::Unheard) => {
-                workspace.edit_not_saved(id);
+                workspace.edit_unheard(id);
                 self.read_unheard(id, path, workspace);
                 return;
             }
         };
         workspace.edit_not_saved(id);
-        let name = workspace
-            .get(id)
-            .map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
+        let entity = workspace.get(id);
+        let name = entity.map_or_else(|| path.leaf().to_string(), |entity| entity.name.clone());
         log.error(format!("saving {path}: {why}"));
-        not_saved(log, &name, &why);
+        let kept = entity.is_some_and(LocalEntity::is_unsaved);
+        not_saved(log, &name, &why, kept);
     }
 
     /// Send the saves asked for of edits of files resting in the library, each once the
@@ -4654,11 +4654,15 @@ impl Sent {
     }
 }
 
-/// Say that the asset `name` was not saved, because of `why`.
-fn not_saved(log: &mut Log, name: &str, why: &str) {
-    log.trouble(format!(
-        "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
-    ));
+/// Say that the asset `name` was not saved, because of `why`, and where `kept`, that
+/// its edit still is.
+fn not_saved(log: &mut Log, name: &str, why: &str, kept: bool) {
+    log.trouble(match kept {
+        true => {
+            format!("“{name}” was not saved, because {why}. The edit is kept and still unsaved.")
+        }
+        false => format!("“{name}” was not saved, because {why}."),
+    });
 }
 
 /// What the library is asked by a change the Edit menu calls `label`.

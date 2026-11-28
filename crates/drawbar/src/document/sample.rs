@@ -711,16 +711,22 @@ struct Edit {
 
 impl Edits {
     /// Take one frame's sets into the edit of an instrument resting in `file`, all of them
-    /// or none.
+    /// or none, and return every set the edit is now made of, even where they change
+    /// nothing there. Where this holds no edit over `file`, the edit starts from `kept`,
+    /// the sets the workspace holds, unless they do not apply to `file`.
     pub fn take(
         &mut self,
         id: u64,
         file: &OnDisk,
         index: &nsmp::Index,
+        kept: &[(String, String)],
         sets: &[(String, String)],
-    ) -> Result<(), String> {
-        let held = self.0.get(&id).filter(|edit| edit.over == file.serial);
-        let mut all = held.map(|edit| edit.sets.clone()).unwrap_or_default();
+    ) -> Result<Sets, String> {
+        let mut all = match self.0.get(&id).filter(|edit| edit.over == file.serial) {
+            Some(held) => held.sets.clone(),
+            None if edited(index, kept).is_ok() => kept.to_vec(),
+            None => Vec::new(),
+        };
         for (path, value) in sets {
             // A set names the value it leaves, so it takes the place of one of the same
             // path just before it.
@@ -729,7 +735,8 @@ impl Edits {
                 None => all.push((path.clone(), value.clone())),
             }
         }
-        self.make(id, file, index, all, false)
+        self.make(id, file, index, all.clone(), false)?;
+        Ok(all)
     }
 
     /// The edit `sets` make of `file`, kept where it changes anything. `held` says the

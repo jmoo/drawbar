@@ -220,7 +220,7 @@ was laid out into, decoded audio, a field view, a half-typed box, a picked row.
 Where the user is looking, such as a zoom or a scroll, is kept.
 
 A piano library held whole has no working copy and records no edit steps. Its
-content is its saved bytes under a plan that only its editor holds, laid out
+content is the body it holds under a plan that only its editor holds, laid out
 into bytes when something needs them, so no one value says what it holds. It is
 a short-lived state: a library just built and not yet reopened from its file, a
 restored draft, or a view of a slot. Giving it one value is later work.
@@ -1020,10 +1020,6 @@ Sources:
 - **One gesture over two documents.** A step extends only while it is the last
   one, so a result that lands on another document in the middle of a drag splits
   the drag in two.
-- **A piano library held whole.** Its editor shows its saved bytes under its
-  plan, so a body that differs from those with no plan, as a restored draft
-  does, is shown as the saved file. Showing the body where no plan applies would
-  give it one value, and edit steps with it.
 - **The label.** "Edit" names no field. The editor knows the field at the point
   of the change and could pass its name.
 

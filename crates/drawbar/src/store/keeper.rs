@@ -674,11 +674,19 @@ impl<F: Fs> Keeper<F> {
             // Most refusals cannot pass, and one that could, as over a file a sync tool
             // is replacing, costs its step. A read or write that failed may pass.
             Err(e @ Error::Refused(_)) => {
+                let why = match e {
+                    Error::Refused(Refusal::ChangedSince { by, .. })
+                        if library.writer_id() != Some(by) =>
+                    {
+                        "another drawbar has changed it since".to_string()
+                    }
+                    e => told(&e),
+                };
                 match again {
                     true => library.forget_redo(),
                     false => library.forget_undo(),
                 }
-                return (Err(told(&e)), true);
+                return (Err(why), true);
             }
             Err(e) => return (Err(told(&e)), false),
         };
@@ -2164,7 +2172,7 @@ fn refused(refusal: &Refusal) -> String {
     match refusal {
         Refusal::Changed(mismatch) => format!("“{}” is not as drawbar last saw it", mismatch.path),
         Refusal::Directory(path) => format!("“{path}” is a folder"),
-        Refusal::ChangedSince { .. } => "another drawbar has changed it since".to_string(),
+        Refusal::ChangedSince { .. } => "it has changed since".to_string(),
         Refusal::Nothing => "there is nothing to do".to_string(),
         Refusal::Emptied => "drawbar no longer keeps what undoing it needs".to_string(),
         Refusal::Unsupported(capability) => {
