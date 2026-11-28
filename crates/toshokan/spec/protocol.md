@@ -728,8 +728,8 @@ except that a directory it removed is made again before anything else, and one i
 made is removed after everything else: the log keeps tree moves, then directories,
 then files, whatever order the intent made them in.
 
-An undo or redo is refused, naming the writer and entry, where another writer
-changed the same thing since: a register no longer holds only what the intent
+An undo or redo is refused, naming the writer and entry, where a write made since
+changed the same thing: a register no longer holds only what the intent
 left, another writer added or removed the same value, a delete of the entity is
 live, or another writer wrote to an entity being uncreated. A file register holds
 what the intent left while every live write of it names the same path and
